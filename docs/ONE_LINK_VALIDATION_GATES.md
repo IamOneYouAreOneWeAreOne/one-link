@@ -83,6 +83,21 @@ automated tests or explicit manual evidence.
 - Advanced warnings use human language.
 - Normal cleanup is automatic.
 
+## 8. Packaged Artifact Parity Gate
+
+- Generated PyInstaller spec includes dynamic imports used by guarded
+  routes, including `one_link.sessions` and `one_link.recovery_api`.
+- Generated PyInstaller spec includes package data, including
+  `one_link/web` and `one_link/data`.
+- Packaged binary `--version` matches current `src/one_link/__init__.py`.
+- Packaged `/peer` response has `ETag` and `no-cache, must-revalidate`.
+- Packaged recovery routes exist and are either auth-gated or return all
+  recovery tracks.
+- Packaged HTTPS endpoint negotiates ALPN `http/1.1`, not `h2`.
+- Packaged HTTPS endpoint serves a two-certificate chain.
+- Release command:
+  `python scripts/validate_packaged_artifact.py --artifact dist/one-link/one-link.exe --spec build/one-link.spec`
+
 ## Current Phase 1 Focus
 
 - Protocol compatibility negotiation.
@@ -90,3 +105,4 @@ automated tests or explicit manual evidence.
 - Blob-store corruption and temp cleanup.
 - Transfer fault classification.
 - Peer registry stability.
+- Packaged artifact parity before public release.

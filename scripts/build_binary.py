@@ -90,6 +90,7 @@ def _render_spec(
     name: str,
     entry: str,
     excludes: list[str],
+    hidden_imports: list[str],
     collect_submodules: list[str],
     collect_all: list[str],
     add_data_args: list[str],
@@ -115,7 +116,7 @@ def _render_spec(
         "",
         f"datas = {datas!r}",
         f"binaries = {binaries!r}",
-        "hiddenimports = []",
+        f"hiddenimports = {hidden_imports!r}",
         "",
     ]
     for module in collect_submodules:
@@ -221,6 +222,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip bundling ONNX models + onnxruntime. Produces a much "
              "smaller binary; Tier ζ/η/θ codecs won't work in the result.",
     )
+    parser.add_argument(
+        "--allow-native-cdc-fallback",
+        action="store_true",
+        help="Developer escape hatch: continue if the optional native CDC "
+             "scanner cannot be rebuilt. Public release builds should not "
+             "use this; otherwise a stale locked DLL can be bundled.",
+    )
     args = parser.parse_args(list(argv or ()))
 
     repo = Path(__file__).resolve().parent.parent
@@ -261,18 +269,28 @@ def main(argv: list[str] | None = None) -> int:
     # that path.
     (build / name).mkdir(parents=True, exist_ok=True)
 
-    native_build = subprocess.run(
-        [sys.executable, str(repo / "scripts" / "build_native_cdc.py")],
-        cwd=repo,
-    )
+    native_cmd = [sys.executable, str(repo / "scripts" / "build_native_cdc.py")]
+    if not args.allow_native_cdc_fallback:
+        native_cmd.append("--required")
+    native_build = subprocess.run(native_cmd, cwd=repo)
     if native_build.returncode != 0:
         print(f"[build] native CDC build failed: exit {native_build.returncode}")
+        print(
+            "[build] refusing to package a possibly stale native CDC DLL. "
+            "Close running one-link daemons or pass "
+            "--allow-native-cdc-fallback for a developer-only fallback build."
+        )
         return native_build.returncode
 
     # PyInstaller's --add-data uses ';' on Windows, ':' elsewhere.
     sep = ";" if platform.system() == "Windows" else ":"
     web_dir = repo / "src" / "one_link" / "web"
     add_data_web = f"{web_dir}{sep}one_link/web"
+    package_data_dir = repo / "src" / "one_link" / "data"
+    add_data_package = (
+        [f"{package_data_dir}{sep}one_link/data"]
+        if package_data_dir.is_dir() else []
+    )
     native_dir = repo / "src" / "one_link" / "native"
     add_native: list[str] = []
     if native_dir.is_dir() and any(p.is_file() for p in native_dir.rglob("*")):
@@ -409,7 +427,7 @@ def main(argv: list[str] | None = None) -> int:
     # (alternating "--add-data"/"--add-binary" flag tokens and their
     # path arguments). For spec generation we only want the path
     # arguments — strip every other token starting at index 0.
-    add_data_args = [add_data_web] + list(add_models[1::2])
+    add_data_args = [add_data_web] + add_data_package + list(add_models[1::2])
     add_binary_args = list(add_native[1::2])
     # Generate a self-contained spec file. We do this rather than
     # using the CLI so we can post-filter Analysis.binaries by path.
@@ -417,6 +435,7 @@ def main(argv: list[str] | None = None) -> int:
         name=name,
         entry=str(entry).replace("\\", "/"),
         excludes=exclude_modules,
+        hidden_imports=["one_link.sessions", "one_link.recovery_api"],
         collect_submodules=["zeroconf", "cryptography", "aiohttp"],
         collect_all=(
             (["onnxruntime"] if onnx_collect else []) +

@@ -1,6 +1,6 @@
 # One Link — The Road to Flawless
 
-**Last updated:** 2026-05-23
+**Last updated:** 2026-05-24
 
 > The engineering-deep roadmap lives at [`docs/ROADMAP.md`](docs/ROADMAP.md).
 > This document is the user-facing one: what "done" looks like, how we
@@ -48,28 +48,29 @@ network in any language, we're done.
 
 ---
 
-## Where we are right now (2026-05-23)
+## Where we are right now (2026-05-24)
 
 | Capability | Desktop | iOS Safari | Android | Notes |
 |---|---|---|---|---|
 | Install + run | ✅ Win/Mac/Linux binaries | ✅ via Safari + cert profile | ⚠️ via Chrome + cert workaround | Native iOS/Android apps not built |
-| Pair devices | ✅ | ✅ | ⚠️ untested | Tonight: fixed cert chain, ALPN, single-pane UI |
+| Pair devices | ✅ | ✅ | ⚠️ untested | Tonight: fixed cert chain, ALPN, single-pane UI, cert relogin |
 | Auto-reconnect after restart | ✅ | ✅ | ⚠️ should work, untested | Cert-authed relogin |
 | Text chat (send + receive) | ✅ | ✅ | ⚠️ untested | Phone has compose |
-| Edit / delete / react | ✅ | ❌ | ❌ | Phone is read-only for these |
-| Reply / threads | ✅ | ❌ | ❌ | |
-| Search messages | ✅ | ❌ | ❌ | |
-| Groups | ✅ | ❌ | ❌ | |
+| Edit / delete / react | ✅ | ✅ | ❌ | Phone direct-chat edit/delete/react shipped |
+| Reply / threads | ✅ | ✅ | ❌ | Phone direct-chat reply shipped |
+| Search messages | ✅ | ✅ | ⚠️ untested | Phone direct-chat, group, and global search shipped; Android untested |
+| Groups | ✅ | partial | ❌ | Phone can see groups, send messages, react/edit/delete own messages, copy invites, add/remove members, and leave; accepting invite links on phone still missing |
 | File send | ✅ | ✅ | ⚠️ untested | Tonight: chunked 16 KiB, backpressure |
-| File receive (inline render) | ✅ | ❌ | ❌ | Phone shows file message text only |
+| File receive (inline render) | ✅ | ✅ | ⚠️ untested | Phone renders inbound attachments inline with download |
 | Big files (>100MB, resume) | ✅ | ⚠️ chunked but untested at scale | ⚠️ untested | |
 | Folders (bidirectional sync) | ✅ | ❌ | ❌ | |
 | Voice calls | ✅ | ❌ | ❌ | Living Presence on desktop only |
 | Video calls | ✅ | ❌ | ❌ | |
-| Peer roster mgmt (rename/mute) | ✅ | ✅ | ⚠️ untested | |
+| Peer roster mgmt (rename/mute) | ✅ | ✅ | ⚠️ untested | Desktop now surfaces paired phone in the identity sidebar; stale generic phone rows are deduped in UI |
 | Settings + sign out | ✅ | ✅ | ⚠️ untested | |
 | Notifications | ✅ | ❌ Safari can't do background | ⚠️ depends on browser | Need native app for true notifications |
-| Recovery from lost devices | ❌ | ❌ | ❌ | No recovery phrase yet |
+| Recovery from lost devices | partial | ❌ | ❌ | 24-word recovery phrase exists in CLI + first-launch desktop UX; restore UX is CLI-only |
+| Packaged artifact parity | partial | n/a | n/a | Source has the fixes; every public tarball/installer must be rebuilt from current source and smoke-tested |
 | i18n (non-English) | ❌ | ❌ | ❌ | English only |
 | Screen reader support | partial | partial | partial | Audited tonight; need full sweep |
 | Works on captive portal Wi-Fi | partial | partial | untested | |
@@ -77,7 +78,7 @@ network in any language, we're done.
 | Works through symmetric NAT | partial | partial | untested | TURN relay not always reliable |
 | Works in censorship-heavy regions | ⚠️ obfs transport code exists, not wired | ❌ | ❌ | |
 
-Bottom line: **desktop is largely there. Phone is ~60%. Network resilience
+Bottom line: **desktop is largely there. Phone is ~70%. Network resilience
 and accessibility need work. Recovery story is missing.**
 
 ---
@@ -105,7 +106,10 @@ time, with no UX cliffs.
 - [ ] File send completes for any file under 100 MB without killing
   the DataChannel. ✅ shipped tonight (needs user retest).
 - [ ] File **receive** on the phone renders inline with a download
-  button. ❌ not built yet.
+  button. ✅ shipped tonight.
+- [ ] The packaged artifact is provably built from current source,
+  includes every dynamic module and data file, and passes the same
+  pairing/chat/file smoke tests as source-run daemon.
 
 ### Phase B — Phone is a real first-class device
 
@@ -113,10 +117,16 @@ time, with no UX cliffs.
 too. Phone is not a thin read-only window.
 
 **Done when:**
-- [ ] Phone can edit, delete, react to messages.
-- [ ] Phone can reply / quote / start threads.
-- [ ] Phone can search the chat history.
-- [ ] Phone can join + see group chats.
+- [ ] Phone can edit, delete, react to messages. ✅ direct-chat
+  surfaces shipped.
+- [ ] Phone can reply / quote / start threads. ✅ direct-chat reply
+  shipped.
+- [ ] Phone can search the chat history. ✅ direct-chat, group, and
+  global cross-app search shipped.
+- [ ] Phone can join + see group chats. partial: roster, message
+  read/send, reactions, own-message edit/delete, invite copy,
+  add/remove members, and leave shipped; accepting group invite links
+  on phone still missing.
 - [ ] Phone can render inbound file attachments (image preview, video
   preview, file icon + name + download for everything else).
 - [ ] Phone can manage folders (see shared folders, sync state).
@@ -145,9 +155,9 @@ your key is compromised, you can rotate. If you don't know what a
 private key is, you still don't lose anything.
 
 **Done when:**
-- [ ] First-launch UX shows a 12-word recovery phrase (BIP39 or
-  similar), with clear "write this down, we cannot recover it for
-  you" copy.
+- [ ] First-launch UX shows a recovery phrase, with clear "write this
+  down, we cannot recover it for you" copy. ✅ desktop now shows the
+  local 24-word BIP-39 phrase during recovery setup.
 - [ ] "Recover from phrase" flow exists on every install path.
 - [ ] Key rotation: a user can declare "my old key is compromised,
   here is my new one" and existing trust relationships migrate.
@@ -179,6 +189,9 @@ double-click. No terminal. No "Right-click → Open to bypass Gatekeeper."
 On phone, an app icon you tap, not a Safari bookmark.
 
 **Done when:**
+- [ ] Release pipeline rebuilds from a clean checkout and refuses to
+  publish if the packaged binary is missing source modules, data
+  files, or the current `ROADMAP.md`/version identity.
 - [ ] Windows: code-signed `.exe` installer, no SmartScreen warning.
 - [ ] macOS: notarized `.dmg`, opens cleanly.
 - [ ] Linux: `.AppImage`, `.deb`, `.rpm`, and Flathub package.
@@ -256,19 +269,42 @@ or just stops caring. Like Bitcoin survived Satoshi vanishing.
 
 In order:
 
-1. **Confirm tonight's file-send fix actually delivers** on a real
-   phone → laptop test. If yes, Phase A file-send is done. If not,
-   diagnose what's still broken.
-2. **Phone file RECEIVE.** Inline rendering of inbound file
-   attachments + download button. (Phase A gate + Phase B start.)
-3. **Walk the cold-install pair flow with a stopwatch.** Find every
+1. ✅ **Confirm tonight's file-send fix actually delivers** on a real
+   phone → laptop test. Source fix shipped: 16 KiB chunks,
+   backpressure, and DataChannel auto-reconnect. Still worth one
+   human retest on the actual iPhone before closing the Phase A gate.
+2. ✅ **Phone file RECEIVE.** Inline rendering of inbound file
+   attachments + download button shipped.
+3. ✅ **Clean up the identity/device surface.** Paired phone now appears
+   in the desktop sidebar, stale generic browser duplicates are deduped,
+   and non-local stale rows can be pruned from the sidebar or full
+   device list.
+4. **Walk the cold-install pair flow with a stopwatch.** Find every
    second between "user opens the app" and "first message arrives."
    Fix every speed bump. (Phase A gate.)
-4. **Phone edit / delete / react / reply / search.** Port the
-   text-chat surfaces to the phone. (Phase B.)
-5. **Recovery phrase at first launch.** The single biggest "for the
-   people" feature missing. (Phase D.)
-6. **Phase C calls** — substantial standalone work. Probably the
+5. **Packaged artifact parity gate.** Rebuild from current source,
+   inspect the generated bundle manifest, then run packaged binary
+   smoke tests for version, recovery routes, `/peer` ETag/cache
+   headers, TLS cert chain, ALPN, pair, phone send, and phone file
+   transfer. This is the fix for the stale tarball class of bug:
+   source green is not enough for public release. Static + optional
+   live validator now exists at `scripts/validate_packaged_artifact.py`;
+   static parity passes against a rebuilt Windows onedir binary, and
+   live packaged-daemon probes now pass for `/peer`, recovery routes,
+   TLS two-cert chain, and ALPN `http/1.1`. Remaining work is packaged
+   end-to-end pair, phone send, and phone file-transfer probes.
+6. **Phone group invite acceptance.** Phone can now see group
+   roster/messages, send group messages, react, edit/delete its own
+   group messages, copy invites, add/remove members, and leave.
+   Remaining Phase B group work is accepting/importing a group invite
+   link directly on the phone.
+   Direct-chat, group, and global search plus reactions, edit, delete,
+   and reply shipped in source.
+7. ✅ **Recovery phrase at first launch.** Desktop setup now displays
+   the local 24-word recovery phrase and requires explicit confirmation.
+   Remaining Phase D work is restore UX outside the CLI, key rotation,
+   and multi-root.
+8. **Phase C calls** — substantial standalone work. Probably the
    single most user-visible feature still missing on the phone.
 
 ---

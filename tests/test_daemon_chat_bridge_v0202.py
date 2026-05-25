@@ -199,7 +199,7 @@ async def test_fetch_messages_returns_recent(server_with_state):
     )
     state.record_message(
         id="m2", ts_ms=2000, direction="out", peer_fp="sha256:p1",
-        msg_type="text", body="hi back",
+        msg_type="text", body="hi back", reply_to="m1",
     )
     peer, captured = _capture_peer(server)
     await server._handle_browser_peer_request(
@@ -221,6 +221,7 @@ async def test_fetch_messages_returns_recent(server_with_state):
     bodies = [m["body"] for m in reply["messages"]]
     assert "hello" in bodies
     assert "hi back" in bodies
+    assert any(m.get("reply_to") == "m1" for m in reply["messages"])
 
 
 @pytest.mark.asyncio
@@ -260,6 +261,585 @@ async def test_fetch_messages_rejects_missing_peer_fp(server_with_state):
     )
     assert captured[0]["t"] == "error"
     assert captured[0]["code"] == "bad_peer_fp"
+
+
+@pytest.mark.asyncio
+async def test_fetch_groups_returns_member_groups(server_with_state, monkeypatch):
+    server, state = server_with_state
+    gid = b"\x11" * 16
+    state.upsert_group_meta(
+        group_id=gid, name="Family", created_ms=1000, state_hash="h",
+    )
+
+    def fake_materialize(group_id):
+        assert group_id == gid
+        return {
+            "group_id": gid.hex(),
+            "name": "Family",
+            "member_count": 3,
+            "my_role": "member",
+            "is_member": True,
+        }
+
+    monkeypatch.setattr(server, "_materialize_group", fake_materialize)
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "fetch_groups",
+        {"v": PEER_DC_PROTOCOL_VERSION, "t": "fetch_groups", "rid": "g1"},
+    )
+    reply = captured[0]
+    assert reply["t"] == "groups"
+    assert reply["rid"] == "g1"
+    assert reply["groups"] == [{
+        "group_id": gid.hex(),
+        "name": "Family",
+        "member_count": 3,
+        "my_role": "member",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_fetch_group_messages_returns_recent(server_with_state):
+    server, state = server_with_state
+    gid = b"\x22" * 16
+    state.insert_group_message(
+        id="gm1", group_id=gid, sender_pub=b"\x01" * 32,
+        epoch=1, counter=1, direction="in", body="hello group",
+        reply_to=None, ts_ms=1000,
+    )
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "fetch_group_messages",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "fetch_group_messages",
+            "rid": "g2",
+            "group_id": gid.hex(),
+            "limit": 50,
+        },
+    )
+    reply = captured[0]
+    assert reply["t"] == "group_messages"
+    assert reply["group_id"] == gid.hex()
+    assert reply["messages"][0]["id"] == "gm1"
+    assert reply["messages"][0]["body"] == "hello group"
+    assert reply["messages"][0]["sender_pub_hex"] == ("01" * 32)
+
+
+@pytest.mark.asyncio
+async def test_search_group_messages_filters_body(server_with_state):
+    server, state = server_with_state
+    gid = b"\x22" * 16
+    state.insert_group_message(
+        id="gm1", group_id=gid, sender_pub=b"\x01" * 32,
+        epoch=1, counter=1, direction="in", body="quiet group signal",
+        ts_ms=1000,
+    )
+    state.insert_group_message(
+        id="gm2", group_id=gid, sender_pub=b"\x01" * 32,
+        epoch=1, counter=2, direction="in", body="unrelated",
+        ts_ms=2000,
+    )
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "search_group_messages",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "search_group_messages",
+            "rid": "gs1",
+            "group_id": gid.hex(),
+            "query": "quiet",
+            "limit": 20,
+        },
+    )
+    reply = captured[0]
+    assert reply["t"] == "group_message_search_results"
+    assert reply["group_id"] == gid.hex()
+    assert [m["id"] for m in reply["messages"]] == ["gm1"]
+
+
+@pytest.mark.asyncio
+async def test_send_group_message_routes_through_daemon(server_with_state, monkeypatch):
+    server, _ = server_with_state
+    gid = b"\x33" * 16
+    captured_args = {}
+
+    async def fake_send_group_message(*, group_id, body, reply_to=None):
+        captured_args.update(group_id=group_id, body=body, reply_to=reply_to)
+        return {"id": "gm2"}
+
+    monkeypatch.setattr(
+        server.daemon, "send_group_message", fake_send_group_message,
+    )
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "send_group_message",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "send_group_message",
+            "rid": "g3",
+            "group_id": gid.hex(),
+            "body": "hello group",
+            "reply_to": "gm1",
+        },
+    )
+    reply = captured[0]
+    assert reply["t"] == "send_group_message_result"
+    assert reply["ok"] is True
+    assert captured_args == {
+        "group_id": gid,
+        "body": "hello group",
+        "reply_to": "gm1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_group_message_actions_route_through_daemon(server_with_state, monkeypatch):
+    server, _ = server_with_state
+    gid = b"\x44" * 16
+    calls = []
+
+    async def fake_reaction(*, group_id, target_msg_id, emoji, op):
+        calls.append(("react", group_id, target_msg_id, emoji, op))
+        return {"sent": 2}
+
+    async def fake_edit(*, group_id, target_msg_id, new_body):
+        calls.append(("edit", group_id, target_msg_id, new_body))
+        return {"sent": 2}
+
+    async def fake_delete(*, group_id, target_msg_id):
+        calls.append(("delete", group_id, target_msg_id))
+        return {"sent": 2}
+
+    monkeypatch.setattr(server.daemon, "send_group_reaction", fake_reaction)
+    monkeypatch.setattr(server.daemon, "send_group_edit", fake_edit)
+    monkeypatch.setattr(server.daemon, "send_group_delete", fake_delete)
+    peer, captured = _capture_peer(server)
+
+    await server._handle_browser_peer_request(
+        peer, "control", "react_group_message",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "react_group_message",
+            "rid": "gr1",
+            "group_id": gid.hex(),
+            "msg_id": "gm1",
+            "emoji": "👍",
+            "op": "add",
+        },
+    )
+    await server._handle_browser_peer_request(
+        peer, "control", "edit_group_message",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "edit_group_message",
+            "rid": "ge1",
+            "group_id": gid.hex(),
+            "msg_id": "gm1",
+            "body": "updated group message",
+        },
+    )
+    await server._handle_browser_peer_request(
+        peer, "control", "delete_group_message",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "delete_group_message",
+            "rid": "gd1",
+            "group_id": gid.hex(),
+            "msg_id": "gm1",
+        },
+    )
+
+    assert [msg["t"] for msg in captured] == [
+        "react_group_message_result",
+        "edit_group_message_result",
+        "delete_group_message_result",
+    ]
+    assert calls == [
+        ("react", gid, "gm1", "👍", "add"),
+        ("edit", gid, "gm1", "updated group message"),
+        ("delete", gid, "gm1"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_group_management_actions_route_through_daemon(server_with_state, monkeypatch):
+    server, state = server_with_state
+    gid = b"\x55" * 16
+    peer_pub = b"\x09" * 32
+    state.upsert_peer(
+        fingerprint="sha256:pinned",
+        short_id="pinned",
+        hostname="friend",
+        pubkey=peer_pub,
+    )
+    state.set_peer_trust("sha256:pinned", "pinned")
+    calls = []
+
+    server._materialize_group = lambda _gid: {
+        "group_id": gid.hex(),
+        "name": "Team",
+        "is_member": True,
+        "members": [{
+            "fingerprint": "sha256:pinned",
+            "display_name": "friend",
+            "role": "member",
+            "is_me": False,
+        }],
+    }
+
+    async def fake_add(*, group_id, member_pubkey, role):
+        calls.append(("add", group_id, member_pubkey, role))
+        return {"member_count": 2}
+
+    async def fake_remove(*, group_id, member_pubkey):
+        calls.append(("remove", group_id, member_pubkey))
+        return {"member_count": 1}
+
+    monkeypatch.setattr(server.daemon, "add_group_member", fake_add)
+    monkeypatch.setattr(server.daemon, "remove_group_member", fake_remove)
+    peer, captured = _capture_peer(server)
+
+    for rid, t, extra in [
+        ("gd1", "fetch_group_detail", {}),
+        ("gi1", "group_invite_link", {}),
+        ("ga1", "add_group_member", {"peer_fp": "sha256:pinned"}),
+        ("gr1", "remove_group_member", {"peer_fp": "sha256:pinned"}),
+        ("gl1", "leave_group", {}),
+    ]:
+        await server._handle_browser_peer_request(
+            peer, "control", t,
+            {
+                "v": PEER_DC_PROTOCOL_VERSION,
+                "t": t,
+                "rid": rid,
+                "group_id": gid.hex(),
+                **extra,
+            },
+        )
+
+    assert [msg["t"] for msg in captured] == [
+        "group_detail",
+        "group_invite_link_result",
+        "add_group_member_result",
+        "remove_group_member_result",
+        "leave_group_result",
+    ]
+    assert captured[1]["url"].startswith("one-link://group-invite/")
+    assert calls == [
+        ("add", gid, peer_pub, "member"),
+        ("remove", gid, peer_pub),
+        ("remove", gid, server.daemon.me.public_bytes),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_search_messages_returns_peer_scoped_results(server_with_state):
+    """Phone search rides the daemon bridge and uses the daemon's
+    FTS index, scoped to the active direct chat.
+    """
+    server, state = server_with_state
+    state.upsert_peer(
+        fingerprint="sha256:p1",
+        short_id="p1",
+        hostname="x",
+        pubkey=b"\x01" * 32,
+    )
+    state.upsert_peer(
+        fingerprint="sha256:p2",
+        short_id="p2",
+        hostname="y",
+        pubkey=b"\x02" * 32,
+    )
+    state.record_message(
+        id="m1", ts_ms=1000, direction="in", peer_fp="sha256:p1",
+        msg_type="text", body="find the quiet signal",
+    )
+    state.record_message(
+        id="m2", ts_ms=2000, direction="in", peer_fp="sha256:p2",
+        msg_type="text", body="find the quiet signal",
+    )
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "search_messages",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "search_messages",
+            "rid": "s1",
+            "peer_fp": "sha256:p1",
+            "query": "quiet signal",
+            "limit": 20,
+        },
+    )
+    reply = captured[0]
+    assert reply["t"] == "message_search_results"
+    assert reply["rid"] == "s1"
+    assert reply["peer_fp"] == "sha256:p1"
+    assert reply["query"] == "quiet signal"
+    assert [m["id"] for m in reply["messages"]] == ["m1"]
+
+
+@pytest.mark.asyncio
+async def test_search_messages_rejects_empty_query(server_with_state):
+    server, _ = server_with_state
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "search_messages",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "search_messages",
+            "rid": "s2",
+            "peer_fp": "sha256:p1",
+            "query": "   ",
+        },
+    )
+    assert captured[0]["t"] == "error"
+    assert captured[0]["code"] == "bad_query"
+
+
+@pytest.mark.asyncio
+async def test_global_search_returns_messages_peers_groups_and_files(
+    server_with_state,
+):
+    server, state = server_with_state
+    fp = "aa" * 32
+    state.upsert_peer(
+        fingerprint=fp,
+        short_id="alpha",
+        pubkey=b"\x01" * 32,
+        hostname="alpha-phone",
+    )
+    state.record_message(
+        id="m-alpha",
+        ts_ms=1234,
+        direction="in",
+        peer_fp=fp,
+        msg_type="TEXT",
+        body="alpha launch note",
+    )
+    gid = bytes.fromhex("01" * 16)
+    state._conn.execute(
+        "INSERT INTO groups(group_id, name, created_ms, updated_ms) "
+        "VALUES(?, ?, ?, ?)",
+        (gid, "alpha group", 1000, 2000),
+    )
+    state._conn.commit()
+    from one_link.paths import inbox_dir
+
+    (inbox_dir() / "alpha-plan.txt").write_text("ship it", encoding="utf-8")
+
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "global_search",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "global_search",
+            "rid": "gs1",
+            "query": "alpha",
+            "limit": 10,
+        },
+    )
+    reply = captured[0]
+    assert reply["t"] == "global_search_results"
+    assert reply["rid"] == "gs1"
+    assert any(m["id"] == "m-alpha" for m in reply["messages"])
+    assert any(p["fingerprint"] == fp for p in reply["peers"])
+    assert any(g["group_id"] == gid.hex() for g in reply["groups"])
+    assert any(f["name"] == "alpha-plan.txt" for f in reply["files"])
+
+
+@pytest.mark.asyncio
+async def test_global_search_rejects_overlong_query(server_with_state):
+    server, _ = server_with_state
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "global_search",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "global_search",
+            "rid": "gs2",
+            "query": "x" * 201,
+        },
+    )
+    assert captured[0]["t"] == "error"
+    assert captured[0]["code"] == "bad_query"
+
+
+@pytest.mark.asyncio
+async def test_fetch_messages_includes_reactions(server_with_state):
+    server, state = server_with_state
+    state.upsert_peer(
+        fingerprint="sha256:p1",
+        short_id="p1",
+        hostname="x",
+        pubkey=b"\x01" * 32,
+    )
+    state.record_message(
+        id="m1", ts_ms=1000, direction="in", peer_fp="sha256:p1",
+        msg_type="text", body="hello",
+    )
+    state.record_reaction(
+        target_msg_id="m1", peer_fp="sha256:p1", emoji="👍",
+    )
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "fetch_messages",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "fetch_messages",
+            "rid": "rx1",
+            "peer_fp": "sha256:p1",
+            "limit": 50,
+        },
+    )
+    msg = captured[0]["messages"][0]
+    assert msg["reactions"]["👍"] == ["sha256:p1"]
+
+
+@pytest.mark.asyncio
+async def test_react_message_offline_peer_persists_locally(
+    server_with_state, monkeypatch,
+):
+    server, state = server_with_state
+
+    async def fake_resolve(_needle):
+        return None
+
+    monkeypatch.setattr(server.daemon, "resolve_for_send", fake_resolve)
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "react_message",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "react_message",
+            "rid": "rx2",
+            "peer_fp": "sha256:p1",
+            "msg_id": "m1",
+            "emoji": "👍",
+            "op": "add",
+        },
+    )
+    reply = captured[0]
+    assert reply["t"] == "react_message_result"
+    assert reply["ok"] is True
+    assert reply["delivered"] is False
+    rows = state.list_reactions_for_messages(["m1"])
+    assert rows["m1"]["👍"] == [server.daemon.me.fingerprint]
+
+
+@pytest.mark.asyncio
+async def test_react_message_validates_emoji(server_with_state):
+    server, _ = server_with_state
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "react_message",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "react_message",
+            "rid": "rx3",
+            "peer_fp": "sha256:p1",
+            "msg_id": "m1",
+            "emoji": "",
+        },
+    )
+    assert captured[0]["t"] == "error"
+    assert captured[0]["code"] == "bad_emoji"
+
+
+@pytest.mark.asyncio
+async def test_edit_message_routes_through_daemon_send_edit(
+    server_with_state, monkeypatch,
+):
+    server, state = server_with_state
+    state.record_message(
+        id="m1", ts_ms=1000, direction="out", peer_fp="sha256:p1",
+        msg_type="text", body="old",
+    )
+
+    class FakePeer:
+        fingerprint = "sha256:p1"
+
+    async def fake_resolve(_needle):
+        return FakePeer()
+
+    async def fake_send_edit(peer, *, target_msg_id, new_body):
+        state.edit_message(id=target_msg_id, new_body=new_body, edited_at_ms=2000)
+        return {"ack": {"ok": True}, "peer": peer.fingerprint}
+
+    monkeypatch.setattr(server.daemon, "resolve_for_send", fake_resolve)
+    monkeypatch.setattr(server.daemon, "send_edit", fake_send_edit)
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "edit_message",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "edit_message",
+            "rid": "ed1",
+            "peer_fp": "sha256:p1",
+            "msg_id": "m1",
+            "body": "new",
+        },
+    )
+    reply = captured[0]
+    assert reply["t"] == "edit_message_result"
+    assert reply["ok"] is True
+    assert reply["msg"]["body"] == "new"
+    assert state.get_message("m1").body == "new"
+
+
+@pytest.mark.asyncio
+async def test_edit_message_rejects_inbound(server_with_state):
+    server, state = server_with_state
+    state.record_message(
+        id="m1", ts_ms=1000, direction="in", peer_fp="sha256:p1",
+        msg_type="text", body="theirs",
+    )
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "edit_message",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "edit_message",
+            "rid": "ed2",
+            "peer_fp": "sha256:p1",
+            "msg_id": "m1",
+            "body": "nope",
+        },
+    )
+    assert captured[0]["t"] == "error"
+    assert captured[0]["code"] == "not_outbound"
+
+
+@pytest.mark.asyncio
+async def test_delete_message_offline_soft_deletes_locally(
+    server_with_state, monkeypatch,
+):
+    server, state = server_with_state
+    state.record_message(
+        id="m1", ts_ms=1000, direction="out", peer_fp="sha256:p1",
+        msg_type="text", body="bye",
+    )
+
+    async def fake_resolve(_needle):
+        return None
+
+    monkeypatch.setattr(server.daemon, "resolve_for_send", fake_resolve)
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer, "control", "delete_message",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "delete_message",
+            "rid": "del1",
+            "peer_fp": "sha256:p1",
+            "msg_id": "m1",
+        },
+    )
+    reply = captured[0]
+    assert reply["t"] == "delete_message_result"
+    assert reply["ok"] is True
+    assert reply["delivered"] is False
+    assert state.get_message("m1").is_deleted
 
 
 @pytest.mark.asyncio
@@ -463,6 +1043,166 @@ def test_phone_send_function_uses_send_message_kind(peer_html: str):
 
 
 # ───────── send_file (chunked upload) wire path ───────────────────
+
+
+def test_phone_chat_search_controls_exist(peer_html: str):
+    assert 'id="daemon-chat-search-input"' in peer_html
+    assert 'id="btn-daemon-chat-search"' in peer_html
+    assert 'type="search"' in peer_html
+    assert 'aria-label="Search this chat"' in peer_html
+
+
+def test_phone_global_search_controls_exist(peer_html: str):
+    assert 'id="daemon-global-search-input"' in peer_html
+    assert 'id="btn-daemon-global-search"' in peer_html
+    assert 'id="daemon-global-search-results"' in peer_html
+    assert 'aria-label="Search all chats, groups, and files"' in peer_html
+
+
+def test_phone_global_search_uses_daemon_bridge(peer_html: str):
+    fn = _snippet(peer_html, "async function searchDaemonGlobal", 700)
+    assert '_daemonRequest("global_search"' in fn
+    assert "query: String(query || \"\").trim()" in fn
+    handler = _snippet(peer_html, "async function _handleDaemonGlobalSearch", 1600)
+    assert "searchDaemonGlobal(query, 10)" in handler
+    assert "_renderDaemonGlobalSearchResults(reply, query)" in handler
+    renderer = _snippet(peer_html, "function _renderDaemonGlobalSearchResults", 5200)
+    assert "_openDaemonChat(peer)" in renderer
+    assert "_openDaemonGroupChat(group)" in renderer
+    assert "results.files" in renderer
+
+
+def test_phone_search_function_uses_search_messages_kind(peer_html: str):
+    snip = _snippet(peer_html, "async function searchDaemonMessages", 900)
+    assert '_daemonRequest("search_messages"' in snip
+    assert "peer_fp: peerFp" in snip
+    assert "query: String(query || \"\").trim()" in snip
+
+
+def test_phone_search_handler_renders_results(peer_html: str):
+    snip = _snippet(peer_html, "async function _handleDaemonChatSearch", 2200)
+    assert "searchDaemonMessages(peer.fingerprint, query, 50)" in snip
+    assert "No matches for" in snip
+    assert "_renderDaemonMessageBubble(log, m)" in snip
+    assert 'id="btn-daemon-chat-search"' in peer_html
+    assert 'id="daemon-chat-search-input"' in peer_html
+
+
+def test_phone_reaction_function_uses_react_message_kind(peer_html: str):
+    snip = _snippet(peer_html, "async function reactDaemonMessage", 900)
+    assert '_daemonRequest("react_message"' in snip
+    assert "msg_id: msgId" in snip
+    assert "emoji" in snip
+    assert 'op: op || "add"' in snip
+
+
+def test_phone_message_bubble_renders_reaction_row(peer_html: str):
+    snip = _snippet(peer_html, "function _renderDaemonReactionRow", 2600)
+    assert "m.reactions" in snip
+    assert "state.daemon_active_peer && state.daemon_active_peer.fingerprint" in snip
+    assert "state.daemon_active_group && state.daemon_active_group.group_id" in snip
+    assert "reactDaemonMessage(peer.fingerprint, m.id, emoji, \"add\")" in snip
+    assert "reactDaemonGroupMessage(group.group_id, m.id, emoji, \"add\")" in snip
+    assert "fetchDaemonMessages(peer.fingerprint, 50)" in snip
+    assert "fetchDaemonGroupMessages(group.group_id, 50)" in snip
+    bubble = _snippet(peer_html, "function _renderDaemonMessageBubble", 2600)
+    assert "_renderDaemonReactionRow(bubble, m)" in bubble
+
+
+def test_phone_edit_delete_functions_use_daemon_bridge(peer_html: str):
+    edit = _snippet(peer_html, "async function editDaemonMessage", 700)
+    assert '_daemonRequest("edit_message"' in edit
+    assert "msg_id: msgId" in edit
+    assert "body" in edit
+    delete = _snippet(peer_html, "async function deleteDaemonMessage", 700)
+    assert '_daemonRequest("delete_message"' in delete
+    assert "msg_id: msgId" in delete
+
+
+def test_phone_message_bubble_renders_edit_delete_for_outbound(peer_html: str):
+    snip = _snippet(peer_html, "function _renderDaemonMessageActions", 2600)
+    assert 'const actions = ["Reply"]' in snip
+    assert 'actions.push("Edit", "Delete")' in snip
+    assert "Edit" in snip
+    assert "Delete" in snip
+    assert "editDaemonMessage(peer.fingerprint, m.id" in snip
+    assert "deleteDaemonMessage(peer.fingerprint, m.id)" in snip
+    assert "editDaemonGroupMessage(group.group_id, m.id" in snip
+    assert "deleteDaemonGroupMessage(group.group_id, m.id)" in snip
+    bubble = _snippet(peer_html, "function _renderDaemonMessageBubble", 2800)
+    assert "_renderDaemonMessageActions(bubble, m)" in bubble
+
+
+def test_phone_reply_surface_and_send_wire(peer_html: str):
+    assert 'id="daemon-chat-reply-bar"' in peer_html
+    assert 'id="daemon-chat-reply-preview"' in peer_html
+    assert 'id="btn-daemon-chat-reply-cancel"' in peer_html
+    actions = _snippet(peer_html, "function _renderDaemonMessageActions", 3200)
+    assert 'const actions = ["Reply"]' in actions
+    assert "_setDaemonReply(m)" in actions
+    send = _snippet(peer_html, "async function _handleDaemonChatSend", 2400)
+    assert "const replyTo = state.daemon_reply_to" in send
+    assert "reply_to: replyTo && replyTo.id" in send
+    assert "_clearDaemonReply()" in send
+
+
+def test_phone_reply_quote_renders_on_message_bubble(peer_html: str):
+    bubble = _snippet(peer_html, "function _renderDaemonMessageBubble", 3000)
+    assert "m.reply_to" in bubble
+    assert "Reply to" in bubble
+    assert "_renderDaemonMessageActions(bubble, m)" in bubble
+
+
+def test_phone_group_roster_and_messages_use_daemon_bridge(peer_html: str):
+    assert "async function fetchDaemonGroups()" in peer_html
+    assert '_daemonRequest("fetch_groups"' in peer_html
+    assert "async function fetchDaemonGroupDetail" in peer_html
+    assert '_daemonRequest("fetch_group_detail"' in peer_html
+    assert "async function fetchDaemonGroupMessages" in peer_html
+    assert '_daemonRequest("fetch_group_messages"' in peer_html
+    assert "async function searchDaemonGroupMessages" in peer_html
+    assert '_daemonRequest("search_group_messages"' in peer_html
+    assert "async function fetchDaemonGroupInviteLink" in peer_html
+    assert '_daemonRequest("group_invite_link"' in peer_html
+    assert "async function addDaemonGroupMember" in peer_html
+    assert '_daemonRequest("add_group_member"' in peer_html
+    assert "async function removeDaemonGroupMember" in peer_html
+    assert '_daemonRequest("remove_group_member"' in peer_html
+    assert "async function leaveDaemonGroup" in peer_html
+    assert '_daemonRequest("leave_group"' in peer_html
+    assert "async function sendDaemonGroupMessage" in peer_html
+    assert '_daemonRequest("send_group_message"' in peer_html
+    assert "async function reactDaemonGroupMessage" in peer_html
+    assert '_daemonRequest("react_group_message"' in peer_html
+    assert "async function editDaemonGroupMessage" in peer_html
+    assert '_daemonRequest("edit_group_message"' in peer_html
+    assert "async function deleteDaemonGroupMessage" in peer_html
+    assert '_daemonRequest("delete_group_message"' in peer_html
+    roster = _snippet(peer_html, "async function _refreshDaemonRoster", 5200)
+    assert "groups = await fetchDaemonGroups()" in roster
+    assert "_openDaemonGroupChat(group)" in roster
+    group_chat = _snippet(peer_html, "async function _openDaemonGroupChat", 2600)
+    assert "fetchDaemonGroupMessages(group.group_id, 50)" in group_chat
+    assert 'input.placeholder = "Message group"' in group_chat
+    assert 'searchInput.placeholder = "Search this group"' in group_chat
+    assert "searchBtn.disabled = false" in group_chat
+    send = _snippet(peer_html, "async function _handleDaemonChatSend", 3600)
+    assert "sendDaemonGroupMessage(group.group_id, body" in send
+    assert "fetchDaemonGroupMessages(group.group_id, 50)" in send
+    search = _snippet(peer_html, "async function _handleDaemonChatSearch", 2600)
+    assert "searchDaemonGroupMessages(group.group_id, query, 50)" in search
+    assert 'id="daemon-chat-group-settings"' in peer_html
+    assert 'id="btn-daemon-chat-group-invite"' in peer_html
+    assert 'id="btn-daemon-chat-group-add"' in peer_html
+    assert 'id="btn-daemon-chat-group-leave"' in peer_html
+    info = _snippet(peer_html, "async function _renderDaemonGroupInfo", 4200)
+    assert "fetchDaemonGroupDetail(group.group_id)" in info
+    assert '["owner", "admin"].includes' in info
+    assert "select.disabled = !canManageMembers" in info
+    assert "removeDaemonGroupMember(group.group_id" in info
+    assert "addDaemonGroupMember(group.group_id, peerFp)" in peer_html
+    assert "fetchDaemonGroupInviteLink(group.group_id)" in peer_html
+    assert "leaveDaemonGroup(group.group_id)" in peer_html
 
 
 @pytest.mark.asyncio
@@ -1261,7 +2001,7 @@ def test_open_daemon_chat_loads_messages(peer_html: str):
     """Tapping a peer row fetches messages + renders bubbles in the
     chat log. Uses _showOnly so the chat card is the only top-level
     card visible (previous show/hide pair allowed multi-card stacks)."""
-    snippet = _snippet(peer_html, "async function _openDaemonChat", 3000)
+    snippet = _snippet(peer_html, "async function _openDaemonChat", 3600)
     assert "fetchDaemonMessages(peer.fingerprint" in snippet
     assert "_renderDaemonMessageBubble(log, m)" in snippet
     assert '_showOnly("#daemon-chat-card")' in snippet

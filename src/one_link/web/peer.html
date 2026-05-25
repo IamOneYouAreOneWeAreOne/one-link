@@ -387,6 +387,25 @@
     </div>
     <div class="body">
       <p class="help" id="daemon-roster-status"></p>
+      <div id="daemon-global-search"
+           style="display:flex; gap:8px; margin-top:10px;">
+        <input id="daemon-global-search-input"
+               type="search"
+               placeholder="Search everything"
+               aria-label="Search all chats, groups, and files"
+               autocomplete="off"
+               style="flex:1 1 auto; padding:8px 10px;
+                      border-radius:10px; border:1px solid var(--line);
+                      background:var(--bg-3); color:var(--text);
+                      font: inherit; font-size:14px;" />
+        <button class="btn ghost"
+                id="btn-daemon-global-search"
+                style="padding:8px 12px; min-height:auto;
+                       font-size:12px;">Search</button>
+      </div>
+      <div id="daemon-global-search-results"
+           style="display:flex; flex-direction:column; gap:8px;
+                  margin-top:10px;" hidden></div>
       <div id="daemon-peers-list"
            style="display:flex; flex-direction:column; gap:8px;
                   margin-top:12px;"></div>
@@ -465,6 +484,22 @@
         <button class="btn ghost" id="btn-daemon-chat-back" style="padding:6px 10px; min-height:auto; font-size:12px;">← Back</button>
         <button class="btn ghost" id="btn-daemon-chat-info" style="padding:6px 10px; min-height:auto; font-size:12px;">⚙ Info</button>
       </div>
+      <div id="daemon-chat-search"
+           style="display:flex; gap:8px; margin-bottom:10px;">
+        <input id="daemon-chat-search-input"
+               type="search"
+               placeholder="Search this chat"
+               aria-label="Search this chat"
+               autocomplete="off"
+               style="flex:1 1 auto; padding:8px 10px;
+                      border-radius:10px; border:1px solid var(--line);
+                      background:var(--bg-3); color:var(--text);
+                      font: inherit; font-size:14px;" />
+        <button class="btn ghost"
+                id="btn-daemon-chat-search"
+                style="padding:8px 12px; min-height:auto;
+                       font-size:12px;">Search</button>
+      </div>
       <!-- 2026-05-23 phase 3a: peer info / mgmt strip. Hidden by
            default, toggled by the Info button. Lets the phone
            rename a peer locally + mute / unmute without going
@@ -472,36 +507,66 @@
       <div id="daemon-chat-peer-info" hidden
            style="background:var(--bg-3); border-radius:10px;
                   padding:12px; margin-bottom:10px; font-size:13px;">
-        <p style="margin:0 0 8px; color:var(--text-dim); font-size:11px;
-                  text-transform:uppercase; letter-spacing:0.5px;">
-          Peer settings
-        </p>
-        <div style="margin-bottom:10px;">
-          <label for="daemon-chat-peer-alias"
-                 style="display:block; font-size:12px;
-                        color:var(--text-dim); margin-bottom:4px;">
-            Local alias (only you see this)
+        <div id="daemon-chat-peer-settings">
+          <p style="margin:0 0 8px; color:var(--text-dim); font-size:11px;
+                    text-transform:uppercase; letter-spacing:0.5px;">
+            Peer settings
+          </p>
+          <div style="margin-bottom:10px;">
+            <label for="daemon-chat-peer-alias"
+                   style="display:block; font-size:12px;
+                          color:var(--text-dim); margin-bottom:4px;">
+              Local alias (only you see this)
+            </label>
+            <div style="display:flex; gap:6px;">
+              <input id="daemon-chat-peer-alias" type="text" maxlength="64"
+                     placeholder="e.g. Laptop, Phone, Workstation"
+                     style="flex:1 1 auto; padding:6px 10px;
+                            border-radius:8px; border:1px solid var(--line);
+                            background:var(--bg-1); color:var(--text);
+                            font: inherit; font-size:13px;" />
+              <button class="btn" id="btn-daemon-chat-peer-alias-save"
+                      style="padding:6px 12px; min-height:auto;
+                             font-size:12px;">Save</button>
+            </div>
+          </div>
+          <label style="display:flex; align-items:center; gap:8px;
+                         font-size:13px; cursor:pointer;"
+                 for="daemon-chat-peer-mute-toggle">
+            <input type="checkbox"
+                   id="daemon-chat-peer-mute-toggle"
+                   aria-label="Mute notifications from this peer" />
+            <span>Mute notifications from this peer</span>
           </label>
-          <div style="display:flex; gap:6px;">
-            <input id="daemon-chat-peer-alias" type="text" maxlength="64"
-                   placeholder="e.g. Laptop, Phone, Workstation"
-                   style="flex:1 1 auto; padding:6px 10px;
-                          border-radius:8px; border:1px solid var(--line);
-                          background:var(--bg-1); color:var(--text);
-                          font: inherit; font-size:13px;" />
-            <button class="btn" id="btn-daemon-chat-peer-alias-save"
+        </div>
+        <div id="daemon-chat-group-settings" hidden>
+          <p style="margin:0 0 8px; color:var(--text-dim); font-size:11px;
+                    text-transform:uppercase; letter-spacing:0.5px;">
+            Group settings
+          </p>
+          <div id="daemon-chat-group-members"
+               style="display:flex; flex-direction:column; gap:4px;
+                      margin-bottom:10px;"></div>
+          <div style="display:flex; gap:6px; margin-bottom:8px;">
+            <select id="daemon-chat-group-member-select"
+                    aria-label="Paired peer to add to group"
+                    style="flex:1 1 auto; padding:6px 10px;
+                           border-radius:8px; border:1px solid var(--line);
+                           background:var(--bg-1); color:var(--text);
+                           font: inherit; font-size:13px;"></select>
+            <button class="btn" id="btn-daemon-chat-group-add"
                     style="padding:6px 12px; min-height:auto;
-                           font-size:12px;">Save</button>
+                           font-size:12px;">Add</button>
+          </div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button class="btn ghost" id="btn-daemon-chat-group-invite"
+                    style="padding:6px 12px; min-height:auto;
+                           font-size:12px;">Copy invite</button>
+            <button class="btn ghost" id="btn-daemon-chat-group-leave"
+                    style="padding:6px 12px; min-height:auto;
+                           font-size:12px;">Leave</button>
           </div>
         </div>
-        <label style="display:flex; align-items:center; gap:8px;
-                       font-size:13px; cursor:pointer;"
-               for="daemon-chat-peer-mute-toggle">
-          <input type="checkbox"
-                 id="daemon-chat-peer-mute-toggle"
-                 aria-label="Mute notifications from this peer" />
-          <span>Mute notifications from this peer</span>
-        </label>
         <p id="daemon-chat-peer-info-status"
            style="margin:6px 0 0; font-size:11px; color:var(--text-dim);
                   min-height:1em;"></p>
@@ -511,6 +576,23 @@
                   min-height:200px; max-height:55vh; overflow-y:auto;
                   display:flex; flex-direction:column; gap:8px;
                   font-size:14px; line-height:1.45;">
+      </div>
+      <div id="daemon-chat-reply-bar" hidden
+           style="margin-top:10px; padding:8px 10px;
+                  border-left:3px solid var(--accent);
+                  background:var(--bg-3); border-radius:8px;
+                  font-size:12px;">
+        <div style="display:flex; gap:8px; align-items:flex-start;">
+          <div style="flex:1 1 auto; min-width:0;">
+            <strong>Replying to</strong>
+            <div id="daemon-chat-reply-preview"
+                 style="color:var(--text-dim); white-space:nowrap;
+                        overflow:hidden; text-overflow:ellipsis;"></div>
+          </div>
+          <button class="btn ghost" id="btn-daemon-chat-reply-cancel"
+                  style="padding:3px 8px; min-height:auto; font-size:12px;"
+                  aria-label="Cancel reply">Cancel</button>
+        </div>
       </div>
       <!-- 2026-05-23: compose surface. Wired to send_message over
            the daemon DC (see _handle_browser_peer_request). The
@@ -3850,6 +3932,8 @@
   state.daemon_dc_fingerprint = null;
   state.daemon_pending = new Map();   // rid → {resolve, reject, timer}
   state.daemon_active_peer = null;     // currently-selected peer in the chat view
+  state.daemon_reply_to = null;        // {id, body} selected in phone chat
+  state.daemon_active_group = null;    // currently-selected group in the chat view
 
   const DAEMON_REQUEST_TIMEOUT_MS = 10_000;
 
@@ -3994,6 +4078,131 @@
     return Array.isArray(reply.messages) ? reply.messages : [];
   }
 
+  async function fetchDaemonGroups() {
+    const reply = await _daemonRequest("fetch_groups", {});
+    return Array.isArray(reply.groups) ? reply.groups : [];
+  }
+
+  async function fetchDaemonGroupMessages(groupId, limit) {
+    const reply = await _daemonRequest("fetch_group_messages", {
+      group_id: groupId,
+      limit: limit || 50,
+    });
+    return Array.isArray(reply.messages) ? reply.messages : [];
+  }
+
+  async function searchDaemonGroupMessages(groupId, query, limit) {
+    const reply = await _daemonRequest("search_group_messages", {
+      group_id: groupId,
+      query: String(query || "").trim(),
+      limit: limit || 50,
+    });
+    return Array.isArray(reply.messages) ? reply.messages : [];
+  }
+
+  async function fetchDaemonGroupDetail(groupId) {
+    const reply = await _daemonRequest("fetch_group_detail", {
+      group_id: groupId,
+    });
+    return reply.group || null;
+  }
+
+  async function fetchDaemonGroupInviteLink(groupId) {
+    return _daemonRequest("group_invite_link", { group_id: groupId });
+  }
+
+  async function addDaemonGroupMember(groupId, peerFp) {
+    return _daemonRequest("add_group_member", {
+      group_id: groupId,
+      peer_fp: peerFp,
+      role: "member",
+    });
+  }
+
+  async function removeDaemonGroupMember(groupId, peerFp) {
+    return _daemonRequest("remove_group_member", {
+      group_id: groupId,
+      peer_fp: peerFp,
+    });
+  }
+
+  async function leaveDaemonGroup(groupId) {
+    return _daemonRequest("leave_group", { group_id: groupId });
+  }
+
+  async function sendDaemonGroupMessage(groupId, body, opts) {
+    const o = opts || {};
+    return _daemonRequest("send_group_message", {
+      group_id: groupId,
+      body,
+      reply_to: o.reply_to || null,
+    });
+  }
+
+  async function reactDaemonGroupMessage(groupId, msgId, emoji, op) {
+    return _daemonRequest("react_group_message", {
+      group_id: groupId,
+      msg_id: msgId,
+      emoji,
+      op: op || "add",
+    });
+  }
+
+  async function editDaemonGroupMessage(groupId, msgId, body) {
+    return _daemonRequest("edit_group_message", {
+      group_id: groupId,
+      msg_id: msgId,
+      body,
+    });
+  }
+
+  async function deleteDaemonGroupMessage(groupId, msgId) {
+    return _daemonRequest("delete_group_message", {
+      group_id: groupId,
+      msg_id: msgId,
+    });
+  }
+
+  async function searchDaemonMessages(peerFp, query, limit) {
+    const reply = await _daemonRequest("search_messages", {
+      peer_fp: peerFp,
+      query: String(query || "").trim(),
+      limit: limit || 50,
+    });
+    return Array.isArray(reply.messages) ? reply.messages : [];
+  }
+
+  async function searchDaemonGlobal(query, limit) {
+    return _daemonRequest("global_search", {
+      query: String(query || "").trim(),
+      limit: limit || 10,
+    });
+  }
+
+  async function reactDaemonMessage(peerFp, msgId, emoji, op) {
+    return _daemonRequest("react_message", {
+      peer_fp: peerFp,
+      msg_id: msgId,
+      emoji,
+      op: op || "add",
+    });
+  }
+
+  async function editDaemonMessage(peerFp, msgId, body) {
+    return _daemonRequest("edit_message", {
+      peer_fp: peerFp,
+      msg_id: msgId,
+      body,
+    });
+  }
+
+  async function deleteDaemonMessage(peerFp, msgId) {
+    return _daemonRequest("delete_message", {
+      peer_fp: peerFp,
+      msg_id: msgId,
+    });
+  }
+
   async function _refreshDaemonRoster() {
     const list = $("#daemon-peers-list");
     const status = $("#daemon-roster-status");
@@ -4004,18 +4213,23 @@
     text(status, "Fetching your chats from the laptop…");
     list.innerHTML = "";
     let peers;
+    let groups = [];
     try {
       peers = await fetchDaemonPeers();
+      groups = await fetchDaemonGroups().catch(() => []);
     } catch (e) {
       text(status,
         `Couldn't fetch chats: ${e && e.message ? e.message : e}`);
       return;
     }
-    if (!peers.length) {
+    state.daemon_roster_peers = peers.slice();
+    state.daemon_roster_groups = groups.slice();
+    if (!peers.length && !groups.length) {
       text(status, "No chats yet on this device. Pair a peer on your laptop first.");
       return;
     }
-    text(status, `${peers.length} chat${peers.length === 1 ? "" : "s"}`);
+    const totalChats = peers.length + groups.length;
+    text(status, `${totalChats} chat${totalChats === 1 ? "" : "s"}`);
     // Sort by last_seen_ms desc so most-recent activity floats up.
     peers.sort((a, b) =>
       Number(b.last_seen_ms || 0) - Number(a.last_seen_ms || 0)
@@ -4063,6 +4277,202 @@
       row.onclick = () => _openDaemonChat(peer);
       list.appendChild(row);
     }
+    for (const group of groups) {
+      const row = document.createElement("button");
+      row.style.display = "flex";
+      row.style.alignItems = "center";
+      row.style.gap = "12px";
+      row.style.padding = "12px 14px";
+      row.style.background = "var(--bg-3)";
+      row.style.border = "1px solid var(--line)";
+      row.style.borderRadius = "10px";
+      row.style.color = "var(--text)";
+      row.style.cursor = "pointer";
+      row.style.textAlign = "left";
+      row.style.minHeight = "60px";
+      row.style.width = "100%";
+      row.style.fontFamily = "inherit";
+      const left = document.createElement("div");
+      left.style.flex = "1 1 auto";
+      left.style.minWidth = "0";
+      const name = document.createElement("div");
+      name.textContent = group.name || "Group";
+      name.style.fontWeight = "600";
+      name.style.fontSize = "15px";
+      const sub = document.createElement("div");
+      sub.style.fontSize = "11px";
+      sub.style.color = "var(--text-dim)";
+      sub.textContent = `${group.member_count || 0} members`;
+      left.appendChild(name);
+      left.appendChild(sub);
+      const chev = document.createElement("div");
+      chev.textContent = "›";
+      chev.style.fontSize = "20px";
+      chev.style.color = "var(--text-dim)";
+      row.appendChild(left);
+      row.appendChild(chev);
+      row.onclick = () => _openDaemonGroupChat(group);
+      list.appendChild(row);
+    }
+  }
+
+  function _daemonSearchResultButton(kind, title, subtitle, onClick) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.gap = "10px";
+    row.style.padding = "10px 12px";
+    row.style.background = "var(--bg-3)";
+    row.style.border = "1px solid var(--line)";
+    row.style.borderRadius = "10px";
+    row.style.color = "var(--text)";
+    row.style.cursor = onClick ? "pointer" : "default";
+    row.style.textAlign = "left";
+    row.style.width = "100%";
+    row.style.fontFamily = "inherit";
+    const badge = document.createElement("span");
+    badge.textContent = kind;
+    badge.style.flex = "0 0 auto";
+    badge.style.fontSize = "10px";
+    badge.style.color = "var(--text-dim)";
+    badge.style.textTransform = "uppercase";
+    badge.style.letterSpacing = "0.5px";
+    const body = document.createElement("span");
+    body.style.flex = "1 1 auto";
+    body.style.minWidth = "0";
+    const name = document.createElement("span");
+    name.textContent = title || "(untitled)";
+    name.style.display = "block";
+    name.style.fontWeight = "600";
+    name.style.fontSize = "14px";
+    name.style.overflow = "hidden";
+    name.style.textOverflow = "ellipsis";
+    name.style.whiteSpace = "nowrap";
+    const sub = document.createElement("span");
+    sub.textContent = subtitle || "";
+    sub.style.display = "block";
+    sub.style.fontSize = "11px";
+    sub.style.color = "var(--text-dim)";
+    sub.style.overflow = "hidden";
+    sub.style.textOverflow = "ellipsis";
+    sub.style.whiteSpace = "nowrap";
+    body.appendChild(name);
+    body.appendChild(sub);
+    row.appendChild(badge);
+    row.appendChild(body);
+    if (onClick) row.onclick = onClick;
+    return row;
+  }
+
+  function _findDaemonRosterPeer(fp) {
+    const peers = Array.isArray(state.daemon_roster_peers)
+      ? state.daemon_roster_peers : [];
+    return peers.find((p) => p && p.fingerprint === fp) || null;
+  }
+
+  function _findDaemonRosterGroup(groupId) {
+    const groups = Array.isArray(state.daemon_roster_groups)
+      ? state.daemon_roster_groups : [];
+    return groups.find((g) => g && g.group_id === groupId) || null;
+  }
+
+  function _renderDaemonGlobalSearchResults(results, query) {
+    const wrap = $("#daemon-global-search-results");
+    if (!wrap) return;
+    wrap.innerHTML = "";
+    const messages = Array.isArray(results.messages) ? results.messages : [];
+    const peers = Array.isArray(results.peers) ? results.peers : [];
+    const groups = Array.isArray(results.groups) ? results.groups : [];
+    const files = Array.isArray(results.files) ? results.files : [];
+    const total = messages.length + peers.length + groups.length + files.length;
+    wrap.hidden = false;
+    if (!total) {
+      const empty = document.createElement("p");
+      empty.className = "help";
+      empty.textContent = `No matches for "${query}".`;
+      wrap.appendChild(empty);
+      return;
+    }
+    const summary = document.createElement("p");
+    summary.className = "help";
+    summary.textContent =
+      `${total} result${total === 1 ? "" : "s"} for "${query}".`;
+    wrap.appendChild(summary);
+    for (const p of peers) {
+      const peer = _findDaemonRosterPeer(p.fingerprint) || {
+        fingerprint: p.fingerprint,
+        alias: p.display_name,
+        hostname: p.hostname,
+        short_id: p.short_id,
+        trust: p.trust,
+        last_seen_ms: p.last_seen_ms,
+      };
+      wrap.appendChild(_daemonSearchResultButton(
+        "peer",
+        p.display_name || p.hostname || p.short_id || p.fingerprint,
+        p.fingerprint || "",
+        () => _openDaemonChat(peer),
+      ));
+    }
+    for (const g of groups) {
+      const group = _findDaemonRosterGroup(g.group_id) || {
+        group_id: g.group_id,
+        name: g.name || "Group",
+        member_count: g.member_count || 0,
+      };
+      wrap.appendChild(_daemonSearchResultButton(
+        "group",
+        g.name || "Group",
+        g.group_id || "",
+        () => _openDaemonGroupChat(group),
+      ));
+    }
+    for (const m of messages) {
+      const peer = _findDaemonRosterPeer(m.peer_fp) || {
+        fingerprint: m.peer_fp,
+        alias: m.peer_display_name,
+      };
+      wrap.appendChild(_daemonSearchResultButton(
+        "msg",
+        m.peer_display_name || m.peer_fp || "Message",
+        m.body || "",
+        () => peer && peer.fingerprint && _openDaemonChat(peer),
+      ));
+    }
+    for (const f of files) {
+      wrap.appendChild(_daemonSearchResultButton(
+        "file",
+        f.name || "File",
+        f.size ? `${f.size} bytes` : "",
+        null,
+      ));
+    }
+  }
+
+  async function _handleDaemonGlobalSearch() {
+    const input = $("#daemon-global-search-input");
+    const results = $("#daemon-global-search-results");
+    if (!input || !results) return;
+    const query = input.value.trim();
+    if (!query) {
+      results.innerHTML = "";
+      results.hidden = true;
+      return;
+    }
+    results.hidden = false;
+    results.innerHTML = "";
+    const loading = document.createElement("p");
+    loading.className = "help";
+    loading.textContent = "Searching everything...";
+    results.appendChild(loading);
+    try {
+      const reply = await searchDaemonGlobal(query, 10);
+      _renderDaemonGlobalSearchResults(reply, query);
+    } catch (e) {
+      loading.textContent =
+        `Search failed: ${e && e.message ? e.message : e}`;
+    }
   }
 
   async function _openDaemonChat(peer) {
@@ -4075,6 +4485,7 @@
       return;
     }
     state.daemon_active_peer = peer;
+    state.daemon_active_group = null;
     // Single-pane: chat takes the screen.
     _showOnly("#daemon-chat-card");
     const titleText =
@@ -4091,13 +4502,32 @@
     // has content. Also hide the peer-info panel — stale alias /
     // mute values from a previous peer would otherwise leak.
     const input = $("#daemon-chat-input");
+    const searchInput = $("#daemon-chat-search-input");
+    const searchBtn = $("#btn-daemon-chat-search");
+    const attachBtn = $("#btn-daemon-chat-attach");
     const sendBtn = $("#btn-daemon-chat-send");
     const sendStatus = $("#daemon-chat-send-status");
     if (input) input.value = "";
+    if (input) {
+      input.disabled = false;
+      input.placeholder = "Message";
+    }
+    if (attachBtn) attachBtn.disabled = false;
+    if (searchBtn) searchBtn.disabled = false;
+    if (searchInput) {
+      searchInput.value = "";
+      searchInput.disabled = false;
+      searchInput.placeholder = "Search this chat";
+    }
+    _clearDaemonReply();
     if (sendStatus) sendStatus.textContent = "";
     if (sendBtn) sendBtn.disabled = true;
     const infoPanel = $("#daemon-chat-peer-info");
     if (infoPanel) infoPanel.hidden = true;
+    const peerSettings = $("#daemon-chat-peer-settings");
+    const groupSettings = $("#daemon-chat-group-settings");
+    if (peerSettings) peerSettings.hidden = false;
+    if (groupSettings) groupSettings.hidden = true;
     const log = $("#daemon-chat-log");
     if (!log) return;
     log.innerHTML = "";
@@ -4126,6 +4556,67 @@
     if (input) input.focus();
   }
 
+  async function _openDaemonGroupChat(group) {
+    if (!group || !group.group_id) return;
+    state.daemon_active_peer = null;
+    state.daemon_active_group = group;
+    _clearDaemonReply();
+    _showOnly("#daemon-chat-card");
+    text($("#daemon-chat-title"), group.name || "Group");
+    text($("#daemon-chat-meta"), `${group.member_count || 0} members`);
+    const input = $("#daemon-chat-input");
+    const searchInput = $("#daemon-chat-search-input");
+    const searchBtn = $("#btn-daemon-chat-search");
+    const sendBtn = $("#btn-daemon-chat-send");
+    const attachBtn = $("#btn-daemon-chat-attach");
+    const sendStatus = $("#daemon-chat-send-status");
+    if (input) {
+      input.value = "";
+      input.disabled = false;
+      input.placeholder = "Message group";
+    }
+    if (searchInput) {
+      searchInput.value = "";
+      searchInput.disabled = false;
+      searchInput.placeholder = "Search this group";
+    }
+    if (searchBtn) searchBtn.disabled = false;
+    if (sendBtn) sendBtn.disabled = true;
+    if (attachBtn) attachBtn.disabled = true;
+    if (sendStatus) sendStatus.textContent = "";
+    const infoPanel = $("#daemon-chat-peer-info");
+    const peerSettings = $("#daemon-chat-peer-settings");
+    const groupSettings = $("#daemon-chat-group-settings");
+    if (infoPanel) infoPanel.hidden = true;
+    if (peerSettings) peerSettings.hidden = true;
+    if (groupSettings) groupSettings.hidden = false;
+    const log = $("#daemon-chat-log");
+    if (!log) return;
+    log.innerHTML = "";
+    const loading = document.createElement("p");
+    loading.className = "help";
+    loading.textContent = "Fetching group messages...";
+    log.appendChild(loading);
+    let msgs;
+    try {
+      msgs = await fetchDaemonGroupMessages(group.group_id, 50);
+    } catch (e) {
+      loading.textContent =
+        `Couldn't fetch group messages: ${e && e.message ? e.message : e}`;
+      return;
+    }
+    log.innerHTML = "";
+    if (!msgs.length) {
+      const empty = document.createElement("p");
+      empty.className = "help";
+      empty.textContent = "No group messages yet.";
+      log.appendChild(empty);
+    } else {
+      for (const m of msgs) _renderDaemonMessageBubble(log, m);
+      log.scrollTop = log.scrollHeight;
+    }
+  }
+
   // 2026-05-23: send a chat message from the phone to a daemon-side
   // peer via the live DC. Mirrors the desktop /api/send wire shape:
   // peer is identified by fingerprint, body is plain text (<=64KiB).
@@ -4152,15 +4643,18 @@
 
   async function _handleDaemonChatSend() {
     const peer = state.daemon_active_peer;
+    const group = state.daemon_active_group;
     const input = $("#daemon-chat-input");
     const sendBtn = $("#btn-daemon-chat-send");
     const sendStatus = $("#daemon-chat-send-status");
-    if (!peer || !peer.fingerprint || !input) return;
+    if ((!peer || !peer.fingerprint) && (!group || !group.group_id)) return;
+    if (!input) return;
     const body = (input.value || "").trim();
     if (!body) return;
     sendBtn && (sendBtn.disabled = true);
     sendStatus && (sendStatus.textContent = "Sending…");
     const optimisticId = _randomHexId();
+    const replyTo = state.daemon_reply_to;
     const log = $("#daemon-chat-log");
     // Optimistic bubble — replaced by server echo on next refresh
     // OR left in place if the server confirms a matching id.
@@ -4170,12 +4664,21 @@
       direction: "outbound",
       body,
       msg_type: "text",
+      reply_to: replyTo && replyTo.id,
     });
     if (log) log.scrollTop = log.scrollHeight;
     try {
-      const reply = await sendDaemonMessage(peer.fingerprint, body, {
-        client_msg_id: optimisticId,
-      });
+      let reply;
+      if (group && group.group_id) {
+        reply = await sendDaemonGroupMessage(group.group_id, body, {
+          reply_to: replyTo && replyTo.id,
+        });
+      } else {
+        reply = await sendDaemonMessage(peer.fingerprint, body, {
+          client_msg_id: optimisticId,
+          reply_to: replyTo && replyTo.id,
+        });
+      }
       if (reply && reply.queued) {
         sendStatus && (sendStatus.textContent =
           "Peer is offline. Queued for delivery when they come back.");
@@ -4183,10 +4686,13 @@
         sendStatus && (sendStatus.textContent = "Sent");
       }
       input.value = "";
+      _clearDaemonReply();
       // Pull the canonical view from the daemon to reconcile the
       // optimistic bubble with the persisted record.
       try {
-        const msgs = await fetchDaemonMessages(peer.fingerprint, 50);
+        const msgs = group && group.group_id
+          ? await fetchDaemonGroupMessages(group.group_id, 50)
+          : await fetchDaemonMessages(peer.fingerprint, 50);
         if (log) {
           log.innerHTML = "";
           for (const m of msgs) _renderDaemonMessageBubble(log, m);
@@ -4202,9 +4708,67 @@
     }
   }
 
+  async function _handleDaemonChatSearch() {
+    const peer = state.daemon_active_peer;
+    const group = state.daemon_active_group;
+    const input = $("#daemon-chat-search-input");
+    const log = $("#daemon-chat-log");
+    if (!input || !log) return;
+    const query = input.value.trim();
+    if (!query) {
+      if (group && group.group_id) await _openDaemonGroupChat(group);
+      else if (peer && peer.fingerprint) await _openDaemonChat(peer);
+      return;
+    }
+    if (!(group && group.group_id) && !(peer && peer.fingerprint)) return;
+    log.innerHTML = "";
+    const loading = document.createElement("p");
+    loading.className = "help";
+    loading.textContent = "Searching...";
+    log.appendChild(loading);
+    let msgs;
+    try {
+      msgs = group && group.group_id
+        ? await searchDaemonGroupMessages(group.group_id, query, 50)
+        : await searchDaemonMessages(peer.fingerprint, query, 50);
+    } catch (e) {
+      loading.textContent =
+        `Search failed: ${e && e.message ? e.message : e}`;
+      return;
+    }
+    log.innerHTML = "";
+    if (!msgs.length) {
+      const empty = document.createElement("p");
+      empty.className = "help";
+      empty.textContent = `No matches for "${query}".`;
+      log.appendChild(empty);
+      return;
+    }
+    const summary = document.createElement("p");
+    summary.className = "help";
+    summary.textContent = `${msgs.length} result${msgs.length === 1 ? "" : "s"} for "${query}".`;
+    log.appendChild(summary);
+    for (const m of msgs.reverse()) _renderDaemonMessageBubble(log, m);
+    log.scrollTop = log.scrollHeight;
+  }
+
   // Wire compose listeners once on DOM-ready. Enter sends, Shift+Enter
   // inserts a newline (standard chat ergonomics).
+  $("#btn-daemon-global-search")?.addEventListener("click", _handleDaemonGlobalSearch);
+  $("#daemon-global-search-input")?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      _handleDaemonGlobalSearch();
+    }
+  });
   $("#btn-daemon-chat-send")?.addEventListener("click", _handleDaemonChatSend);
+  $("#btn-daemon-chat-search")?.addEventListener("click", _handleDaemonChatSearch);
+  $("#daemon-chat-search-input")?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      _handleDaemonChatSearch();
+    }
+  });
   $("#daemon-chat-input")?.addEventListener("input", (ev) => {
     const sendBtn = $("#btn-daemon-chat-send");
     if (!sendBtn) return;
@@ -4430,18 +4994,148 @@
     const panel = $("#daemon-chat-peer-info");
     if (!panel) return;
     const peer = state.daemon_active_peer;
-    if (!peer) return;
+    const group = state.daemon_active_group;
+    if (!peer && !group) return;
     if (panel.hidden) {
+      const peerSettings = $("#daemon-chat-peer-settings");
+      const groupSettings = $("#daemon-chat-group-settings");
+      if (peerSettings) peerSettings.hidden = !peer;
+      if (groupSettings) groupSettings.hidden = !group;
       // Pre-populate with current values.
       const aliasInput = $("#daemon-chat-peer-alias");
       const muteToggle = $("#daemon-chat-peer-mute-toggle");
-      if (aliasInput) aliasInput.value = peer.alias || "";
-      if (muteToggle) muteToggle.checked = !!peer.muted;
+      if (peer && aliasInput) aliasInput.value = peer.alias || "";
+      if (peer && muteToggle) muteToggle.checked = !!peer.muted;
       const statusEl = $("#daemon-chat-peer-info-status");
       if (statusEl) statusEl.textContent = "";
       panel.hidden = false;
+      if (group) _renderDaemonGroupInfo().catch((e) => {
+        if (statusEl) statusEl.textContent =
+          `Couldn't load group info: ${e && e.message ? e.message : e}`;
+      });
     } else {
       panel.hidden = true;
+    }
+  }
+
+  async function _renderDaemonGroupInfo() {
+    const group = state.daemon_active_group;
+    const host = $("#daemon-chat-group-members");
+    const select = $("#daemon-chat-group-member-select");
+    const addBtn = $("#btn-daemon-chat-group-add");
+    const statusEl = $("#daemon-chat-peer-info-status");
+    if (!group || !group.group_id || !host || !select) return;
+    if (statusEl) statusEl.textContent = "Loading group...";
+    const [detail, peers] = await Promise.all([
+      fetchDaemonGroupDetail(group.group_id),
+      fetchDaemonPeers(),
+    ]);
+    host.replaceChildren();
+    const members = Array.isArray(detail?.members) ? detail.members : [];
+    const canManageMembers = ["owner", "admin"].includes(String(detail?.my_role || ""));
+    for (const member of members) {
+      const row = document.createElement("div");
+      row.style.display = "flex";
+      row.style.gap = "6px";
+      row.style.alignItems = "center";
+      row.style.justifyContent = "space-between";
+      const name = document.createElement("span");
+      name.textContent =
+        `${member.display_name || member.fingerprint || "member"} (${member.role || "member"})`;
+      name.style.minWidth = "0";
+      name.style.overflow = "hidden";
+      name.style.textOverflow = "ellipsis";
+      name.style.whiteSpace = "nowrap";
+      row.appendChild(name);
+      if (canManageMembers && !member.is_me && member.fingerprint) {
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "btn ghost";
+        remove.textContent = "Remove";
+        remove.style.padding = "3px 8px";
+        remove.style.minHeight = "auto";
+        remove.style.fontSize = "11px";
+        remove.addEventListener("click", async () => {
+          if (!confirm(`Remove ${member.display_name || member.fingerprint}?`)) return;
+          await removeDaemonGroupMember(group.group_id, member.fingerprint);
+          await _renderDaemonGroupInfo();
+          await _refreshDaemonRoster();
+        });
+        row.appendChild(remove);
+      }
+      host.appendChild(row);
+    }
+    select.replaceChildren();
+    select.disabled = !canManageMembers;
+    if (addBtn) addBtn.disabled = !canManageMembers;
+    const memberFps = new Set(members.map((m) => m.fingerprint).filter(Boolean));
+    for (const peer of peers || []) {
+      if (!peer.fingerprint || memberFps.has(peer.fingerprint)) continue;
+      const opt = document.createElement("option");
+      opt.value = peer.fingerprint;
+      opt.textContent = peer.alias || peer.hostname || peer.fingerprint;
+      select.appendChild(opt);
+    }
+    if (!select.childNodes.length) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = canManageMembers
+        ? "No paired peers to add"
+        : "Only admins can add members";
+      select.appendChild(opt);
+    }
+    if (statusEl) statusEl.textContent =
+      `${members.length} member${members.length === 1 ? "" : "s"}`;
+  }
+
+  async function _handleDaemonChatGroupAdd() {
+    const group = state.daemon_active_group;
+    const select = $("#daemon-chat-group-member-select");
+    const statusEl = $("#daemon-chat-peer-info-status");
+    const peerFp = (select?.value || "").trim();
+    if (!group || !group.group_id || !peerFp) return;
+    if (statusEl) statusEl.textContent = "Adding member...";
+    try {
+      await addDaemonGroupMember(group.group_id, peerFp);
+      await _renderDaemonGroupInfo();
+      await _refreshDaemonRoster();
+      if (statusEl) statusEl.textContent = "Member added.";
+    } catch (e) {
+      if (statusEl) statusEl.textContent =
+        `Couldn't add member: ${e && e.message ? e.message : e}`;
+    }
+  }
+
+  async function _handleDaemonChatGroupInvite() {
+    const group = state.daemon_active_group;
+    const statusEl = $("#daemon-chat-peer-info-status");
+    if (!group || !group.group_id) return;
+    if (statusEl) statusEl.textContent = "Creating invite...";
+    try {
+      const invite = await fetchDaemonGroupInviteLink(group.group_id);
+      const textToCopy = invite.url || invite.token || "";
+      await navigator.clipboard.writeText(textToCopy);
+      if (statusEl) statusEl.textContent = "Invite copied.";
+    } catch (e) {
+      if (statusEl) statusEl.textContent =
+        `Couldn't copy invite: ${e && e.message ? e.message : e}`;
+    }
+  }
+
+  async function _handleDaemonChatGroupLeave() {
+    const group = state.daemon_active_group;
+    const statusEl = $("#daemon-chat-peer-info-status");
+    if (!group || !group.group_id) return;
+    if (!confirm(`Leave ${group.name || "this group"}?`)) return;
+    if (statusEl) statusEl.textContent = "Leaving group...";
+    try {
+      await leaveDaemonGroup(group.group_id);
+      state.daemon_active_group = null;
+      await _refreshDaemonRoster();
+      _showOnly("#daemon-roster-card");
+    } catch (e) {
+      if (statusEl) statusEl.textContent =
+        `Couldn't leave group: ${e && e.message ? e.message : e}`;
     }
   }
 
@@ -4494,6 +5188,9 @@
   $("#btn-daemon-chat-info")?.addEventListener("click", _toggleDaemonChatPeerInfo);
   $("#btn-daemon-chat-peer-alias-save")?.addEventListener("click", _handleDaemonChatPeerAliasSave);
   $("#daemon-chat-peer-mute-toggle")?.addEventListener("change", _handleDaemonChatPeerMuteToggle);
+  $("#btn-daemon-chat-group-add")?.addEventListener("click", _handleDaemonChatGroupAdd);
+  $("#btn-daemon-chat-group-invite")?.addEventListener("click", _handleDaemonChatGroupInvite);
+  $("#btn-daemon-chat-group-leave")?.addEventListener("click", _handleDaemonChatGroupLeave);
 
   // ── Phase 3b: phone Settings card ─────────────────────────────────
   // Surfaces device identity + paired daemon + sign-out. Reachable
@@ -4779,6 +5476,7 @@
   function _renderDaemonMessageBubble(host, m) {
     if (!host) return;
     const bubble = document.createElement("div");
+    bubble.dataset.msgId = m.id || "";
     bubble.style.maxWidth = "85%";
     bubble.style.padding = "8px 12px";
     bubble.style.borderRadius = "12px";
@@ -4805,6 +5503,16 @@
     if (isFileMsg && m.file) {
       _renderFileBubbleBody(bubble, m);
     } else {
+      if (m.reply_to) {
+        const quote = document.createElement("div");
+        quote.textContent = `Reply to ${String(m.reply_to).slice(0, 12)}`;
+        quote.style.borderLeft = "3px solid currentColor";
+        quote.style.opacity = "0.7";
+        quote.style.paddingLeft = "8px";
+        quote.style.marginBottom = "6px";
+        quote.style.fontSize = "12px";
+        bubble.appendChild(quote);
+      }
       const body = document.createElement("div");
       if (m.deleted_at_ms) {
         body.textContent = "(deleted)";
@@ -4828,13 +5536,213 @@
     if (m.edited_at_ms) metaText += " · edited";
     meta.textContent = metaText;
     bubble.appendChild(meta);
+    _renderDaemonReactionRow(bubble, m);
+    _renderDaemonMessageActions(bubble, m);
     host.appendChild(bubble);
+  }
+
+  function _renderDaemonReactionRow(bubble, m) {
+    if (!bubble || !m || m.deleted_at_ms) return;
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.flexWrap = "wrap";
+    row.style.gap = "5px";
+    row.style.marginTop = "6px";
+    const reactions = m.reactions || {};
+    for (const [emoji, peers] of Object.entries(reactions)) {
+      const chip = document.createElement("span");
+      chip.textContent = `${emoji} ${Array.isArray(peers) ? peers.length : 1}`;
+      chip.style.fontSize = "11px";
+      chip.style.padding = "2px 6px";
+      chip.style.borderRadius = "999px";
+      chip.style.background = "rgba(255,255,255,.10)";
+      row.appendChild(chip);
+    }
+    if (
+      !(state.daemon_active_peer && state.daemon_active_peer.fingerprint)
+      && !(state.daemon_active_group && state.daemon_active_group.group_id)
+    ) {
+      if (row.childNodes.length) bubble.appendChild(row);
+      return;
+    }
+    for (const emoji of ["👍", "❤️", "😂", "🎉"]) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = emoji;
+      btn.title = `React ${emoji}`;
+      btn.ariaLabel = `React ${emoji}`;
+      btn.style.border = "1px solid var(--line)";
+      btn.style.borderRadius = "999px";
+      btn.style.background = "transparent";
+      btn.style.color = "inherit";
+      btn.style.padding = "2px 7px";
+      btn.style.fontSize = "13px";
+      btn.style.minHeight = "28px";
+      btn.addEventListener("click", async () => {
+        const peer = state.daemon_active_peer;
+        const group = state.daemon_active_group;
+        if (!m.id) return;
+        btn.disabled = true;
+        try {
+          const msgs = group && group.group_id
+            ? (
+              await reactDaemonGroupMessage(group.group_id, m.id, emoji, "add"),
+              await fetchDaemonGroupMessages(group.group_id, 50)
+            )
+            : (
+              await reactDaemonMessage(peer.fingerprint, m.id, emoji, "add"),
+              await fetchDaemonMessages(peer.fingerprint, 50)
+            );
+          const log = $("#daemon-chat-log");
+          if (log) {
+            log.innerHTML = "";
+            for (const rowMsg of msgs) _renderDaemonMessageBubble(log, rowMsg);
+            log.scrollTop = log.scrollHeight;
+          }
+        } catch (e) {
+          text($("#daemon-chat-send-status"),
+            `Reaction failed: ${e && e.message ? e.message : e}`);
+          btn.disabled = false;
+        }
+      });
+      row.appendChild(btn);
+    }
+    bubble.appendChild(row);
+  }
+
+  function _renderDaemonMessageActions(bubble, m) {
+    if (!bubble || !m || m.deleted_at_ms) return;
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.gap = "6px";
+    row.style.marginTop = "6px";
+    const direction = String(m.direction || "").toLowerCase();
+    const actions = ["Reply"];
+    if (direction === "out" || direction === "outbound") {
+      actions.push("Edit", "Delete");
+    }
+    for (const action of actions) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = action;
+      btn.style.border = "1px solid var(--line)";
+      btn.style.borderRadius = "999px";
+      btn.style.background = "transparent";
+      btn.style.color = "inherit";
+      btn.style.padding = "3px 8px";
+      btn.style.fontSize = "11px";
+      btn.style.minHeight = "28px";
+      btn.addEventListener("click", async () => {
+        const peer = state.daemon_active_peer;
+        const group = state.daemon_active_group;
+        if (!m.id) return;
+        if (action === "Reply") {
+          _setDaemonReply(m);
+        } else if (group && group.group_id) {
+          if (action === "Edit") {
+            const next = prompt("Edit message", m.body || "");
+            if (next == null || !next.trim() || next === (m.body || "")) return;
+            await _mutateDaemonGroupMessage(
+              () => editDaemonGroupMessage(group.group_id, m.id, next.trim()),
+              group.group_id,
+            );
+          } else {
+            if (!confirm("Delete this message?")) return;
+            await _mutateDaemonGroupMessage(
+              () => deleteDaemonGroupMessage(group.group_id, m.id),
+              group.group_id,
+            );
+          }
+        } else if (!peer || !peer.fingerprint) {
+          return;
+        } else if (action === "Edit") {
+          const next = prompt("Edit message", m.body || "");
+          if (next == null || !next.trim() || next === (m.body || "")) return;
+          await _mutateDaemonMessage(
+            () => editDaemonMessage(peer.fingerprint, m.id, next.trim()),
+            peer.fingerprint,
+          );
+        } else {
+          if (!confirm("Delete this message?")) return;
+          await _mutateDaemonMessage(
+            () => deleteDaemonMessage(peer.fingerprint, m.id),
+            peer.fingerprint,
+          );
+        }
+      });
+      row.appendChild(btn);
+    }
+    bubble.appendChild(row);
+  }
+
+  async function _mutateDaemonMessage(fn, peerFp) {
+    const status = $("#daemon-chat-send-status");
+    try {
+      status && (status.textContent = "Updating...");
+      await fn();
+      const msgs = await fetchDaemonMessages(peerFp, 50);
+      const log = $("#daemon-chat-log");
+      if (log) {
+        log.innerHTML = "";
+        for (const rowMsg of msgs) _renderDaemonMessageBubble(log, rowMsg);
+        log.scrollTop = log.scrollHeight;
+      }
+      status && (status.textContent = "Updated");
+    } catch (e) {
+      status && (status.textContent =
+        `Update failed: ${e && e.message ? e.message : e}`);
+    }
+  }
+
+  async function _mutateDaemonGroupMessage(fn, groupId) {
+    const status = $("#daemon-chat-send-status");
+    try {
+      status && (status.textContent = "Updating...");
+      await fn();
+      const msgs = await fetchDaemonGroupMessages(groupId, 50);
+      const log = $("#daemon-chat-log");
+      if (log) {
+        log.innerHTML = "";
+        for (const rowMsg of msgs) _renderDaemonMessageBubble(log, rowMsg);
+        log.scrollTop = log.scrollHeight;
+      }
+      status && (status.textContent = "Updated");
+    } catch (e) {
+      status && (status.textContent =
+        `Update failed: ${e && e.message ? e.message : e}`);
+    }
+  }
+
+  function _setDaemonReply(m) {
+    state.daemon_reply_to = {
+      id: String(m.id || ""),
+      body: String(m.body || m.file?.name || "(message)").slice(0, 160),
+    };
+    _renderDaemonReplyBar();
+    $("#daemon-chat-input")?.focus();
+  }
+
+  function _clearDaemonReply() {
+    state.daemon_reply_to = null;
+    _renderDaemonReplyBar();
+  }
+
+  function _renderDaemonReplyBar() {
+    const bar = $("#daemon-chat-reply-bar");
+    const preview = $("#daemon-chat-reply-preview");
+    if (!bar) return;
+    const reply = state.daemon_reply_to;
+    bar.hidden = !reply;
+    if (preview) preview.textContent = reply ? reply.body : "";
   }
 
   $("#btn-daemon-chat-back")?.addEventListener("click", () => {
     state.daemon_active_peer = null;
+    state.daemon_active_group = null;
+    _clearDaemonReply();
     _showOnly("#daemon-roster-card");
   });
+  $("#btn-daemon-chat-reply-cancel")?.addEventListener("click", _clearDaemonReply);
 
   // ── hook pair handshake into existing WebRTC session lifecycle ────
   // Wrap createOfferSignal + acceptOfferSignal so they install our
