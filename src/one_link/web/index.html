@@ -8798,7 +8798,7 @@
               <input id="self-mesh-peer" type="text" placeholder="Recipient or trusted device" />
             </div>
             <div class="sm-actions">
-            <button id="btn-self-mesh-trust-root">Trust folder</button>
+            <button id="btn-self-mesh-trust-root">Mark folder trusted</button>
             <button id="btn-self-mesh-manifest">Pull file list</button>
             <button id="btn-self-mesh-send">Send file</button>
             </div>
@@ -10586,7 +10586,7 @@
         </div>
         <div class="mini-actions wrap" id="dev-verify-actions">
           <button class="btn-primary" id="dev-verify-confirm">Verify in person</button>
-          <button class="btn-ghost" id="dev-verify-revoke" style="display:none;">Revoke verification</button>
+          <button class="btn-ghost" id="dev-verify-revoke" style="display:none;">Remove verification</button>
         </div>
       </div>
 
@@ -11647,7 +11647,16 @@
           signal: ctrl ? ctrl.signal : undefined,
         });
         _maybe401(r.status);
-        if (!r.ok) throw new Error(`${p} ${r.status}`);
+        if (!r.ok) {
+          // v0.21.x: route GET errors through _apiError so the
+          // user-visible message comes from the server's JSON
+          // (error, hint, code) rather than a raw URL-path-and-
+          // status leak. Falls back gracefully when the body
+          // isn't JSON (which is fine - _apiError synthesizes a
+          // generic 'request failed (status)' headline).
+          const j = await r.json().catch(() => ({}));
+          throw _apiError(j, r.status);
+        }
         return r.json();
       } finally {
         if (timer) clearTimeout(timer);
@@ -13519,7 +13528,7 @@
     row.onclick = async () => {
       if (action === "pair" && d.one_link_peer) {
         if (!d.one_link_peer.fingerprint) {
-          toast("That device isn't ready yet. Try again in a moment.", "warn");
+          toast("That device is still starting up. Try again in a few seconds.", "warn");
           return;
         }
         closeDiscoverModal();

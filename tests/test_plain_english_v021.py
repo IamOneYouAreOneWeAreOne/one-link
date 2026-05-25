@@ -225,6 +225,47 @@ def test_loading_spinners_explain_what_is_loading(index_html):
         )
 
 
+def test_api_get_error_does_not_leak_path_to_user(index_html):
+    """api.get used to throw `Error('${p} ${r.status}')` which
+    surfaced as toast text reading e.g. '/api/recovery/rotate/status
+    500' - the URL path leaks the internal API surface to users
+    + tells them nothing actionable. Now routed through _apiError
+    so the user sees the server's {error, hint} JSON body."""
+    idx = index_html.find("async get(p, opts = {})")
+    assert idx > 0, "api.get helper not found"
+    body = index_html[idx:idx + 1500]
+    assert "throw new Error(`${p} ${r.status}`)" not in body, (
+        "api.get throws the URL path in the error message - users "
+        "see leaked API paths in toasts when something fails"
+    )
+    assert "_apiError(j, r.status)" in body, (
+        "api.get should route errors through _apiError like .post "
+        "and .del do, so the user-visible message comes from the "
+        "server's JSON body (error/hint/code) not the raw path"
+    )
+
+
+def test_noun_only_buttons_renamed_to_verb_phrases(index_html):
+    """A button labeled 'Trust folder' tells the user nothing
+    about what clicking does. 'Mark folder trusted' makes the
+    action explicit. Similar: 'Revoke verification' -> 'Remove
+    verification'."""
+    assert ">Mark folder trusted<" in index_html
+    assert ">Remove verification<" in index_html
+    # Old noun-only labels gone.
+    assert ">Trust folder<" not in index_html
+    assert ">Revoke verification<" not in index_html
+
+
+def test_device_not_ready_toast_explains_what_to_do(index_html):
+    """'That device isn't ready yet. Try again in a moment.' is
+    vague ('a moment' = how long?). The actual scenario is the
+    peer's daemon is still in startup; tell the user that +
+    set an expectation."""
+    assert "That device isn't ready yet" not in index_html
+    assert "That device is still starting up. Try again in a few seconds." in index_html
+
+
 def test_device_guardian_jargon_replaced_with_safety_language(index_html):
     """'Device Guardian' is an internal subsystem name that leaked
     into user-visible status text + error toasts. Replace with
