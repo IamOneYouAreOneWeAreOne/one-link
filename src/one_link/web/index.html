@@ -9337,7 +9337,7 @@
             <div class="settings-control-grid">
               <div class="settings-control-card">
                 <div class="settings-card-kicker">Identity</div>
-                <div class="settings-card-title" id="privacy-identity-short">Loading...</div>
+                <div class="settings-card-title" id="privacy-identity-short">Reading your identity…</div>
                 <div class="settings-card-detail">
                   Copy or verify the fingerprint before trusting a new device.
                 </div>
@@ -9845,7 +9845,7 @@
                         title="Refresh storage usage" aria-label="Refresh storage usage">↻</button>
               </div>
               <div class="storage-totals" id="storage-totals">
-                <span class="settings-help">Loading…</span>
+                <span class="settings-help">Counting your files…</span>
               </div>
               <div class="storage-table" id="storage-table">
                 <p class="settings-help">No conversations. Suspicious.</p>
@@ -10605,7 +10605,7 @@
           <button class="btn-icon" id="dev-trust-history-toggle" title="Show / hide trust timeline">▾</button>
         </div>
         <div class="trust-timeline" id="dev-trust-timeline" style="display:none;">
-          <div class="empty">Loading…</div>
+          <div class="empty">Reading device history…</div>
         </div>
       </div>
 
@@ -15658,7 +15658,7 @@
       const summary = el("div", "one-health-row");
       const summaryText = el("div", "");
       summaryText.appendChild(el("b", "", "Lost-device and calls"));
-      summaryText.appendChild(el("span", "", `${lost.human || "Device Guardian is checking."} ${calls.human || ""}`));
+      summaryText.appendChild(el("span", "", `${lost.human || "Checking your devices…"} ${calls.human || ""}`));
       summary.appendChild(summaryText);
       summary.appendChild(el("span", "tag", `${lost.unsafe_devices || 0} unsafe`));
       people.appendChild(summary);
@@ -15666,7 +15666,7 @@
         const row = el("div", "one-health-row");
         const text = el("div", "");
         text.appendChild(el("b", "", p.label || "Trusted"));
-        text.appendChild(el("span", "", p.kind === "device" ? `Device Guardian ${p.safety_state || "trusted"}` : (p.verified ? "Verified in person" : "Trusted person")));
+        text.appendChild(el("span", "", p.kind === "device" ? `Safety: ${p.safety_state || "trusted"}` : (p.verified ? "Verified in person" : "Trusted person")));
         row.appendChild(text);
         row.appendChild(el("span", "tag", p.kind || "one"));
         people.appendChild(row);
@@ -15809,7 +15809,7 @@
         proofs: ["already_frozen"],
         reason: "user requested hard revoke",
       });
-      if (!res?.ok) return toast(res?.decision?.detail || "Revoke needs stronger proof.", "warn", 8000);
+      if (!res?.ok) return toast(res?.decision?.detail || "Couldn't remove this device. Try again from a trusted device you've verified in person.", "warn", 8000);
       toast("Device hard revoked", "warn");
       await refreshSelfMesh();
     } catch (e) {
@@ -15827,7 +15827,7 @@
         proofs,
         reason,
       });
-      if (!res?.ok) return toast(res?.decision?.detail || "Guardian needs stronger proof.", "warn", 8000);
+      if (!res?.ok) return toast(res?.decision?.detail || "Couldn't change safety status. Try again from a trusted device you've verified in person.", "warn", 8000);
       toast(label, safetyState === "trusted" ? "good" : "warn", 7000);
       await refreshSelfMesh();
     } catch (e) {
@@ -21478,7 +21478,7 @@
     const host = $("#media-gallery-list");
     const title = $("#media-gallery-title");
     if (!host) return;
-    host.innerHTML = "<p class=\"settings-help\">Loading…</p>";
+    host.innerHTML = "<p class=\"settings-help\">Loading photos + videos…</p>";
     const peer = [...state.peers.values()].find(p => p.fingerprint === fp);
     if (title) {
       title.textContent = `Shared files · ${peer?.display_name || peer?.hostname || "device"}`;
@@ -26320,16 +26320,16 @@
       </div>` : "";
     card.innerHTML = `
       <div class="recwiz-card-head">
-        <div class="recwiz-card-name">Rotate identity key</div>
+        <div class="recwiz-card-name">Change your identity key</div>
         <div class="recwiz-card-status ${pillCls}">${escapeText(pillText)}</div>
       </div>
       ${fpRow}
       <p class="recwiz-card-desc">
-        Replace this device's identity key. Useful if your key was
-        compromised, on a scheduled rotation, or if a device was
-        lost. Your paired peers receive a signed key-change
-        announcement and update automatically; you do not need to
-        re-pair with them.
+        Replace this device's identity with a fresh one. Useful if
+        you think someone got hold of your old key, or if a device
+        was lost. Your paired devices will recognize the new key
+        automatically the next time they talk to you - you don't
+        need to re-pair.
       </p>
       <details class="recwiz-help">
         <summary>How does this work?</summary>
@@ -26352,7 +26352,7 @@
       ${peerListHtml}
       <div class="recwiz-card-actions" style="margin-top:10px;">
         <button type="button" class="recwiz-btn" data-recwiz-action="open-rotate">
-          ${inFlight ? "Rotate again" : "Rotate identity"}
+          ${inFlight ? "Change again" : "Change identity key"}
         </button>
         ${inFlight ? `<button type="button" class="recwiz-btn" data-recwiz-rotate-refresh="1">Refresh status</button>` : ""}
       </div>
@@ -26387,16 +26387,15 @@
     m.className = "recwiz-modal";
     m.setAttribute("role", "dialog");
     m.setAttribute("aria-modal", "true");
-    m.setAttribute("aria-label", "Rotate identity key");
+    m.setAttribute("aria-label", "Change identity key");
     m.innerHTML = `
       <div class="recwiz-backdrop" data-recwiz-close></div>
       <div class="recwiz-pane">
-        <h2 class="recwiz-title">Rotate identity key</h2>
+        <h2 class="recwiz-title">Change your identity key</h2>
         <p class="recwiz-lead">
-          This replaces your current identity key with a fresh one.
-          Paired peers will receive a signed key-change announcement
-          and update automatically when this device next talks to
-          them.
+          This swaps the secret this device uses to prove it's you.
+          Your paired devices will recognize the new one automatically
+          the next time you talk to them. You don't need to re-pair.
         </p>
         <details class="recwiz-help" style="margin-bottom:14px;">
           <summary>How does this work?</summary>
@@ -29987,7 +29986,7 @@
     const totalsHost = $("#storage-totals");
     const tableHost = $("#storage-table");
     if (!totalsHost || !tableHost) return;
-    totalsHost.innerHTML = `<span class="settings-help">Loading…</span>`;
+    totalsHost.innerHTML = `<span class="settings-help">Counting your files…</span>`;
     let r;
     try {
       r = await api.get("/api/storage/usage");
@@ -31761,7 +31760,7 @@
     </div>
     <div class="privacy-panel-body" id="privacy-panel-body">
       <!-- Populated by JS from /api/sovereignty/status + /api/sovereignty/outbound. -->
-      <div class="privacy-panel-loading">Loading…</div>
+      <div class="privacy-panel-loading">Checking your privacy settings…</div>
     </div>
   </div>
 </div>
@@ -34631,7 +34630,7 @@
   async function refreshPrivacyPanel() {
     const body = document.getElementById("privacy-panel-body");
     if (!body) return;
-    body.innerHTML = `<div class="privacy-panel-loading">Loading…</div>`;
+    body.innerHTML = `<div class="privacy-panel-loading">Checking your privacy settings…</div>`;
     let status, presets, outbound;
     try {
       [status, presets, outbound] = await Promise.all([

@@ -180,3 +180,67 @@ def test_ios_install_page_explains_why_extra_step_3_exists(server_src):
         "iOS install step 3 lacks a 'why this extra step?' "
         "explainer; users skip it thinking it's redundant"
     )
+
+
+# ── index.html (desktop) jargon scrub ──────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def index_html() -> str:
+    return _INDEX_HTML.read_text(encoding="utf-8")
+
+
+def test_rotate_identity_renamed_to_change_identity(index_html):
+    """The recovery wizard's rotation card used to be labeled
+    'Rotate identity key' - 'rotate' is engineer-speak. Users
+    just want to 'change' it. Pin the rename so the audit
+    finding doesn't regress."""
+    # The card title.
+    assert '"recwiz-card-name">Change your identity key<' in index_html
+    # The modal title + aria-label.
+    assert 'aria-label", "Change identity key"' in index_html
+    assert 'recwiz-title">Change your identity key<' in index_html
+    # The button label (inFlight branch + initial branch).
+    assert '"Change again" : "Change identity key"' in index_html
+    # The old jargon must be gone.
+    assert '"recwiz-card-name">Rotate identity key<' not in index_html
+    assert 'recwiz-title">Rotate identity key<' not in index_html
+
+
+def test_loading_spinners_explain_what_is_loading(index_html):
+    """Bare 'Loading…' / 'Loading...' strings are vague spinner
+    states the audit flagged as P1 friction. Each one should
+    name WHAT is loading so the user knows what to wait for.
+    Pin the fixes."""
+    expected_fixes = [
+        "Reading your identity…",
+        "Counting your files…",
+        "Reading device history…",
+        "Loading photos + videos…",
+        "Checking your privacy settings…",
+    ]
+    for fix in expected_fixes:
+        assert fix in index_html, (
+            f"loading-state context message missing: {fix!r}"
+        )
+
+
+def test_device_guardian_jargon_replaced_with_safety_language(index_html):
+    """'Device Guardian' is an internal subsystem name that leaked
+    into user-visible status text + error toasts. Replace with
+    'Safety' / plain English about what the user can do."""
+    # The status row no longer says 'Device Guardian {state}'.
+    assert "Device Guardian ${p.safety_state" not in index_html, (
+        "user-visible 'Device Guardian {state}' label leaked; "
+        "should be 'Safety: {state}'"
+    )
+    # The error toasts no longer say 'needs stronger proof'.
+    assert "Revoke needs stronger proof" not in index_html, (
+        "Error toast 'Revoke needs stronger proof' is jargon; "
+        "users have no way to action it"
+    )
+    assert "Guardian needs stronger proof" not in index_html, (
+        "Error toast 'Guardian needs stronger proof' is jargon"
+    )
+    # And the new wording is in.
+    assert "Try again from a trusted device you've verified in person" in index_html
