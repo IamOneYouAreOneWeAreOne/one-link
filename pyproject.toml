@@ -49,6 +49,22 @@ tray = ["pystray>=0.19", "pillow>=12.2.0"]
 # dep (~150KB) that users not running Tor never need.
 tor = ["aiohttp-socks>=0.10"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+# v0.21.x browser-driven E2E harness. Catches UI bugs that no
+# amount of unit testing can: pixel overlap, iframe security
+# headers blocking inline previews, click handlers that hijack
+# disclosure widgets, dialog z-order regressions, etc. - the
+# bug-class that pure code audits cannot see because they read
+# the source, not the rendered pixels.
+#
+# Install: `pip install -e .[e2e]` THEN `playwright install
+# chromium` once (fetches ~150 MB browser binaries). The CI
+# job does this automatically.
+e2e = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "playwright>=1.50",
+  "pytest-playwright>=0.7",
+]
 # v0.7.2 supply-chain gates (audit finding C):
 #   - pip-audit: scans the lockfile against the OSV vulnerability DB
 #   - bandit: SAST for common Python issues (subprocess shell=True, etc)

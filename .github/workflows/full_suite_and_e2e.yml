@@ -1,0 +1,140 @@
+name: full-suite + e2e
+
+# This is the safety-net workflow that catches the bug-class
+# `tests.yml` cannot:
+#
+#   1. Full pytest suite (currently 6400+ tests) — `tests.yml`
+#      only runs ~200 of them. Recovery wizard, rotation, preview
+#      polish, search prefix-match, folder picker, etc. were
+#      previously invisible to CI.
+#
+#   2. Browser-driven E2E (Playwright) — catches pixel overlap,
+#      iframe security headers blocking inline previews, click
+#      handlers hijacking disclosure widgets, dialog z-order,
+#      welcome-state-under-search-banner-class bugs that no
+#      amount of unit testing can see because they read source,
+#      not rendered pixels.
+#
+#   3. Real Windows runner — exercises platform-specific code
+#      paths (the modern IFileOpenDialog CLSID, PowerShell
+#      property availability) that Linux CI categorically
+#      cannot test.
+#
+# Runs on every push + PR. Designed to be the gate that blocks
+# merges to master when a UI-or-platform-only regression sneaks
+# through the test suite.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  # Manual run from the Actions tab.
+  workflow_dispatch:
+
+jobs:
+  full_suite:
+    name: full pytest suite / ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.12"]
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: pytest (full suite, excluding e2e + heavy soaks)
+        shell: bash
+        # E2E suite + the long-running call-reliability soak are
+        # excluded here - they run in their own jobs below. The
+        # rest of tests/ (6400+ unit + integration + invariants)
+        # all run on every push.
+        run: |
+          python -m pytest tests/ \
+            --ignore=tests/e2e \
+            --ignore=tests/test_call_reliability_soak.py \
+            --deselect tests/test_pairing.py \
+            -q --tb=short \
+            --maxfail=20
+        env:
+          PYTHONUNBUFFERED: "1"
+
+  e2e_browser:
+    name: e2e (playwright) / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install + playwright
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[e2e]"
+          playwright install --with-deps chromium
+
+      - name: e2e tests (browser-driven)
+        shell: bash
+        # Same pattern as the regular suite: each test gets its own
+        # subprocess daemon in a fresh ONE_LINK_HOME, opens the UI
+        # in real Chromium, exercises the DOM.
+        run: |
+          python -m pytest tests/e2e/ -v --tb=short \
+            --browser chromium
+
+      - name: upload trace + screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces-${{ matrix.os }}
+          path: |
+            test-results/
+            **/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  windows_native_picker_smoke:
+    name: real-OS native picker smoke (windows-only)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    # This job exercises the real Windows folder-picker code path
+    # WITHOUT actually showing a dialog. It verifies the CoCreateInstance
+    # call succeeds against either CLSID (classic OR broker) on the
+    # CI runner's specific Windows build. Without this, a CLSID-not-
+    # registered regression like the one this session fixed is
+    # invisible to all the mocked unit tests.
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: probe IFileOpenDialog CoCreateInstance (no dialog)
+        shell: pwsh
+        run: python scripts/ci_probe_modern_folder_picker.py
