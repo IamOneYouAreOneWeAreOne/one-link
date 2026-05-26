@@ -2269,6 +2269,21 @@
   .file-row .meta { flex: 1; min-width: 0; }
   .file-row .meta .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
   .file-row .meta .size { font-size: 11px; color: var(--text-dim); }
+  /* v0.21.x: folder paths (no spaces, no natural break points)
+     would overflow the meta column and force a horizontal scroll.
+     overflow-wrap: anywhere lets the browser break before/after
+     path separators so the full string is always visible. The
+     monospace family + tighter line-height makes the wrapped path
+     readable without taking more vertical room than needed. */
+  .file-row .meta .folder-path {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+    font-size: 10.5px;
+    line-height: 1.35;
+    margin-top: 2px;
+    color: var(--text-dim);
+  }
   .file-row .file-actions {
     display: flex;
     gap: 6px;
@@ -19445,7 +19460,15 @@
         const meta = el("div", "meta");
         meta.appendChild(el("div", "name", f.name));
         meta.appendChild(el("div", "size", `${f.files || 0} files · ${f.in_store || 0} local blobs · ${f.shared_with?.length || 0} peers`));
-        meta.appendChild(el("div", "size", f.local_path));
+        // v0.21.x: paths have no spaces so they don't wrap by
+        // default and overflowed the panel horizontally (forcing a
+        // scrollbar). Dedicated class lets the path wrap at any
+        // char (overflow-wrap: anywhere) so the full path is always
+        // visible. Tooltip carries the full string too in case a
+        // future style change clips it.
+        const pathEl = el("div", "size folder-path", f.local_path);
+        pathEl.title = f.local_path;
+        meta.appendChild(pathEl);
         row.appendChild(meta);
         // v0.21.x: wrap actions in .file-actions so the grid template
         // (26px icon + 1fr meta + auto actions) collapses them into a
