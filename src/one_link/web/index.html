@@ -25014,6 +25014,21 @@
             }
           });
         }
+      } else if (m.type === "folder_recv_collision") {
+        // v0.21.x: incoming folder write overwrote a local file with
+        // different content. CRDT decided who wins; the user just
+        // needs to know it happened so they can recover from chunk
+        // cache if their version was the one that lost. Toast is
+        // info-level (the system did the right thing per the
+        // folder's conflict_policy).
+        const path = m.file_path || "a file";
+        const folder = m.folder_name || "folder";
+        toast(
+          `Overwrote ${path} in ${folder} `
+            + `(${_humanBytes(m.existing_size || 0)} → `
+            + `${_humanBytes(m.incoming_size || 0)})`,
+          "info", 7000,
+        );
       } else if (m.type === "folder_send_retrying") {
         // v0.21.x: folder send dropped mid-flight on a transient
         // error (link drop, timeout). We're retrying. Receiver's

@@ -4223,6 +4223,29 @@ class Daemon:
                 "conflict": row,
             })
 
+    def _on_folder_collision(
+        self, folder_name: str, file_path: str,
+        existing_size: int, incoming_size: int, incoming_blob: str,
+    ) -> None:
+        """v0.21.x: invoked from foldersync.FolderEngine._materialize
+        when the local destination already exists with a DIFFERENT
+        size than the incoming entry. The materialize step still
+        proceeds (CRDT semantics control which side wins per the
+        folder's conflict_policy); this hook just notifies the UI
+        so the user knows their local content got overwritten +
+        can recover it from chunk-cache backups if needed."""
+        if self.ui_server is None:
+            return
+        with contextlib.suppress(Exception):
+            self.ui_server.broadcast({
+                "type": "folder_recv_collision",
+                "folder_name": folder_name,
+                "file_path": file_path,
+                "existing_size": existing_size,
+                "incoming_size": incoming_size,
+                "incoming_blob": incoming_blob,
+            })
+
     def _broadcast_key_change_if_present(self, peer_rec) -> None:
         """v0.7.8: if `state.upsert_peer` just detected a hostname-pubkey
         rotation, the returned PeerRecord has `_pending_key_change_event_id`
@@ -23190,6 +23213,8 @@ class Daemon:
                 # ``Optional[Callable[[str, int], None]]`` so the
                 # assignment is fully type-checked.
                 self.folder_engine._on_conflict_recorded = self._on_folder_conflict
+                # v0.21.x: file-overwrite collision hook → WS broadcast.
+                self.folder_engine._on_collision_detected = self._on_folder_collision
                 await self.folder_engine.start()
                 self._folder_sync_task = asyncio.create_task(self._folder_sync_loop())
             except Exception as e:

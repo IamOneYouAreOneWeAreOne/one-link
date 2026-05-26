@@ -201,6 +201,14 @@ class FolderEngine:
         self._on_conflict_recorded: Optional[
             Callable[[str, int], None]
         ] = None
+        # v0.21.x: file-overwrite collision hook for folder receive.
+        # Fires when materialize is about to overwrite a dst that
+        # exists with a different size than the incoming entry.
+        # Callback signature: (folder_name, file_path, existing_size,
+        # incoming_size, incoming_blob_hash) -> None.
+        self._on_collision_detected: Optional[
+            Callable[[str, str, int, int, str], None]
+        ] = None
         # Phase D #3 (ADR-0022): active reconciliation counters. Every
         # ``receive_remote_manifest`` call increments ``_checks`` and,
         # when the native OR-set disagrees with the legacy merge winner,
@@ -999,7 +1007,34 @@ class FolderEngine:
             return
         if not self.blobs.has(entry.blob_hash):
             return
-        # Skip if already correct
+        # v0.21.x: collision surfacing. If dst already exists with a
+        # DIFFERENT size than the incoming entry, the upcoming O_TRUNC
+        # write will silently overwrite distinct user content. Fire
+        # the _on_collision_detected callback so the daemon can emit
+        # a folder_recv_collision WS broadcast. CRDT semantics still
+        # rule (latest-wins / local-priority / peer-priority per
+        # conflict_policy); this is a NOTIFICATION only.
+        if (
+            dst.is_file()
+            and self._on_collision_detected is not None
+            and entry.size is not None
+        ):
+            try:
+                existing_size = dst.stat().st_size
+            except OSError:
+                existing_size = None
+            if (
+                existing_size is not None
+                and existing_size != entry.size
+            ):
+                with contextlib.suppress(Exception):
+                    self._on_collision_detected(
+                        folder_name, entry.file_path,
+                        existing_size, entry.size,
+                        entry.blob_hash,
+                    )
+        # Skip if already correct (same size assumed identical at
+        # this granularity; full hash check is a separate scan).
         if dst.is_file() and dst.stat().st_size == (entry.size or 0):
             try:
                 # Quick check by filesystem mtime; we deliberately don't
