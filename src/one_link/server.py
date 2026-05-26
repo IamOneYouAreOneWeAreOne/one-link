@@ -14639,24 +14639,76 @@ class UIServer:
                     scope, ident, e,
                 )
                 file_hashes = [(p, rel, None) for p, rel in files]
-            # Per-file send loop with fast-path for dedup hits.
+            # Split files into fast-path dedup hits + actually-new.
+            # Fast-path: peer has the file complete → no wire activity.
+            # Actually-new files get routed by size:
+            #   - Tiny / many: send_files_batched (BATCHED FILE_OFFER,
+            #     simple sequential chunk streaming)
+            #   - Large: per-file send_file (native pipeline, QUIC
+            #     fast-path, adaptive scheduling all kick in)
+            LARGE_FILE_THRESHOLD = 16 * 1024 * 1024  # 16 MB
+            batched_specs: list[tuple[Path, str]] = []
+            large_specs: list[tuple[Path, str]] = []
             for path_obj, rel, blob_hash in file_hashes:
+                if blob_hash and blob_hash in peer_has:
+                    dedup_files += 1
+                    with contextlib.suppress(OSError):
+                        dedup_bytes += path_obj.stat().st_size
+                    continue
                 try:
-                    if blob_hash and blob_hash in peer_has:
-                        # Fast path: peer already has this file
-                        # complete. Skip FILE_OFFER round-trip
-                        # entirely.
-                        dedup_files += 1
-                        with contextlib.suppress(OSError):
-                            dedup_bytes += path_obj.stat().st_size
-                        continue
+                    sz = path_obj.stat().st_size
+                except OSError:
+                    sz = 0
+                if sz >= LARGE_FILE_THRESHOLD:
+                    large_specs.append((path_obj, rel))
+                else:
+                    batched_specs.append((path_obj, rel))
+
+            # BATCHED SEND for small files — collapses N FILE_OFFER
+            # round-trips into ⌈N/256⌉ via FILE_OFFER_BATCH_V1.
+            if batched_specs:
+                try:
+                    bres = await self.daemon.send_files_batched(
+                        peer, batched_specs,
+                    )
+                    sent += int(bres.get("sent", 0))
+                    failed += int(bres.get("failed", 0))
+                    dedup_files += int(bres.get("dedup_files", 0))
+                    dedup_bytes += int(bres.get("dedup_bytes", 0))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    # Batched path failed catastrophically — degrade
+                    # to per-file send_file for the same set. Same
+                    # bytes either way, just lose the round-trip win.
+                    log.warning(
+                        "folder send %s/%s: batched path failed (%s); "
+                        "degrading to per-file send_file",
+                        scope, ident, e,
+                    )
+                    for path_obj, rel in batched_specs:
+                        try:
+                            await self.daemon.send_file(
+                                peer, path_obj, rel_path=rel,
+                            )
+                            sent += 1
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as ex:
+                            failed += 1
+                            log.warning(
+                                "folder send %s/%s rel=%s degraded "
+                                "fallback failed: %s",
+                                scope, ident, rel, ex,
+                            )
+            # LARGE FILES via per-file send_file so the native pipeline
+            # + QUIC fast path + adaptive scheduler all get to run.
+            for path_obj, rel in large_specs:
+                try:
                     result = await self.daemon.send_file(
                         peer, path_obj, rel_path=rel,
                     )
                     sent += 1
-                    # Chunk-level dedup heuristic for files where the
-                    # peer had SOME but not all chunks (BLOB_INVENTORY
-                    # only reports whole-file matches).
                     if isinstance(result, dict):
                         meta = result.get("metadata") or {}
                         pb = result.get("progress_bytes")
@@ -14674,7 +14726,7 @@ class UIServer:
                 except Exception as e:
                     failed += 1
                     log.warning(
-                        "folder send %s/%s rel=%s failed: %s",
+                        "folder send %s/%s rel=%s (large) failed: %s",
                         scope, ident, rel, e,
                     )
             payload = {

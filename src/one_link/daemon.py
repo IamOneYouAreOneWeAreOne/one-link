@@ -7974,6 +7974,437 @@ class Daemon:
             if self._valid_blob_hex(str(h))
         }
 
+    async def send_files_batched(
+        self,
+        peer: Peer,
+        file_specs: list[tuple[Path, str]],
+        *,
+        progress_cb=None,
+    ) -> dict:
+        """v0.21.x BATCHED N-file send.
+
+        file_specs: list of (absolute path, rel_path) tuples. rel_path
+        may be None for flat-inbox placement.
+
+        Collapses N FILE_OFFER round-trips into ⌈N / FILE_OFFER_BATCH_V1
+        frame cap⌉. For ALL-NEW 100-file folders on LAN this saves ~5s
+        of pure latency. After the batched OFFER phase, chunks stream
+        sequentially per file via FILE_CDC_CHUNK frames; the receiver
+        finalizes each file when its chunk set is complete and sends
+        FILE_DONE back.
+
+        Trades off vs send_file (intentional, scoped):
+          - Skips: native_transfer pipeline, QUIC fast path, adaptive
+            scheduler, per-file Smart-Rules selector, compression.
+          - For small files (KB) the per-byte throughput is the same.
+          - For large files (>50 MB) per-byte can be 1.5-3x slower
+            than send_file's native pipeline. Caller should route
+            very large files to send_file individually.
+
+        Returns: {
+          ok: bool,
+          sent: int,                  # files that successfully transferred
+          failed: int,                # files that errored
+          dedup_files: int,           # files w/ empty FILE_WANTS (chunk dedup)
+          dedup_bytes: int,           # bytes saved via chunk-level dedup
+          results: list[dict],        # per-file: {rel_path, ok, error?}
+        }
+        """
+        if not file_specs:
+            return {
+                "ok": True, "sent": 0, "failed": 0,
+                "dedup_files": 0, "dedup_bytes": 0, "results": [],
+            }
+        block = self._check_outbound_trust(peer)
+        if block:
+            raise RuntimeError(block)
+        peer_fp = self._peer_fp_from_peer(peer)
+        if not peer_fp:
+            raise RuntimeError(
+                f"send_files_batched refused: peer fingerprint unresolved "
+                f"for {peer.short_id}"
+            )
+        if not self._capability_allowed(peer_fp, FILES):
+            raise RuntimeError(
+                f"files capability disabled for peer {peer.short_id}"
+            )
+
+        # Build per-file metadata + inner offers.
+        items: list[dict] = []
+        skipped_at_index: list[dict] = []
+        for path_obj, rel in file_specs:
+            try:
+                file_sig = self._file_cache_signature(path_obj)
+                size = int(file_sig["size"])
+                cached = self._cached_file_index(file_sig)
+                if cached is not None:
+                    file_index, _ = cached
+                    blob_hex = file_index.blob_hash
+                else:
+                    blob_hex = hash_path(path_obj)
+                    file_index = FileIndex(
+                        blob_hash=blob_hex, size=size, chunks=(),
+                    )
+                    self._record_file_index_cache(
+                        path_obj, file_index, index_kind="hash_only",
+                    )
+                # CDC index (cheap if cached via state).
+                cdc_chunks: tuple[Chunk, ...] = file_index.chunks
+                if not cdc_chunks and size > 0:
+                    # Force a full CDC index for batched send — the
+                    # cached file_index might be hash_only. Replace
+                    # cached entry so subsequent sends reuse it.
+                    file_index = index_path(path_obj)
+                    cdc_chunks = file_index.chunks
+                    self._record_file_index_cache(
+                        path_obj, file_index, index_kind="cdc",
+                    )
+                cdc_index = [
+                    {
+                        "index": c.index, "start": c.start, "end": c.end,
+                        "size": c.size, "hash": c.hash,
+                    }
+                    for c in cdc_chunks
+                ]
+                offer_id = f"out:{blob_hex}:{uuid.uuid4().hex[:12]}"
+                inner_offer = {
+                    "t": "FILE_OFFER",
+                    "id": offer_id,
+                    "from": self.me.short_id,
+                    "ts": int(time.time() * 1000),
+                    "name": path_obj.name,
+                    "size": size,
+                    "blob": blob_hex,
+                    "mode": "cdc" if cdc_chunks else "stream",
+                }
+                if rel:
+                    clean_rel = self._safe_transfer_rel_path(rel)
+                    if clean_rel:
+                        inner_offer["rel_path"] = clean_rel
+                if cdc_chunks:
+                    inner_offer["chunks"] = cdc_index
+                items.append({
+                    "path": path_obj, "rel": rel, "size": size,
+                    "blob": blob_hex, "offer_id": offer_id,
+                    "cdc_chunks": cdc_chunks, "offer": inner_offer,
+                    "transfer_id": offer_id,
+                    "wants": None, "rejected": None, "done": False,
+                })
+            except Exception as e:
+                # Pre-build failure: count as a skipped item, continue
+                # so the rest of the batch still goes.
+                skipped_at_index.append({
+                    "rel_path": rel, "ok": False,
+                    "error": f"pre-build failed: {e}",
+                })
+                log.warning(
+                    "batched send: pre-build failed for %s: %s", path_obj, e,
+                )
+
+        if not items:
+            return {
+                "ok": False, "sent": 0, "failed": len(skipped_at_index),
+                "dedup_files": 0, "dedup_bytes": 0,
+                "results": skipped_at_index,
+            }
+
+        # Insert ledger rows up-front so the UI sees them as 'queued'.
+        for it in items:
+            with contextlib.suppress(Exception):
+                self._upsert_transfer(
+                    id=it["transfer_id"], direction="out",
+                    peer_fp=peer_fp, kind="file",
+                    name=it["path"].name, size=it["size"],
+                    blob_hash=it["blob"], status="queued",
+                    progress_bytes=0, total_bytes=it["size"],
+                    chunks_done=0,
+                    chunks_total=max(1, len(it["cdc_chunks"])),
+                    metadata={
+                        "mode": "cdc" if it["cdc_chunks"] else "stream",
+                        "path": str(it["path"]),
+                        "delivery_state": "queued",
+                        "batched": True,
+                    },
+                )
+
+        sess = await self._get_outbound_session(peer)
+        results: list[dict] = list(skipped_at_index)
+        sent = 0
+        failed = len(skipped_at_index)
+        dedup_files = 0
+        dedup_bytes = 0
+        # FILE_OFFER_BATCH frame cap from receiver-side MAX_BATCH_OFFERS.
+        BATCH_FRAME_CAP = 256
+        FILE_ACK_S = FILE_ACK_DEADLINE_S
+        offer_index_by_id = {it["offer_id"]: it for it in items}
+        try:
+            async with sess.lock:
+                # PHASE 1: send batched OFFERs.
+                for start in range(0, len(items), BATCH_FRAME_CAP):
+                    batch = items[start:start + BATCH_FRAME_CAP]
+                    batch_msg = make_msg(
+                        "FILE_OFFER_BATCH", self.me.short_id,
+                        offers=[it["offer"] for it in batch],
+                    )
+                    await sess.channel.send(encode_msg(batch_msg))
+                # PHASE 2: collect N FILE_WANTS / ACK responses.
+                # FILE_DONE messages may interleave (receiver finalizes
+                # dedup'd files immediately on offer); we stash them
+                # in early_dones for PHASE 4 instead of discarding.
+                outstanding_responses = set(offer_index_by_id)
+                blob_to_item = {it["blob"]: it for it in items}
+                early_dones: set[str] = set()
+                response_deadline = time.monotonic() + FILE_ACK_S * 2
+                while outstanding_responses:
+                    timeout_left = response_deadline - time.monotonic()
+                    if timeout_left <= 0:
+                        for oid in outstanding_responses:
+                            it = offer_index_by_id[oid]
+                            it["rejected"] = "response_timeout"
+                            results.append({
+                                "rel_path": it["rel"], "ok": False,
+                                "error": "no response to FILE_OFFER",
+                            })
+                            failed += 1
+                        break
+                    try:
+                        plaintext = await asyncio.wait_for(
+                            sess.channel.recv(), timeout=timeout_left,
+                        )
+                    except asyncio.TimeoutError:
+                        continue
+                    m = decode_msg(plaintext)
+                    t = str(m.get("t") or "")
+                    # Stash early-arriving FILE_DONEs so PHASE 4 can
+                    # consume them. Without this they'd fall through
+                    # to the "not one of ours" continue.
+                    if t == "FILE_DONE":
+                        blob = str(m.get("blob") or "")
+                        if blob in blob_to_item:
+                            early_dones.add(blob)
+                        continue
+                    of_id = str(m.get("of") or "")
+                    if of_id not in offer_index_by_id:
+                        # Not one of ours (could be a chat msg, PING,
+                        # CAPS, etc — those flow on the same session).
+                        # Skip; they'll be handled by the natural
+                        # inbound dispatcher when this lock releases.
+                        continue
+                    it = offer_index_by_id[of_id]
+                    if t == "FILE_WANTS":
+                        raw_wants = m.get("wants") or m.get("missing") or []
+                        if not isinstance(raw_wants, list):
+                            raw_wants = []
+                        it["wants"] = [
+                            int(w) for w in raw_wants
+                            if isinstance(w, int) or (
+                                isinstance(w, str) and w.isdigit()
+                            )
+                        ]
+                    elif t == "ACK":
+                        reason = m.get("rejected")
+                        if reason:
+                            it["rejected"] = str(reason)
+                            results.append({
+                                "rel_path": it["rel"], "ok": False,
+                                "error": f"offer rejected: {reason}",
+                            })
+                            failed += 1
+                        else:
+                            # ACK without rejected = immediate dedup
+                            # (receiver already had the file complete).
+                            it["wants"] = []
+                            it["done"] = True
+                            dedup_files += 1
+                            dedup_bytes += it["size"]
+                            sent += 1
+                            results.append({
+                                "rel_path": it["rel"], "ok": True,
+                                "dedup": True,
+                            })
+                    outstanding_responses.discard(of_id)
+                # PHASE 3: stream chunks per file, then await FILE_DONE.
+                pending_dones: set[str] = set()
+                for it in items:
+                    if it["done"] or it["rejected"]:
+                        continue
+                    wants = it["wants"] or []
+                    if not wants:
+                        # Empty wants = chunk-level dedup hit. Receiver
+                        # will still send FILE_DONE once it assembles
+                        # (which may have already happened — see
+                        # early_dones below).
+                        dedup_files += 1
+                        dedup_bytes += it["size"]
+                        if it["blob"] in early_dones:
+                            it["done"] = True
+                            sent += 1
+                            results.append({
+                                "rel_path": it["rel"], "ok": True,
+                                "dedup_via_chunks": True,
+                            })
+                        else:
+                            pending_dones.add(it["blob"])
+                        continue
+                    # Stream just the requested chunks.
+                    try:
+                        await self._stream_cdc_chunks_for_batched(
+                            sess=sess, it=it, wants=wants,
+                        )
+                        if it["blob"] in early_dones:
+                            it["done"] = True
+                            sent += 1
+                            results.append({
+                                "rel_path": it["rel"], "ok": True,
+                                "size": it["size"],
+                            })
+                        else:
+                            pending_dones.add(it["blob"])
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        it["rejected"] = f"stream: {e}"
+                        results.append({
+                            "rel_path": it["rel"], "ok": False,
+                            "error": f"stream failed: {e}",
+                        })
+                        failed += 1
+                # PHASE 4: drain FILE_DONE messages.
+                done_deadline = time.monotonic() + FILE_ACK_S * max(
+                    2, len(pending_dones),
+                )
+                while pending_dones:
+                    timeout_left = done_deadline - time.monotonic()
+                    if timeout_left <= 0:
+                        for blob in pending_dones:
+                            it = next(
+                                (x for x in items if x["blob"] == blob),
+                                None,
+                            )
+                            if it:
+                                results.append({
+                                    "rel_path": it["rel"], "ok": False,
+                                    "error": "no FILE_DONE within deadline",
+                                })
+                                failed += 1
+                        break
+                    try:
+                        plaintext = await asyncio.wait_for(
+                            sess.channel.recv(), timeout=timeout_left,
+                        )
+                    except asyncio.TimeoutError:
+                        continue
+                    m = decode_msg(plaintext)
+                    if str(m.get("t") or "") != "FILE_DONE":
+                        continue
+                    blob = str(m.get("blob") or "")
+                    if blob in pending_dones:
+                        pending_dones.discard(blob)
+                        it = next(
+                            (x for x in items if x["blob"] == blob),
+                            None,
+                        )
+                        if it and not it["done"]:
+                            it["done"] = True
+                            sent += 1
+                            if not any(
+                                r.get("rel_path") == it["rel"]
+                                for r in results
+                            ):
+                                results.append({
+                                    "rel_path": it["rel"], "ok": True,
+                                    "size": it["size"],
+                                })
+                            with contextlib.suppress(Exception):
+                                self._update_transfer(
+                                    it["transfer_id"], status="completed",
+                                    progress_bytes=it["size"],
+                                    total_bytes=it["size"],
+                                    chunks_done=max(1, len(it["cdc_chunks"])),
+                                    chunks_total=max(1, len(it["cdc_chunks"])),
+                                )
+                        if progress_cb is not None:
+                            with contextlib.suppress(Exception):
+                                progress_cb({
+                                    "sent": sent, "failed": failed,
+                                    "remaining": len(pending_dones),
+                                })
+        except asyncio.CancelledError:
+            raise
+        return {
+            "ok": failed == 0,
+            "sent": sent, "failed": failed,
+            "dedup_files": dedup_files,
+            "dedup_bytes": dedup_bytes,
+            "results": results,
+        }
+
+    async def _stream_cdc_chunks_for_batched(
+        self, *, sess, it: dict, wants: list[int],
+    ) -> None:
+        """v0.21.x batched-send chunk streamer. One FILE_CDC_CHUNK
+        frame per wanted chunk, with sequential ACK-per-chunk. Simple,
+        correct, no fancy pipelining — the batching win is in the
+        OFFER phase, not here.
+        """
+        path = it["path"]
+        blob = it["blob"]
+        cdc_chunks = it["cdc_chunks"]
+        chunks_by_index = {c.index: c for c in cdc_chunks}
+        FILE_ACK_S = FILE_ACK_DEADLINE_S
+        with open(path, "rb") as f:
+            for idx in wants:
+                if idx not in chunks_by_index:
+                    raise RuntimeError(
+                        f"requested chunk index {idx} not in CDC manifest "
+                        f"for blob {blob[:8]}"
+                    )
+                c = chunks_by_index[idx]
+                f.seek(c.start)
+                data = f.read(c.size)
+                if len(data) != c.size:
+                    raise RuntimeError(
+                        f"short read at chunk {idx} of blob {blob[:8]}"
+                    )
+                chunk_id = f"cdc:{blob[:12]}:{idx}:{uuid.uuid4().hex[:8]}"
+                chunk_msg = make_msg(
+                    "FILE_CDC_CHUNK", self.me.short_id,
+                    id=chunk_id,
+                    blob=blob,
+                    index=idx,
+                    enc="raw",
+                    data=base64.b64encode(data).decode("ascii"),
+                )
+                await sess.channel.send(encode_msg(chunk_msg))
+                # Await ACK for this chunk before sending the next —
+                # simplest correct flow control. Could pipeline later.
+                ack_deadline = time.monotonic() + FILE_ACK_S
+                while True:
+                    timeout_left = ack_deadline - time.monotonic()
+                    if timeout_left <= 0:
+                        raise RuntimeError(
+                            f"chunk {idx} ACK timeout"
+                        )
+                    try:
+                        plaintext = await asyncio.wait_for(
+                            sess.channel.recv(), timeout=timeout_left,
+                        )
+                    except asyncio.TimeoutError:
+                        continue
+                    reply = decode_msg(plaintext)
+                    if (
+                        str(reply.get("t") or "") == "ACK"
+                        and str(reply.get("of") or "") == chunk_id
+                    ):
+                        if reply.get("rejected"):
+                            raise RuntimeError(
+                                f"chunk {idx} rejected: {reply['rejected']}"
+                            )
+                        break
+                    # Not for this chunk; tolerate (could be a
+                    # FILE_DONE for an earlier file, etc).
+                    continue
+
     async def query_peer_chunks(self, peer: Peer, hashes: list[str]) -> dict:
         block = self._check_outbound_trust(peer)
         if block:
