@@ -3940,6 +3940,22 @@
   .pair-peer-info .who-name { font-weight: 600; }
   .pair-peer-info .who-sub  { font-size: 12px; color: var(--text-dim); }
 
+  /* v0.21.x Wave 6 UI: live per-blob receive progress on folder card.
+     Surfaces folder_recv_blob_done WS events as a one-line indicator
+     so users see "Receiving 47 blobs · 12.3 MB · 100 to go" while a
+     transfer is in flight. Drops off after 15s of no events. */
+  .folder-recv-progress {
+    font-size: 11.5px;
+    color: var(--accent);
+    margin-top: 4px;
+    font-weight: 500;
+    animation: folder-recv-pulse 2s ease-in-out infinite;
+  }
+  @keyframes folder-recv-pulse {
+    0%, 100% { opacity: 0.85; }
+    50% { opacity: 1; }
+  }
+
   /* v0.21.x: folder Send confirmation modal + in-flight progress
      overlay. Modal shows file count + total size + dedup breakdown
      BEFORE bytes move. Progress overlay sits bottom-right while a
@@ -12313,7 +12329,12 @@
     // v0.7.x: surface the underlying exception text on catch-all
     // 500s so the user (and us) can see what actually failed,
     // instead of just "Send didn't work."
-    err.error_detail = j && j.error_detail || null;
+    // v0.21.x: accept both `error_detail` (legacy) AND `detail`
+    // (newer endpoints) so the actual exception text always reaches
+    // the user. Without this, catch-all 500s show as opaque headlines.
+    err.error_detail = (
+        (j && (j.error_detail || j.detail)) || null
+    );
     return err;
   }
 
@@ -12764,7 +12785,15 @@
     // assumes both end in a period, which our server-side
     // translations all do.
     let body = hint ? `${headline} ${hint}` : headline;
-    if (detail && (e?.code === "send_failed" || !e?.code)) {
+    // v0.21.x: surface the underlying exception text on EVERY 5xx
+    // (not just send_failed) so opaque catch-alls like "could not
+    // create folder" carry the actual cause the user can act on.
+    const status = e?.status;
+    if (detail && (
+        e?.code === "send_failed"
+        || !e?.code
+        || (status && status >= 500 && status < 600)
+    )) {
       body += ` (${detail})`;
     }
     return body;
@@ -20096,6 +20125,26 @@
         nameEl.onclick = openInline;
         meta.appendChild(nameEl);
         meta.appendChild(el("div", "size", `${f.files || 0} files · ${f.in_store || 0} local blobs · ${f.shared_with?.length || 0} peers`));
+        // v0.21.x Wave 6 UI render: if any peer in shared_with is
+        // currently streaming us blobs (folder_recv_blob_done event
+        // landed in the last 15s), show a live "Receiving N blobs"
+        // line right under the meta. Stale events (>15s) drop off.
+        const progressMap = state.folderRecvProgress || {};
+        const liveRecv = (f.shared_with || []).map(fp =>
+          progressMap[String(fp).slice(0, 16)]
+        ).filter(p => p && (Date.now() - (p.lastSeen || 0)) < 15000);
+        if (liveRecv.length > 0) {
+          const totalBlobs = liveRecv.reduce((s, p) => s + (p.blobsDone || 0), 0);
+          const totalBytes = liveRecv.reduce((s, p) => s + (p.bytesDone || 0), 0);
+          const remaining = liveRecv.reduce((s, p) => s + (p.remaining || 0), 0);
+          const recvEl = el(
+              "div", "folder-recv-progress",
+              `Receiving · ${totalBlobs} blob${totalBlobs === 1 ? "" : "s"} in `
+              + `(${_humanBytes(totalBytes)})`
+              + (remaining > 0 ? ` · ${remaining} to go` : ""),
+          );
+          meta.appendChild(recvEl);
+        }
         // Middle-truncate the path: keep the start (C:\Users\...) and
         // the meaningful end (the actual folder name) visible, elide
         // the middle. Full path in the tooltip so nothing is hidden
@@ -24953,8 +25002,17 @@
         cur.remaining = Number(m.remaining || 0);
         cur.lastSeen = Date.now();
         state.folderRecvProgress[peerKey] = cur;
-        if (typeof refreshFolders === "function" && cur.blobsDone % 5 === 0) {
-          refreshFolders();
+        // v0.21.x: rAF-debounced re-render so the folder card's
+        // "Receiving N blobs" line updates live without firing N
+        // refreshFolders for an N-blob transfer.
+        if (!state._folderRecvRenderScheduled) {
+          state._folderRecvRenderScheduled = true;
+          requestAnimationFrame(() => {
+            state._folderRecvRenderScheduled = false;
+            if (typeof refreshFolders === "function") {
+              refreshFolders();
+            }
+          });
         }
       } else if (m.type === "folder_send_declined_by_peer") {
         // v0.21.x: receiver explicitly declined our folder send.

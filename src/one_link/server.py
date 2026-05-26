@@ -15921,14 +15921,51 @@ class UIServer:
                 conflict_policy="latest-wins",
             )
         except ValueError as e:
+            # ValueError is the explicit "folder already exists" raise
+            # from folder_engine.add_folder. Check if the folder is in
+            # state NOW — auto-accept may have created it concurrently
+            # with the user's click. If it's there, the work the user
+            # wanted is done; return idempotent success instead of an
+            # error the user has no way to resolve.
+            if self.daemon.state.get_folder(folder_name) is not None:
+                self.daemon.state.mark_folder_offer_accepted(
+                    offer_id, local_path=local_path,
+                )
+                return web.json_response({
+                    "ok": True, "already_accepted": True,
+                    "folder_name": folder_name,
+                    "raced_with_auto_accept": True,
+                })
             return web.json_response({"error": str(e)}, status=409)
         except Exception as e:
+            # Catch-all 500. Could be: sqlite UNIQUE collision from a
+            # racing auto-accept (Wave 1 self-mesh fast-path), watchdog
+            # Observer startup failure, mkdir failure on a path with
+            # weird permissions. Check the post-state: if a folder named
+            # `folder_name` now exists in state regardless, treat as
+            # success (idempotent recovery). Otherwise surface the
+            # actual exception via error_detail so the UI toast can
+            # show it instead of an opaque "could not create folder".
             log.warning(
                 "accept folder offer failed (%s/%s): %s",
                 peer_fp[:8], folder_name, e,
             )
+            if self.daemon.state.get_folder(folder_name) is not None:
+                with contextlib.suppress(Exception):
+                    self.daemon.state.mark_folder_offer_accepted(
+                        offer_id, local_path=local_path,
+                    )
+                return web.json_response({
+                    "ok": True, "already_accepted": True,
+                    "folder_name": folder_name,
+                    "raced_with_auto_accept": True,
+                })
             return web.json_response(
-                {"error": "could not create folder", "detail": str(e)},
+                {
+                    "error": "could not create folder",
+                    "error_detail": str(e),
+                    "exception_type": type(e).__name__,
+                },
                 status=500,
             )
         # Capability grant: explicit Accept = consent for folder
