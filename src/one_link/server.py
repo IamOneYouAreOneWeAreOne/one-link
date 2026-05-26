@@ -2453,6 +2453,15 @@ class UIServer:
         r.add_delete(r"/api/peers/{fp}/verify", self._guarded(self.api_clear_peer_verified))
         # v0.10.2 disappearing messages — per-peer TTL.
         r.add_post(r"/api/peers/{fp}/ttl", self._guarded(self.api_set_peer_ttl))
+        # v0.21.x: test-only force-dial endpoint, gated behind the env
+        # var ONE_LINK_ENABLE_TEST_API=1 so it is INERT in production.
+        # Lets integration tests skip mDNS rediscovery (which can take
+        # >60 s on a loopback LAN under contention) by triggering an
+        # immediate dial to a peer's last known address. The endpoint
+        # itself still requires the bearer token + the env gate; both
+        # are needed.
+        r.add_post(r"/api/peers/{fp}/_test_force_dial",
+                   self._guarded(self.api_test_force_dial))
         # v0.11.2 per-chat mute with duration (peer + group).
         r.add_post(r"/api/peers/{fp}/mute", self._guarded(self.api_set_peer_mute))
         r.add_post(r"/api/groups/{gid}/mute", self._guarded(self.api_set_group_mute))
@@ -15271,6 +15280,47 @@ class UIServer:
             "ok": True, "fingerprint": fp,
             "dm_ttl_ms": updated.dm_ttl_ms,
         })
+
+    async def api_test_force_dial(self, request: web.Request) -> web.Response:
+        """v0.21.x test-only: trigger an immediate _dial_peer to the
+        peer at the given fingerprint, skipping mDNS rediscovery.
+
+        Gated by env ONE_LINK_ENABLE_TEST_API=1 — without it the
+        endpoint returns 404 so production builds can't be used as a
+        side-channel to probe peer reachability.
+
+        Used by tests/test_rotation_integration_v021.py to drive the
+        post-rotation re-handshake without the 60 s mDNS window.
+        """
+        if os.environ.get("ONE_LINK_ENABLE_TEST_API") != "1":
+            return web.json_response(
+                {"error": "not found"}, status=404,
+            )
+        fp = request.match_info["fp"]
+        if self.daemon.state is None:
+            return web.json_response(
+                {"error": "no state"}, status=503,
+            )
+        peer = self.daemon._peer_from_fp(fp)
+        if peer is None:
+            return web.json_response(
+                {"error": "unknown peer", "fingerprint": fp},
+                status=404,
+            )
+        try:
+            await asyncio.wait_for(
+                self.daemon._dial_peer(peer), timeout=10.0,
+            )
+        except asyncio.TimeoutError:
+            return web.json_response(
+                {"ok": False, "error": "dial timeout"},
+                status=504,
+            )
+        except Exception as e:
+            return web.json_response(
+                {"ok": False, "error": str(e)}, status=502,
+            )
+        return web.json_response({"ok": True, "fingerprint": fp})
 
     async def api_set_peer_mute(self, request: web.Request) -> web.Response:
         """v0.11.2: per-peer mute with duration.

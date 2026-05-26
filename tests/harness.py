@@ -145,6 +145,11 @@ def _spawn(home: Path, log: Path) -> tuple[subprocess.Popen, object]:
     # this env in production so it doesn't ship a control-plane
     # bypass. Test daemons explicitly opt in.
     env.setdefault("ONE_LINK_DEV_HOOKS", "1")
+    # v0.21.x: rotation integration test uses /api/peers/{fp}/_test_force_dial
+    # to skip mDNS rediscovery after a daemon restart. The endpoint is
+    # 404 unless this env is set — keeps the surface inert in
+    # production builds.
+    env.setdefault("ONE_LINK_ENABLE_TEST_API", "1")
     log.parent.mkdir(parents=True, exist_ok=True)
     f = open(log, "wb")
     proc = subprocess.Popen(

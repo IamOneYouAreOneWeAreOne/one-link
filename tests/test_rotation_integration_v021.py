@@ -131,19 +131,20 @@ async def _pair_a_and_b(p):
 
 @pytest.mark.skip(
     reason=(
-        "Caught the critical BLAKE3-vs-SHA256 fingerprint mismatch "
-        "(fixed in this commit). Re-running the test post-fix exposes "
-        "a second layer: A restarts cleanly with the new identity, "
-        "but A's mDNS rediscovery + re-dial of B over the LAN takes "
-        "more than the 60s timeout - the test gets a flood of "
-        "'empty pre-handshake disconnect' as A retries before B's "
-        "discovery cache updates. The rotation+cert path itself works "
-        "(unit-tested at every layer); robustly testing it end-to-end "
-        "needs either a deterministic peer-rediscovery trigger or a "
-        "test-only API that lets the test force an immediate dial. "
-        "Both are bigger surface than this commit. Leaving the test "
-        "in place + skipped so it can be unskipped + finished in a "
-        "fresh session."
+        "2026-05-26 follow-up: the rotation-cert delivery currently "
+        "requires the OLD identity's still-trusted channel to be "
+        "live when the cert is sent. After A restarts under its NEW "
+        "identity, B sees A as non-pinned (the fingerprint changed) "
+        "and drops the connection at the pre-handshake stage with "
+        "'ENDPOINT_UPDATE from non-pinned peer dropped'. The "
+        "/api/peers/{fp}/_test_force_dial endpoint added in this "
+        "commit eliminates the mDNS-rediscovery delay (the original "
+        "skip reason) but exposes a real protocol gap: rotation "
+        "must be a *coordinated* handshake where the receiver also "
+        "knows to expect an old->new transition. Closing this "
+        "needs new wire surface — out of scope for the test-coverage "
+        "sweep. Leaving the test in place + skipped with the "
+        "updated finding."
     ),
 )
 @pytest.mark.asyncio
@@ -231,6 +232,20 @@ async def test_rotation_propagates_to_paired_peer_over_real_wire():
                 f"A post-restart fingerprint {me.get('fingerprint')!r} "
                 f"does not match rotated target {fp_a_new!r}"
             )
+
+            # v0.21.x: skip the slow mDNS rediscovery window by
+            # calling the test-only force-dial endpoint. A's peer
+            # state DB persists across the restart, so A still knows
+            # B's last address/port — we just need to trigger a dial
+            # explicitly without waiting for the periodic rediscovery
+            # to fire. The endpoint is gated behind
+            # ONE_LINK_ENABLE_TEST_API which the harness sets
+            # automatically.
+            async with s.post(
+                f"{base_a_new}/api/peers/{fp_b}/_test_force_dial",
+                headers={"Authorization": f"Bearer {ta_new}"},
+            ) as r:
+                _ = await r.json()  # may fail; just primes the dial
 
             # Wait for A to re-handshake B + deliver the rotation cert.
             # The CAPS-time drain in daemon.py fires the cert as part of
