@@ -20844,7 +20844,107 @@
     actions.appendChild(mine);
     actions.appendChild(theirs);
     actions.appendChild(both);
-    row.appendChild(actions);
+    // v0.21.x Ship 9: Show diff. For text files this expands an
+    // inline panel with a coloured line-diff between the two
+    // versions, so the user can SEE exactly which lines each side
+    // changed before picking. Auto-merge hint when one is a strict
+    // extension of the other.
+    if (c.local_blob_hash && c.remote_blob_hash) {
+      const diffBtn = el("button", "show-diff-btn", "Show diff");
+      diffBtn.type = "button";
+      diffBtn.title = "Show a line-by-line comparison of the two versions.";
+      const diffSlot = el("div", "conflict-diff-slot");
+      diffSlot.style.display = "none";
+      diffSlot.style.marginTop = "8px";
+      diffBtn.onclick = async () => {
+        if (diffSlot.style.display !== "none") {
+          diffSlot.style.display = "none";
+          diffBtn.textContent = "Show diff";
+          return;
+        }
+        diffBtn.textContent = "Loading…";
+        diffBtn.disabled = true;
+        try {
+          const r = await api.get(
+            `/api/blobs/${c.local_blob_hash}/diff?against=${c.remote_blob_hash}`,
+          );
+          diffSlot.replaceChildren();
+          // Auto-merge hint banner.
+          if (r.auto_merge) {
+            const banner = document.createElement("div");
+            banner.style.padding = "8px 10px";
+            banner.style.borderRadius = "6px";
+            banner.style.fontSize = "11px";
+            banner.style.marginBottom = "8px";
+            if (r.auto_merge.kind === "identical") {
+              banner.style.background = "rgba(110,231,183,.15)";
+              banner.style.color = "#6ee7b7";
+              banner.textContent = "✓ Both versions are identical — safe to Keep mine.";
+            } else if (r.auto_merge.kind === "b_extends_a") {
+              banner.style.background = "rgba(124,92,255,.15)";
+              banner.style.color = "var(--accent)";
+              banner.textContent = "💡 Peer's version contains everything yours has plus more. Keep theirs picks up their additions without losing anything.";
+            } else if (r.auto_merge.kind === "a_extends_b") {
+              banner.style.background = "rgba(124,92,255,.15)";
+              banner.style.color = "var(--accent)";
+              banner.textContent = "💡 Your version contains everything theirs has plus more. Keep mine picks up your additions without losing anything.";
+            }
+            diffSlot.appendChild(banner);
+          }
+          // Summary line.
+          const summary = document.createElement("div");
+          summary.style.fontSize = "11px";
+          summary.style.color = "var(--text-dim)";
+          summary.style.marginBottom = "6px";
+          summary.textContent = (
+            `${r.lines_added} line${r.lines_added === 1 ? "" : "s"} added, `
+            + `${r.lines_removed} removed`
+            + (r.a_truncated || r.b_truncated ? " (preview truncated)" : "")
+          );
+          diffSlot.appendChild(summary);
+          // Coloured diff: green +lines, red -lines, dim @@ hunks.
+          const pre = document.createElement("pre");
+          pre.style.background = "var(--bg)";
+          pre.style.padding = "8px";
+          pre.style.borderRadius = "6px";
+          pre.style.fontSize = "11px";
+          pre.style.fontFamily = "var(--font-mono, ui-monospace, Menlo, monospace)";
+          pre.style.maxHeight = "300px";
+          pre.style.overflow = "auto";
+          pre.style.whiteSpace = "pre";
+          for (const rawLine of (r.unified_diff || "").split("\n")) {
+            const span = document.createElement("span");
+            span.textContent = rawLine + "\n";
+            if (rawLine.startsWith("+") && !rawLine.startsWith("+++")) {
+              span.style.color = "#6ee7b7"; // green
+              span.style.background = "rgba(110,231,183,.08)";
+            } else if (rawLine.startsWith("-") && !rawLine.startsWith("---")) {
+              span.style.color = "#f87171"; // red
+              span.style.background = "rgba(248,113,113,.08)";
+            } else if (rawLine.startsWith("@@")) {
+              span.style.color = "var(--accent)";
+              span.style.fontWeight = "600";
+            } else {
+              span.style.color = "var(--text-dim)";
+            }
+            pre.appendChild(span);
+          }
+          diffSlot.appendChild(pre);
+          diffSlot.style.display = "block";
+          diffBtn.textContent = "Hide diff";
+        } catch (e) {
+          toast(`Diff failed: ${errorToastBody(e)}`, "bad", 5000);
+          diffBtn.textContent = "Show diff";
+        } finally {
+          diffBtn.disabled = false;
+        }
+      };
+      actions.appendChild(diffBtn);
+      row.appendChild(actions);
+      row.appendChild(diffSlot);
+    } else {
+      row.appendChild(actions);
+    }
     return row;
   }
 

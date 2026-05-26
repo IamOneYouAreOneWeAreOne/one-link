@@ -2421,6 +2421,10 @@ class UIServer:
                   self._guarded(self.api_blob_preview))
         r.add_get(r"/api/blobs/{hash}/raw",
                   self._guarded(self.api_blob_raw))
+        # v0.21.x Ship 9: unified line-diff between two blobs +
+        # auto-merge hint when one strictly extends the other.
+        r.add_get(r"/api/blobs/{hash}/diff",
+                  self._guarded(self.api_blob_diff))
         # v0.21.x Ship 7: power + network status (on battery, metered)
         # + resulting sync gate state.
         r.add_get("/api/power-status", self._guarded(self.api_power_status))
@@ -18205,6 +18209,76 @@ class UIServer:
         except OSError as e:
             return web.json_response({"error": f"reveal failed: {e}"}, status=500)
         return web.json_response({"ok": True, "path": str(path)})
+
+    async def api_blob_diff(self, request: web.Request) -> web.Response:
+        """v0.21.x Ship 9: unified line-diff between two text blobs.
+
+        Used by the conflict resolver to show exactly which lines
+        changed on each side so the user can make an informed
+        Keep-mine / Keep-theirs / Keep-both decision (or edit one
+        version manually).
+
+        Query: ?against=<other_blob_hash>. Both blobs must be in
+        the local store + must be decodable as text (utf-8 with
+        replace-fallback)."""
+        a_hash = request.match_info.get("hash", "").strip()
+        b_hash = (request.query.get("against") or "").strip()
+        for h in (a_hash, b_hash):
+            if len(h) != 64 or not all(c in "0123456789abcdefABCDEF" for c in h):
+                return web.json_response({"error": "bad blob hash"}, status=400)
+        if self.daemon.blob_store is None:
+            return web.json_response({"error": "store unavailable"}, status=503)
+        if not self.daemon.blob_store.has(a_hash) or not self.daemon.blob_store.has(b_hash):
+            return web.json_response({"error": "blob not in store"}, status=404)
+        cap = self.PREVIEW_MAX_BYTES
+        try:
+            with self.daemon.blob_store.open_read(a_hash) as fa:
+                a_raw = fa.read(cap + 1)
+            with self.daemon.blob_store.open_read(b_hash) as fb:
+                b_raw = fb.read(cap + 1)
+        except OSError as e:
+            return web.json_response({"error": f"read: {e}"}, status=500)
+        a_truncated = len(a_raw) > cap
+        b_truncated = len(b_raw) > cap
+        a_text = a_raw[:cap].decode("utf-8", errors="replace")
+        b_text = b_raw[:cap].decode("utf-8", errors="replace")
+        # v0.21.x Ship 9 auto-merge heuristic: if one side is a
+        # strict prefix of the other (a peer added more lines at
+        # the end), the merge IS the superset. Auto-resolvable
+        # without user interaction.
+        auto_merge: Optional[dict] = None
+        if a_text == b_text:
+            auto_merge = {"kind": "identical"}
+        elif b_text.startswith(a_text):
+            auto_merge = {"kind": "b_extends_a", "winner": "b"}
+        elif a_text.startswith(b_text):
+            auto_merge = {"kind": "a_extends_b", "winner": "a"}
+        # Compute unified diff (line-based).
+        import difflib
+        a_lines = a_text.splitlines(keepends=True)
+        b_lines = b_text.splitlines(keepends=True)
+        diff = list(difflib.unified_diff(
+            a_lines, b_lines,
+            fromfile=f"blob/{a_hash[:12]}",
+            tofile=f"blob/{b_hash[:12]}",
+            lineterm="",
+            n=3,
+        ))
+        # Summarize: how many lines added/removed/changed?
+        added = sum(1 for line in diff if line.startswith("+") and not line.startswith("+++"))
+        removed = sum(1 for line in diff if line.startswith("-") and not line.startswith("---"))
+        return web.json_response({
+            "a_blob": a_hash,
+            "b_blob": b_hash,
+            "a_size": len(a_raw),
+            "b_size": len(b_raw),
+            "a_truncated": a_truncated,
+            "b_truncated": b_truncated,
+            "unified_diff": "".join(diff),
+            "lines_added": added,
+            "lines_removed": removed,
+            "auto_merge": auto_merge,
+        })
 
     async def api_blob_preview(self, request: web.Request) -> web.Response:
         """v0.21.x Ship 3: fetch a content-addressed blob from the
