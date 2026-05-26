@@ -10903,8 +10903,20 @@ class Daemon:
             self._abort_blob(blob)
             return
         try:
-            data = base64.b64decode(msg.get("data", ""))
+            raw = base64.b64decode(msg.get("data", ""))
         except (binascii.Error, ValueError):
+            self._abort_blob(blob)
+            return
+        # v0.21.x: decompress if the sender flagged enc=zlib (or any
+        # other supported codec). _decode_payload caps the output at
+        # CHUNK_SIZE + small overhead so a zlib bomb in a BLOB_CHUNK
+        # frame can't OOM the receiver.
+        enc = str(msg.get("enc", "raw"))
+        try:
+            data = self._decode_payload(
+                enc, raw, max_bytes=CHUNK_SIZE + 64,
+            )
+        except RuntimeError:
             self._abort_blob(blob)
             return
         ctx["received"] += len(data)
@@ -19288,6 +19300,12 @@ class Daemon:
             # started sending blobs so the per-chunk sleep can pace
             # us correctly against the user-set kbps cap.
             throttle_started_at = time.monotonic()
+            # v0.21.x compression: peer's caps determine if we should
+            # zlib-compress chunks. Computed once outside the blob loop.
+            peer_caps_frame_chunks = getattr(channel, "peer_caps", None) or {}
+            peer_feature_set = set(normalize_caps(
+                peer_caps_frame_chunks.get("features") or [],
+            ))
             for blob_hex in wants:
                 if not self._valid_blob_hex(blob_hex):
                     continue
@@ -19310,6 +19328,18 @@ class Daemon:
                 # penalty; on SSDs the overhead of asyncio.to_thread
                 # is small compared to the base64 + AEAD work that
                 # would otherwise be serialized.
+                #
+                # v0.21.x compression: when the peer advertises
+                # FILE_COMPRESSION, each chunk is run through
+                # _encode_payload (zlib level 1) which skips
+                # compression for already-compressed content (no win)
+                # and otherwise wins ~50-70% on text/code. Peer
+                # decodes via _decode_payload using the ``enc`` field.
+                # No new wire surface — ``enc`` already exists for
+                # other paths.
+                peer_supports_compression = (
+                    FILE_COMPRESSION in peer_feature_set
+                )
                 n_chunks = (
                     max(1, (int(size) + CHUNK_SIZE - 1) // CHUNK_SIZE)
                     if size > 0 else 1
@@ -19319,7 +19349,7 @@ class Daemon:
                         await channel.send(encode_msg(make_msg(
                             "BLOB_CHUNK", self.me.short_id,
                             blob=blob_hex, seq=0,
-                            data="", eof=True,
+                            data="", eof=True, enc="raw",
                         )))
                     else:
                         read_task = asyncio.create_task(
@@ -19337,11 +19367,16 @@ class Daemon:
                                 read_task = asyncio.create_task(
                                     asyncio.to_thread(fh.read, CHUNK_SIZE),
                                 )
+                            enc, payload = self._encode_payload(
+                                data,
+                                allow_compress=peer_supports_compression,
+                            )
                             await channel.send(encode_msg(make_msg(
                                 "BLOB_CHUNK", self.me.short_id,
                                 blob=blob_hex, seq=seq,
-                                data=base64.b64encode(data).decode("ascii"),
+                                data=base64.b64encode(payload).decode("ascii"),
                                 eof=is_last,
+                                enc=enc,
                             )))
                             # v0.21.x Ship 6: bandwidth-cap throttle.
                             await self._throttle_chunk(
