@@ -14551,6 +14551,19 @@ class UIServer:
             )
 
         async def _bg_send() -> None:
+            # PERFORMANCE NOTE (deferred follow-up): N files = N
+            # FILE_OFFER round-trips. The wire protocol already has
+            # a FILE_OFFER_BATCH_V1 handler on the receiver side
+            # (see daemon.py:5133); a sender-side batcher would
+            # collapse the offer phase into a single round-trip
+            # (capped at 256 offers per batch). Win on LAN ~5s
+            # saved for 100-file folders; bigger on WAN. Skipped
+            # this round to keep the change set small + safely
+            # tested — sequential sends are functionally correct
+            # and per-file overhead is already low thanks to the
+            # Linked Mesh persistent outbound session (no per-file
+            # handshake) and the CDC chunk cache (no re-send of
+            # known chunks).
             sent = 0
             failed = 0
             for path_obj, rel in files:
@@ -17584,6 +17597,13 @@ class UIServer:
         peer_needle: Optional[str] = None
         upload_path: Optional[Path] = None
         upload_name: str = "upload.bin"
+        # v0.21.x: optional folder-relative path. When set + safe,
+        # forwarded to daemon.send_file so the receiver mirrors the
+        # tree under inbox/<rel_path>. Sanitization happens in
+        # daemon._safe_transfer_rel_path; we validate here so an
+        # unsafe value gets rejected with a 400 instead of silently
+        # dropped on the wire.
+        rel_path_raw: Optional[str] = None
 
         from aiohttp.multipart import MultipartReader as _MultipartReader
 
@@ -17601,6 +17621,13 @@ class UIServer:
                 part: Any = raw_part
                 if part.name == "peer":
                     peer_needle = (await part.text()).strip()
+                elif part.name == "rel_path":
+                    # NO .strip() — trailing space is one of the
+                    # things the sanitizer rejects (Windows silently
+                    # truncates trailing dots/spaces, creating a
+                    # collision risk). Pre-stripping would mask it.
+                    rel_path_text = await part.text()
+                    rel_path_raw = rel_path_text if rel_path_text else None
                 elif part.name == "file":
                     upload_name = Path(part.filename or "upload.bin").name
                     if not upload_name or upload_name in (".", ".."):
@@ -17628,6 +17655,23 @@ class UIServer:
             return web.json_response({"error": "missing 'peer' field"}, status=400)
         if not upload_path or not upload_path.is_file():
             return web.json_response({"error": "missing 'file' field"}, status=400)
+
+        # v0.21.x: validate rel_path here so an unsafe value gets a 400
+        # at the entry rather than being silently dropped by the
+        # receiver-side validator. Empty / None means flat placement.
+        clean_rel_path: Optional[str] = None
+        if rel_path_raw is not None:
+            clean_rel_path = self.daemon._safe_transfer_rel_path(rel_path_raw)
+            if clean_rel_path is None:
+                with contextlib.suppress(OSError):
+                    upload_path.unlink(missing_ok=True)
+                return web.json_response(
+                    {
+                        "error": "rel_path failed validation",
+                        "code": "bad_rel_path",
+                    },
+                    status=400,
+                )
 
         # v0.5.1: also tries the rendezvous if the peer isn't on mDNS.
         peer = await self.daemon.resolve_for_send(peer_needle)
@@ -17699,6 +17743,7 @@ class UIServer:
                     peer,
                     upload_path,
                     transfer_id=durable_transfer_id,
+                    rel_path=clean_rel_path,
                 )
             except Exception as first_err:
                 transfer_id_attr = getattr(first_err, "transfer_id", None)
@@ -17735,6 +17780,7 @@ class UIServer:
                     fresh_peer,
                     upload_path,
                     transfer_id=durable_transfer_id,
+                    rel_path=clean_rel_path,
                 )
             # Keep browser-upload bytes when they were attached to a
             # durable transfer row. The outbound preview/open endpoint

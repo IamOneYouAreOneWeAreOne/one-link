@@ -12464,10 +12464,15 @@
       if (!r.ok) throw _apiError(j, r.status);
       return j;
     },
-    async upload(peer, file) {
+    async upload(peer, file, opts = {}) {
       const fd = new FormData();
       fd.append("peer", peer);
       fd.append("file", file, file.name);
+      // v0.21.x: optional rel_path for folder-tree-preserving uploads
+      // (drag-folder drop in chat UI). Receiver mirrors the tree
+      // under inbox/<rel_path>. Falsy values are not sent so single-
+      // file uploads keep the original flat behavior.
+      if (opts.relPath) fd.append("rel_path", String(opts.relPath));
       const r = await fetch("/api/send-file", { method:"POST", credentials:"include", body: fd });
       _maybe401(r.status);
       const j = await r.json().catch(()=>({}));
@@ -25107,7 +25112,7 @@
       r.readAsDataURL(file);
     });
   }
-  async function stageFile(file) {
+  async function stageFile(file, relPath = null) {
     if (!file) return;
     // v0.21.x: EXIF / metadata stripping for images. Camera photos
     // carry GPS coords + camera model + timestamp by default; sending
@@ -25129,7 +25134,12 @@
     }
     const id = ++state.stagedSeq;
     const dataUrl = await readDataUrl(workingFile);
-    state.staged.push({ id, file: workingFile, dataUrl });
+    // v0.21.x: relPath carries the original folder-relative path when
+    // the file came in from a drag-folder drop. The send pipeline
+    // forwards it as the rel_path multipart field so the recipient
+    // mirrors the folder tree under inbox/<rel_path> instead of
+    // dropping every file flat. null for ordinary single-file stages.
+    state.staged.push({ id, file: workingFile, dataUrl, relPath });
     renderStaging();
     refreshSendEnabled();
   }
@@ -26264,7 +26274,9 @@
       state.staged = [];
       renderStaging();
       for (const s of filesToSend) {
-        uploadFile(s.file);
+        // v0.21.x: forward s.relPath when present so drag-folder
+        // drops preserve their tree on the receiver.
+        uploadFile(s.file, s.relPath ? { relPath: s.relPath } : {});
       }
     } finally {
       refreshSendEnabled();
@@ -29860,7 +29872,7 @@
     }
   }
 
-  async function uploadFile(file) {
+  async function uploadFile(file, opts = {}) {
     if (!state.selectedPeer) { toast("Pick a device on the left to start.", "info"); return; }
     const peer = state.peers.get(state.selectedPeer);
     if (peer?.trust === "rejected") {
@@ -29873,12 +29885,19 @@
     // dead-end. Cached by name+size, so a same-name+size resend
     // refreshes the entry.
     rememberOutboundFile(file);
-    const sendingToast = toast(`Sending ${file.name}...`, "info", 30000);
+    // v0.21.x: when this file came from a drag-folder drop, opts.relPath
+    // is the folder-relative path. Show the original tree position in
+    // the sending toast so users see what they're sending.
+    const displayName = opts.relPath || file.name;
+    const sendingToast = toast(`Sending ${displayName}...`, "info", 30000);
     try {
-      const result = await api.upload(state.selectedPeer, file);
+      const result = await api.upload(
+        state.selectedPeer, file,
+        opts.relPath ? { relPath: opts.relPath } : {},
+      );
       sendingToast?.remove();
       if (result?.queued || result?.paused) {
-        toast(`${file.name} will send when they're back online.`, "info", 5000);
+        toast(`${displayName} will send when they're back online.`, "info", 5000);
       }
     } catch (e) {
       sendingToast?.remove();
@@ -30027,14 +30046,14 @@
       toast(`Staging ${collected.length} files`, "info", 2000);
     }
     for (const { file, relPath } of collected) {
-      // For nested files, attach the relative path to the staged name so
-      // the receiver can see where it came from. We can't preserve the
-      // tree on send (the wire protocol takes flat names), but the
-      // sender at least sees what they're sending.
-      const tagged = relPath !== file.name
-        ? new File([file], relPath.replace(/[\\\/]/g, "_"), { type: file.type })
-        : file;
-      await stageFile(tagged);
+      // v0.21.x: preserve the folder tree on send. The wire protocol
+      // now carries a sanitized rel_path field on FILE_OFFER, so the
+      // recipient ends up with inbox/<rel_path> instead of a flat
+      // inbox/<basename>. Pass relPath as a second arg to stageFile
+      // so it gets bundled into the multipart upload. The file.name
+      // stays the bare leaf so the staging chip + outbound bubble
+      // show the user-meaningful name (not the full nested path).
+      await stageFile(file, relPath !== file.name ? relPath : null);
     }
   });
 

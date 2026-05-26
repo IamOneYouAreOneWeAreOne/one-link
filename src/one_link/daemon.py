@@ -18490,6 +18490,18 @@ class Daemon:
         Sanitization (no ``..`` / no absolute / no drive letters /
         no NUL / no reserved-device-name segments) happens both
         sender-side (here) and receiver-side (defense in depth).
+
+        THROTTLING POLICY (v0.21.x explicit design decision):
+        send_file does NOT consult ``_sync_paused_or_quiet`` and
+        does NOT pace chunks against ``sync_bandwidth_kbps``. Those
+        gates apply only to the BACKGROUND folder-sync push path
+        (``push_folder_to_peer``). Rationale: a user clicking
+        "Send" in the UI is an explicit, user-initiated action;
+        making the bytes wait for a quiet-hours window or a
+        bandwidth cap they configured for BACKGROUND sync would
+        surprise them. Folder one-shot Send shares this path and
+        intentionally inherits the unthrottled behavior — if you
+        clicked Send on a 10 GB folder, you want it to go.
         """
         block = self._check_outbound_trust(peer)
         if block:
