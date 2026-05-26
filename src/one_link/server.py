@@ -14673,9 +14673,10 @@ class UIServer:
         for o in offers:
             with contextlib.suppress(Exception):
                 p = self.daemon.state.get_peer(o["peer_fp"])
-                if p:
-                    o["peer_hostname"] = p.get("hostname")
-                    o["peer_short_id"] = p.get("short_id")
+                if p is not None:
+                    # get_peer returns a PeerRecord dataclass, not a dict.
+                    o["peer_hostname"] = getattr(p, "hostname", None)
+                    o["peer_short_id"] = getattr(p, "short_id", None)
         return web.json_response({"offers": offers})
 
     async def api_accept_folder_offer(self, request: web.Request) -> web.Response:
@@ -18041,6 +18042,13 @@ class UIServer:
         # render in a tightly-sandboxed iframe so a malicious sender
         # can't run arbitrary JS in the host page's origin.
         "svg": "image",
+        # v0.21.x Ship 1: raster image preview — backs the folder
+        # file browser's inline image render. Browser-native decoders
+        # cover all of these; we just need to serve the bytes with
+        # the right content-type.
+        "png": "image", "jpg": "image", "jpeg": "image",
+        "gif": "image", "webp": "image", "bmp": "image", "ico": "image",
+        "avif": "image", "heic": "image", "heif": "image",
         "html": "html-sandboxed", "htm": "html-sandboxed",
         # markdown variants → markdown renderer (subset)
         "md": "markdown", "markdown": "markdown", "mdown": "markdown",
