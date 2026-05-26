@@ -5895,6 +5895,24 @@ class State:
                 (policy, folder_name),
             )
 
+    def has_known_file_by_blob(self, blob_hash: str) -> bool:
+        """v0.21.x folder-send pre-flight: does the file_index_cache
+        carry ANY row whose blob_hash matches? Used by the
+        BLOB_INVENTORY_QUERY handler so files received via
+        /api/send-file (which land in inbox/, not blob_store) still
+        count as 'have' for dedup purposes.
+
+        Returns True iff at least one cached file index has the
+        given blob_hash. Fast: one SELECT 1 LIMIT 1.
+        """
+        if not isinstance(blob_hash, str) or not blob_hash:
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM file_index_cache WHERE blob_hash = ? LIMIT 1",
+            (blob_hash,),
+        ).fetchone()
+        return row is not None
+
     def set_folder_local_path(
         self, folder_name: str, new_local_path: str,
     ) -> None:

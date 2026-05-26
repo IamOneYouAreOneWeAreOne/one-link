@@ -6203,6 +6203,24 @@ class Daemon:
                 self._emit_capability_request(peer_fp, peer_sid, FOLDER_SYNC)
                 return
             await self._handle_blob_request(channel, msg, peer_fp)
+        elif t == "BLOB_INVENTORY_QUERY":
+            # v0.21.x: pre-flight dedup check. Sender asks "of these
+            # whole-file BLAKE3 hashes, which do you already have
+            # complete?" Receiver answers with the subset it has,
+            # checking both the blob_store AND the inbox (so files
+            # that arrived via /api/send-file count as 'have').
+            # Cap gate: FILES — the same cap that gates send_file
+            # itself, so an inventory probe can't leak info beyond
+            # what a real file send would.
+            if not self._capability_allowed(peer_fp, FILES):
+                self._emit_capability_request(peer_fp, peer_sid, FILES)
+                await channel.send(encode_msg(make_msg(
+                    "BLOB_INVENTORY_REPLY", self.me.short_id,
+                    of=msg.get("id"), have=[],
+                    rejected="not_authorized",
+                )))
+                return
+            await self._handle_blob_inventory_query(channel, msg, peer_fp)
         elif t == "COVER_PACKET":
             # D05 wire-up — cover-traffic packet. Drop silently. No
             # caps gate here: the frame carries no payload of interest
@@ -7858,6 +7876,103 @@ class Daemon:
             size=len(data),
             data=base64.b64encode(payload).decode("ascii"),
         )))
+
+    async def _handle_blob_inventory_query(
+        self, channel, msg, peer_fp: str,
+    ) -> None:
+        """v0.21.x pre-flight dedup: respond to BLOB_INVENTORY_QUERY
+        with the subset of WHOLE-FILE blob hashes we already have
+        complete (in blob_store OR cached in the file-index from a
+        prior receive). The sender uses this to estimate
+        will-transfer vs already-on-device BEFORE actually sending.
+        """
+        raw = msg.get("hashes") or []
+        if not isinstance(raw, list):
+            raw = []
+        MAX_QUERY_HASHES = 2048
+        clean: list[str] = []
+        seen = set()
+        for h in raw[:MAX_QUERY_HASHES]:
+            h = str(h)
+            if h in seen or not self._valid_blob_hex(h):
+                continue
+            seen.add(h)
+            clean.append(h)
+        have: list[str] = []
+        for h in clean:
+            # 1. blob_store: files that landed via folder-sync OR any
+            #    other CDC pipeline that wrote to the store.
+            if self.blob_store is not None and self.blob_store.has(h):
+                have.append(h)
+                continue
+            # 2. file_index_cache reverse-lookup: files received via
+            #    /api/send-file end up indexed by their BLAKE3 even
+            #    when they're not in blob_store proper.
+            if self.state is not None:
+                with contextlib.suppress(Exception):
+                    if self.state.has_known_file_by_blob(h):
+                        have.append(h)
+                        continue
+        await channel.send(encode_msg(make_msg(
+            "BLOB_INVENTORY_REPLY", self.me.short_id,
+            of=msg.get("id"), have=have,
+        )))
+
+    async def query_peer_blob_inventory(
+        self, peer: Peer, hashes: list[str], *,
+        timeout_s: float = 8.0,
+    ) -> Optional[set[str]]:
+        """v0.21.x: ask a peer which whole-file blob hashes they
+        already have. Used by the folder-send preview to compute
+        dedup BEFORE sending.
+
+        Returns:
+          - set[str] : the subset of hashes the peer has (empty set
+            is a VALID response meaning "I have none of those")
+          - None : the call failed (timeout, capability denied,
+            peer offline, peer doesn't speak the protocol). Caller
+            should treat as "no pre-check available" and may still
+            proceed — dedup still works at FILE_OFFER time per file.
+        """
+        block = self._check_outbound_trust(peer)
+        if block:
+            return None
+        peer_fp = self._peer_fp_from_peer(peer) or ""
+        if peer_fp and not self._capability_allowed(peer_fp, FILES):
+            return None
+        clean = [h for h in hashes[:2048] if self._valid_blob_hex(str(h))]
+        if not clean:
+            return set()
+        try:
+            sess = await self._get_outbound_session(peer)
+        except Exception:
+            return None
+        try:
+            async with sess.lock:
+                q = make_msg(
+                    "BLOB_INVENTORY_QUERY", self.me.short_id,
+                    hashes=clean,
+                )
+                await self._send_via_transport(
+                    sess.peer_fp, sess.channel, encode_msg(q),
+                )
+                reply = await self._recv_chunk_protocol_reply(
+                    sess=sess,
+                    request_id=str(q.get("id")),
+                    expected_types={"BLOB_INVENTORY_REPLY"},
+                    timeout_s=timeout_s,
+                )
+        except Exception:
+            return None
+        if reply.get("rejected"):
+            return None
+        raw_have = reply.get("have") or []
+        if not isinstance(raw_have, list):
+            return set()
+        return {
+            str(h) for h in raw_have
+            if self._valid_blob_hex(str(h))
+        }
 
     async def query_peer_chunks(self, peer: Peer, hashes: list[str]) -> dict:
         block = self._check_outbound_trust(peer)

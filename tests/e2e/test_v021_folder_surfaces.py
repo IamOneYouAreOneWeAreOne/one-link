@@ -72,6 +72,48 @@ def test_folder_settings_modal_exists_in_dom(ui_page):
         )
 
 
+def test_folder_send_confirm_modal_exists_in_dom(ui_page):
+    """v0.21.x Send confirmation modal must be present in DOM with
+    stats container, target line, Cancel + Send buttons."""
+    for sel in [
+        "#folder-send-confirm-backdrop",
+        "#folder-send-confirm-target",
+        "#folder-send-confirm-stats",
+        "#folder-send-confirm-cancel",
+        "#folder-send-confirm-go",
+    ]:
+        assert ui_page.locator(sel).count() == 1, (
+            f"{sel} missing — folder Send confirmation modal incomplete"
+        )
+
+
+def test_folder_send_progress_overlay_exists_in_dom(ui_page):
+    """v0.21.x in-flight progress overlay with Cancel button must be
+    in DOM (display:none until a send is active)."""
+    for sel in [
+        "#folder-send-progress",
+        "#fsp-title",
+        "#fsp-detail",
+        "#fsp-cancel",
+    ]:
+        assert ui_page.locator(sel).count() == 1, (
+            f"{sel} missing — folder Send progress overlay incomplete"
+        )
+
+
+def test_chat_attach_menu_has_folder_option(ui_page):
+    """v0.21.x 4th attach-popover option: Folder. Source-text guard
+    so a refactor of the menu items can't silently drop it."""
+    src = ui_page.content()
+    # The popover is rendered on-demand via JS; the static menu
+    # template lives in the source. Search for the data-src marker.
+    assert 'data-src="folder"' in src, (
+        "Folder attach option missing from the chat composer popover "
+        "template — drag-folder still works but the explicit affordance "
+        "is gone"
+    )
+
+
 def test_folder_offers_section_exists_in_dom(ui_page):
     """The Ship 0 incoming-folder-offers section must be present in
     the DOM (display:none initially when there are no offers).

@@ -3940,6 +3940,75 @@
   .pair-peer-info .who-name { font-weight: 600; }
   .pair-peer-info .who-sub  { font-size: 12px; color: var(--text-dim); }
 
+  /* v0.21.x: folder Send confirmation modal + in-flight progress
+     overlay. Modal shows file count + total size + dedup breakdown
+     BEFORE bytes move. Progress overlay sits bottom-right while a
+     send is in-flight; has a Cancel button so users are never
+     stuck watching a transfer they regret. */
+  .folder-send-target {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    background: var(--bg-2);
+    border-radius: 8px;
+  }
+  .folder-send-target strong { color: var(--text); font-size: 13px; }
+  .folder-send-stats { display: flex; flex-direction: column; gap: 6px; }
+  .folder-send-stats .fss-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 8px 12px;
+    background: var(--bg-2);
+    border-radius: 8px;
+    font-size: 13px;
+  }
+  .folder-send-stats .fss-row .fss-label { color: var(--text-dim); }
+  .folder-send-stats .fss-row .fss-value { font-weight: 600; }
+  .folder-send-stats .fss-row.fss-row-transfer .fss-value { color: var(--accent); }
+  .folder-send-stats .fss-row.fss-row-dedup .fss-value { color: var(--good, #6acc7a); }
+  .folder-send-stats .fss-row-loading {
+    color: var(--text-dim);
+    font-size: 12.5px;
+    justify-content: flex-start;
+    gap: 10px;
+  }
+  .folder-send-stats .fss-spinner,
+  .folder-send-progress .fsp-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--bg-3);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: fss-spin 0.8s linear infinite;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+  @keyframes fss-spin { to { transform: rotate(360deg); } }
+
+  .folder-send-progress {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    z-index: 9000;
+    max-width: 380px;
+    background: var(--bg-1);
+    border: 1px solid var(--accent);
+    border-radius: 12px;
+    padding: 12px 14px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  }
+  .folder-send-progress .fsp-body {
+    display: grid;
+    grid-template-columns: 18px 1fr auto;
+    gap: 10px;
+    align-items: center;
+  }
+  .folder-send-progress .fsp-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .folder-send-progress .fsp-text strong { font-size: 13px; }
+  .folder-send-progress .fsp-text span { font-size: 12px; }
+
   /* v0.21.x: per-folder Sync settings — conflict-policy card grid.
      Three radio-button cards stand side-by-side on wider modals
      and stack vertically on narrow ones. The card is the clickable
@@ -11516,6 +11585,47 @@
         <button class="btn-ghost" id="folder-settings-close">Cancel</button>
         <button class="btn-primary" id="folder-settings-save">Save</button>
       </div>
+    </div>
+  </div>
+
+  <!-- v0.21.x: folder Send confirmation modal. Opens when the user
+       clicks "Send" on a folder card OR picks "Folder" from the chat
+       composer attach popover. Pre-flights with BLOB_INVENTORY_QUERY
+       so the user sees the dedup breakdown BEFORE bytes start moving.
+       Cancel + Send buttons; Send disabled until the pre-flight
+       completes (with a "Skip pre-check" escape hatch for impatience). -->
+  <div class="modal-backdrop" id="folder-send-confirm-backdrop">
+    <div class="modal" style="max-width:540px;">
+      <h2 style="margin:0 0 4px;">Send folder</h2>
+      <p class="settings-help" style="margin:6px 0 14px;">
+        One-shot copy to the selected device. No ongoing sync, no
+        future edits propagate. Cancel any time before or during.
+      </p>
+      <div class="folder-send-target" id="folder-send-confirm-target"></div>
+      <div class="folder-send-stats" id="folder-send-confirm-stats">
+        <div class="fss-row fss-row-loading">
+          <span class="fss-spinner"></span>
+          <span>Checking what's already on the other device…</span>
+        </div>
+      </div>
+      <div class="actions" style="margin-top:18px; display:flex; gap:8px; justify-content:flex-end;">
+        <button class="btn-ghost" id="folder-send-confirm-cancel">Cancel</button>
+        <button class="btn-primary" id="folder-send-confirm-go" disabled>Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- v0.21.x: folder Send in-flight progress overlay. Shows after
+       the user confirms Send; lets them cancel while the transfer
+       is running. Surfaces the post-flight dedup summary on completion. -->
+  <div class="folder-send-progress" id="folder-send-progress" style="display:none;">
+    <div class="fsp-body">
+      <div class="fsp-spinner"></div>
+      <div class="fsp-text">
+        <strong id="fsp-title">Sending…</strong>
+        <span id="fsp-detail" class="settings-help-inline"></span>
+      </div>
+      <button id="fsp-cancel" class="btn-ghost btn-sm">Cancel</button>
     </div>
   </div>
 
@@ -20049,24 +20159,21 @@
             + "first.) For a live two-way sync, use Share instead."
         );
         send.setAttribute("aria-label", "Send one-shot folder copy");
-        send.onclick = async () => {
+        send.onclick = () => {
           const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
           if (!peer?.fingerprint || peer.trust !== "pinned") {
             toast("Pick a paired peer first", "info");
             return;
           }
-          try {
-            const r = await api.post(
-              `/api/folders/${encodeURIComponent(f.name)}/send-to`,
-              { peer_fp: peer.fingerprint },
-            );
-            toast(
-              `Sending ${r.file_count} file${r.file_count === 1 ? "" : "s"} to ${peer.hostname || peer.short_id}`,
-              "good", 4000,
-            );
-          } catch (e) {
-            toast(`Send didn't work: ${errorToastBody(e) || e}`, "bad", 6000);
-          }
+          // v0.21.x: open the confirmation modal with pre-flight
+          // dedup info instead of firing immediately. Bytes don't
+          // move until the user clicks Send in the modal.
+          openFolderSendConfirm({
+            scope: "folder", ident: f.name,
+            peerFp: peer.fingerprint,
+            peerHostname: peer.hostname || peer.short_id,
+            displayName: f.name, displayPath: f.local_path,
+          });
         };
         const sync = el("button", null, "Sync");
         sync.title = (
@@ -20827,6 +20934,164 @@
     ],
     logs: ["*.log", "*.tmp", "*.swp", "*.swo", "*.bak", "*~"],
   };
+
+  // ─── v0.21.x folder Send confirmation + in-flight overlay ────
+  // openFolderSendConfirm() is called from BOTH the folder-card Send
+  // button (scope=folder) and the chat composer's Folder attach
+  // option (scope=adhoc). The pre-flight check + send + cancel flow
+  // is identical; only the endpoint URLs change.
+  state.folderSendInflight = null;  // {scope, ident, peer_fp, peer_hostname}
+
+  function _fmtFiles(n) {
+    return `${n} file${n === 1 ? "" : "s"}`;
+  }
+
+  function _folderSendUrls(scope, ident) {
+    // ident is the folder NAME for scope=folder, or the local_path
+    // for scope=adhoc. Encode appropriately.
+    if (scope === "folder") {
+      const base = `/api/folders/${encodeURIComponent(ident)}/send-to`;
+      return { send: base, preview: `${base}/preview`, cancel: `${base}/cancel` };
+    }
+    return {
+      send: "/api/fs/send-folder",
+      preview: "/api/fs/send-folder/preview",
+      cancel: "/api/fs/send-folder/cancel",
+    };
+  }
+
+  async function openFolderSendConfirm({ scope, ident, peerFp, peerHostname, displayName, displayPath }) {
+    state.folderSendConfirmCtx = { scope, ident, peerFp, peerHostname, displayName, displayPath };
+    const targetEl = $("#folder-send-confirm-target");
+    targetEl.innerHTML = "";
+    const head = document.createElement("div");
+    head.innerHTML = `<strong>${displayName}</strong>${displayPath ? ` · ${displayPath}` : ""}<br>To ${peerHostname || peerFp.slice(0, 8)}`;
+    targetEl.appendChild(head);
+    const statsEl = $("#folder-send-confirm-stats");
+    statsEl.innerHTML = `
+      <div class="fss-row fss-row-loading">
+        <span class="fss-spinner"></span>
+        <span>Checking what's already on the other device…</span>
+      </div>
+    `;
+    const goBtn = $("#folder-send-confirm-go");
+    goBtn.disabled = true;
+    $("#folder-send-confirm-backdrop").classList.add("show");
+    document.body.classList.add("modal-open");
+    // Pre-flight call.
+    const urls = _folderSendUrls(scope, ident);
+    const body = scope === "folder"
+      ? { peer_fp: peerFp }
+      : { peer_fp: peerFp, local_path: ident };
+    try {
+      const stats = await api.post(urls.preview, body);
+      _renderFolderSendStats(stats);
+      goBtn.disabled = false;
+    } catch (e) {
+      const status = e?.status;
+      const errMsg = errorToastBody(e) || (e?.message ?? "Pre-check failed.");
+      statsEl.innerHTML = `<div class="fss-row" style="color: var(--bad, #e85c5c)"><span>${errMsg}</span></div>`;
+      // For peer_offline / folder_path_missing / etc the user can't
+      // proceed; keep Send disabled. For other failures (e.g. the
+      // peer's daemon doesn't speak BLOB_INVENTORY_QUERY) we allow
+      // the user to send anyway — dedup still works at FILE_OFFER
+      // time, they just don't get a pre-flight estimate.
+      if (status === 503 || status === 404 || status === 409) {
+        goBtn.disabled = true;
+      } else {
+        goBtn.disabled = false;
+        statsEl.insertAdjacentHTML("beforeend",
+          `<div class="fss-row fss-row-loading"><span>The send will still try to dedup automatically.</span></div>`,
+        );
+      }
+    }
+  }
+
+  function _renderFolderSendStats(stats) {
+    const statsEl = $("#folder-send-confirm-stats");
+    statsEl.innerHTML = "";
+    const total = document.createElement("div");
+    total.className = "fss-row";
+    total.innerHTML = `<span class="fss-label">Total</span><span class="fss-value">${_fmtFiles(stats.file_count || 0)} · ${_humanBytes(stats.total_bytes || 0)}</span>`;
+    statsEl.appendChild(total);
+    if (stats.pre_check_complete) {
+      if ((stats.already_on_peer_count || 0) > 0) {
+        const dedup = document.createElement("div");
+        dedup.className = "fss-row fss-row-dedup";
+        dedup.innerHTML = `<span class="fss-label">Already on the other device</span><span class="fss-value">${_fmtFiles(stats.already_on_peer_count)} · ${_humanBytes(stats.already_on_peer_bytes || 0)} skipped</span>`;
+        statsEl.appendChild(dedup);
+      }
+      const transfer = document.createElement("div");
+      transfer.className = "fss-row fss-row-transfer";
+      transfer.innerHTML = `<span class="fss-label">Will transfer</span><span class="fss-value">${_fmtFiles(stats.will_transfer_count || 0)} · ${_humanBytes(stats.will_transfer_bytes || 0)}</span>`;
+      statsEl.appendChild(transfer);
+    } else {
+      const hint = document.createElement("div");
+      hint.className = "fss-row fss-row-loading";
+      hint.innerHTML = `<span>The other device couldn't answer the dedup pre-check; sending will still skip files they already have at the FILE_OFFER step.</span>`;
+      statsEl.appendChild(hint);
+    }
+  }
+
+  function closeFolderSendConfirm() {
+    $("#folder-send-confirm-backdrop").classList.remove("show");
+    document.body.classList.remove("modal-open");
+    state.folderSendConfirmCtx = null;
+  }
+
+  function showFolderSendProgress({ scope, ident, peerFp, peerHostname, displayName, fileCount, totalBytes }) {
+    state.folderSendInflight = { scope, ident, peerFp, peerHostname, displayName };
+    $("#fsp-title").textContent = `Sending ${displayName}`;
+    $("#fsp-detail").textContent = `${_fmtFiles(fileCount)} · ${_humanBytes(totalBytes || 0)} → ${peerHostname || peerFp.slice(0, 8)}`;
+    $("#folder-send-progress").style.display = "block";
+  }
+
+  function hideFolderSendProgress() {
+    $("#folder-send-progress").style.display = "none";
+    state.folderSendInflight = null;
+  }
+
+  async function _cancelInflightFolderSend() {
+    const cur = state.folderSendInflight;
+    if (!cur) return;
+    const urls = _folderSendUrls(cur.scope, cur.ident);
+    const body = cur.scope === "folder"
+      ? { peer_fp: cur.peerFp }
+      : { peer_fp: cur.peerFp, local_path: cur.ident };
+    try {
+      await api.post(urls.cancel, body);
+      toast(`Cancelled send of ${cur.displayName}.`, "info", 4000);
+    } catch (e) {
+      // 404 = task already finished. Just hide the overlay.
+      if (e?.status !== 404) {
+        toast(`Cancel failed: ${errorToastBody(e) || e}`, "bad", 5000);
+      }
+    } finally {
+      hideFolderSendProgress();
+    }
+  }
+
+  async function _confirmFolderSendGo() {
+    const ctx = state.folderSendConfirmCtx;
+    if (!ctx) return;
+    const urls = _folderSendUrls(ctx.scope, ctx.ident);
+    const body = ctx.scope === "folder"
+      ? { peer_fp: ctx.peerFp }
+      : { peer_fp: ctx.peerFp, local_path: ctx.ident };
+    closeFolderSendConfirm();
+    try {
+      const r = await api.post(urls.send, body);
+      showFolderSendProgress({
+        scope: ctx.scope, ident: ctx.ident,
+        peerFp: ctx.peerFp, peerHostname: ctx.peerHostname,
+        displayName: ctx.displayName,
+        fileCount: r.file_count || 0,
+        totalBytes: r.total_bytes || 0,
+      });
+    } catch (e) {
+      toast(`Send didn't start: ${errorToastBody(e) || e}`, "bad", 6000);
+    }
+  }
 
   function openFolderSettings(folder) {
     state.folderSettingsTarget = folder.name;
@@ -24623,6 +24888,25 @@
         refreshFolders();
       } else if (m.type === "folder_scan_complete") {
         refreshFolders();
+      } else if (m.type === "folder_send_complete") {
+        // v0.21.x one-shot folder send finished. Show a summary
+        // toast with dedup info if any files were skipped.
+        const sent = m.sent || 0;
+        const failed = m.failed || 0;
+        const dedup = m.dedup_files || 0;
+        const dedupBytes = m.dedup_bytes || 0;
+        let body = `Sent ${_fmtFiles(sent)}`;
+        if (dedup > 0) {
+          body += ` · ${_fmtFiles(dedup)} already on device (${_humanBytes(dedupBytes)} skipped)`;
+        }
+        if (failed > 0) {
+          body += ` · ${failed} failed`;
+        }
+        toast(body, failed > 0 ? "bad" : "good", 7000);
+        hideFolderSendProgress();
+      } else if (m.type === "folder_send_cancelled") {
+        toast(`Send cancelled — sent ${m.sent || 0}, ${m.remaining || 0} not sent.`, "info", 5000);
+        hideFolderSendProgress();
       } else if (m.type === "key_change_acked" || m.type === "key_change_acked_all") {
         // v0.7.8: another tab acknowledged. Refresh peers so the
         // banner / overlay clears for everyone live.
@@ -26342,6 +26626,13 @@
           <span class="asm-sub">From clipboard (or just press Ctrl+V)</span>
         </span>
       </button>
+      <button type="button" class="asm-item" data-src="folder">
+        <span class="asm-icon">🗂️</span>
+        <span class="asm-label">
+          <span class="asm-title">Folder</span>
+          <span class="asm-sub">Send an entire folder, one-shot</span>
+        </span>
+      </button>
     `;
     document.body.appendChild(menu);
     // Position above the anchor (composer button); flip below if no room.
@@ -26377,6 +26668,8 @@
         $("#btn-camera")?.click();
       } else if (src === "paste") {
         $("#btn-screenshot")?.click();
+      } else if (src === "folder") {
+        _triggerFolderAttach();
       }
     });
     setTimeout(() => {
@@ -26384,6 +26677,42 @@
       document.addEventListener("keydown", esc);
     }, 0);
   }
+  // v0.21.x: chat composer "Folder" attach option — picks an OS
+  // folder + opens the Send confirmation modal. Goes through the
+  // ad-hoc folder-send endpoints (no Folders-tab registration
+  // required).
+  async function _triggerFolderAttach() {
+    if (!state.selectedPeer) {
+      toast("Pick a device on the left to start.", "info");
+      return;
+    }
+    const peer = state.peers.get(state.selectedPeer);
+    if (!peer?.fingerprint || peer.trust !== "pinned") {
+      toast("Pick a paired device first.", "info");
+      return;
+    }
+    let path = null;
+    try {
+      const r = await api.post("/api/fs/pick-folder", {});
+      if (r && r.path) path = r.path;
+      else if (r && r.cancelled) return;  // silent
+    } catch (e) {
+      toast(
+        `Folder picker unavailable on this device: ${errorToastBody(e)}`,
+        "info", 4000,
+      );
+      return;
+    }
+    if (!path) return;
+    const leaf = path.split(/[\\/]/).filter(Boolean).pop() || path;
+    openFolderSendConfirm({
+      scope: "adhoc", ident: path,
+      peerFp: peer.fingerprint,
+      peerHostname: peer.hostname || peer.short_id,
+      displayName: leaf, displayPath: path,
+    });
+  }
+
   // v0.9.2 voice - click toggles record / stop. Cancel + Send buttons
   // in the overlay handle explicit cancel vs send.
   $("#btn-voice")?.addEventListener("click", () => {
@@ -31405,6 +31734,14 @@
   $("#folder-settings-backdrop")?.addEventListener("click", (e) => {
     if (e.target === e.currentTarget) closeFolderSettings();
   });
+  // v0.21.x: folder Send confirmation modal + in-flight progress.
+  $("#folder-send-confirm-cancel")?.addEventListener("click", closeFolderSendConfirm);
+  $("#folder-send-confirm-go")?.addEventListener("click", _confirmFolderSendGo);
+  $("#folder-send-confirm-backdrop")?.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeFolderSendConfirm();
+  });
+  $("#fsp-cancel")?.addEventListener("click", _cancelInflightFolderSend);
+
   $("#folder-settings-close")?.addEventListener("click", closeFolderSettings);
   $("#folder-settings-save")?.addEventListener("click", saveFolderSettings);
   // v0.21.x: Folder location section — Browse picks an OS folder,

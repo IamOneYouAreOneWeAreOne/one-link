@@ -2413,6 +2413,20 @@ class UIServer:
         # set so the recipient's inbox mirrors the folder tree.
         r.add_post(r"/api/folders/{name}/send-to",
                    self._guarded(self.api_send_folder_to_peer))
+        # v0.21.x: pre-flight dedup + cancel + ad-hoc folder send
+        r.add_post(r"/api/folders/{name}/send-to/preview",
+                   self._guarded(self.api_send_folder_preview))
+        r.add_post(r"/api/folders/{name}/send-to/cancel",
+                   self._guarded(self.api_send_folder_cancel))
+        # Ad-hoc folder send by absolute path (chat composer "Folder"
+        # attach option uses this; the folder doesn't need to be
+        # registered in state.folders first).
+        r.add_post(r"/api/fs/send-folder",
+                   self._guarded(self.api_fs_send_folder))
+        r.add_post(r"/api/fs/send-folder/preview",
+                   self._guarded(self.api_fs_send_folder_preview))
+        r.add_post(r"/api/fs/send-folder/cancel",
+                   self._guarded(self.api_fs_send_folder_cancel))
         r.add_post(r"/api/folders/{name}/reveal", self._guarded(self.api_folder_reveal))
         # v0.21.x file browser — per-file preview / raw stream / reveal
         r.add_get(r"/api/folders/{name}/file/{path:.+}/preview",
@@ -14470,6 +14484,204 @@ class UIServer:
             "ok": True, "folder": self.daemon.state.get_folder(name),
         })
 
+    # ─── v0.21.x folder one-shot send — shared helpers ─────────────
+    # The three folder-send entry points (POST /api/folders/{name}/
+    # send-to, /preview, ad-hoc /api/fs/send-folder + /preview) share
+    # the same primitives: peer resolution, folder walk, preview-via-
+    # BLOB_INVENTORY_QUERY, background-task tracking for cancellation.
+
+    def _resolve_online_peer(self, peer_fp: str):
+        """Find a discovery.Peer for the given fingerprint, or None."""
+        if not self.daemon.discovery:
+            return None
+        for p in self.daemon.discovery.registry.list():
+            cand = self.daemon._peer_fp_from_peer(p)
+            if cand == peer_fp:
+                return p
+        return None
+
+    def _walk_folder_files(
+        self, root: Path, rel_root: str,
+    ) -> tuple[list[tuple[Path, str]], int, int]:
+        """Walk root, return (files, total_bytes, skipped). files is
+        [(absolute path, rel_path)] with every entry prefixed by
+        rel_root so the recipient ends up with inbox/<rel_root>/<rel>.
+        """
+        files: list[tuple[Path, str]] = []
+        total_bytes = 0
+        skipped = 0
+        for p in root.rglob("*"):
+            try:
+                if not p.is_file():
+                    continue
+                rel = p.relative_to(root).as_posix()
+                files.append((p, f"{rel_root}/{rel}"))
+                total_bytes += p.stat().st_size
+            except OSError:
+                skipped += 1
+        return files, total_bytes, skipped
+
+    async def _preview_folder_send(
+        self, peer, files: list[tuple[Path, str]], total_bytes: int,
+    ) -> dict:
+        """Pre-flight dedup probe: hash each file (cheap if cached
+        via file_index_cache), ask peer BLOB_INVENTORY_QUERY which
+        ones they already have, return per-bucket counts + bytes."""
+        from one_link.cdc import hash_path
+        per_file: list[tuple[Path, str, str, int]] = []  # path, rel, hash, size
+        for p, rel in files:
+            try:
+                size = p.stat().st_size
+                blob = hash_path(p)
+                per_file.append((p, rel, blob, size))
+            except OSError:
+                continue
+        hashes = [h for (_, _, h, _) in per_file]
+        peer_has: set[str] | None = None
+        if hashes:
+            try:
+                peer_has = await self.daemon.query_peer_blob_inventory(
+                    peer, hashes,
+                )
+            except Exception as e:
+                log.warning("BLOB_INVENTORY_QUERY failed: %s", e)
+                peer_has = None
+        pre_check_complete = peer_has is not None
+        check_set = peer_has if peer_has is not None else set()
+        on_peer_count = 0
+        on_peer_bytes = 0
+        new_count = 0
+        new_bytes = 0
+        for _, _, blob, size in per_file:
+            if blob in check_set:
+                on_peer_count += 1
+                on_peer_bytes += size
+            else:
+                new_count += 1
+                new_bytes += size
+        return {
+            "file_count": len(files),
+            "total_bytes": total_bytes,
+            "already_on_peer_count": on_peer_count,
+            "already_on_peer_bytes": on_peer_bytes,
+            "will_transfer_count": new_count,
+            "will_transfer_bytes": new_bytes,
+            "pre_check_complete": pre_check_complete,
+        }
+
+    def _folder_send_key(self, scope: str, ident: str, peer_fp: str) -> str:
+        return f"{scope}:{ident}:{peer_fp}"
+
+    def _ensure_folder_send_registry(self) -> dict:
+        if not hasattr(self, "_folder_send_tasks"):
+            self._folder_send_tasks: dict = {}
+        return self._folder_send_tasks
+
+    async def _run_folder_send_task(
+        self, *, scope: str, ident: str, peer, peer_fp: str,
+        files: list[tuple[Path, str]], on_complete_broadcast: dict,
+    ) -> None:
+        """Background task: send each file, broadcast completion +
+        dedup summary, clean up the task entry. Cancellable via
+        task.cancel() from api_send_folder_cancel.
+        """
+        registry = self._ensure_folder_send_registry()
+        key = self._folder_send_key(scope, ident, peer_fp)
+        sent = 0
+        failed = 0
+        dedup_files = 0
+        dedup_bytes = 0
+        try:
+            for path_obj, rel in files:
+                try:
+                    result = await self.daemon.send_file(
+                        peer, path_obj, rel_path=rel,
+                    )
+                    sent += 1
+                    # send_file may return progress / dedup hints; if
+                    # the receiver answered FILE_WANTS=[] the
+                    # transfer recorded zero progress_bytes despite
+                    # 'sent'. Use 'progress_bytes == 0' as a dedup
+                    # heuristic. Some pipelines return None metadata;
+                    # treat absence as 'unknown'.
+                    if isinstance(result, dict):
+                        meta = result.get("metadata") or {}
+                        pb = result.get("progress_bytes")
+                        if pb is None:
+                            pb = meta.get("progress_bytes")
+                        try:
+                            if pb is not None and int(pb) == 0:
+                                dedup_files += 1
+                                with contextlib.suppress(OSError):
+                                    dedup_bytes += path_obj.stat().st_size
+                        except (TypeError, ValueError):
+                            pass
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    failed += 1
+                    log.warning(
+                        "folder send %s/%s rel=%s failed: %s",
+                        scope, ident, rel, e,
+                    )
+            payload = {
+                **on_complete_broadcast,
+                "sent": sent,
+                "failed": failed,
+                "dedup_files": dedup_files,
+                "dedup_bytes": dedup_bytes,
+            }
+            self.broadcast(payload)
+        except asyncio.CancelledError:
+            self.broadcast({
+                **on_complete_broadcast,
+                "type": on_complete_broadcast["type"].replace(
+                    "_complete", "_cancelled",
+                ),
+                "sent": sent,
+                "failed": failed,
+                "remaining": max(0, len(files) - sent - failed),
+            })
+            raise
+        finally:
+            registry.pop(key, None)
+
+    def _kick_folder_send_task(
+        self, *, scope: str, ident: str, peer, peer_fp: str,
+        files: list[tuple[Path, str]], on_complete_broadcast: dict,
+    ) -> str:
+        """Schedule the background send task, return its registry key
+        (used by the cancel endpoint to find it)."""
+        registry = self._ensure_folder_send_registry()
+        key = self._folder_send_key(scope, ident, peer_fp)
+        # If a task with this key is already running, refuse a second
+        # — caller should cancel the first one to start fresh.
+        if key in registry and not registry[key].done():
+            return key
+        task = asyncio.get_running_loop().create_task(
+            self._run_folder_send_task(
+                scope=scope, ident=ident, peer=peer, peer_fp=peer_fp,
+                files=files, on_complete_broadcast=on_complete_broadcast,
+            ),
+        )
+        registry[key] = task
+        return key
+
+    def _cancel_folder_send_task(
+        self, scope: str, ident: str, peer_fp: str,
+    ) -> bool:
+        """Cancel an in-flight folder-send task. Returns True if a
+        task was found + cancelled, False if nothing matched."""
+        registry = self._ensure_folder_send_registry()
+        key = self._folder_send_key(scope, ident, peer_fp)
+        task = registry.get(key)
+        if task is None or task.done():
+            return False
+        task.cancel()
+        return True
+
+    # ─── endpoints ────────────────────────────────────────────────
+
     async def api_send_folder_to_peer(
         self, request: web.Request,
     ) -> web.Response:
@@ -14480,12 +14692,11 @@ class UIServer:
         Walks the folder on disk and sends each file via the standard
         send_file pipeline with rel_path set so the recipient's inbox
         mirrors the folder tree. NO MANIFEST PUSH, NO PERMISSION GRANT,
-        NO SYNC — this is "I literally send this folder to that person
-        and it arrives." Future edits do NOT propagate.
+        NO SYNC. Future edits do NOT propagate.
 
-        Response: { ok, started, file_count, skipped }
-        Actual file transfers run in a background task; clients can
-        watch the regular file-transfer WebSocket events for progress.
+        Returns: { ok, started, file_count, total_bytes, skipped }.
+        Actual transfers run in a tracked background task; cancel via
+        POST /api/folders/{name}/send-to/cancel.
         """
         if self.daemon.state is None:
             return web.json_response(
@@ -14504,13 +14715,7 @@ class UIServer:
             return web.json_response(
                 {"error": "peer_fp required"}, status=400,
             )
-        peer = None
-        if self.daemon.discovery:
-            for p in self.daemon.discovery.registry.list():
-                cand = self.daemon._peer_fp_from_peer(p)
-                if cand == peer_fp:
-                    peer = p
-                    break
+        peer = self._resolve_online_peer(peer_fp)
         if peer is None:
             return web.json_response(
                 {"error": "peer not currently online", "code": "peer_offline"},
@@ -14527,70 +14732,246 @@ class UIServer:
                 },
                 status=409,
             )
-        # Walk the folder + collect file list before kicking the
-        # background sender so the caller gets an immediate count.
-        files: list[tuple[Path, str]] = []  # (abs path, rel_path)
-        skipped = 0
-        for p in local_path.rglob("*"):
-            try:
-                if not p.is_file():
-                    continue
-                rel = p.relative_to(local_path).as_posix()
-                # Prefix every entry with the folder name so the
-                # recipient ends up with inbox/<folder_name>/<rel>
-                # — a clean, browseable folder rather than loose
-                # files mixed into their flat inbox.
-                rel_with_root = f"{name}/{rel}"
-                files.append((p, rel_with_root))
-            except OSError:
-                skipped += 1
+        files, total_bytes, skipped = self._walk_folder_files(local_path, name)
         if not files:
             return web.json_response(
                 {"error": "folder is empty", "code": "folder_empty"},
                 status=409,
             )
-
-        async def _bg_send() -> None:
-            # PERFORMANCE NOTE (deferred follow-up): N files = N
-            # FILE_OFFER round-trips. The wire protocol already has
-            # a FILE_OFFER_BATCH_V1 handler on the receiver side
-            # (see daemon.py:5133); a sender-side batcher would
-            # collapse the offer phase into a single round-trip
-            # (capped at 256 offers per batch). Win on LAN ~5s
-            # saved for 100-file folders; bigger on WAN. Skipped
-            # this round to keep the change set small + safely
-            # tested — sequential sends are functionally correct
-            # and per-file overhead is already low thanks to the
-            # Linked Mesh persistent outbound session (no per-file
-            # handshake) and the CDC chunk cache (no re-send of
-            # known chunks).
-            sent = 0
-            failed = 0
-            for path_obj, rel in files:
-                try:
-                    await self.daemon.send_file(peer, path_obj, rel_path=rel)
-                    sent += 1
-                except Exception as e:
-                    failed += 1
-                    log.warning(
-                        "folder send %s -> %s: %s failed: %s",
-                        name, peer_fp[:8], rel, e,
-                    )
-            self.broadcast({
+        self._kick_folder_send_task(
+            scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
+            files=files,
+            on_complete_broadcast={
                 "type": "folder_send_complete",
-                "name": name,
-                "peer_fp": peer_fp,
-                "sent": sent,
-                "failed": failed,
-            })
-
-        asyncio.get_running_loop().create_task(_bg_send())
+                "name": name, "peer_fp": peer_fp,
+            },
+        )
         return web.json_response({
-            "ok": True,
-            "started": True,
+            "ok": True, "started": True,
             "file_count": len(files),
+            "total_bytes": total_bytes,
             "skipped": skipped,
         })
+
+    async def api_send_folder_preview(
+        self, request: web.Request,
+    ) -> web.Response:
+        """v0.21.x: pre-flight dedup info for a folder Send.
+        Body: { peer_fp: str }. Returns dedup breakdown (no bytes
+        actually sent)."""
+        if self.daemon.state is None:
+            return web.json_response(
+                {"error": "state not initialized"}, status=503,
+            )
+        name = request.match_info["name"]
+        folder = self.daemon.state.get_folder(name)
+        if folder is None:
+            return web.json_response({"error": "no such folder"}, status=404)
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        peer_fp = (data.get("peer_fp") or "").strip()
+        if not peer_fp:
+            return web.json_response(
+                {"error": "peer_fp required"}, status=400,
+            )
+        peer = self._resolve_online_peer(peer_fp)
+        if peer is None:
+            return web.json_response(
+                {"error": "peer not currently online", "code": "peer_offline"},
+                status=503,
+            )
+        local_path = Path(folder["local_path"])
+        if not local_path.is_dir():
+            return web.json_response(
+                {
+                    "error": (
+                        f"folder location missing on this device: {local_path}"
+                    ),
+                    "code": "folder_path_missing",
+                },
+                status=409,
+            )
+        files, total_bytes, skipped = self._walk_folder_files(local_path, name)
+        if not files:
+            return web.json_response(
+                {"error": "folder is empty", "code": "folder_empty"},
+                status=409,
+            )
+        stats = await self._preview_folder_send(peer, files, total_bytes)
+        stats["skipped"] = skipped
+        stats["name"] = name
+        stats["peer_fp"] = peer_fp
+        return web.json_response({"ok": True, **stats})
+
+    async def api_send_folder_cancel(
+        self, request: web.Request,
+    ) -> web.Response:
+        """v0.21.x: cancel an in-flight folder Send.
+        Body: { peer_fp: str }. Returns 200 with cancelled:true on
+        success, 404 if no in-flight task matches."""
+        name = request.match_info["name"]
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        peer_fp = (data.get("peer_fp") or "").strip()
+        if not peer_fp:
+            return web.json_response(
+                {"error": "peer_fp required"}, status=400,
+            )
+        cancelled = self._cancel_folder_send_task("folder", name, peer_fp)
+        if not cancelled:
+            return web.json_response(
+                {"error": "no in-flight folder send found"}, status=404,
+            )
+        return web.json_response({"ok": True, "cancelled": True})
+
+    # ── ad-hoc (chat composer "Folder" attach option) ──────────
+
+    def _validate_ad_hoc_folder_path(
+        self, raw_path: str,
+    ) -> tuple[Path | None, str | None, dict | None]:
+        """Resolve a user-supplied folder path; return (path, root_name,
+        error_response). Rejects paths that don't exist or aren't
+        directories. The root_name (leaf basename) is what the
+        recipient sees under inbox/<root_name>/."""
+        if not raw_path:
+            return None, None, {"error": "local_path required"}
+        try:
+            path = Path(raw_path).expanduser().resolve()
+        except (OSError, ValueError) as e:
+            return None, None, {"error": f"bad local_path: {e}"}
+        if not path.is_dir():
+            return None, None, {
+                "error": f"path is not a directory: {path}",
+                "code": "not_a_directory",
+            }
+        # The folder name we ship in rel_path. Sanitize via the same
+        # rules that gate file names so "C:\." or "/" can't sneak in.
+        leaf = path.name
+        if not leaf or leaf in (".", "..", "/", "\\"):
+            return None, None, {
+                "error": "could not derive a folder name from path",
+            }
+        return path, leaf, None
+
+    async def api_fs_send_folder(
+        self, request: web.Request,
+    ) -> web.Response:
+        """v0.21.x ad-hoc one-shot folder send.
+        Body: { peer_fp: str, local_path: str }."""
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        peer_fp = (data.get("peer_fp") or "").strip()
+        local_path_raw = (data.get("local_path") or "").strip()
+        if not peer_fp:
+            return web.json_response(
+                {"error": "peer_fp required"}, status=400,
+            )
+        path, root_name, err = self._validate_ad_hoc_folder_path(local_path_raw)
+        if err is not None:
+            return web.json_response(err, status=400)
+        peer = self._resolve_online_peer(peer_fp)
+        if peer is None:
+            return web.json_response(
+                {"error": "peer not currently online", "code": "peer_offline"},
+                status=503,
+            )
+        files, total_bytes, skipped = self._walk_folder_files(path, root_name)
+        if not files:
+            return web.json_response(
+                {"error": "folder is empty", "code": "folder_empty"},
+                status=409,
+            )
+        self._kick_folder_send_task(
+            scope="adhoc", ident=str(path), peer=peer, peer_fp=peer_fp,
+            files=files,
+            on_complete_broadcast={
+                "type": "folder_send_complete",
+                "name": root_name,
+                "local_path": str(path),
+                "peer_fp": peer_fp,
+                "scope": "adhoc",
+            },
+        )
+        return web.json_response({
+            "ok": True, "started": True,
+            "name": root_name,
+            "local_path": str(path),
+            "file_count": len(files),
+            "total_bytes": total_bytes,
+            "skipped": skipped,
+        })
+
+    async def api_fs_send_folder_preview(
+        self, request: web.Request,
+    ) -> web.Response:
+        """v0.21.x ad-hoc preview."""
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        peer_fp = (data.get("peer_fp") or "").strip()
+        local_path_raw = (data.get("local_path") or "").strip()
+        if not peer_fp:
+            return web.json_response(
+                {"error": "peer_fp required"}, status=400,
+            )
+        path, root_name, err = self._validate_ad_hoc_folder_path(local_path_raw)
+        if err is not None:
+            return web.json_response(err, status=400)
+        peer = self._resolve_online_peer(peer_fp)
+        if peer is None:
+            return web.json_response(
+                {"error": "peer not currently online", "code": "peer_offline"},
+                status=503,
+            )
+        files, total_bytes, skipped = self._walk_folder_files(path, root_name)
+        if not files:
+            return web.json_response(
+                {"error": "folder is empty", "code": "folder_empty"},
+                status=409,
+            )
+        stats = await self._preview_folder_send(peer, files, total_bytes)
+        stats["skipped"] = skipped
+        stats["name"] = root_name
+        stats["local_path"] = str(path)
+        stats["peer_fp"] = peer_fp
+        return web.json_response({"ok": True, **stats})
+
+    async def api_fs_send_folder_cancel(
+        self, request: web.Request,
+    ) -> web.Response:
+        """v0.21.x ad-hoc cancel.
+        Body: { peer_fp: str, local_path: str }."""
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        peer_fp = (data.get("peer_fp") or "").strip()
+        local_path_raw = (data.get("local_path") or "").strip()
+        if not peer_fp or not local_path_raw:
+            return web.json_response(
+                {"error": "peer_fp and local_path required"}, status=400,
+            )
+        try:
+            path = Path(local_path_raw).expanduser().resolve()
+        except Exception as e:
+            return web.json_response(
+                {"error": f"bad local_path: {e}"}, status=400,
+            )
+        cancelled = self._cancel_folder_send_task(
+            "adhoc", str(path), peer_fp,
+        )
+        if not cancelled:
+            return web.json_response(
+                {"error": "no in-flight folder send found"}, status=404,
+            )
+        return web.json_response({"ok": True, "cancelled": True})
 
     async def api_relocate_folder(self, request: web.Request) -> web.Response:
         """v0.21.x: point an existing folder at a new on-disk path.
