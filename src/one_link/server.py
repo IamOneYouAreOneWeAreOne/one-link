@@ -698,7 +698,31 @@ def _pick_win_ifiledialog(title: str):
             return _PICKER_UNAVAILABLE
         SetTitle(ppv, title)
 
-        hr = Show(ppv, None)
+        # v0.21.x: the dialog was opening BEHIND the browser tab,
+        # so users clicked Browse and "nothing happened" — the
+        # picker was just sitting invisible. Two things needed:
+        #
+        # (1) Hand the dialog the user's CURRENTLY-FOCUSED window
+        #     (the browser) as its owner via Show(hwnd). Owning a
+        #     foreground window makes Windows Z-order the modal on
+        #     top of it instead of dropping it behind.
+        #
+        # (2) Call AllowSetForegroundWindow(ASFW_ANY) before Show()
+        #     so the foreground-lock policy doesn't suppress our
+        #     activation request (the daemon process didn't put the
+        #     browser in front, so Windows would normally refuse to
+        #     let the daemon's window take focus).
+        try:
+            user32 = _ct.WinDLL("user32")
+            user32.GetForegroundWindow.restype = _wt.HWND
+            user32.AllowSetForegroundWindow.restype = _ct.c_int
+            user32.AllowSetForegroundWindow.argtypes = [_wt.DWORD]
+            ASFW_ANY = 0xFFFFFFFF
+            user32.AllowSetForegroundWindow(ASFW_ANY)
+            parent_hwnd = user32.GetForegroundWindow()
+        except Exception:
+            parent_hwnd = None
+        hr = Show(ppv, parent_hwnd)
         # From here on, the dialog has been shown to the user.
         # Any further failure (including user cancellation) returns
         # None so the dispatcher DOES NOT fall through to the legacy
@@ -14639,18 +14663,49 @@ class UIServer:
         """v0.10.6: open a native folder-picker dialog on the daemon's
         desktop and return the selected absolute path.
 
-        Dispatches to the OS-native picker (Vista-style FolderBrowser
-        on Windows, Cocoa choose-folder on macOS, zenity/kdialog on
+        Dispatches to the OS-native picker (modern IFileOpenDialog on
+        Windows, Cocoa choose-folder on macOS, zenity/kdialog on
         Linux). The picker runs in a worker thread because the dialog
-        loops are blocking."""
+        loops are blocking.
+
+        v0.21.x: spawn a DEDICATED thread per call instead of using
+        asyncio.to_thread (which pulls from a shared pool). Windows
+        IFileOpenDialog requires the calling thread to be in STA
+        (single-threaded apartment) mode. asyncio's shared thread
+        pool reuses threads across requests; if any prior request
+        on that thread initialized COM as MTA (which other parts of
+        the daemon can do — mDNS, file watchers, etc.), the picker
+        thread's CoInitializeEx(STA) returns RPC_E_CHANGED_MODE,
+        the dialog technically "shows" but in a broken state — the
+        symptom was clicking Browse and seeing nothing happen for
+        seconds at a time while a hidden dialog sat invisible. A
+        fresh thread per call guarantees clean COM state."""
+        import threading
+
         title = "Choose a folder to share with One Link"
-        try:
-            picked = await asyncio.to_thread(_native_folder_picker, title)
-        except Exception as e:
+        result_box: dict = {}
+
+        def _worker() -> None:
+            try:
+                result_box["picked"] = _native_folder_picker(title)
+            except Exception as e:
+                result_box["error"] = e
+
+        t = threading.Thread(
+            target=_worker, name="ol-folder-picker", daemon=True,
+        )
+        t.start()
+        # Park the picker on the dedicated thread, but don't block
+        # the event loop — yield to a worker that joins the thread.
+        await asyncio.to_thread(t.join)
+
+        if "error" in result_box:
+            err = result_box["error"]
             return web.json_response(
-                {"error": f"folder picker failed: {e}", "available": False},
+                {"error": f"folder picker failed: {err}", "available": False},
                 status=500,
             )
+        picked = result_box.get("picked")
         if picked is None:
             # Either the user cancelled OR no picker was available.
             # The UI falls back to the manual text path input.

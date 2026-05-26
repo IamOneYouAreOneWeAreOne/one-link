@@ -480,6 +480,75 @@ def test_modern_picker_tries_broker_clsid_on_stripped_windows():
     assert "-2147221164" in body or "0x80040154" in body
 
 
+def test_modern_picker_passes_foreground_hwnd_to_show():
+    """v0.21.x: Show(hwnd=None) drops the dialog behind the user's
+    foreground window because there's no owner Z-order anchor.
+    Symptom users hit: click Browse, see nothing happen for seconds
+    (a hidden dialog sitting behind the browser tab). The picker
+    must get the active foreground HWND and pass it to Show() so
+    Windows Z-orders the modal ON TOP of the browser. Pin both
+    the AllowSetForegroundWindow call AND the Show(parent_hwnd)
+    shape so a refactor can't quietly revert to Show(None)."""
+    from pathlib import Path as _Path
+    src = (_Path(__file__).resolve().parents[1] / "src" / "one_link" / "server.py").read_text(encoding="utf-8")
+    idx = src.find("def _pick_win_ifiledialog(")
+    end = src.find("\ndef _pick_win_powershell(", idx)
+    body = src[idx:end]
+    # Must call AllowSetForegroundWindow so the daemon process can
+    # let the dialog take focus (Windows would normally suppress
+    # focus-stealing from a background process).
+    assert "AllowSetForegroundWindow" in body, (
+        "missing AllowSetForegroundWindow call — the dialog will "
+        "open BEHIND the browser tab and the user will think the "
+        "Browse button is broken"
+    )
+    # Must query the current foreground window to use as the
+    # dialog's owner.
+    assert "GetForegroundWindow" in body, (
+        "missing GetForegroundWindow — the dialog needs an owner "
+        "HWND to be Z-ordered above"
+    )
+    # And must actually pass it to Show.
+    assert "Show(ppv, parent_hwnd)" in body, (
+        "Show must be called with the resolved parent_hwnd, not "
+        "None — None drops the dialog behind active windows"
+    )
+
+
+def test_pick_folder_endpoint_uses_dedicated_thread():
+    """v0.21.x: asyncio.to_thread reuses threads from a shared
+    pool. Windows IFileOpenDialog requires the calling thread to
+    be in STA (single-threaded apartment) mode; if any prior call
+    on that thread initialized COM as MTA, our STA init returns
+    RPC_E_CHANGED_MODE and the dialog ends up in a broken state
+    (visible-but-unresponsive, or hidden entirely). Pin that
+    api_pick_folder spawns a fresh threading.Thread per call so
+    COM state can never leak across requests."""
+    from pathlib import Path as _Path
+    src = (_Path(__file__).resolve().parents[1] / "src" / "one_link" / "server.py").read_text(encoding="utf-8")
+    idx = src.find("async def api_pick_folder(")
+    assert idx > 0
+    end = src.find("\n    async def ", idx + 1)
+    body = src[idx:end if end > 0 else idx + 4000]
+    # Must use a fresh threading.Thread, NOT asyncio.to_thread
+    # directly on _native_folder_picker.
+    assert "threading.Thread" in body, (
+        "api_pick_folder must spawn a dedicated thread for the "
+        "picker — asyncio.to_thread reuses a shared pool which "
+        "leaks COM state and silently breaks the dialog"
+    )
+    # Must NOT directly to_thread the picker itself (the .join is
+    # OK; the picker call is the part that needs the fresh thread).
+    assert "asyncio.to_thread(_native_folder_picker" not in body, (
+        "api_pick_folder is back to asyncio.to_thread on the picker "
+        "itself — this is exactly the bug that broke the Browse "
+        "button: shared pool threads come with leaked COM state"
+    )
+    # And must actually start + join the thread.
+    assert ".start()" in body
+    assert ".join" in body
+
+
 def test_powershell_picker_passes_dialog_title(monkeypatch):
     """The title we configure must reach the WinForms dialog so
     the user sees 'Choose a folder to share with One Link' rather
