@@ -3940,6 +3940,45 @@
   .pair-peer-info .who-name { font-weight: 600; }
   .pair-peer-info .who-sub  { font-size: 12px; color: var(--text-dim); }
 
+  /* v0.21.x: folder offer preview (collapsible file list). Lets the
+     user see what they're about to accept BEFORE clicking Accept. */
+  .offer-preview-toggle {
+    display: block;
+    margin: 6px 0 4px;
+    font-size: 11.5px;
+    color: var(--accent);
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .offer-preview-toggle:hover { text-decoration: underline; }
+  .offer-preview-body {
+    max-height: 220px;
+    overflow-y: auto;
+    background: var(--bg-2);
+    border-radius: 6px;
+    padding: 6px 8px;
+    margin-bottom: 8px;
+  }
+  .offer-preview-body ul {
+    margin: 0;
+    padding-left: 16px;
+    font-size: 11.5px;
+    font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+    color: var(--text-dim);
+  }
+  .offer-preview-body li {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 1.5;
+  }
+  .offer-preview-overflow {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 4px;
+    font-style: italic;
+  }
+
   /* v0.21.x Wave 6 UI: live per-blob receive progress on folder card.
      Surfaces folder_recv_blob_done WS events as a one-line indicator
      so users see "Receiving 47 blobs · 12.3 MB · 100 to go" while a
@@ -3984,6 +4023,21 @@
   .folder-send-stats .fss-row .fss-value { font-weight: 600; }
   .folder-send-stats .fss-row.fss-row-transfer .fss-value { color: var(--accent); }
   .folder-send-stats .fss-row.fss-row-dedup .fss-value { color: var(--good, #6acc7a); }
+  .folder-send-stats .fss-row.fss-row-recommendation {
+    background: rgba(118, 87, 244, 0.08);
+    border-radius: 6px;
+    padding: 6px 10px;
+    border-left: 3px solid var(--accent);
+  }
+  .folder-send-stats .fss-row.fss-row-recommendation .fss-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+  }
+  .folder-send-stats .fss-row.fss-row-recommendation .fss-value {
+    font-weight: 600;
+  }
   .folder-send-stats .fss-row-loading {
     color: var(--text-dim);
     font-size: 12.5px;
@@ -20314,6 +20368,51 @@
       "div", "offer-meta",
       `${o.entry_count || 0} file${o.entry_count === 1 ? "" : "s"} · ${_humanBytes(o.total_bytes)}`,
     ));
+    // v0.21.x: collapsible file-list preview. Shows the user what's
+    // actually IN the folder before they click Accept. Entries are
+    // already in the offer (sender shipped them in MANIFEST_PUSH);
+    // we just render them on demand. Hidden by default to keep the
+    // card compact.
+    const entries = Array.isArray(o.entries) ? o.entries : [];
+    if (entries.length > 0) {
+      const previewToggle = document.createElement("a");
+      previewToggle.href = "#";
+      previewToggle.className = "offer-preview-toggle";
+      previewToggle.textContent = `▸ Preview file list (${entries.length})`;
+      const previewBody = document.createElement("div");
+      previewBody.className = "offer-preview-body";
+      previewBody.style.display = "none";
+      // Show up to 200 entries; rest are summarized.
+      const SHOW_LIMIT = 200;
+      const shown = entries.slice(0, SHOW_LIMIT);
+      const overflow = entries.length - shown.length;
+      const ul = document.createElement("ul");
+      for (const e of shown) {
+        const li = document.createElement("li");
+        const sz = _humanBytes(e.size || 0);
+        const path = String(e.file_path || e.path || "?");
+        li.title = path;
+        li.textContent = `${path} · ${sz}`;
+        ul.appendChild(li);
+      }
+      previewBody.appendChild(ul);
+      if (overflow > 0) {
+        const more = document.createElement("div");
+        more.className = "offer-preview-overflow";
+        more.textContent = `…and ${overflow} more`;
+        previewBody.appendChild(more);
+      }
+      previewToggle.onclick = (ev) => {
+        ev.preventDefault();
+        const open = previewBody.style.display !== "none";
+        previewBody.style.display = open ? "none" : "block";
+        previewToggle.textContent = (
+          (open ? "▸" : "▾") + ` Preview file list (${entries.length})`
+        );
+      };
+      card.appendChild(previewToggle);
+      card.appendChild(previewBody);
+    }
     // Path picker row.
     const pathRow = el("div", "offer-path-row");
     const pathInput = document.createElement("input");
@@ -21079,6 +21178,28 @@
       hint.className = "fss-row fss-row-loading";
       hint.innerHTML = `<span>The other device couldn't answer the dedup pre-check; sending will still skip files they already have at the FILE_OFFER step.</span>`;
       statsEl.appendChild(hint);
+    }
+    // v0.21.x: smart auto-router recommendation. Shows the user
+    // WHICH mode the daemon would pick if they don't override +
+    // WHY (e.g. "78% compressible → archive (60% smaller)").
+    if (stats.recommended_mode) {
+      const rec = document.createElement("div");
+      rec.className = "fss-row fss-row-recommendation";
+      const modeLabel = {
+        archive: "Compressed archive",
+        manifest_push: "Live folder sync (chunk dedup)",
+        per_file: "Per-file (FILE_OFFER batched)",
+      }[stats.recommended_mode] || stats.recommended_mode;
+      const compRatio = stats.recommended_compressible_ratio;
+      const compHint = compRatio !== undefined && compRatio !== null
+        ? ` · ${Math.round((compRatio || 0) * 100)}% compressible`
+        : "";
+      rec.innerHTML = (
+        `<span class="fss-label">Recommended</span>`
+        + `<span class="fss-value">${modeLabel}${compHint}</span>`
+      );
+      rec.title = stats.recommended_reason || "";
+      statsEl.appendChild(rec);
     }
   }
 
@@ -25013,6 +25134,35 @@
               refreshFolders();
             }
           });
+        }
+      } else if (m.type === "folder_send_blob_done") {
+        // v0.21.x: per-blob send progress (sender side). Update the
+        // in-flight overlay's detail line so the user sees real
+        // progress instead of static "Sending paper". Stash by peer_fp
+        // so multi-peer fan-out updates each card independently.
+        state.folderSendProgress = state.folderSendProgress || {};
+        const key = `${m.folder_name}::${m.peer_fp}`;
+        state.folderSendProgress[key] = {
+          folder_name: m.folder_name, peer_fp: m.peer_fp,
+          blobs_done: m.blobs_done || 0,
+          blobs_total: m.blobs_total || 0,
+          bytes_done: m.bytes_done || 0,
+          bytes_total: m.bytes_total || 0,
+          last_seen: Date.now(),
+        };
+        // Update the in-flight overlay if we're sending to this peer.
+        const cur = state.folderSendInflight;
+        if (cur && cur.peerFp === m.peer_fp && cur.displayName === m.folder_name) {
+          const detail = $("#fsp-detail");
+          if (detail) {
+            const total = m.blobs_total || 0;
+            const done = m.blobs_done || 0;
+            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+            detail.textContent = (
+              `${done} of ${total} blob${total === 1 ? "" : "s"} · `
+              + `${_humanBytes(m.bytes_done || 0)} sent · ${pct}%`
+            );
+          }
         }
       } else if (m.type === "folder_recv_collision") {
         // v0.21.x: incoming folder write overwrote a local file with

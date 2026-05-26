@@ -19553,6 +19553,24 @@ class Daemon:
                         "peer": peer.short_id,
                     },
                 )
+                # v0.21.x: per-blob progress on the SENDER side. UI
+                # uses these to update the in-flight overlay from
+                # generic "Sending paper" to specific "Sending paper
+                # · 23 of 147 blobs · 12 MB sent". Mirrors the
+                # folder_recv_blob_done emitted on the RECEIVER side.
+                if self.ui_server is not None:
+                    with contextlib.suppress(Exception):
+                        self.ui_server.broadcast({
+                            "type": "folder_send_blob_done",
+                            "folder_name": folder_name,
+                            "peer_fp": peer_fp,
+                            "blob": blob_hex,
+                            "size": int(size),
+                            "blobs_done": blobs_sent,
+                            "blobs_total": len(wants),
+                            "bytes_done": bytes_sent,
+                            "bytes_total": total_bytes,
+                        })
 
             await channel.close()
             self._update_transfer(

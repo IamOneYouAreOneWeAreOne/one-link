@@ -15526,6 +15526,21 @@ class UIServer:
             )
         stats = await self._preview_folder_send(peer, files, total_bytes)
         stats["skipped"] = skipped
+        # v0.21.x: also run the smart auto-router so the confirmation
+        # modal can show "Would send as ARCHIVE (60% smaller)" before
+        # the user clicks Send. Cheap — picker is <5ms on 500 files.
+        try:
+            mode, reasoning = await self._pick_folder_send_mode(
+                peer=peer, files=files,
+            )
+            stats["recommended_mode"] = mode
+            stats["recommended_reason"] = reasoning.get("why")
+            stats["recommended_compressible_ratio"] = reasoning.get(
+                "compressible_ratio",
+            )
+            stats["recommended_dedup_ratio"] = reasoning.get("dedup_ratio")
+        except Exception as e:
+            log.debug("auto-router hint failed: %s", e)
         stats["name"] = name
         stats["peer_fp"] = peer_fp
         return web.json_response({"ok": True, **stats})
@@ -15695,6 +15710,19 @@ class UIServer:
         stats["name"] = root_name
         stats["local_path"] = str(path)
         stats["peer_fp"] = peer_fp
+        # v0.21.x: auto-router hint for ad-hoc folder send.
+        try:
+            mode, reasoning = await self._pick_folder_send_mode(
+                peer=peer, files=files,
+            )
+            stats["recommended_mode"] = mode
+            stats["recommended_reason"] = reasoning.get("why")
+            stats["recommended_compressible_ratio"] = reasoning.get(
+                "compressible_ratio",
+            )
+            stats["recommended_dedup_ratio"] = reasoning.get("dedup_ratio")
+        except Exception as e:
+            log.debug("auto-router hint failed (adhoc): %s", e)
         return web.json_response({"ok": True, **stats})
 
     async def api_fs_send_folder_cancel(

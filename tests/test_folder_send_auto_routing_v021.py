@@ -239,6 +239,30 @@ async def test_endpoint_explicit_per_file_overrides_picker(auto_ctx, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_preview_endpoint_includes_recommended_mode(auto_ctx, tmp_path):
+    """v0.21.x Wave C: preview response now carries auto-router
+    recommendation so the confirmation modal can show the user
+    'Recommended: Compressed archive · 100% compressible' before
+    they click Send."""
+    src = tmp_path / "preview_demo"
+    _add_folder(
+        auto_ctx["state"], "preview_demo", src,
+        [(f"f{i}.py", b"# code\n" * 5000) for i in range(3)],
+    )
+    r = await auto_ctx["client"].post(
+        "/api/folders/preview_demo/send-to/preview",
+        headers=_h(auto_ctx["token"]),
+        json={"peer_fp": auto_ctx["peer_fp"]},
+    )
+    assert r.status == 200, await r.text()
+    body = await r.json()
+    assert "recommended_mode" in body
+    assert body["recommended_mode"] in {"archive", "manifest_push", "per_file"}
+    assert "recommended_reason" in body
+    assert body["recommended_compressible_ratio"] is not None
+
+
+@pytest.mark.asyncio
 async def test_endpoint_mode_string_override_works(auto_ctx, tmp_path):
     """mode='manifest_push' (string flag) also forces."""
     src = tmp_path / "papers"
