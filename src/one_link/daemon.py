@@ -5754,6 +5754,11 @@ class Daemon:
                         progress_bytes=f.size,
                         total_bytes=f.size,
                     )
+                    # v0.21.x folder-archive auto-extract (stream path).
+                    archive_event = self._maybe_extract_folder_archive(f.out_path)
+                    if archive_event is not None and self.ui_server is not None:
+                        with contextlib.suppress(Exception):
+                            self.ui_server.broadcast(archive_event)
                 log.info("file done: %s ok=%s -> %s", f.name, ok, f.out_path)
                 await self._ack_file_chunk(channel, msg, f, force_individual=True)
                 if ok:
@@ -9403,6 +9408,12 @@ class Daemon:
                 "ok": ok,
             }
             self._incoming_files.pop(blob, None)
+            # v0.21.x folder-archive auto-extract (binary-chunk path).
+            if ok:
+                archive_event = self._maybe_extract_folder_archive(f.out_path)
+                if archive_event is not None and self.ui_server is not None:
+                    with contextlib.suppress(Exception):
+                        self.ui_server.broadcast(archive_event)
             if not ok:
                 # v0.20.7 (security audit M23): same quarantine
                 # discipline as _finish_cdc_file. See note there.
@@ -9944,10 +9955,140 @@ class Daemon:
             # next daemon start doesn't try to re-acquire a
             # finished blob.
             _delete_resume_sidecar(inbox_dir(), blob)
+            # v0.21.x folder-archive auto-extract. If this file's
+            # path matches the magic subdirectory (the sender shipped
+            # a one-shot folder send via archive mode), unpack into
+            # inbox/<folder_name>/ and broadcast ONE notification
+            # instead of leaving the .zip sitting in the magic dir.
+            archive_event = self._maybe_extract_folder_archive(f.out_path)
+            if archive_event is not None and self.ui_server is not None:
+                with contextlib.suppress(Exception):
+                    self.ui_server.broadcast(archive_event)
         except Exception:
             self._update_transfer(f.transfer_id, status="failed")
             self._abort_incoming_file(blob, f)
             raise
+
+    # v0.21.x: folder-as-archive receive support. The sender of a
+    # one-shot folder send zips the folder into one file and ships it
+    # with rel_path = "__one_link_folder__/<folder_name>.zip". The
+    # receiver detects this prefix, extracts the zip into
+    # inbox/<folder_name>/, deletes the staging archive, and emits ONE
+    # WS notification instead of N per-file FILE_DONE events.
+    _FOLDER_ARCHIVE_MAGIC = "__one_link_folder__"
+
+    def _maybe_extract_folder_archive(self, out_path: Path) -> Optional[dict]:
+        """If ``out_path`` is a freshly-arrived folder-archive zip,
+        extract it into ``inbox/<folder_name>/`` and return a summary
+        dict suitable for WS broadcast. Returns None for ordinary
+        single-file arrivals (no-op).
+
+        Defensive: zip member names are checked for path traversal
+        BEFORE writing. Any escape attempt aborts the extract and
+        leaves the archive in place + quarantined for inspection.
+        """
+        import zipfile
+        try:
+            base = inbox_dir().resolve()
+            resolved = out_path.resolve()
+        except OSError:
+            return None
+        if resolved.parent.name != self._FOLDER_ARCHIVE_MAGIC:
+            return None
+        if resolved.parent.parent != base:
+            # Magic dir but not at inbox root — unexpected. Skip.
+            return None
+        if not resolved.suffix.lower() == ".zip":
+            return None
+        # Folder name = the zip's stem, with the leading blob-prefix
+        # stripped if present (the receiver-side _unique_inbox_path
+        # collision-suffix adds "{blob[:8]}_" to flat names but the
+        # rel_path code path skips that for nested ones — both shapes
+        # need to work here).
+        stem = resolved.stem
+        # If stem looks like "{8hex}_folder", strip the prefix.
+        if len(stem) > 9 and stem[8] == "_" and all(
+            c in "0123456789abcdef" for c in stem[:8]
+        ):
+            folder_name = stem[9:]
+        else:
+            folder_name = stem
+        # Sanitize folder name once more (defense-in-depth): no
+        # traversal, no absolute, no reserved chars.
+        if not folder_name or folder_name in (".", ".."):
+            return None
+        for bad in ("/", "\\", "..", "\x00", ":"):
+            if bad in folder_name:
+                return None
+        target_root = (base / folder_name).resolve()
+        try:
+            target_root.relative_to(base)
+        except ValueError:
+            log.warning(
+                "folder-archive extract: target %s escapes inbox; "
+                "leaving archive in place", target_root,
+            )
+            return None
+        target_root.mkdir(parents=True, exist_ok=True)
+        files_extracted = 0
+        bytes_extracted = 0
+        try:
+            with zipfile.ZipFile(resolved, "r") as zf:
+                for member in zf.infolist():
+                    name = member.filename.replace("\\", "/")
+                    # Per-member path-traversal guard.
+                    if (
+                        not name
+                        or name.startswith("/")
+                        or ".." in name.split("/")
+                        or (len(name) > 1 and name[1] == ":")
+                    ):
+                        log.warning(
+                            "folder-archive extract: rejecting "
+                            "unsafe member name %r", member.filename,
+                        )
+                        continue
+                    dest = (target_root / name).resolve()
+                    try:
+                        dest.relative_to(target_root)
+                    except ValueError:
+                        log.warning(
+                            "folder-archive extract: member %r escapes "
+                            "target; skipping", name,
+                        )
+                        continue
+                    if member.is_dir():
+                        dest.mkdir(parents=True, exist_ok=True)
+                        continue
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(member, "r") as src, open(dest, "wb") as dst:
+                        shutil.copyfileobj(src, dst, length=1024 * 1024)
+                    files_extracted += 1
+                    bytes_extracted += dest.stat().st_size
+        except (zipfile.BadZipFile, OSError) as e:
+            log.warning(
+                "folder-archive extract failed for %s: %s",
+                resolved, e,
+            )
+            return None
+        # Delete the staging zip; we have the unpacked contents now.
+        with contextlib.suppress(OSError):
+            resolved.unlink()
+        # If the magic subdir is now empty, prune it.
+        with contextlib.suppress(OSError):
+            if not any(resolved.parent.iterdir()):
+                resolved.parent.rmdir()
+        log.info(
+            "folder archive extracted: %s (%d files, %d bytes)",
+            folder_name, files_extracted, bytes_extracted,
+        )
+        return {
+            "type": "folder_archive_received",
+            "folder_name": folder_name,
+            "target_root": str(target_root),
+            "files_extracted": files_extracted,
+            "bytes_extracted": bytes_extracted,
+        }
 
     def _record_finished_cdc_sources(self, path: Path, f: IncomingFile) -> None:
         """Record chunk source rows for a just-assembled CDC receive.

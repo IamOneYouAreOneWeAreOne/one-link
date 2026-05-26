@@ -379,6 +379,7 @@ async def test_adhoc_send_folder_happy_path(preview_ctx):
         json={
             "peer_fp": preview_ctx["peer_fp"],
             "local_path": str(preview_ctx["folder_root"]),
+            "archive": False,
         },
     )
     assert r.status == 200, await r.text()
@@ -408,10 +409,15 @@ async def test_adhoc_send_folder_happy_path(preview_ctx):
 
 
 @pytest.mark.asyncio
-async def test_adhoc_send_folder_fast_path_skips_all_dedup_files(preview_ctx):
-    """When EVERY file in the folder is already on the peer, the
+async def test_adhoc_per_file_fast_path_skips_all_dedup_files(preview_ctx):
+    """PER-FILE MODE: when every file is already on the peer, the
     fast-path skips both send_files_batched AND send_file — zero
-    per-file FILE_OFFER round-trips. Big win for re-send-same-folder."""
+    per-file FILE_OFFER round-trips. Big win for re-send-same-folder
+    in the legacy per-file flow.
+
+    (In archive mode this concept doesn't apply — the archive itself
+    is always sent as ONE file, and chunk-level dedup kicks in
+    on the zip's CDC chunks if the recipient has them.)"""
     from one_link.cdc import hash_path
     root = preview_ctx["folder_root"]
     all_hashes = {hash_path(p) for p in root.rglob("*") if p.is_file()}
@@ -424,6 +430,7 @@ async def test_adhoc_send_folder_fast_path_skips_all_dedup_files(preview_ctx):
         json={
             "peer_fp": preview_ctx["peer_fp"],
             "local_path": str(root),
+            "archive": False,  # force per-file mode for fast-path coverage
         },
     )
     assert r.status == 200
@@ -447,6 +454,7 @@ async def test_adhoc_send_folder_no_fast_path_when_probe_fails(preview_ctx):
         json={
             "peer_fp": preview_ctx["peer_fp"],
             "local_path": str(preview_ctx["folder_root"]),
+            "archive": False,
         },
     )
     assert r.status == 200
@@ -554,6 +562,7 @@ async def test_adhoc_preview_returns_breakdown(preview_ctx):
         json={
             "peer_fp": preview_ctx["peer_fp"],
             "local_path": str(preview_ctx["folder_root"]),
+            "archive": False,
         },
     )
     assert r.status == 200
@@ -570,6 +579,7 @@ async def test_adhoc_cancel_404_when_nothing_inflight(preview_ctx):
         json={
             "peer_fp": preview_ctx["peer_fp"],
             "local_path": str(preview_ctx["folder_root"]),
+            "archive": False,
         },
     )
     assert r.status == 404
@@ -589,6 +599,7 @@ async def test_adhoc_send_then_cancel(preview_ctx):
         json={
             "peer_fp": preview_ctx["peer_fp"],
             "local_path": str(preview_ctx["folder_root"]),
+            "archive": False,
         },
     )
     assert r1.status == 200
@@ -598,6 +609,7 @@ async def test_adhoc_send_then_cancel(preview_ctx):
         json={
             "peer_fp": preview_ctx["peer_fp"],
             "local_path": str(preview_ctx["folder_root"]),
+            "archive": False,
         },
     )
     assert r2.status == 200

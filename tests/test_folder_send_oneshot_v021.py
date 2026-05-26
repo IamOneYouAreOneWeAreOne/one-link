@@ -243,17 +243,21 @@ async def send_ctx(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_send_endpoint_kicks_background_send_and_returns_count(send_ctx):
+async def test_send_endpoint_per_file_mode_with_archive_false(send_ctx):
+    """Legacy per-file mode is now opt-in via archive=false. Pin the
+    behavior so the per-file code path stays exercised even after
+    archive-mode became the default."""
     r = await send_ctx["client"].post(
         "/api/folders/papers/send-to",
         headers=_h(send_ctx["token"]),
-        json={"peer_fp": send_ctx["peer_fp"]},
+        json={"peer_fp": send_ctx["peer_fp"], "archive": False},
     )
     assert r.status == 200, await r.text()
     body = await r.json()
     assert body["ok"] is True
     assert body["started"] is True
     assert body["file_count"] == 2
+    assert body["mode"] == "per_file"
     # Let the background task run.
     await asyncio.sleep(0.05)
     assert send_ctx["daemon"].send_file.await_count == 2
@@ -261,6 +265,24 @@ async def test_send_endpoint_kicks_background_send_and_returns_count(send_ctx):
     calls = send_ctx["daemon"].send_file.await_args_list
     rel_paths = sorted(c.kwargs["rel_path"] for c in calls)
     assert rel_paths == ["papers/a.txt", "papers/sub/b.txt"]
+
+
+@pytest.mark.asyncio
+async def test_send_endpoint_default_is_archive_mode(send_ctx):
+    """Default (no archive flag) is archive mode — ONE send_file
+    call carrying the magic rel_path."""
+    r = await send_ctx["client"].post(
+        "/api/folders/papers/send-to",
+        headers=_h(send_ctx["token"]),
+        json={"peer_fp": send_ctx["peer_fp"]},
+    )
+    assert r.status == 200, await r.text()
+    body = await r.json()
+    assert body["mode"] == "archive"
+    await asyncio.sleep(0.05)
+    assert send_ctx["daemon"].send_file.await_count == 1
+    kwargs = send_ctx["daemon"].send_file.await_args.kwargs
+    assert kwargs["rel_path"] == "__one_link_folder__/papers.zip"
 
 
 @pytest.mark.asyncio

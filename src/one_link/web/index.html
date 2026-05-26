@@ -24889,24 +24889,56 @@
       } else if (m.type === "folder_scan_complete") {
         refreshFolders();
       } else if (m.type === "folder_send_complete") {
-        // v0.21.x one-shot folder send finished. Show a summary
-        // toast with dedup info if any files were skipped.
-        const sent = m.sent || 0;
+        // v0.21.x one-shot folder send finished.
         const failed = m.failed || 0;
-        const dedup = m.dedup_files || 0;
-        const dedupBytes = m.dedup_bytes || 0;
-        let body = `Sent ${_fmtFiles(sent)}`;
-        if (dedup > 0) {
-          body += ` · ${_fmtFiles(dedup)} already on device (${_humanBytes(dedupBytes)} skipped)`;
+        const mode = m.mode || "per_file";
+        let body;
+        if (mode === "archive") {
+          // ARCHIVE mode — one transfer for the whole folder.
+          if (failed > 0) {
+            body = `Folder send failed: ${m.name || ""} — ${m.error || "unknown error"}`;
+          } else {
+            const orig = m.original_size || 0;
+            const arch = m.archive_size || 0;
+            const ratio = m.compression_ratio || 0;
+            const savedPct = Math.round(ratio * 100);
+            body = `Folder ${m.name || ""} sent as one archive`;
+            if (orig > 0 && arch > 0) {
+              body += ` · ${_humanBytes(orig)} → ${_humanBytes(arch)}`;
+              if (savedPct > 0) body += ` (${savedPct}% smaller)`;
+            }
+          }
+          toast(body, failed > 0 ? "bad" : "good", 7000);
+        } else {
+          const sent = m.sent || 0;
+          const dedup = m.dedup_files || 0;
+          const dedupBytes = m.dedup_bytes || 0;
+          body = `Sent ${_fmtFiles(sent)}`;
+          if (dedup > 0) {
+            body += ` · ${_fmtFiles(dedup)} already on device (${_humanBytes(dedupBytes)} skipped)`;
+          }
+          if (failed > 0) {
+            body += ` · ${failed} failed`;
+          }
+          toast(body, failed > 0 ? "bad" : "good", 7000);
         }
-        if (failed > 0) {
-          body += ` · ${failed} failed`;
-        }
-        toast(body, failed > 0 ? "bad" : "good", 7000);
         hideFolderSendProgress();
       } else if (m.type === "folder_send_cancelled") {
         toast(`Send cancelled — sent ${m.sent || 0}, ${m.remaining || 0} not sent.`, "info", 5000);
         hideFolderSendProgress();
+      } else if (m.type === "folder_archive_received") {
+        // v0.21.x: receiver-side notification when a folder archive
+        // arrives + extracts. ONE toast for the whole folder; users
+        // see "Folder received" not 147 individual file toasts.
+        const n = m.files_extracted || 0;
+        const bytes = m.bytes_extracted || 0;
+        const folder = m.folder_name || "folder";
+        toast(
+          `Folder received: ${folder} (${_fmtFiles(n)} · ${_humanBytes(bytes)})`,
+          "good", 8000,
+        );
+        // Also refresh the files pane in case the user is looking at it.
+        if (typeof refreshTransfers === "function") refreshTransfers();
       } else if (m.type === "key_change_acked" || m.type === "key_change_acked_all") {
         // v0.7.8: another tab acknowledged. Refresh peers so the
         // banner / overlay clears for everyone live.

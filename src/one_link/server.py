@@ -14489,6 +14489,144 @@ class UIServer:
     # send-to, /preview, ad-hoc /api/fs/send-folder + /preview) share
     # the same primitives: peer resolution, folder walk, preview-via-
     # BLOB_INVENTORY_QUERY, background-task tracking for cancellation.
+    #
+    # v0.21.x ARCHIVE MODE (default): the sender zips the folder into
+    # ONE file and ships it with rel_path =
+    # "__one_link_folder__/<folder>.zip". Receiver detects the magic
+    # prefix on FILE_DONE and extracts into inbox/<folder>/. The user
+    # sees ONE transfer row + ONE arrival notification instead of N.
+    # Per-file mode (the old behavior) remains available via the
+    # archive=false override on the endpoint.
+
+    _FOLDER_ARCHIVE_MAGIC_DIR = "__one_link_folder__"
+    _FOLDER_ARCHIVE_TEMP_TTL_S = 6 * 3600  # GC sender-side staging
+
+    def _stage_folder_archive(
+        self, folder_root: Path, folder_name: str,
+    ) -> tuple[Path, int, int]:
+        """Build a .zip of folder_root in a per-daemon staging area.
+        Returns (archive_path, original_size, archive_size).
+        Files are added with paths relative to folder_root so the
+        receiver extracts directly into inbox/<folder_name>/<...>.
+        """
+        import zipfile
+        from one_link.paths import data_dir as _dd
+        staging = _dd() / "folder_archive_staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        # Clean up old archives older than the TTL.
+        cutoff = time.time() - self._FOLDER_ARCHIVE_TEMP_TTL_S
+        for old in staging.iterdir():
+            try:
+                if old.stat().st_mtime < cutoff:
+                    old.unlink(missing_ok=True)
+            except OSError:
+                continue
+        archive_name = f"{int(time.time() * 1000)}_{secrets.token_hex(6)}_{folder_name}.zip"
+        archive_path = staging / archive_name
+        original_size = 0
+        with zipfile.ZipFile(
+            archive_path, mode="w",
+            compression=zipfile.ZIP_DEFLATED, compresslevel=6,
+        ) as zf:
+            for p in folder_root.rglob("*"):
+                try:
+                    if not p.is_file():
+                        continue
+                    arcname = p.relative_to(folder_root).as_posix()
+                    zf.write(p, arcname=arcname)
+                    original_size += p.stat().st_size
+                except OSError as e:
+                    log.warning(
+                        "folder-archive stage: skip %s: %s", p, e,
+                    )
+        archive_size = archive_path.stat().st_size
+        return archive_path, original_size, archive_size
+
+    async def _send_folder_archive(
+        self, *, peer, peer_fp: str, folder_root: Path,
+        folder_name: str, scope: str, ident: str,
+    ) -> None:
+        """Archive-mode background task: zip the folder, send the zip
+        as ONE file with magic rel_path, clean up the staging file,
+        broadcast completion. Receiver auto-extracts via
+        daemon._maybe_extract_folder_archive."""
+        registry = self._ensure_folder_send_registry()
+        key = self._folder_send_key(scope, ident, peer_fp)
+        archive_path: Path | None = None
+        try:
+            # Build the archive off the event loop — zipping a large
+            # folder is CPU + I/O bound.
+            (archive_path, original_size, archive_size) = await asyncio.to_thread(
+                self._stage_folder_archive, folder_root, folder_name,
+            )
+            magic_rel = f"{self._FOLDER_ARCHIVE_MAGIC_DIR}/{folder_name}.zip"
+            try:
+                await self.daemon.send_file(
+                    peer, archive_path, rel_path=magic_rel,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning(
+                    "folder-archive send %s/%s failed: %s",
+                    scope, ident, e,
+                )
+                self.broadcast({
+                    "type": "folder_send_complete",
+                    "name": folder_name,
+                    "peer_fp": peer_fp,
+                    "scope": scope,
+                    "mode": "archive",
+                    "sent": 0, "failed": 1,
+                    "dedup_files": 0, "dedup_bytes": 0,
+                    "error": str(e),
+                })
+                return
+            self.broadcast({
+                "type": "folder_send_complete",
+                "name": folder_name,
+                "peer_fp": peer_fp,
+                "scope": scope,
+                "mode": "archive",
+                "sent": 1, "failed": 0,
+                "dedup_files": 0, "dedup_bytes": 0,
+                "original_size": original_size,
+                "archive_size": archive_size,
+                "compression_ratio": (
+                    round(1 - archive_size / max(1, original_size), 3)
+                ),
+            })
+        except asyncio.CancelledError:
+            self.broadcast({
+                "type": "folder_send_cancelled",
+                "name": folder_name,
+                "peer_fp": peer_fp,
+                "scope": scope,
+                "mode": "archive",
+            })
+            raise
+        finally:
+            if archive_path is not None:
+                with contextlib.suppress(OSError):
+                    archive_path.unlink(missing_ok=True)
+            registry.pop(key, None)
+
+    def _kick_folder_archive_task(
+        self, *, scope: str, ident: str, peer, peer_fp: str,
+        folder_root: Path, folder_name: str,
+    ) -> str:
+        registry = self._ensure_folder_send_registry()
+        key = self._folder_send_key(scope, ident, peer_fp)
+        if key in registry and not registry[key].done():
+            return key
+        task = asyncio.get_running_loop().create_task(
+            self._send_folder_archive(
+                peer=peer, peer_fp=peer_fp, folder_root=folder_root,
+                folder_name=folder_name, scope=scope, ident=ident,
+            ),
+        )
+        registry[key] = task
+        return key
 
     def _resolve_online_peer(self, peer_fp: str):
         """Find a discovery.Peer for the given fingerprint, or None."""
@@ -14843,16 +14981,38 @@ class UIServer:
                 {"error": "folder is empty", "code": "folder_empty"},
                 status=409,
             )
+        # v0.21.x: archive mode is the DEFAULT now. Receiver gets ONE
+        # transfer (one chat bubble, one progress bar, one extraction)
+        # instead of N separate file deliveries. Opt out via the
+        # ``archive: false`` body field if you specifically want
+        # per-file transfers (rarely useful — folder one-shot's
+        # intent is "send the folder", not "send these files
+        # individually that happen to be in a folder").
+        archive_mode = bool(data.get("archive", True))
+        if archive_mode:
+            self._kick_folder_archive_task(
+                scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
+                folder_root=local_path, folder_name=name,
+            )
+            return web.json_response({
+                "ok": True, "started": True,
+                "mode": "archive",
+                "file_count": len(files),
+                "total_bytes": total_bytes,
+                "skipped": skipped,
+            })
+        # Legacy per-file path (opt-in).
         self._kick_folder_send_task(
             scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
             files=files,
             on_complete_broadcast={
                 "type": "folder_send_complete",
-                "name": name, "peer_fp": peer_fp,
+                "name": name, "peer_fp": peer_fp, "mode": "per_file",
             },
         )
         return web.json_response({
             "ok": True, "started": True,
+            "mode": "per_file",
             "file_count": len(files),
             "total_bytes": total_bytes,
             "skipped": skipped,
@@ -14992,6 +15152,23 @@ class UIServer:
                 {"error": "folder is empty", "code": "folder_empty"},
                 status=409,
             )
+        # v0.21.x: archive mode default. See api_send_folder_to_peer.
+        archive_mode = bool(data.get("archive", True))
+        if archive_mode:
+            self._kick_folder_archive_task(
+                scope="adhoc", ident=str(path), peer=peer, peer_fp=peer_fp,
+                folder_root=path, folder_name=root_name,
+            )
+            return web.json_response({
+                "ok": True, "started": True,
+                "mode": "archive",
+                "name": root_name,
+                "local_path": str(path),
+                "file_count": len(files),
+                "total_bytes": total_bytes,
+                "skipped": skipped,
+            })
+        # Legacy per-file path (opt-in).
         self._kick_folder_send_task(
             scope="adhoc", ident=str(path), peer=peer, peer_fp=peer_fp,
             files=files,
@@ -15001,10 +15178,12 @@ class UIServer:
                 "local_path": str(path),
                 "peer_fp": peer_fp,
                 "scope": "adhoc",
+                "mode": "per_file",
             },
         )
         return web.json_response({
             "ok": True, "started": True,
+            "mode": "per_file",
             "name": root_name,
             "local_path": str(path),
             "file_count": len(files),
