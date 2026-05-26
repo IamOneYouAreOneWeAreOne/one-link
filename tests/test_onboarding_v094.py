@@ -45,9 +45,13 @@ def test_onboarding_flag_overwrite(state: State):
 # ───────── server endpoint shape ─────────────────────────────────────
 
 def test_set_settings_accepts_onboarding_flag():
+    """v0.21.x: api_set_settings grew several new setting blocks
+    (auto_install_updates, sync_bandwidth_kbps, sync_quiet_*,
+    sync_pause_*, etc.) that pushed the onboarding_completed
+    branch past the original 2500-char window. Widen to 6000."""
     src = Path("src/one_link/server.py").read_text(encoding="utf-8")
     idx = src.find("async def api_set_settings(")
-    snippet = src[idx:idx + 2500]
+    snippet = src[idx:idx + 6000]
     assert '"onboarding_completed" in data' in snippet
     assert 'set_setting(\n                "onboarding_completed",' in snippet
 

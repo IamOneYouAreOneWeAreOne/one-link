@@ -132,11 +132,27 @@ def test_hamburger_hidden_on_desktop(index_html: str):
 
 def test_touch_target_minimums(index_html: str):
     """44px is the iOS HIG minimum for tap targets. Buttons that
-    are smaller on desktop MUST grow on mobile."""
-    idx = index_html.find("@media (max-width: 720px)")
-    idx2 = index_html.find("@media (max-width: 720px)", idx + 1)
-    scope = index_html[idx2:idx2 + 4000]
-    assert "44px" in scope
+    are smaller on desktop MUST grow on mobile. We allow the
+    rule to live in ANY @media (max-width: 720px) block (the
+    file now has multiple as more responsive UI ships)."""
+    # Collect all @media (max-width: 720px) blocks and ensure at
+    # least one of them contains the 44px rule.
+    needle = "@media (max-width: 720px)"
+    pos = 0
+    starts: list[int] = []
+    while True:
+        i = index_html.find(needle, pos)
+        if i < 0:
+            break
+        starts.append(i)
+        pos = i + 1
+    assert starts, "no mobile media-query blocks found"
+    # Scope each block to ~6000 chars (typical block size).
+    has_44 = any("44px" in index_html[s:s + 6000] for s in starts)
+    assert has_44, (
+        "44px touch-target minimum must appear in at least one "
+        "@media (max-width: 720px) block"
+    )
 
 
 def test_one_setup_is_phone_native_inside_mobile_query(index_html: str):
