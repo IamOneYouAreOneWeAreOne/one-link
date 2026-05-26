@@ -15367,15 +15367,38 @@ class UIServer:
             data = await request.json()
         except Exception as e:
             return web.json_response({"error": f"bad json: {e}"}, status=400)
-        peer_fp = (data.get("peer_fp") or "").strip()
-        if not peer_fp:
+        # v0.21.x MULTI-PEER: accept either peer_fp (single) OR
+        # peer_fps (list). For a list, fan out — each peer gets its
+        # own task entry in the registry + can be cancelled
+        # independently via the existing cancel endpoint.
+        raw_fps = data.get("peer_fps")
+        if isinstance(raw_fps, list) and raw_fps:
+            peer_fps_in = [
+                str(fp).strip() for fp in raw_fps if str(fp).strip()
+            ]
+        else:
+            single = (data.get("peer_fp") or "").strip()
+            peer_fps_in = [single] if single else []
+        if not peer_fps_in:
             return web.json_response(
-                {"error": "peer_fp required"}, status=400,
+                {"error": "peer_fp or peer_fps required"}, status=400,
             )
-        peer = self._resolve_online_peer(peer_fp)
-        if peer is None:
+        # Resolve online peers; classify offline ones for the response.
+        resolved: list[tuple[str, object]] = []
+        offline: list[str] = []
+        for fp in peer_fps_in:
+            obj = self._resolve_online_peer(fp)
+            if obj is None:
+                offline.append(fp)
+            else:
+                resolved.append((fp, obj))
+        if not resolved:
             return web.json_response(
-                {"error": "peer not currently online", "code": "peer_offline"},
+                {
+                    "error": "no targeted peer is currently online",
+                    "code": "peer_offline",
+                    "offline_peer_fps": offline,
+                },
                 status=503,
             )
         local_path = Path(folder["local_path"])
@@ -15395,9 +15418,7 @@ class UIServer:
                 {"error": "folder is empty", "code": "folder_empty"},
                 status=409,
             )
-        # v0.21.x: mode routing — explicit flags always win; default
-        # is SMART AUTO-ROUTING (_pick_folder_send_mode picks the
-        # best mode based on file content + peer dedup state).
+        # Mode routing — explicit flags win; default = smart auto-router.
         archive_mode = bool(data.get("archive", False))
         per_file_mode = bool(data.get("per_file", False))
         mode_override = (data.get("mode") or "").strip().lower()
@@ -15409,34 +15430,52 @@ class UIServer:
         elif per_file_mode:
             mode, reasoning = "per_file", {"why": "per_file=true override"}
         else:
+            # Pick mode once based on the FIRST online peer (per-peer
+            # dedup differs but mode-per-peer adds complexity; safe
+            # baseline + correct often-enough).
             mode, reasoning = await self._pick_folder_send_mode(
-                peer=peer, files=files,
+                peer=resolved[0][1], files=files,
             )
-        if mode == "archive":
-            self._kick_folder_archive_task(
-                scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
-                folder_root=local_path, folder_name=name,
-            )
-        elif mode == "per_file":
-            self._kick_folder_send_task(
-                scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
-                files=files,
-                on_complete_broadcast={
-                    "type": "folder_send_complete",
-                    "name": name, "peer_fp": peer_fp, "mode": "per_file",
-                },
-            )
-        else:  # manifest_push (default safe fallback)
-            self._kick_folder_manifest_task(
-                scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
-                folder_name=name,
-            )
+        # Fan out: one task per online peer.
+        per_peer_results: list[dict] = []
+        for peer_fp, peer in resolved:
+            if mode == "archive":
+                self._kick_folder_archive_task(
+                    scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
+                    folder_root=local_path, folder_name=name,
+                )
+            elif mode == "per_file":
+                self._kick_folder_send_task(
+                    scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
+                    files=files,
+                    on_complete_broadcast={
+                        "type": "folder_send_complete",
+                        "name": name, "peer_fp": peer_fp,
+                        "mode": "per_file",
+                    },
+                )
+            else:  # manifest_push
+                self._kick_folder_manifest_task(
+                    scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
+                    folder_name=name,
+                )
+            per_peer_results.append({
+                "peer_fp": peer_fp, "started": True,
+            })
+        for fp in offline:
+            per_peer_results.append({
+                "peer_fp": fp, "started": False,
+                "error": "peer offline",
+            })
         return web.json_response({
             "ok": True, "started": True, "mode": mode,
             "auto_routing": reasoning,
             "file_count": len(files),
             "total_bytes": total_bytes,
             "skipped": skipped,
+            "fanout_count": len(resolved),
+            "offline_count": len(offline),
+            "per_peer": per_peer_results,
         })
 
     async def api_send_folder_preview(
