@@ -5938,6 +5938,52 @@ class State:
             assert cur.lastrowid is not None, "INSERT did not return a rowid"
             return int(cur.lastrowid)
 
+    def list_folder_file_history(
+        self,
+        *,
+        folder_name: str,
+        file_path: str,
+        limit: int = 50,
+    ) -> list[dict]:
+        """v0.21.x Ship 5: per-file version history derived from the
+        folder_audit log. Returns historical blob_hash values for a
+        single (folder, path) in newest-first order, de-duped against
+        consecutive same-hash rows so a watcher-bursts-then-settles
+        sequence doesn't show 10 identical entries.
+
+        Each row carries timestamp + peer_fp (who made the change)
+        + blob_hash + size + action so the UI can show 'edited X
+        ago by <device> · 4.2 KB · [Preview] [Restore]'."""
+        rows = self._conn.execute(
+            "SELECT id, ts_ms, peer_fp, action, blob_hash, size, note"
+            " FROM folder_audit"
+            " WHERE folder_name = ? AND file_path = ?"
+            " ORDER BY ts_ms DESC, id DESC LIMIT ?",
+            (folder_name, file_path, int(limit) * 3),  # pull extra for de-dup
+        ).fetchall()
+        out: list[dict] = []
+        last_hash: Optional[str] = None
+        for r in rows:
+            bh = r["blob_hash"]
+            # Skip consecutive duplicates of the same blob hash —
+            # a manifest reapply or tombstone-then-restore burst
+            # would otherwise show as 5 identical rows.
+            if bh == last_hash:
+                continue
+            last_hash = bh
+            out.append({
+                "id": int(r["id"]),
+                "ts_ms": int(r["ts_ms"]),
+                "peer_fp": r["peer_fp"],
+                "action": r["action"],
+                "blob_hash": bh,
+                "size": int(r["size"]) if r["size"] is not None else None,
+                "note": r["note"],
+            })
+            if len(out) >= limit:
+                break
+        return out
+
     def list_folder_audit(
         self,
         *,

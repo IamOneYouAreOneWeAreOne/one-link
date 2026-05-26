@@ -20418,6 +20418,15 @@
       document.body.removeChild(a);
     };
     actions.appendChild(dlBtn);
+    // v0.21.x Ship 5: per-file version history. Opens an inline
+    // list of past blob hashes recorded in the audit log; each
+    // historical version can be previewed or restored in place.
+    const histBtn = document.createElement("button");
+    histBtn.type = "button";
+    histBtn.textContent = "History";
+    histBtn.title = "Previous versions of this file recorded in the audit log.";
+    histBtn.onclick = () => _showFolderFileHistory(folderName, entry);
+    actions.appendChild(histBtn);
     head.appendChild(actions);
     previewEl.appendChild(head);
     const body = document.createElement("div");
@@ -20479,6 +20488,186 @@
       err.className = "folder-browser-preview-empty";
       err.textContent = `Couldn't preview: ${errorToastBody(e)}`;
       body.appendChild(err);
+    }
+  }
+
+  // v0.21.x Ship 5: per-file version history viewer. Lists past
+  // blob_hash values from the folder audit log; each historical
+  // version can be previewed (text inline / image / download) or
+  // restored in place (writes the blob's bytes back to the file
+  // path on disk → watcher reconciles → vclock bumps → propagates
+  // to peers as a normal edit).
+  async function _showFolderFileHistory(folderName, entry) {
+    const body = $("#folder-browser-preview").querySelector(".preview-body");
+    if (!body) return;
+    body.replaceChildren();
+    const wrap = document.createElement("div");
+    wrap.style.display = "flex";
+    wrap.style.flexDirection = "column";
+    wrap.style.gap = "8px";
+    const heading = document.createElement("div");
+    heading.style.fontSize = "12px";
+    heading.style.color = "var(--text-dim)";
+    heading.style.marginBottom = "4px";
+    heading.textContent = `Past versions of ${entry.path}`;
+    wrap.appendChild(heading);
+    body.appendChild(wrap);
+    const loading = document.createElement("div");
+    loading.textContent = "Loading history…";
+    loading.style.color = "var(--text-dim)";
+    loading.style.fontSize = "12px";
+    wrap.appendChild(loading);
+    let versions = [];
+    try {
+      const r = await api.get(
+        `/api/folders/${encodeURIComponent(folderName)}/file/${encodeURIComponent(entry.path)}/history`,
+      );
+      versions = r.versions || [];
+    } catch (e) {
+      loading.textContent = `Couldn't load history: ${errorToastBody(e)}`;
+      return;
+    }
+    loading.remove();
+    if (versions.length === 0) {
+      const em = document.createElement("div");
+      em.style.color = "var(--text-dim)";
+      em.style.fontSize = "12px";
+      em.textContent = "No prior versions recorded.";
+      wrap.appendChild(em);
+      return;
+    }
+    for (const v of versions) {
+      const row = document.createElement("div");
+      row.style.background = "var(--bg)";
+      row.style.borderRadius = "8px";
+      row.style.padding = "10px 12px";
+      const head = document.createElement("div");
+      head.style.display = "flex";
+      head.style.justifyContent = "space-between";
+      head.style.alignItems = "center";
+      head.style.gap = "8px";
+      head.style.marginBottom = "6px";
+      const label = document.createElement("div");
+      label.style.fontSize = "12px";
+      const peer = v.peer_fp ? v.peer_fp.slice(0, 8) : "?";
+      label.innerHTML = `<strong>${v.action}</strong> · ${_humanAgo(v.ts_ms)} · by <code>${peer}</code> · ${v.size != null ? _humanBytes(v.size) : "—"}`;
+      head.appendChild(label);
+      const hash = document.createElement("code");
+      hash.style.fontSize = "10px";
+      hash.style.color = "var(--text-dim)";
+      hash.textContent = v.blob_hash ? v.blob_hash.slice(0, 16) + "…" : "(deleted)";
+      hash.title = v.blob_hash || "";
+      head.appendChild(hash);
+      row.appendChild(head);
+      if (!v.blob_hash) {
+        const note = document.createElement("div");
+        note.style.fontSize = "11px";
+        note.style.color = "var(--text-dim)";
+        note.textContent = "Tombstone (the file was deleted at this point).";
+        row.appendChild(note);
+      } else {
+        const actions = document.createElement("div");
+        actions.style.display = "flex";
+        actions.style.gap = "6px";
+        const prev = document.createElement("button");
+        prev.type = "button";
+        prev.textContent = "Preview";
+        prev.style.fontSize = "11px";
+        prev.style.padding = "5px 9px";
+        prev.disabled = !v.local_available;
+        prev.title = v.local_available
+          ? "Show this past version's content."
+          : "Not previewable — the blob was garbage-collected from this device.";
+        const previewSlot = document.createElement("div");
+        previewSlot.style.display = "none";
+        previewSlot.style.marginTop = "6px";
+        prev.onclick = async () => {
+          if (previewSlot.style.display !== "none") {
+            previewSlot.style.display = "none";
+            prev.textContent = "Preview";
+            return;
+          }
+          prev.textContent = "Loading…";
+          prev.disabled = true;
+          try {
+            const ext = (entry.path || "").split(".").pop() || "";
+            const r2 = await api.get(
+              `/api/blobs/${v.blob_hash}/preview` + (ext ? `?as=${encodeURIComponent(ext)}` : ""),
+            );
+            previewSlot.replaceChildren();
+            if (r2.kind === "image" && r2.stream_url) {
+              const img = document.createElement("img");
+              img.src = r2.stream_url + (ext ? `&as=${encodeURIComponent(ext)}` : `?as=${encodeURIComponent(ext)}`);
+              img.style.maxWidth = "100%";
+              img.style.maxHeight = "200px";
+              previewSlot.appendChild(img);
+            } else if (r2.content !== undefined) {
+              const pre = document.createElement("pre");
+              pre.textContent = r2.content;
+              pre.style.maxHeight = "200px";
+              pre.style.overflow = "auto";
+              pre.style.fontFamily = "var(--font-mono, ui-monospace, Menlo, monospace)";
+              pre.style.fontSize = "11px";
+              pre.style.background = "var(--bg-2)";
+              pre.style.padding = "8px";
+              pre.style.borderRadius = "4px";
+              pre.style.whiteSpace = "pre-wrap";
+              pre.style.wordBreak = "break-word";
+              previewSlot.appendChild(pre);
+            } else {
+              const note = document.createElement("div");
+              note.style.fontSize = "11px";
+              note.style.color = "var(--text-dim)";
+              note.textContent = "No inline preview for this file type.";
+              previewSlot.appendChild(note);
+            }
+            previewSlot.style.display = "block";
+            prev.textContent = "Hide preview";
+          } catch (err) {
+            toast(`Preview failed: ${errorToastBody(err)}`, "bad", 5000);
+            prev.textContent = "Preview";
+          } finally {
+            prev.disabled = false;
+          }
+        };
+        actions.appendChild(prev);
+        const restoreBtn = document.createElement("button");
+        restoreBtn.type = "button";
+        restoreBtn.textContent = "Restore this version";
+        restoreBtn.style.fontSize = "11px";
+        restoreBtn.style.padding = "5px 9px";
+        restoreBtn.style.background = "var(--accent)";
+        restoreBtn.style.color = "white";
+        restoreBtn.disabled = !v.local_available;
+        restoreBtn.title = v.local_available
+          ? "Overwrite the current file with these bytes. Peers will pick up the restore as a normal edit."
+          : "Not restorable — the blob was garbage-collected from this device.";
+        restoreBtn.onclick = async () => {
+          if (!confirm(
+            `Overwrite "${entry.path}" with the version from ${_humanAgo(v.ts_ms)}? `
+            + "The current contents will be replaced; the change will sync to every paired device."
+          )) return;
+          restoreBtn.disabled = true;
+          restoreBtn.textContent = "Restoring…";
+          try {
+            await api.post(
+              `/api/folders/${encodeURIComponent(folderName)}/file/${encodeURIComponent(entry.path)}/restore`,
+              { blob_hash: v.blob_hash },
+            );
+            toast(`Restored "${entry.path}".`, "good", 4500);
+            // Re-open the file preview so the user sees the restored content.
+            setTimeout(() => _previewFolderFile(folderName, entry), 600);
+          } catch (err) {
+            toast(`Restore failed: ${errorToastBody(err)}`, "bad", 6000);
+            restoreBtn.disabled = false;
+            restoreBtn.textContent = "Restore this version";
+          }
+        };
+        actions.appendChild(restoreBtn);
+        row.appendChild(actions);
+        row.appendChild(previewSlot);
+      }
+      wrap.appendChild(row);
     }
   }
 

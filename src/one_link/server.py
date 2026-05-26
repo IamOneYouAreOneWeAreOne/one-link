@@ -2409,6 +2409,11 @@ class UIServer:
                   self._guarded(self.api_folder_file_raw))
         r.add_post(r"/api/folders/{name}/file/{path:.+}/reveal",
                    self._guarded(self.api_folder_file_reveal))
+        # v0.21.x Ship 5: per-file version history + restore.
+        r.add_get(r"/api/folders/{name}/file/{path:.+}/history",
+                  self._guarded(self.api_folder_file_history))
+        r.add_post(r"/api/folders/{name}/file/{path:.+}/restore",
+                   self._guarded(self.api_folder_file_restore))
         # v0.21.x Ship 3: blob preview for side-by-side conflict
         # resolution. Content-addressed; hash validation prevents
         # path-traversal abuse.
@@ -18407,6 +18412,112 @@ class UIServer:
         except OSError as e:
             return web.json_response({"error": f"reveal failed: {e}"}, status=500)
         return web.json_response({"ok": True})
+
+    async def api_folder_file_history(self, request: web.Request) -> web.Response:
+        """v0.21.x Ship 5: per-file version history. Returns the
+        list of past blob_hash values for one file in newest-first
+        order. Each version can be previewed via /api/blobs/{h}
+        and restored via .../restore."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        name = request.match_info["name"]
+        rel = request.match_info.get("path", "").strip("/")
+        if not rel:
+            return web.json_response({"error": "path required"}, status=400)
+        folder = self.daemon.state.get_folder(name)
+        if not folder:
+            return web.json_response({"error": "no such folder"}, status=404)
+        limit = 50
+        with contextlib.suppress(Exception):
+            limit = max(1, min(int(request.query.get("limit") or 50), 200))
+        versions = self.daemon.state.list_folder_file_history(
+            folder_name=name, file_path=rel, limit=limit,
+        )
+        # Enrich each version with availability (is the blob still
+        # in our local store?) so the UI can grey-out unreplayable
+        # ones.
+        for v in versions:
+            v["local_available"] = bool(
+                v.get("blob_hash") and self.daemon.blob_store
+                and self.daemon.blob_store.has(v["blob_hash"])
+            )
+        return web.json_response({
+            "folder": name,
+            "file_path": rel,
+            "versions": versions,
+        })
+
+    async def api_folder_file_restore(self, request: web.Request) -> web.Response:
+        """Restore a file to a previous version from the local blob
+        store. Body: {blob_hash: <hex>}.
+
+        Writes the historical bytes to the file's current path on
+        disk + bumps the manifest entry's vclock so the change
+        propagates as a normal edit (peers will pull the restored
+        bytes via the standard MANIFEST_PUSH / WANTS / CHUNK path).
+        Refuses to restore a blob we don't have locally."""
+        if self.daemon.state is None or self.daemon.folder_engine is None:
+            return web.json_response(
+                {"error": "folder sync not initialized"}, status=503,
+            )
+        name = request.match_info["name"]
+        rel = request.match_info.get("path", "").strip("/")
+        if not rel:
+            return web.json_response({"error": "path required"}, status=400)
+        folder = self.daemon.state.get_folder(name)
+        if not folder:
+            return web.json_response({"error": "no such folder"}, status=404)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad json"}, status=400)
+        target_hash = (data.get("blob_hash") or "").strip()
+        if len(target_hash) != 64 or not all(c in "0123456789abcdefABCDEF" for c in target_hash):
+            return web.json_response({"error": "bad blob hash"}, status=400)
+        if not self.daemon.blob_store or not self.daemon.blob_store.has(target_hash):
+            return web.json_response(
+                {"error": "blob no longer in local store"}, status=410,
+            )
+        # Resolve target path with traversal guard.
+        try:
+            root = Path(folder["local_path"]).resolve()
+            target = (root / rel).resolve()
+            target.relative_to(root)
+        except (OSError, ValueError):
+            return web.json_response({"error": "bad path"}, status=400)
+        # Write the historical bytes atomically (write to a temp
+        # sibling, then os.replace) so a crash mid-write doesn't
+        # leave a half-restored file.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".restore-tmp")
+        try:
+            with self.daemon.blob_store.open_read(target_hash) as src:
+                with tmp.open("wb") as dst:
+                    while True:
+                        chunk = src.read(64 * 1024)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+            os.replace(tmp, target)
+        except OSError as e:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            return web.json_response({"error": f"write failed: {e}"}, status=500)
+        # The watcher will pick up the mtime change + reconcile via
+        # the normal _dirty_pump path, which bumps the vclock and
+        # propagates. No manual manifest update needed here.
+        # Audit log the restore so it's visible in history too.
+        with contextlib.suppress(Exception):
+            self.daemon.state.record_folder_audit_event(
+                folder_name=name,
+                peer_fp=getattr(self.daemon.me, "fingerprint", "") or "",
+                action="restored",
+                file_path=rel,
+                blob_hash=target_hash,
+                size=target.stat().st_size,
+                note=f"restored from history (blob={target_hash[:12]})",
+            )
+        return web.json_response({"ok": True, "blob_hash": target_hash})
 
     async def api_folder_reveal(self, request: web.Request) -> web.Response:
         """v0.21.x: open a synced folder's local path in the OS file
