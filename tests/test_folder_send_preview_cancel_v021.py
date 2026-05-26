@@ -382,7 +382,7 @@ async def test_adhoc_send_folder_happy_path(preview_ctx):
         json={
             "peer_fp": preview_ctx["peer_fp"],
             "local_path": str(preview_ctx["folder_root"]),
-            "archive": False,
+            "per_file": True,
         },
     )
     assert r.status == 200, await r.text()
@@ -433,7 +433,7 @@ async def test_adhoc_per_file_fast_path_skips_all_dedup_files(preview_ctx):
         json={
             "peer_fp": preview_ctx["peer_fp"],
             "local_path": str(root),
-            "archive": False,  # force per-file mode for fast-path coverage
+            "per_file": True,  # force per-file mode for fast-path coverage
         },
     )
     assert r.status == 200
@@ -457,7 +457,7 @@ async def test_adhoc_send_folder_no_fast_path_when_probe_fails(preview_ctx):
         json={
             "peer_fp": preview_ctx["peer_fp"],
             "local_path": str(preview_ctx["folder_root"]),
-            "archive": False,
+            "per_file": True,
         },
     )
     assert r.status == 200
@@ -567,7 +567,7 @@ async def test_adhoc_preview_returns_breakdown(preview_ctx):
         json={
             "peer_fp": preview_ctx["peer_fp"],
             "local_path": str(preview_ctx["folder_root"]),
-            "archive": False,
+            "per_file": True,
         },
     )
     assert r.status == 200
@@ -584,7 +584,7 @@ async def test_adhoc_cancel_404_when_nothing_inflight(preview_ctx):
         json={
             "peer_fp": preview_ctx["peer_fp"],
             "local_path": str(preview_ctx["folder_root"]),
-            "archive": False,
+            "per_file": True,
         },
     )
     assert r.status == 404
@@ -604,7 +604,7 @@ async def test_adhoc_send_then_cancel(preview_ctx):
         json={
             "peer_fp": preview_ctx["peer_fp"],
             "local_path": str(preview_ctx["folder_root"]),
-            "archive": False,
+            "per_file": True,
         },
     )
     assert r1.status == 200
@@ -614,7 +614,7 @@ async def test_adhoc_send_then_cancel(preview_ctx):
         json={
             "peer_fp": preview_ctx["peer_fp"],
             "local_path": str(preview_ctx["folder_root"]),
-            "archive": False,
+            "per_file": True,
         },
     )
     assert r2.status == 200

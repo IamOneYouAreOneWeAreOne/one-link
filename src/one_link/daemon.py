@@ -18915,6 +18915,65 @@ class Daemon:
         return len(peers)
 
     # ─── folder sync orchestration ─────────────────────────────────────
+    async def send_adhoc_folder_one_shot_via_manifest(
+        self,
+        peer: Peer,
+        folder_path: Path,
+        folder_name: str,
+    ) -> dict:
+        """v0.21.x one-shot send of an AD-HOC folder (one the user picked
+        via the chat-composer "Folder" attach option, not pre-registered
+        in Folders tab) via the MANIFEST_PUSH ceremony.
+
+        Internally:
+          1. Temp-register the folder in state + folder_engine (with a
+             collision-safe name like ``<base>__adhoc_<8hex>`` if the
+             base already exists)
+          2. Run the initial scan to populate the manifest
+          3. Delegate to send_folder_one_shot_via_manifest which
+             handles temp-share-grant + push + grant cleanup
+          4. In finally: remove the temp folder registration (which
+             also stops the watcher) — uses a finally block so
+             cleanup runs on success, failure, AND cancellation
+
+        Returns the same shape as send_folder_one_shot_via_manifest,
+        augmented with the temp-name actually used on the wire.
+        """
+        if self.state is None or self.folder_engine is None:
+            return {"ok": False, "error": "folder sync not initialized"}
+        folder_path = Path(folder_path).expanduser().resolve()
+        if not folder_path.is_dir():
+            return {
+                "ok": False,
+                "error": f"path is not a directory: {folder_path}",
+            }
+        # Pick a collision-safe name. If the base name already exists
+        # in state.folders, append a short hex suffix so the temp
+        # registration doesn't clash with the user's existing folder.
+        base = folder_name or folder_path.name or "folder"
+        temp_name = base
+        if self.state.get_folder(temp_name) is not None:
+            temp_name = f"{base}__adhoc_{uuid.uuid4().hex[:8]}"
+        registered = False
+        try:
+            self.folder_engine.add_folder(
+                name=temp_name, local_path=folder_path, shared_with=[],
+            )
+            registered = True
+            # Run the initial scan off the event loop so the
+            # MANIFEST_PUSH has real entries to ship.
+            await asyncio.to_thread(
+                self.folder_engine.start_initial_scan, temp_name,
+            )
+            result = await self.send_folder_one_shot_via_manifest(
+                peer, temp_name,
+            )
+            return {**result, "temp_folder_name": temp_name}
+        finally:
+            if registered:
+                with contextlib.suppress(Exception):
+                    self.folder_engine.remove_folder(temp_name)
+
     async def send_folder_one_shot_via_manifest(
         self,
         peer: Peer,

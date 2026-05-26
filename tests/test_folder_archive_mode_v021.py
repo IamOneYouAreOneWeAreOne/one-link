@@ -371,7 +371,8 @@ async def test_send_to_endpoint_per_file_true_uses_per_file(server_ctx, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_adhoc_endpoint_defaults_to_archive_mode(server_ctx, tmp_path):
+async def test_adhoc_endpoint_archive_true_uses_archive(server_ctx, tmp_path):
+    """archive=true opts ad-hoc folder send into zip mode."""
     src = tmp_path / "adhoc_folder"
     _make_file(src, "f.txt", b"f")
     r = await server_ctx["client"].post(
@@ -380,6 +381,7 @@ async def test_adhoc_endpoint_defaults_to_archive_mode(server_ctx, tmp_path):
         json={
             "peer_fp": server_ctx["peer_fp"],
             "local_path": str(src),
+            "archive": True,
         },
     )
     assert r.status == 200

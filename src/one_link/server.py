@@ -14669,6 +14669,78 @@ class UIServer:
         finally:
             registry.pop(key, None)
 
+    async def _send_adhoc_folder_manifest_push(
+        self, *, peer, peer_fp: str, folder_path: Path, folder_name: str,
+        scope: str, ident: str,
+    ) -> None:
+        """Ad-hoc folder MANIFEST_PUSH wrapper. Calls the daemon-level
+        send_adhoc_folder_one_shot_via_manifest which handles the
+        temp-folder-registration dance."""
+        registry = self._ensure_folder_send_registry()
+        key = self._folder_send_key(scope, ident, peer_fp)
+        try:
+            result = await self.daemon.send_adhoc_folder_one_shot_via_manifest(
+                peer, folder_path, folder_name,
+            )
+            self.broadcast({
+                "type": "folder_send_complete",
+                "name": folder_name,
+                "local_path": str(folder_path),
+                "peer_fp": peer_fp,
+                "scope": scope,
+                "mode": "manifest_push",
+                "sent": int(result.get("blobs_sent") or 0),
+                "failed": 0 if result.get("ok") else 1,
+                "dedup_files": 0, "dedup_bytes": 0,
+                "ok": bool(result.get("ok")),
+                "error": result.get("error"),
+                "temp_folder_name": result.get("temp_folder_name"),
+            })
+        except asyncio.CancelledError:
+            self.broadcast({
+                "type": "folder_send_cancelled",
+                "name": folder_name,
+                "local_path": str(folder_path),
+                "peer_fp": peer_fp,
+                "scope": scope,
+                "mode": "manifest_push",
+            })
+            raise
+        except Exception as e:
+            log.warning(
+                "adhoc manifest-push folder send %s/%s failed: %s",
+                scope, ident, e,
+            )
+            self.broadcast({
+                "type": "folder_send_complete",
+                "name": folder_name,
+                "local_path": str(folder_path),
+                "peer_fp": peer_fp,
+                "scope": scope,
+                "mode": "manifest_push",
+                "sent": 0, "failed": 1,
+                "ok": False, "error": str(e),
+            })
+        finally:
+            registry.pop(key, None)
+
+    def _kick_adhoc_folder_manifest_task(
+        self, *, scope: str, ident: str, peer, peer_fp: str,
+        folder_path: Path, folder_name: str,
+    ) -> str:
+        registry = self._ensure_folder_send_registry()
+        key = self._folder_send_key(scope, ident, peer_fp)
+        if key in registry and not registry[key].done():
+            return key
+        task = asyncio.get_running_loop().create_task(
+            self._send_adhoc_folder_manifest_push(
+                peer=peer, peer_fp=peer_fp, folder_path=folder_path,
+                folder_name=folder_name, scope=scope, ident=ident,
+            ),
+        )
+        registry[key] = task
+        return key
+
     def _kick_folder_manifest_task(
         self, *, scope: str, ident: str, peer, peer_fp: str,
         folder_name: str,
@@ -15238,38 +15310,54 @@ class UIServer:
                 {"error": "folder is empty", "code": "folder_empty"},
                 status=409,
             )
-        # v0.21.x: archive mode default. See api_send_folder_to_peer.
-        archive_mode = bool(data.get("archive", True))
+        # v0.21.x: same mode routing as api_send_folder_to_peer. Default
+        # is MANIFEST_PUSH (chunk-level dedup + receiver Accept/Decline
+        # card). archive/per_file are opt-ins.
+        archive_mode = bool(data.get("archive", False))
+        per_file_mode = bool(data.get("per_file", False))
         if archive_mode:
             self._kick_folder_archive_task(
                 scope="adhoc", ident=str(path), peer=peer, peer_fp=peer_fp,
                 folder_root=path, folder_name=root_name,
             )
             return web.json_response({
-                "ok": True, "started": True,
-                "mode": "archive",
+                "ok": True, "started": True, "mode": "archive",
                 "name": root_name,
                 "local_path": str(path),
                 "file_count": len(files),
                 "total_bytes": total_bytes,
                 "skipped": skipped,
             })
-        # Legacy per-file path (opt-in).
-        self._kick_folder_send_task(
-            scope="adhoc", ident=str(path), peer=peer, peer_fp=peer_fp,
-            files=files,
-            on_complete_broadcast={
-                "type": "folder_send_complete",
+        if per_file_mode:
+            self._kick_folder_send_task(
+                scope="adhoc", ident=str(path), peer=peer, peer_fp=peer_fp,
+                files=files,
+                on_complete_broadcast={
+                    "type": "folder_send_complete",
+                    "name": root_name,
+                    "local_path": str(path),
+                    "peer_fp": peer_fp,
+                    "scope": "adhoc",
+                    "mode": "per_file",
+                },
+            )
+            return web.json_response({
+                "ok": True, "started": True, "mode": "per_file",
                 "name": root_name,
                 "local_path": str(path),
-                "peer_fp": peer_fp,
-                "scope": "adhoc",
-                "mode": "per_file",
-            },
+                "file_count": len(files),
+                "total_bytes": total_bytes,
+                "skipped": skipped,
+            })
+        # DEFAULT: MANIFEST_PUSH ceremony via the ad-hoc wrapper
+        # (temp-registers the picked folder in state, runs scan,
+        # sends, cleans up).
+        self._kick_adhoc_folder_manifest_task(
+            scope="adhoc", ident=str(path), peer=peer, peer_fp=peer_fp,
+            folder_path=path, folder_name=root_name,
         )
         return web.json_response({
-            "ok": True, "started": True,
-            "mode": "per_file",
+            "ok": True, "started": True, "mode": "manifest_push",
             "name": root_name,
             "local_path": str(path),
             "file_count": len(files),
