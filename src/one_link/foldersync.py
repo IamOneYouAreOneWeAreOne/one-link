@@ -20,6 +20,7 @@ sits in daemon and the file/blob/manifest mechanics sit here.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import threading
@@ -1062,7 +1063,32 @@ class FolderEngine:
                 fs = self._folders.get(folder_name)
                 if not fs:
                     continue
+                # v0.21.x rename detection: when a delete + create
+                # land in the same debounce window AND the created
+                # file has the same blob hash as the deleted one,
+                # treat it as a rename. The new manifest entry
+                # inherits the old entry's vclock so peers see a
+                # continuation of history instead of "file X
+                # disappeared + unrelated file Y appeared".
+                renames = self._detect_renames(folder_name, fs, items)
+                renamed_handled: set[str] = set()
+                for old_rel, new_rel, blob_hex, new_path in renames:
+                    try:
+                        self._reconcile_rename(
+                            folder_name, fs, old_rel, new_rel,
+                            blob_hex, new_path,
+                        )
+                        # Skip default processing for both halves.
+                        renamed_handled.add(str(fs.root / old_rel))
+                        renamed_handled.add(str(new_path))
+                    except Exception as e:
+                        log.warning(
+                            "rename reconcile failed for %s -> %s: %s",
+                            old_rel, new_rel, e,
+                        )
                 for path, action in items.items():
+                    if path in renamed_handled:
+                        continue
                     p = Path(path)
                     try:
                         if action == "deleted" or not p.exists():
@@ -1071,6 +1097,122 @@ class FolderEngine:
                             self._reconcile_file(folder_name, p)
                     except Exception as e:
                         log.warning("dirty handle failed for %s: %s", path, e)
+
+    def _detect_renames(
+        self, folder_name: str, fs, items: dict,
+    ) -> list[tuple[str, str, str, Path]]:
+        """Pair deleted-path events with new-create events that have
+        identical content (same blob_hash). Returns a list of
+        (old_rel, new_rel, blob_hex, new_path) tuples for matched
+        pairs. Unmatched events fall back to the standard tombstone
+        or reconcile path.
+
+        Pairing rules:
+          - For each deleted path: look up its blob_hash in the
+            manifest BEFORE tombstoning.
+          - For each created path: hash the file once.
+          - Pair when blob_hash matches AND old_rel != new_rel.
+          - 1:1 pairing — the first match wins (handles
+            renames cleanly; doesn't false-positive on copies of
+            duplicate-content files because the original still
+            exists for the copy case).
+        """
+        deletes: list[tuple[str, str]] = []  # (rel, blob_hash)
+        creates: list[tuple[str, str, Path]] = []  # (rel, blob_hash, path)
+        for path, action in items.items():
+            p = Path(path)
+            rel = _safe_relpath(fs.root, p)
+            if rel is None:
+                continue
+            if action == "deleted" or not p.exists():
+                entry = self.state.get_manifest_entry(folder_name, rel)
+                if entry and entry.get("blob_hash"):
+                    deletes.append((rel, entry["blob_hash"]))
+            else:
+                # Existing entry with matching blob → not a rename
+                # candidate (just a re-touched file). Skip.
+                existing = self.state.get_manifest_entry(folder_name, rel)
+                try:
+                    blob_hex = self.blobs.put_path(p)
+                except Exception:
+                    continue
+                if existing and existing.get("blob_hash") == blob_hex:
+                    continue
+                creates.append((rel, blob_hex, p))
+        if not deletes or not creates:
+            return []
+        renames: list[tuple[str, str, str, Path]] = []
+        used_creates: set[str] = set()
+        for old_rel, old_hash in deletes:
+            for new_rel, new_hash, new_path in creates:
+                if new_rel in used_creates:
+                    continue
+                if old_hash != new_hash:
+                    continue
+                if old_rel == new_rel:
+                    continue
+                renames.append((old_rel, new_rel, old_hash, new_path))
+                used_creates.add(new_rel)
+                break
+        return renames
+
+    def _reconcile_rename(
+        self, folder_name: str, fs, old_rel: str, new_rel: str,
+        blob_hex: str, new_path: Path,
+    ) -> None:
+        """Apply a detected rename: tombstone the old path + create
+        the new entry with an INHERITED vclock (bumped by us) so
+        peers see continuous history."""
+        try:
+            stat = new_path.stat()
+        except OSError:
+            return
+        old_entry = self.state.get_manifest_entry(folder_name, old_rel)
+        # Inherit the old vclock so the new path's history is
+        # connected to the old path's. Each operation increments
+        # our slot once.
+        base_clock = (
+            VectorClock.from_dict(old_entry["vclock"])
+            if old_entry else VectorClock.empty()
+        )
+        new_entry_clock = base_clock.increment(self.me_fp)
+        self.state.record_blob(blob_hex, stat.st_size)
+        self.state.upsert_manifest_entry(
+            folder_name=folder_name,
+            file_path=new_rel,
+            blob_hash=blob_hex,
+            size=stat.st_size,
+            mtime_ms=int(stat.st_mtime * 1000),
+            vclock=new_entry_clock.to_dict(),
+        )
+        # Tombstone the old path: same shape as _tombstone_file —
+        # upsert with blob_hash=None + a separately-bumped clock so
+        # the tombstone propagates independently from the new entry.
+        tombstone_clock = new_entry_clock.increment(self.me_fp)
+        self.state.upsert_manifest_entry(
+            folder_name=folder_name,
+            file_path=old_rel,
+            blob_hash=None,
+            size=None,
+            mtime_ms=int(time.time() * 1000),
+            vclock=tombstone_clock.to_dict(),
+        )
+        # Audit log: 'renamed' action with the old path in the note.
+        # peer_fp = me_fp since this is a local-origin rename.
+        with contextlib.suppress(Exception):
+            self.state.record_folder_audit_event(
+                folder_name=folder_name,
+                peer_fp=self.me_fp,
+                action="renamed",
+                file_path=new_rel,
+                blob_hash=blob_hex,
+                size=stat.st_size,
+                note=f"renamed from {old_rel}",
+            )
+        log.info(
+            "rename detected: %s/%s -> %s (blob=%s)",
+            folder_name, old_rel, new_rel, blob_hex[:12],
+        )
 
     def _reconcile_file(self, folder_name: str, p: Path) -> None:
         """Hash file, ingest into blob store, update manifest if changed."""
