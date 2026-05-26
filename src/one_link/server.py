@@ -13253,6 +13253,19 @@ class UIServer:
             "auto_accept_lan": s.get("auto_accept_lan", "false") == "true",
             "pair_default_allow_all": pair_allow_all,
             "auto_install_updates": auto_install,
+            # v0.21.x Ship 6: sync bandwidth + scheduling.
+            # bandwidth = max upload KB/s when actively syncing folder
+            # blobs to a peer (0 = no limit). quiet_hours = HH:MM
+            # range; if 'enabled' is on, push_folder_to_peer is
+            # skipped during the window. pause_on_metered = honor
+            # OS-reported metered network status (Windows only).
+            # paused = manual master switch (overrides everything).
+            "sync_bandwidth_kbps": int(s.get("sync_bandwidth_kbps") or 0),
+            "sync_quiet_hours_enabled": s.get("sync_quiet_hours_enabled", "false") == "true",
+            "sync_quiet_start": s.get("sync_quiet_start", "22:00"),
+            "sync_quiet_end": s.get("sync_quiet_end", "07:00"),
+            "sync_pause_on_metered": s.get("sync_pause_on_metered", "true") == "true",
+            "sync_paused": s.get("sync_paused", "false") == "true",
             # Theme: 'dark' (default) | 'light' | 'auto' (follow OS)
             "theme": s.get("theme", "dark"),
             "ui_density": s.get("ui_density", "comfortable"),
@@ -13370,6 +13383,41 @@ class UIServer:
             else:
                 stored = "0" if str(v).lower() in ("0", "false", "no") else "1"
             self.daemon.state.set_setting("auto_install_updates", stored)
+        # v0.21.x Ship 6: sync bandwidth + scheduling settings.
+        if "sync_bandwidth_kbps" in data:
+            try:
+                v = int(data["sync_bandwidth_kbps"] or 0)
+            except (TypeError, ValueError):
+                return web.json_response(
+                    {"error": "sync_bandwidth_kbps must be a non-negative integer"},
+                    status=400,
+                )
+            if v < 0:
+                return web.json_response(
+                    {"error": "sync_bandwidth_kbps must be >= 0"}, status=400,
+                )
+            self.daemon.state.set_setting("sync_bandwidth_kbps", str(v))
+        for key in (
+            "sync_quiet_hours_enabled", "sync_pause_on_metered", "sync_paused",
+        ):
+            if key in data:
+                v = data[key]
+                stored = "true" if (v is True or str(v).lower() in ("1", "true", "yes")) else "false"
+                self.daemon.state.set_setting(key, stored)
+        for key in ("sync_quiet_start", "sync_quiet_end"):
+            if key in data:
+                v = (data[key] or "").strip()
+                import re as _re
+                if not _re.fullmatch(r"\d{1,2}:\d{2}", v):
+                    return web.json_response(
+                        {"error": f"{key} must be HH:MM"}, status=400,
+                    )
+                hh, mm = v.split(":")
+                if not (0 <= int(hh) <= 23 and 0 <= int(mm) <= 59):
+                    return web.json_response(
+                        {"error": f"{key} hour 0-23, minute 0-59"}, status=400,
+                    )
+                self.daemon.state.set_setting(key, f"{int(hh):02d}:{int(mm):02d}")
         # v0.9.4: persist onboarding completion server-side so a
         # fresh browser tab on a paired daemon doesn't re-pop the
         # wizard. Local storage is the primary gate; this is the

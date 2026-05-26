@@ -14914,6 +14914,99 @@ class Daemon:
                 await writer.wait_closed()
             raise
 
+    # v0.21.x Ship 6: sync bandwidth + scheduling helpers.
+    def _sync_paused_or_quiet(self) -> tuple[bool, str]:
+        """Return (skip, reason) for the current moment based on the
+        user's global sync rules. push_folder_to_peer calls this
+        before any wire I/O to honour the user-set quiet hours +
+        manual pause + (Windows-only) metered-network status.
+
+        Quiet hours wrap midnight correctly (e.g. 22:00 → 07:00 is
+        treated as ON between 22:00–23:59 OR 00:00–07:00). All
+        time values are local-machine time (the user set them in
+        their local clock; ambiguous DST transitions skip a few
+        minutes of quiet, which is fine — this is courtesy
+        throttling, not a security guarantee)."""
+        if self.state is None:
+            return (False, "")
+        try:
+            if self.state.get_setting("sync_paused") in ("1", "true", "yes"):
+                return (True, "user paused sync globally in Settings")
+            if self.state.get_setting("sync_quiet_hours_enabled") in ("1", "true", "yes"):
+                start = self.state.get_setting("sync_quiet_start") or "22:00"
+                end = self.state.get_setting("sync_quiet_end") or "07:00"
+                if self._time_in_window(start, end):
+                    return (True, f"quiet hours active ({start}–{end})")
+            if self.state.get_setting("sync_pause_on_metered") in ("1", "true", "yes"):
+                if self._network_is_metered():
+                    return (True, "network is metered")
+        except Exception:
+            pass
+        return (False, "")
+
+    @staticmethod
+    def _time_in_window(start: str, end: str) -> bool:
+        """Wrap-midnight inclusive of start, exclusive of end."""
+        from datetime import datetime
+        try:
+            sh, sm = (int(x) for x in start.split(":"))
+            eh, em = (int(x) for x in end.split(":"))
+        except (ValueError, AttributeError):
+            return False
+        now = datetime.now()
+        cur = now.hour * 60 + now.minute
+        s = sh * 60 + sm
+        e = eh * 60 + em
+        if s == e:
+            return False
+        if s < e:
+            return s <= cur < e
+        # Wraps midnight: e.g. 22:00 → 07:00.
+        return cur >= s or cur < e
+
+    @staticmethod
+    def _network_is_metered() -> bool:
+        """v0.21.x Ship 6: best-effort metered-network detection on
+        Windows. Returns False on non-Windows + on any error (we
+        don't want a broken detection to silently block sync; users
+        can still set the manual sync_paused if their connection
+        actually is metered)."""
+        if os.name != "nt":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            # NetworkCostType from Windows.Networking.Connectivity
+            # 1 = Unrestricted, 2 = Fixed, 3 = Variable, 4 = OverDataLimit.
+            # Easier path: use the WinRT NetworkInformation via a tiny
+            # PowerShell shellout. For now we just return False; the
+            # manual pause + quiet hours cover the user-action gap.
+            # Full WinRT integration is a follow-up Ship.
+            return False
+        except Exception:
+            return False
+
+    async def _throttle_chunk(self, bytes_sent: int, started_at: float) -> None:
+        """v0.21.x Ship 6: enforce the global sync_bandwidth_kbps
+        upload cap. Called between chunks in push_folder_to_peer.
+        Computes the elapsed time vs the budget for bytes_sent at
+        the configured rate and sleeps the difference. 0 = no cap."""
+        if self.state is None:
+            return
+        try:
+            cap_kbps = int(self.state.get_setting("sync_bandwidth_kbps") or 0)
+        except (TypeError, ValueError):
+            cap_kbps = 0
+        if cap_kbps <= 0:
+            return
+        cap_bps = cap_kbps * 1024.0
+        elapsed = time.monotonic() - started_at
+        if elapsed <= 0:
+            return
+        target = bytes_sent / cap_bps  # seconds we should have spent
+        if target > elapsed:
+            await asyncio.sleep(target - elapsed)
+
     async def send_to(self, peer: Peer, msgs: list[dict]) -> list[dict]:
         """Send chat/control messages over a reusable encrypted session."""
         block = self._check_outbound_trust(peer)
@@ -17770,6 +17863,17 @@ class Daemon:
         if self.folder_engine is None or self.state is None or self.blob_store is None:
             return {"ok": False, "error": "folder sync not initialized", "blobs_sent": 0}
 
+        # v0.21.x Ship 6: honour user-set quiet hours / pause /
+        # metered. Skip the push entirely if the rules say no
+        # syncing now. The watcher will re-trigger naturally when
+        # things change next.
+        skip, reason = self._sync_paused_or_quiet()
+        if skip:
+            return {
+                "ok": True, "deferred": True, "reason": reason,
+                "blobs_sent": 0,
+            }
+
         peer_fp = self._peer_fp_from_peer(peer)
         if not peer_fp or not self._is_pinned(peer_fp):
             return {"ok": False, "error": "peer not pinned", "blobs_sent": 0}
@@ -17879,6 +17983,10 @@ class Daemon:
             except asyncio.TimeoutError:
                 wants = []
 
+            # v0.21.x Ship 6: bandwidth throttle. Track when we
+            # started sending blobs so the per-chunk sleep can pace
+            # us correctly against the user-set kbps cap.
+            throttle_started_at = time.monotonic()
             for blob_hex in wants:
                 if not self._valid_blob_hex(blob_hex):
                     continue
@@ -17904,6 +18012,11 @@ class Daemon:
                         )))
                         seq += 1
                         prev = cur
+                        # v0.21.x Ship 6: pace per chunk against the
+                        # bandwidth cap. _throttle_chunk sleeps the
+                        # delta so the effective send rate stays at
+                        # or below sync_bandwidth_kbps.
+                        await self._throttle_chunk(bytes_sent, throttle_started_at)
                 blobs_sent += 1
                 self._update_transfer(
                     transfer_id,
