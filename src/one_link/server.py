@@ -764,12 +764,17 @@ def _pick_win_ifiledialog(title: str):
                 user32.SetForegroundWindow(owner_hwnd)
         except Exception:
             owner_hwnd = None
+        log.info(
+            "IFileOpenDialog: about to Show with owner_hwnd=%r",
+            owner_hwnd,
+        )
         try:
             hr = Show(ppv, owner_hwnd)
         finally:
             if owner_hwnd and user32:
                 with contextlib.suppress(Exception):
                     user32.DestroyWindow(owner_hwnd)
+        log.info("IFileOpenDialog: Show returned hr=0x%08X", hr & 0xFFFFFFFF)
         # From here on, the dialog has been shown to the user.
         # Any further failure (including user cancellation) returns
         # None so the dispatcher DOES NOT fall through to the legacy
@@ -786,8 +791,12 @@ def _pick_win_ifiledialog(title: str):
 
         psi = c_void_p()
         hr = GetResult(ppv, byref(psi))
+        log.info(
+            "IFileOpenDialog: GetResult returned hr=0x%08X psi=%r",
+            hr & 0xFFFFFFFF, psi.value,
+        )
         if hr != S_OK or not psi.value:
-            log.debug(
+            log.warning(
                 "IFileDialog.GetResult failed: 0x%08X", hr & 0xFFFFFFFF,
             )
             Release(ppv)
@@ -802,10 +811,16 @@ def _pick_win_ifiledialog(title: str):
             )(psi_vtbl[5])
             name_ptr = c_void_p()
             hr = SI_GetDisplayName(psi, SIGDN_FILESYSPATH, byref(name_ptr))
+            log.info(
+                "IFileOpenDialog: GetDisplayName(FILESYSPATH) hr=0x%08X name_ptr=%r",
+                hr & 0xFFFFFFFF, name_ptr.value,
+            )
             if hr != S_OK or not name_ptr.value:
                 return None
             try:
-                return _ct.wstring_at(name_ptr.value)
+                picked = _ct.wstring_at(name_ptr.value)
+                log.info("IFileOpenDialog: picked path=%r", picked)
+                return picked
             finally:
                 ole32.CoTaskMemFree(name_ptr)
         finally:
@@ -971,31 +986,21 @@ def _native_folder_picker(title: str) -> Optional[str]:
     if os.environ.get("ONE_LINK_DISABLE_NATIVE_PICKER"):
         return None
     if sys.platform == "win32":
-        # v0.21.x: PowerShell + WinForms FolderBrowserDialog as the
-        # PRIMARY Windows picker. Previously the modern ctypes
-        # IFileOpenDialog ran first, but on Win11 builds that only
-        # register the BrokerFileOpenDialog (most current Win11
-        # installs!) the dialog appeared to the user but Show()
-        # returned CANCELLED_HR even when the user picked a folder
-        # and clicked Select Folder. Symptom: user clicks Browse,
-        # sees dialog, picks folder, dialog closes, path never
-        # appears. The PowerShell picker uses a hidden TopMost
-        # owner form (which IS visible to Windows' Z-order and IS
-        # cross-thread / cross-process safe) and reliably returns
-        # the picked path. Visual downside: WinForms folder
-        # dialog has a slightly older look than the IFileOpenDialog
-        # one — but a working picker beats a pretty broken one.
+        # v0.21.x: modern Win10/11 IFileOpenDialog first (matches
+        # File Explorer's look). Now has structured diagnostic
+        # logging at INFO level so if it returns None after the
+        # user picks a folder we can see exactly which step failed
+        # (Show, GetResult, GetDisplayName, etc.) in the daemon log.
+        picked = _pick_win_ifiledialog(title)
+        if picked is not _PICKER_UNAVAILABLE:
+            return picked  # str (picked path) or None (cancelled)
+        # PowerShell + WinForms FolderBrowserDialog as fallback —
+        # uglier but reliable. Used when COM/CLSID init fails on
+        # stripped Windows builds.
         picked = _pick_win_powershell(title)
         if picked is not None:
             return picked
-        # Modern IFileOpenDialog as second resort. If PowerShell
-        # is missing / locked-down (rare), at least try the modern
-        # COM picker before giving up.
-        picked = _pick_win_ifiledialog(title)
-        if picked is not _PICKER_UNAVAILABLE and picked is not None:
-            return picked
-        # Final fallback: DPI-aware tk dialog. Locked-down boxes
-        # with no PowerShell + no COM init still get something.
+        # Final fallback: DPI-aware tk dialog.
         return _pick_tkinter_fallback(title)
     if sys.platform == "darwin":
         picked = _pick_mac_osascript(title)
@@ -13988,6 +13993,13 @@ class UIServer:
                 {"error": f"invalid conflict_policy: {conflict_policy!r}"},
                 status=400,
             )
+        # v0.21.x: add_folder is now FAST (just writes the row +
+        # starts the watcher). The slow disk scan runs as a
+        # background task. Symptom this fixes: user picks a large
+        # folder like their whole project tree (Coherence is tens
+        # of thousands of files, multi-GB), clicks Add, request
+        # hangs for minutes-to-hours because the synchronous walk
+        # blocked the event loop, no toast, no feedback.
         try:
             f = self.daemon.folder_engine.add_folder(
                 name=name,
@@ -14004,7 +14016,37 @@ class UIServer:
         # v0.7.1: every fp in shared_with gets folder caps auto-granted.
         for fp in shared_with:
             self._ensure_folder_caps_for(str(fp), note=f"folder={name}/add")
-        return web.json_response({"ok": True, "folder": f})
+
+        # Kick the initial disk scan off in a thread executor and
+        # forget it. It can take minutes for a large folder; the
+        # watcher already covers any change made AFTER add_folder,
+        # so the user is fully functional immediately. WS broadcast
+        # tells the UI to flip the row out of "scanning..." state.
+        loop = asyncio.get_running_loop()
+
+        async def _bg_scan() -> None:
+            try:
+                await loop.run_in_executor(
+                    None,
+                    self.daemon.folder_engine.start_initial_scan, name,
+                )
+                self.broadcast({
+                    "type": "folder_scan_complete",
+                    "name": name,
+                })
+            except Exception as e:  # pragma: no cover - background
+                log.warning("initial folder scan for %r failed: %s", name, e)
+                self.broadcast({
+                    "type": "folder_scan_failed",
+                    "name": name,
+                    "error": str(e),
+                })
+
+        loop.create_task(_bg_scan())
+
+        return web.json_response({
+            "ok": True, "folder": f, "scan_status": "in_progress",
+        })
 
     def _ensure_folder_caps_for(self, peer_fp: str, *, note: str = "") -> None:
         """v0.7.1: explicit user share = positive consent for folder
@@ -14755,15 +14797,22 @@ class UIServer:
 
         if "error" in result_box:
             err = result_box["error"]
+            log.warning("folder picker FAILED: %s", err)
             return web.json_response(
                 {"error": f"folder picker failed: {err}", "available": False},
                 status=500,
             )
         picked = result_box.get("picked")
+        # v0.21.x: log at INFO so the daemon's normal output shows
+        # what the picker returned. Helps diagnose "I clicked
+        # Browse + picked a folder but the input stayed empty" —
+        # we can tell whether the picker actually got the path
+        # back from the OS dialog, or whether the dialog returned
+        # null (cancellation / focus issue / etc).
         if picked is None:
-            # Either the user cancelled OR no picker was available.
-            # The UI falls back to the manual text path input.
+            log.info("folder picker returned: None (cancelled OR no picker available)")
             return web.json_response({"path": None, "cancelled": True})
+        log.info("folder picker returned: %r", picked)
         return web.json_response({"path": picked, "cancelled": False})
 
     async def api_set_peer_ttl(self, request: web.Request) -> web.Response:

@@ -344,101 +344,82 @@ def test_kill_switch_returns_none_when_env_var_set(monkeypatch):
     assert server._native_folder_picker("hi") is None
 
 
-def test_windows_dispatcher_tries_powershell_first(monkeypatch):
-    """v0.21.x: PowerShell picker is now PRIMARY on Windows.
-    The modern ctypes IFileOpenDialog was originally first, but
-    on Win11 builds that only register BrokerFileOpenDialog (most
-    current Win11 installs), the broker dialog appeared but
-    Show() returned CANCELLED_HR even when the user picked a
-    folder. PowerShell's WinForms FolderBrowserDialog (slightly
-    older look) reliably returns the picked path because it uses
-    a hidden TopMost owner form and runs in its own subprocess
-    with clean COM state. If PowerShell returns a real path,
-    the modern picker MUST NOT also pop."""
+def test_windows_dispatcher_tries_modern_picker_first(monkeypatch):
+    """v0.21.x: the modern IFileOpenDialog is PRIMARY on Windows
+    again — users found the legacy WinForms picker visually awful
+    ('its aweful'). If modern returns a real path, legacy MUST NOT
+    also pop."""
     from one_link import server
     monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
     monkeypatch.setattr(server.sys, "platform", "win32")
     call_order: list[str] = []
-
-    def fake_ps(t):
-        call_order.append("powershell")
-        return "C:/From/PowerShell"
 
     def fake_modern(t):
         call_order.append("modern")
         return "C:/From/Modern"
 
-    monkeypatch.setattr(server, "_pick_win_powershell", fake_ps)
+    def fake_ps(t):
+        call_order.append("powershell")
+        return "C:/From/PowerShell"
+
     monkeypatch.setattr(server, "_pick_win_ifiledialog", fake_modern)
+    monkeypatch.setattr(server, "_pick_win_powershell", fake_ps)
     out = server._native_folder_picker("hi")
-    assert out == "C:/From/PowerShell"
-    assert call_order == ["powershell"], (
-        "modern picker must NOT run when PowerShell returns a "
-        "path — we'd pop two dialogs"
+    assert out == "C:/From/Modern"
+    assert call_order == ["modern"], (
+        "legacy picker must NOT run when modern returns a path"
     )
 
 
-def test_windows_dispatcher_falls_through_to_modern_when_powershell_returns_none(monkeypatch):
-    """If PowerShell is missing / locked-down / cancelled, fall
-    through to the modern IFileOpenDialog as a second resort.
-    On stripped Windows installs without PowerShell, at least
-    the user gets the COM-based picker."""
+def test_windows_dispatcher_falls_through_to_powershell_when_modern_unavailable(monkeypatch):
+    """If IFileOpenDialog can't initialize (REGDB_E_CLASSNOTREG
+    on stripped Windows, COM blocked), fall through to PowerShell.
+    The _PICKER_UNAVAILABLE sentinel signals 'try the fallback';
+    None signals 'user cancelled' (no fallback)."""
     from one_link import server
     monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
     monkeypatch.setattr(server.sys, "platform", "win32")
-    monkeypatch.setattr(server, "_pick_win_powershell", lambda t: None)
-    monkeypatch.setattr(
-        server, "_pick_win_ifiledialog", lambda t: "C:/From/Modern/Fallback",
-    )
-    assert server._native_folder_picker("hi") == "C:/From/Modern/Fallback"
-
-
-def test_windows_dispatcher_final_fallback_is_tk(monkeypatch):
-    """Both PowerShell + modern picker unavailable → tkinter
-    final fallback. Guarantees SOMETHING pops even on locked-
-    down Windows boxes where PowerShell is restricted AND
-    COM init fails."""
-    from one_link import server
-    monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
-    monkeypatch.setattr(server.sys, "platform", "win32")
-    monkeypatch.setattr(server, "_pick_win_powershell", lambda t: None)
     monkeypatch.setattr(
         server, "_pick_win_ifiledialog", lambda t: server._PICKER_UNAVAILABLE,
     )
-    monkeypatch.setattr(server, "_pick_tkinter_fallback", lambda t: "C:/Tk")
-    assert server._native_folder_picker("hi") == "C:/Tk"
+    monkeypatch.setattr(
+        server, "_pick_win_powershell", lambda t: "C:/From/PowerShell/Fallback",
+    )
+    assert server._native_folder_picker("hi") == "C:/From/PowerShell/Fallback"
 
 
-def test_windows_dispatcher_powershell_cancel_does_not_double_pop(monkeypatch):
-    """When PowerShell returns None it could be EITHER cancellation
-    OR unavailable. The current behavior is permissive (falls
-    through to modern picker) which gives PS-less users a working
-    picker, at the cost of a possible double-pop for users who
-    actively cancelled. Pin the current trade-off so a future
-    refactor that distinguishes cancel-vs-unavailable can update
-    this test deliberately."""
+def test_windows_dispatcher_modern_cancel_does_not_fall_through(monkeypatch):
+    """When the modern picker returns None (user cancelled), we
+    MUST NOT pop a second PowerShell dialog. The user just
+    dismissed a dialog; another one would be confusing."""
     from one_link import server
     monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
     monkeypatch.setattr(server.sys, "platform", "win32")
-    call_order: list[str] = []
+    monkeypatch.setattr(server, "_pick_win_ifiledialog", lambda t: None)
 
-    def fake_ps(t):
-        call_order.append("ps")
-        return None  # user cancelled PowerShell dialog
-
-    def fake_modern(t):
-        call_order.append("modern")
-        return None  # user cancelled (or _PICKER_UNAVAILABLE)
-
-    monkeypatch.setattr(server, "_pick_win_powershell", fake_ps)
-    monkeypatch.setattr(server, "_pick_win_ifiledialog", fake_modern)
-    monkeypatch.setattr(server, "_pick_tkinter_fallback", lambda t: None)
-    result = server._native_folder_picker("hi")
-    assert result is None
-    # Both got tried because we can't tell cancel from unavailable
-    # at this layer. Documented limitation.
-    assert call_order == ["ps", "modern"]
+    def _boom(t):
+        raise AssertionError(
+            "PowerShell picker invoked after modern returned None "
+            "(cancellation) — this would pop TWO dialogs in a row"
+        )
+    monkeypatch.setattr(server, "_pick_win_powershell", _boom)
+    monkeypatch.setattr(server, "_pick_tkinter_fallback", _boom)
     assert server._native_folder_picker("hi") is None
+
+
+def test_windows_dispatcher_final_fallback_is_tk(monkeypatch):
+    """Both modern + PowerShell unavailable → tkinter final
+    fallback. Guarantees SOMETHING pops even on locked-down
+    Windows boxes where both COM init AND PowerShell fail."""
+    from one_link import server
+    monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
+    monkeypatch.setattr(server.sys, "platform", "win32")
+    monkeypatch.setattr(
+        server, "_pick_win_ifiledialog", lambda t: server._PICKER_UNAVAILABLE,
+    )
+    monkeypatch.setattr(server, "_pick_win_powershell", lambda t: None)
+    monkeypatch.setattr(server, "_pick_tkinter_fallback", lambda t: "C:/Tk")
+    assert server._native_folder_picker("hi") == "C:/Tk"
 
 
 def test_modern_picker_uses_fos_pickfolders_options():

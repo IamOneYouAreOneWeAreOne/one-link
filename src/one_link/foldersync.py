@@ -519,6 +519,22 @@ class FolderEngine:
         ignored_patterns: list[str] | None = None,
         conflict_policy: str = "latest-wins",
     ) -> dict:
+        """v0.21.x: ONLY does the fast registration steps — write the
+        folder row to state.db + start the filesystem watcher. The
+        full disk scan (``_scan_full``) is INTENTIONALLY skipped here
+        and must be triggered separately via ``start_initial_scan``.
+
+        Why split: a user picking a large folder (their whole project
+        tree, Documents, etc.) used to hang the daemon for minutes
+        because _scan_full hashed every file synchronously inside
+        this call, blocking the HTTP request the entire time. With
+        the split, add_folder returns in milliseconds; the scan
+        runs in a background task and surfaces via refreshFolders.
+
+        Watchdog covers any file changes AFTER add_folder returns,
+        so even with a delayed initial scan, edits made post-Add are
+        picked up immediately. The initial scan only seeds the
+        manifest for files that already existed."""
         local_path = Path(local_path).expanduser().resolve()
         local_path.mkdir(parents=True, exist_ok=True)
         existing = self.state.get_folder(name)
@@ -532,16 +548,23 @@ class FolderEngine:
         )
         try:
             self._start_watch(name, local_path)
-            self._scan_full(name, local_path)
         except Exception:
             self.state.remove_folder(name)
             raise
-        # ``add_folder`` guarantees the row exists by the time we reach
-        # here (we just inserted it + the start_watch ran). Assert non-
-        # None so mypy stops widening the return to Optional.
         row = self.state.get_folder(name)
         assert row is not None, "folder row missing immediately after insert"
         return row
+
+    def start_initial_scan(self, name: str) -> bool:
+        """Run the slow disk scan for an already-registered folder.
+        Idempotent — re-running it just re-reconciles. Safe to call
+        from a background thread / executor. Returns True if the scan
+        actually ran, False if the folder isn't registered."""
+        fs = self._folders.get(name)
+        if not fs:
+            return False
+        self._scan_full(name, fs.root)
+        return True
 
     def remove_folder(self, name: str) -> None:
         fs = self._folders.pop(name, None)
