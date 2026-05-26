@@ -2397,6 +2397,136 @@
   .folder-offer-card .offer-actions .btn-decline:hover {
     color: var(--text);
   }
+  /* v0.21.x folder file browser. Two-pane layout: file tree on the
+     left, preview pane on the right. Modal sits at max-width 920px
+     so it gets enough horizontal room for both panes to be useful. */
+  .folder-browser-head {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 16px; margin-bottom: 12px;
+  }
+  .folder-browser-path {
+    font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+    font-size: 11px; color: var(--text-dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 600px;
+    cursor: pointer;
+  }
+  .folder-browser-path:hover { color: var(--accent); text-decoration: underline; }
+  .folder-browser-meta {
+    font-size: 12px; color: var(--text-dim);
+    text-align: right; white-space: nowrap; flex-shrink: 0;
+  }
+  .folder-browser-toolbar {
+    display: flex; gap: 8px; align-items: center; margin-bottom: 10px;
+  }
+  .folder-browser-toolbar input[type="search"] {
+    flex: 1; background: var(--bg-2); border: 1px solid var(--bg-3);
+    color: var(--text); border-radius: 8px; padding: 8px 12px;
+    font-size: 12px;
+  }
+  .folder-browser-toolbar input[type="search"]:focus {
+    border-color: var(--accent); outline: none;
+  }
+  .folder-browser-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+    gap: 12px;
+    flex: 1;
+    min-height: 50vh;
+    max-height: 65vh;
+  }
+  .folder-browser-list {
+    overflow-y: auto;
+    background: var(--bg-2);
+    border-radius: 10px;
+    padding: 6px;
+  }
+  .folder-browser-list .empty {
+    text-align: center; color: var(--text-dim);
+    padding: 40px 16px; font-size: 12px;
+  }
+  .folder-file-row {
+    display: grid;
+    grid-template-columns: 22px 16px 1fr auto;
+    gap: 8px; align-items: center;
+    padding: 7px 9px; border-radius: 6px; cursor: pointer;
+    font-size: 12px;
+  }
+  .folder-file-row:hover { background: var(--bg-3); }
+  .folder-file-row.selected { background: var(--accent); color: white; }
+  .folder-file-row.selected .ff-meta { color: rgba(255,255,255,.85); }
+  .folder-file-row .ff-icon { font-size: 15px; line-height: 1; opacity: .85; }
+  .folder-file-row .ff-status {
+    font-size: 13px; line-height: 1; text-align: center;
+  }
+  .folder-file-row .ff-status.synced  { color: var(--good, #6ee7b7); }
+  .folder-file-row .ff-status.uploading { color: var(--accent-2); }
+  .folder-file-row .ff-status.downloading { color: var(--accent-2); }
+  .folder-file-row .ff-status.cloud    { color: var(--text-dim); }
+  .folder-file-row .ff-status.conflict { color: #fbbf24; }
+  .folder-file-row .ff-status.missing  { color: #f87171; }
+  .folder-file-row .ff-name {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .folder-file-row .ff-meta {
+    color: var(--text-dim); font-size: 10.5px;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .folder-browser-preview {
+    overflow: hidden;
+    background: var(--bg-2);
+    border-radius: 10px;
+    display: flex; flex-direction: column;
+  }
+  .folder-browser-preview-empty {
+    flex: 1; display: grid; place-items: center;
+    color: var(--text-dim); font-size: 12px; padding: 20px;
+    text-align: center;
+  }
+  .folder-browser-preview .preview-head {
+    padding: 10px 12px; border-bottom: 1px solid var(--bg-3);
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 8px; flex-shrink: 0;
+  }
+  .folder-browser-preview .preview-name {
+    font-weight: 600; font-size: 12.5px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .folder-browser-preview .preview-actions {
+    display: flex; gap: 6px; flex-shrink: 0;
+  }
+  .folder-browser-preview .preview-actions button {
+    background: var(--bg-3); color: var(--text-dim);
+    border-radius: 6px; padding: 5px 9px; font-size: 11px;
+    white-space: nowrap;
+  }
+  .folder-browser-preview .preview-actions button:hover {
+    color: var(--text); background: var(--bg);
+  }
+  .folder-browser-preview .preview-body {
+    flex: 1; overflow: auto; padding: 12px;
+  }
+  .folder-browser-preview .preview-body pre {
+    margin: 0; padding: 0; font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+    font-size: 12px; line-height: 1.4; white-space: pre-wrap; word-break: break-word;
+    color: var(--text);
+  }
+  .folder-browser-preview .preview-body img,
+  .folder-browser-preview .preview-body video {
+    max-width: 100%; max-height: 100%; display: block; margin: 0 auto;
+  }
+  .folder-browser-preview .preview-body iframe {
+    width: 100%; height: 100%; min-height: 50vh; border: 0; background: white;
+  }
+  .folder-browser-preview .preview-body audio { width: 100%; }
+  .folder-browser-preview .preview-truncated {
+    margin-top: 12px; padding: 8px 10px;
+    background: rgba(251,191,36,.12); color: #fbbf24;
+    border-radius: 6px; font-size: 11px;
+  }
+  @media (max-width: 720px) {
+    .folder-browser-body { grid-template-columns: 1fr; }
+  }
   .file-row a, .file-row button {
     color: var(--text-dim); padding: 6px 9px; border-radius: 6px; background: var(--bg-2); font-size: 12px;
     white-space: nowrap;
@@ -11222,6 +11352,50 @@
     </div>
   </div>
 
+  <!-- v0.21.x: inline folder file browser. Opens on folder-name
+       click in the Folders panel. Shows the file tree with per-file
+       sync status, supports click-to-preview for text + image +
+       PDF + video + audio, and offers per-file actions
+       (open in OS file manager, download a copy). -->
+  <div class="modal-backdrop" id="folder-browser-backdrop">
+    <div class="modal" style="max-width:920px; max-height:88vh;">
+      <div class="folder-browser-head">
+        <div>
+          <h2 id="folder-browser-title" style="margin:0 0 4px;">Folder</h2>
+          <div class="folder-browser-path" id="folder-browser-path"
+               title="Local path on this computer (click to open in your file manager)"></div>
+        </div>
+        <div class="folder-browser-meta" id="folder-browser-meta"></div>
+      </div>
+      <div class="folder-browser-toolbar">
+        <input type="search" id="folder-browser-search"
+               placeholder="Filter files…"
+               aria-label="Filter the file list" />
+        <button class="btn-ghost" id="folder-browser-open-explorer"
+                title="Open this folder in Windows Explorer / Finder">
+          Open in file manager
+        </button>
+        <button class="btn-ghost" id="folder-browser-sync"
+                title="Push the current contents to every paired device that has accepted this folder">
+          Sync now
+        </button>
+        <button class="btn-ghost" id="folder-browser-close" aria-label="Close file browser">
+          Close
+        </button>
+      </div>
+      <div class="folder-browser-body">
+        <div id="folder-browser-list" class="folder-browser-list">
+          <div class="empty">Loading…</div>
+        </div>
+        <div id="folder-browser-preview" class="folder-browser-preview">
+          <div class="folder-browser-preview-empty">
+            Pick a file to preview it here.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- v0.8.1.1: hidden DEBUG OVERLAY. Open with Ctrl+Shift+D
        or via the Settings modal's "Open diagnostics" button. -->
   <div class="modal-backdrop" id="debug-backdrop">
@@ -19600,11 +19774,10 @@
         // squeezing them into competing flex slots.
         const content = el("div", "content");
         const meta = el("div", "meta");
-        // v0.21.x: folder name + path are now click-to-open shortcuts.
-        // Clicking either opens the local path in the OS file
-        // manager (Explorer / Finder) so users can actually SEE the
-        // synced files — the previous flow had NO way to do this
-        // from the One Link UI.
+        // v0.21.x: folder name opens the INLINE file browser modal;
+        // path opens the OS file manager. Two distinct affordances:
+        // browse files inside One Link (most users want) vs leave
+        // the app for OS-native context (power users).
         const openInExplorer = async () => {
           try {
             await api.post(
@@ -19614,10 +19787,14 @@
             toast(`Couldn't open folder: ${errorToastBody(e)}`, "bad", 6000);
           }
         };
+        const openInline = () => openFolderBrowser(f.name);
         const nameEl = el("div", "name folder-name-clickable", f.name);
-        nameEl.title = `Open ${f.name} in your file manager`;
+        nameEl.title = (
+            `Browse the files inside ${f.name} without leaving One Link. `
+            + "(Use the Open button to launch your OS file manager.)"
+        );
         nameEl.style.cursor = "pointer";
-        nameEl.onclick = openInExplorer;
+        nameEl.onclick = openInline;
         meta.appendChild(nameEl);
         meta.appendChild(el("div", "size", `${f.files || 0} files · ${f.in_store || 0} local blobs · ${f.shared_with?.length || 0} peers`));
         // Middle-truncate the path: keep the start (C:\Users\...) and
@@ -19842,6 +20019,353 @@
     count.textContent = String(state.folderOffers.length);
     for (const o of state.folderOffers) {
       list.appendChild(_renderFolderOffer(o));
+    }
+  }
+
+  // v0.21.x folder file browser. Modal that shows the file tree
+  // inside a synced folder, with per-file sync status, click-to-
+  // preview for text/image/audio/video/pdf, and per-file actions
+  // (show in file manager, download). Foundation for the per-file
+  // status, version-history, and selective-sync features that
+  // hang off the same UI.
+  state.folderBrowser = {
+    folderName: null,
+    entries: [],
+    conflicts: {},     // rel_path -> true if has unresolved conflict
+    transfers: {},     // rel_path -> "uploading" | "downloading"
+    filter: "",
+    selectedPath: null,
+  };
+
+  function _fileGlyphForName(name) {
+    const ext = (name.split(".").pop() || "").toLowerCase();
+    if (["png","jpg","jpeg","gif","webp","bmp","svg"].includes(ext)) return "🖼";
+    if (["mp4","mov","mkv","webm","avi"].includes(ext)) return "🎬";
+    if (["mp3","wav","flac","ogg","m4a"].includes(ext)) return "🎵";
+    if (["pdf"].includes(ext)) return "📄";
+    if (["zip","tar","gz","7z","rar"].includes(ext)) return "🗜";
+    if (["doc","docx","odt","rtf"].includes(ext)) return "📝";
+    if (["xls","xlsx","ods","csv"].includes(ext)) return "📊";
+    if (["md","txt","log","json","yml","yaml","toml","ini","conf","cfg"].includes(ext)) return "📝";
+    if (["py","js","ts","go","rs","c","h","cpp","java","sh","ps1","html","css"].includes(ext)) return "🧩";
+    return "📎";
+  }
+
+  function _statusForEntry(e) {
+    // ⚠ conflict overrides everything else.
+    if (state.folderBrowser.conflicts[e.path]) {
+      return { glyph: "⚠", cls: "conflict", title: "Conflict: both devices changed this file. Open the Conflicts banner to resolve." };
+    }
+    const transfer = state.folderBrowser.transfers[e.path];
+    if (transfer === "uploading") {
+      return { glyph: "↑", cls: "uploading", title: "Uploading to a paired device right now." };
+    }
+    if (transfer === "downloading") {
+      return { glyph: "↓", cls: "downloading", title: "Downloading from a paired device right now." };
+    }
+    // Manifest entry: do we have the local blob?
+    if (e.blob_hash && e.local) {
+      return { glyph: "✓", cls: "synced", title: "Synced. Local copy matches what every paired device has." };
+    }
+    if (e.blob_hash && !e.local) {
+      return { glyph: "☁", cls: "cloud", title: "On a paired device but not yet on this one. Sync to pull it." };
+    }
+    if (!e.blob_hash) {
+      return { glyph: "•", cls: "missing", title: "On disk but not yet indexed. Will be picked up by the next scan." };
+    }
+    return { glyph: "?", cls: "", title: "Unknown status." };
+  }
+
+  function _renderFolderFileRow(e) {
+    const row = document.createElement("div");
+    row.className = "folder-file-row";
+    row.dataset.path = e.path;
+    if (state.folderBrowser.selectedPath === e.path) {
+      row.classList.add("selected");
+    }
+    const icon = document.createElement("span");
+    icon.className = "ff-icon";
+    icon.textContent = _fileGlyphForName(e.path);
+    row.appendChild(icon);
+    const stat = _statusForEntry(e);
+    const sEl = document.createElement("span");
+    sEl.className = `ff-status ${stat.cls}`;
+    sEl.textContent = stat.glyph;
+    sEl.title = stat.title;
+    row.appendChild(sEl);
+    const nameEl = document.createElement("span");
+    nameEl.className = "ff-name";
+    nameEl.textContent = e.path;
+    nameEl.title = e.path;
+    row.appendChild(nameEl);
+    const metaEl = document.createElement("span");
+    metaEl.className = "ff-meta";
+    metaEl.textContent = `${_humanBytes(e.size)} · ${_humanAgo(e.mtime_ms)}`;
+    row.appendChild(metaEl);
+    row.onclick = () => _previewFolderFile(state.folderBrowser.folderName, e);
+    return row;
+  }
+
+  function _humanAgo(ms) {
+    if (!ms) return "?";
+    const delta = Date.now() - Number(ms);
+    if (delta < 60_000) return "just now";
+    if (delta < 3_600_000) return `${Math.round(delta / 60_000)}m ago`;
+    if (delta < 86_400_000) return `${Math.round(delta / 3_600_000)}h ago`;
+    return `${Math.round(delta / 86_400_000)}d ago`;
+  }
+
+  async function openFolderBrowser(folderName) {
+    const folder = (state.folders || []).find((x) => x.name === folderName);
+    if (!folder) {
+      toast("That folder isn't in the list anymore.", "info", 3500);
+      return;
+    }
+    state.folderBrowser.folderName = folderName;
+    state.folderBrowser.filter = "";
+    state.folderBrowser.selectedPath = null;
+    state.folderBrowser.transfers = {};
+    $("#folder-browser-title").textContent = folder.name;
+    const pathEl = $("#folder-browser-path");
+    pathEl.textContent = folder.local_path;
+    pathEl.title = `${folder.local_path}\n\nClick to open in your file manager.`;
+    pathEl.onclick = async () => {
+      try {
+        await api.post(`/api/folders/${encodeURIComponent(folderName)}/reveal`, {});
+      } catch (e) {
+        toast(`Couldn't open folder: ${errorToastBody(e)}`, "bad", 5000);
+      }
+    };
+    $("#folder-browser-meta").textContent = "Loading…";
+    const searchEl = $("#folder-browser-search");
+    searchEl.value = "";
+    searchEl.oninput = () => {
+      state.folderBrowser.filter = (searchEl.value || "").toLowerCase();
+      _renderFolderBrowserList();
+    };
+    const previewEl = $("#folder-browser-preview");
+    previewEl.replaceChildren();
+    const empty = document.createElement("div");
+    empty.className = "folder-browser-preview-empty";
+    empty.textContent = "Pick a file to preview it here.";
+    previewEl.appendChild(empty);
+    $("#folder-browser-backdrop").classList.add("show");
+    document.body.classList.add("modal-open");
+    // Wire toolbar handlers (idempotent — replace onclick each open).
+    $("#folder-browser-open-explorer").onclick = async () => {
+      try {
+        await api.post(`/api/folders/${encodeURIComponent(folderName)}/reveal`, {});
+      } catch (e) {
+        toast(`Couldn't open folder: ${errorToastBody(e)}`, "bad", 5000);
+      }
+    };
+    $("#folder-browser-sync").onclick = async () => {
+      try {
+        const r = await api.post(`/api/folders/${encodeURIComponent(folderName)}/sync`, {});
+        const pushed = (r.results || []).filter((x) => x.status === "pushed").length;
+        toast(`Sync queued for ${pushed} device${pushed === 1 ? "" : "s"}`, "good", 4000);
+      } catch (e) {
+        toast(`Sync failed: ${errorToastBody(e)}`, "bad", 6000);
+      }
+    };
+    $("#folder-browser-close").onclick = closeFolderBrowser;
+    // Load tree + conflicts in parallel.
+    await Promise.all([
+      _loadFolderBrowserTree(folderName),
+      _loadFolderBrowserConflicts(folderName),
+      _loadFolderBrowserTransfers(folderName),
+    ]);
+    _renderFolderBrowserList();
+  }
+
+  function closeFolderBrowser() {
+    $("#folder-browser-backdrop").classList.remove("show");
+    document.body.classList.remove("modal-open");
+    state.folderBrowser.folderName = null;
+  }
+
+  async function _loadFolderBrowserTree(folderName) {
+    try {
+      const r = await api.get(`/api/folders/${encodeURIComponent(folderName)}/tree`);
+      state.folderBrowser.entries = r.entries || [];
+      $("#folder-browser-meta").textContent =
+        `${r.total_entries || 0} files · ${_humanBytes(r.total_bytes || 0)}`;
+    } catch (e) {
+      state.folderBrowser.entries = [];
+      $("#folder-browser-meta").textContent = "—";
+      toast(`Couldn't read folder tree: ${errorToastBody(e)}`, "bad", 5000);
+    }
+  }
+
+  async function _loadFolderBrowserConflicts(folderName) {
+    try {
+      const r = await api.get(`/api/folder-conflicts?unresolved=1&limit=500`);
+      const map = {};
+      for (const c of r.conflicts || []) {
+        if (c.folder_name === folderName && c.file_path) {
+          map[c.file_path] = true;
+        }
+      }
+      state.folderBrowser.conflicts = map;
+    } catch (_e) {
+      state.folderBrowser.conflicts = {};
+    }
+  }
+
+  async function _loadFolderBrowserTransfers(folderName) {
+    // Map in-flight folder transfers to per-file status. Folder
+    // transfers are tracked as kind=folder; per-file is approximated
+    // by the wanted_blobs metadata.
+    try {
+      const r = await api.transfers();
+      const map = {};
+      const transfers = r.transfers || r || [];
+      for (const t of transfers) {
+        if (t.kind !== "folder") continue;
+        if ((t.name || t.metadata?.folder) !== folderName) continue;
+        if (t.status !== "active" && t.status !== "queued") continue;
+        // No per-file granularity here yet; mark all currently-cloud
+        // files as downloading if direction=in, uploading if =out.
+        for (const e of state.folderBrowser.entries) {
+          if (e.blob_hash && !e.local && t.direction === "in") {
+            map[e.path] = "downloading";
+          }
+          if (e.blob_hash && e.local && t.direction === "out") {
+            map[e.path] = "uploading";
+          }
+        }
+      }
+      state.folderBrowser.transfers = map;
+    } catch (_e) {
+      state.folderBrowser.transfers = {};
+    }
+  }
+
+  function _renderFolderBrowserList() {
+    const list = $("#folder-browser-list");
+    list.replaceChildren();
+    const filter = state.folderBrowser.filter;
+    const matches = (state.folderBrowser.entries || []).filter((e) => {
+      if (!filter) return true;
+      return (e.path || "").toLowerCase().includes(filter);
+    });
+    if (matches.length === 0) {
+      const em = document.createElement("div");
+      em.className = "empty";
+      em.textContent = filter
+        ? "No files match your filter."
+        : "This folder is empty. Drop files into it on disk and they'll appear here.";
+      list.appendChild(em);
+      return;
+    }
+    for (const e of matches) {
+      list.appendChild(_renderFolderFileRow(e));
+    }
+  }
+
+  async function _previewFolderFile(folderName, entry) {
+    state.folderBrowser.selectedPath = entry.path;
+    _renderFolderBrowserList();
+    const previewEl = $("#folder-browser-preview");
+    previewEl.replaceChildren();
+    const head = document.createElement("div");
+    head.className = "preview-head";
+    const nameEl = document.createElement("div");
+    nameEl.className = "preview-name";
+    nameEl.textContent = entry.path;
+    nameEl.title = entry.path;
+    head.appendChild(nameEl);
+    const actions = document.createElement("div");
+    actions.className = "preview-actions";
+    const showBtn = document.createElement("button");
+    showBtn.type = "button";
+    showBtn.textContent = "Show in folder";
+    showBtn.title = "Highlight this file in your OS file manager.";
+    showBtn.onclick = async () => {
+      try {
+        await api.post(
+          `/api/folders/${encodeURIComponent(folderName)}/file/${encodeURIComponent(entry.path)}/reveal`, {},
+        );
+      } catch (err) {
+        toast(`Couldn't reveal: ${errorToastBody(err)}`, "bad", 5000);
+      }
+    };
+    actions.appendChild(showBtn);
+    const dlBtn = document.createElement("button");
+    dlBtn.type = "button";
+    dlBtn.textContent = "Download a copy";
+    dlBtn.title = "Save a copy of this file outside the synced folder.";
+    dlBtn.onclick = () => {
+      const u = `/api/folders/${encodeURIComponent(folderName)}/file/${encodeURIComponent(entry.path)}/raw`;
+      const a = document.createElement("a");
+      a.href = u;
+      a.download = entry.path.split(/[\\/]/).pop() || "file";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    };
+    actions.appendChild(dlBtn);
+    head.appendChild(actions);
+    previewEl.appendChild(head);
+    const body = document.createElement("div");
+    body.className = "preview-body";
+    previewEl.appendChild(body);
+    body.textContent = "Loading…";
+    try {
+      const r = await api.get(
+        `/api/folders/${encodeURIComponent(folderName)}/file/${encodeURIComponent(entry.path)}/preview`,
+      );
+      body.replaceChildren();
+      if (r.previewable === false) {
+        const ne = document.createElement("div");
+        ne.className = "folder-browser-preview-empty";
+        ne.textContent = `Preview not supported for .${r.extension || "?"} files. Use Download a copy to fetch it.`;
+        body.appendChild(ne);
+        return;
+      }
+      if (r.stream_url) {
+        // Image / video / audio / pdf / html-sandboxed
+        if (r.kind === "image") {
+          const img = document.createElement("img");
+          img.src = r.stream_url;
+          img.alt = entry.path;
+          body.appendChild(img);
+        } else if (r.kind === "video") {
+          const v = document.createElement("video");
+          v.src = r.stream_url;
+          v.controls = true;
+          body.appendChild(v);
+        } else if (r.kind === "audio") {
+          const a = document.createElement("audio");
+          a.src = r.stream_url;
+          a.controls = true;
+          body.appendChild(a);
+        } else if (r.kind === "pdf" || r.kind === "html-sandboxed") {
+          const f = document.createElement("iframe");
+          f.src = r.stream_url;
+          if (r.kind === "html-sandboxed") {
+            f.sandbox = "";  // empty = max isolation
+          }
+          body.appendChild(f);
+        }
+        return;
+      }
+      // Text-y kinds: inline content.
+      const pre = document.createElement("pre");
+      pre.textContent = r.content || "";
+      body.appendChild(pre);
+      if (r.truncated) {
+        const trunc = document.createElement("div");
+        trunc.className = "preview-truncated";
+        trunc.textContent = `Showing the first ${_humanBytes(r.preview_bytes || 0)} of ${_humanBytes(r.size || 0)}. Use Download a copy for the full file.`;
+        body.appendChild(trunc);
+      }
+    } catch (e) {
+      body.replaceChildren();
+      const err = document.createElement("div");
+      err.className = "folder-browser-preview-empty";
+      err.textContent = `Couldn't preview: ${errorToastBody(e)}`;
+      body.appendChild(err);
     }
   }
 
@@ -30150,6 +30674,16 @@
   // Esc closes too - match other modals.
   $("#conflicts-backdrop")?.addEventListener("click", (e) => {
     if (e.target === e.currentTarget) closeConflictsModal();
+  });
+  // v0.21.x folder browser modal handlers — backdrop click + Esc.
+  $("#folder-browser-backdrop")?.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeFolderBrowser();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if ($("#folder-browser-backdrop")?.classList.contains("show")) {
+      closeFolderBrowser();
+    }
   });
   $("#btn-refresh-mesh").onclick = async () => {
     await refreshTransfers();

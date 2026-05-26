@@ -2402,6 +2402,13 @@ class UIServer:
         r.add_post(r"/api/folders/{name}/sync", self._guarded(self.api_sync_folder_now))
         r.add_post(r"/api/folders/{name}/policy", self._guarded(self.api_set_folder_policy))
         r.add_post(r"/api/folders/{name}/reveal", self._guarded(self.api_folder_reveal))
+        # v0.21.x file browser — per-file preview / raw stream / reveal
+        r.add_get(r"/api/folders/{name}/file/{path:.+}/preview",
+                  self._guarded(self.api_folder_file_preview))
+        r.add_get(r"/api/folders/{name}/file/{path:.+}/raw",
+                  self._guarded(self.api_folder_file_raw))
+        r.add_post(r"/api/folders/{name}/file/{path:.+}/reveal",
+                   self._guarded(self.api_folder_file_reveal))
         r.add_get(r"/api/folders/{name}/audit", self._guarded(self.api_folder_audit))
         r.add_get(r"/api/folders/{name}/tree", self._guarded(self.api_folder_tree))
         # v0.21.x folder-share ceremony: incoming offers (proposals
@@ -18119,6 +18126,178 @@ class UIServer:
         except OSError as e:
             return web.json_response({"error": f"reveal failed: {e}"}, status=500)
         return web.json_response({"ok": True, "path": str(path)})
+
+    async def api_folder_file_preview(self, request: web.Request) -> web.Response:
+        """v0.21.x: preview a single file inside a synced folder.
+        Backs the inline file browser. Returns either inlined text
+        content (for text-y extensions, capped at PREVIEW_MAX_BYTES)
+        or a stream_url that the browser can drop into an <img> /
+        <video> / <audio> / <iframe> element.
+
+        The folder must be registered + the file must exist on disk;
+        we deliberately don't fall through to other folders or to
+        traversal-escape paths."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        name = request.match_info["name"]
+        rel = request.match_info.get("path", "").strip("/")
+        if not rel:
+            return web.json_response({"error": "path required"}, status=400)
+        folder = self.daemon.state.get_folder(name)
+        if not folder:
+            return web.json_response({"error": "no such folder"}, status=404)
+        try:
+            root = Path(folder["local_path"]).resolve()
+            target = (root / rel).resolve()
+        except OSError as e:
+            return web.json_response({"error": f"bad path: {e}"}, status=500)
+        # Path-traversal guard: target must live under root.
+        try:
+            target.relative_to(root)
+        except ValueError:
+            return web.json_response({"error": "path escapes folder"}, status=400)
+        if not target.is_file():
+            return web.json_response({"error": "not a file"}, status=404)
+        ext = target.suffix.lstrip(".").lower()
+        kind = self.PREVIEW_KINDS.get(ext)
+        if kind is None:
+            return web.json_response({
+                "name": target.name,
+                "extension": ext,
+                "kind": None,
+                "size": target.stat().st_size,
+                "previewable": False,
+            })
+        size = target.stat().st_size
+        # For stream-friendly kinds, hand back a URL the browser can
+        # load directly rather than inlining bytes.
+        if kind in ("pdf", "video", "audio", "image", "html-sandboxed"):
+            from urllib.parse import quote as _urlquote
+            stream = (
+                f"/api/folders/{_urlquote(name, safe='')}"
+                f"/file/{_urlquote(rel, safe='/')}/raw"
+            )
+            return web.json_response({
+                "name": target.name,
+                "extension": ext,
+                "kind": kind,
+                "size": size,
+                "previewable": True,
+                "stream_url": stream,
+            })
+        # Text-y: inline contents, capped.
+        cap = self.PREVIEW_MAX_BYTES
+        truncated = size > cap
+        try:
+            with target.open("rb") as f:
+                raw = f.read(cap)
+        except OSError as e:
+            return web.json_response({"error": f"read: {e}"}, status=500)
+        try:
+            content = raw.decode("utf-8")
+            encoding = "utf-8"
+        except UnicodeDecodeError:
+            content = raw.decode("utf-8", errors="replace")
+            encoding = "utf-8-replace"
+        return web.json_response({
+            "name": target.name,
+            "extension": ext,
+            "kind": kind,
+            "encoding": encoding,
+            "size": size,
+            "preview_bytes": len(raw),
+            "truncated": truncated,
+            "previewable": True,
+            "content": content,
+        })
+
+    async def api_folder_file_raw(self, request: web.Request) -> web.Response:
+        """Stream a folder file's raw bytes for <img>/<video>/<iframe>
+        previews. Same path-traversal guard as the preview endpoint;
+        Content-Type inferred from extension."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        name = request.match_info["name"]
+        rel = request.match_info.get("path", "").strip("/")
+        if not rel:
+            return web.json_response({"error": "path required"}, status=400)
+        folder = self.daemon.state.get_folder(name)
+        if not folder:
+            return web.json_response({"error": "no such folder"}, status=404)
+        try:
+            root = Path(folder["local_path"]).resolve()
+            target = (root / rel).resolve()
+        except OSError as e:
+            return web.json_response({"error": f"bad path: {e}"}, status=500)
+        try:
+            target.relative_to(root)
+        except ValueError:
+            return web.json_response({"error": "path escapes folder"}, status=400)
+        if not target.is_file():
+            return web.json_response({"error": "not a file"}, status=404)
+        import mimetypes
+        ctype, _ = mimetypes.guess_type(target.name)
+        if not ctype:
+            ctype = "application/octet-stream"
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": ctype,
+                "Content-Length": str(target.stat().st_size),
+                "X-Frame-Options": "SAMEORIGIN",
+                "Content-Security-Policy": (
+                    "default-src 'self'; frame-ancestors 'self'"
+                ),
+            },
+        )
+        await resp.prepare(request)
+        try:
+            with target.open("rb") as f:
+                while True:
+                    chunk = f.read(64 * 1024)
+                    if not chunk:
+                        break
+                    await resp.write(chunk)
+        except OSError:
+            pass
+        await resp.write_eof()
+        return resp
+
+    async def api_folder_file_reveal(self, request: web.Request) -> web.Response:
+        """Show a specific folder file in the OS file manager
+        (Explorer /select on Windows, open -R on macOS). Lets users
+        jump from the inline browser to OS-native context."""
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        name = request.match_info["name"]
+        rel = request.match_info.get("path", "").strip("/")
+        folder = self.daemon.state.get_folder(name)
+        if not folder or not rel:
+            return web.json_response({"error": "bad request"}, status=400)
+        try:
+            root = Path(folder["local_path"]).resolve()
+            target = (root / rel).resolve()
+            target.relative_to(root)
+        except (OSError, ValueError):
+            return web.json_response({"error": "bad path"}, status=400)
+        if not target.exists():
+            return web.json_response({"error": "not found"}, status=404)
+        if self._reveal_throttled():
+            return web.json_response({"ok": True, "throttled": True})
+        if os.environ.get("ONE_LINK_DISABLE_REVEAL") == "1":
+            return web.json_response({"ok": True, "disabled": True})
+        import sys
+        import subprocess
+        try:
+            if sys.platform == "win32":
+                subprocess.Popen(["explorer.exe", f"/select,{target}"])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", str(target)])
+            else:
+                subprocess.Popen(["xdg-open", str(target.parent)])
+        except OSError as e:
+            return web.json_response({"error": f"reveal failed: {e}"}, status=500)
+        return web.json_response({"ok": True})
 
     async def api_folder_reveal(self, request: web.Request) -> web.Response:
         """v0.21.x: open a synced folder's local path in the OS file
