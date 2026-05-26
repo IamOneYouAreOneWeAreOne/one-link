@@ -331,10 +331,13 @@ async def test_send_then_cancel_stops_in_flight_task(preview_ctx):
         return {"ok": True}
     preview_ctx["daemon"].send_file = AsyncMock(side_effect=blocking_send)
 
+    # Use per_file mode so send_file is the actual transfer driver
+    # we can block on. (The default manifest_push mode calls
+    # send_folder_one_shot_via_manifest instead of send_file directly.)
     r1 = await preview_ctx["client"].post(
         "/api/folders/papers/send-to",
         headers=_h(preview_ctx["token"]),
-        json={"peer_fp": preview_ctx["peer_fp"]},
+        json={"peer_fp": preview_ctx["peer_fp"], "per_file": True},
     )
     assert r1.status == 200
     # Cancel.
@@ -487,7 +490,9 @@ async def test_adhoc_send_folder_large_files_use_per_file_send_file(
     r = await preview_ctx["client"].post(
         "/api/folders/large/send-to",
         headers=_h(preview_ctx["token"]),
-        json={"peer_fp": preview_ctx["peer_fp"]},
+        # per_file=True to exercise the size-based routing inside
+        # _run_folder_send_task (large → send_file, small → batched).
+        json={"peer_fp": preview_ctx["peer_fp"], "per_file": True},
     )
     assert r.status == 200
     for _ in range(50):

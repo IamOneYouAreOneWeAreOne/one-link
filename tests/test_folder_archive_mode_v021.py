@@ -328,9 +328,8 @@ def test_round_trip_stage_then_extract(server_ctx, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_send_to_endpoint_defaults_to_archive_mode(server_ctx, tmp_path):
-    """POST /api/folders/{name}/send-to with no archive flag defaults
-    to archive mode, returns mode=archive in the response."""
+async def test_send_to_endpoint_archive_true_uses_archive(server_ctx, tmp_path):
+    """archive=true is the opt-in for zip-and-send mode."""
     src = tmp_path / "papers"
     _make_file(src, "a.txt", b"a")
     server_ctx["state"].add_folder(
@@ -339,12 +338,11 @@ async def test_send_to_endpoint_defaults_to_archive_mode(server_ctx, tmp_path):
     r = await server_ctx["client"].post(
         "/api/folders/papers/send-to",
         headers=_h(server_ctx["token"]),
-        json={"peer_fp": server_ctx["peer_fp"]},
+        json={"peer_fp": server_ctx["peer_fp"], "archive": True},
     )
     assert r.status == 200
     body = await r.json()
     assert body["mode"] == "archive"
-    # send_file should be called with the magic rel_path.
     for _ in range(50):
         await asyncio.sleep(0.02)
         if server_ctx["daemon"].send_file.await_count >= 1:
@@ -355,9 +353,8 @@ async def test_send_to_endpoint_defaults_to_archive_mode(server_ctx, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_send_to_endpoint_archive_false_uses_per_file(server_ctx, tmp_path):
-    """archive=false in the body opts out into the legacy per-file
-    path (returns mode=per_file)."""
+async def test_send_to_endpoint_per_file_true_uses_per_file(server_ctx, tmp_path):
+    """per_file=true is the opt-in for legacy per-file mode."""
     src = tmp_path / "legacy"
     _make_file(src, "a.txt", b"a")
     server_ctx["state"].add_folder(
@@ -366,7 +363,7 @@ async def test_send_to_endpoint_archive_false_uses_per_file(server_ctx, tmp_path
     r = await server_ctx["client"].post(
         "/api/folders/legacy/send-to",
         headers=_h(server_ctx["token"]),
-        json={"peer_fp": server_ctx["peer_fp"], "archive": False},
+        json={"peer_fp": server_ctx["peer_fp"], "per_file": True},
     )
     assert r.status == 200
     body = await r.json()

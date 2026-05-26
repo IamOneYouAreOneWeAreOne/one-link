@@ -24893,6 +24893,18 @@
         const failed = m.failed || 0;
         const mode = m.mode || "per_file";
         let body;
+        if (mode === "manifest_push") {
+          if (failed > 0 || !m.ok) {
+            body = `Folder send failed: ${m.name || ""} — ${m.error || "unknown error"}`;
+          } else {
+            body = `Folder ${m.name || ""} delivered`;
+            if (m.sent > 0) body += ` · ${m.sent} new blob${m.sent === 1 ? "" : "s"} streamed`;
+            else body += ` · already on the other device (dedup)`;
+          }
+          toast(body, (failed > 0 || !m.ok) ? "bad" : "good", 7000);
+          hideFolderSendProgress();
+          return;
+        }
         if (mode === "archive") {
           // ARCHIVE mode — one transfer for the whole folder.
           if (failed > 0) {

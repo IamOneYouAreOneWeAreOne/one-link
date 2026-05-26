@@ -18915,6 +18915,61 @@ class Daemon:
         return len(peers)
 
     # ─── folder sync orchestration ─────────────────────────────────────
+    async def send_folder_one_shot_via_manifest(
+        self,
+        peer: Peer,
+        folder_name: str,
+    ) -> dict:
+        """v0.21.x one-shot folder send via the existing MANIFEST_PUSH
+        ceremony. Reuses every win of folder-sync (chunk-level dedup,
+        per-file resumability, receiver-side Accept/Decline card) WITHOUT
+        creating an ongoing shared-folder record.
+
+        How it works:
+          1. Temporarily grant the peer in shared_with (if not already
+             there) so push_folder_to_peer's share-list check passes.
+          2. Send MANIFEST_PUSH. The receiver's _handle_manifest_push
+             either:
+               a. Has the folder already → reconciles + pulls deltas
+               b. Doesn't have it → caches as pending_folder_offer,
+                  broadcasts folder_offer_received, surfaces in the UI
+                  with Accept/Decline. On Accept the receiver's flow
+                  takes over from here (creates local folder, pulls
+                  blobs back via empty MANIFEST_WANTS reverse-trigger).
+          3. After push_folder_to_peer returns, REMOVE the temp grant
+             so we don't leak persistent shared_with state.
+
+        Returns push_folder_to_peer's result dict, augmented with
+        ``one_shot: True``. Failures don't poison shared_with — the
+        cleanup runs in finally.
+        """
+        if self.state is None:
+            return {"ok": False, "error": "state not initialized", "blobs_sent": 0}
+        f = self.state.get_folder(folder_name)
+        if not f:
+            return {"ok": False, "error": "no such folder", "blobs_sent": 0}
+        peer_fp = self._peer_fp_from_peer(peer)
+        if not peer_fp:
+            return {"ok": False, "error": "peer fp unresolved", "blobs_sent": 0}
+        was_already_shared = peer_fp in f.get("shared_with", [])
+        granted_temporarily = False
+        try:
+            if not was_already_shared:
+                # Temp-grant so push_folder_to_peer's share-list check
+                # passes. Default permission: 'rw' (matches what the
+                # Share button does today).
+                self.state.share_folder_with(folder_name, peer_fp)
+                self.state.set_folder_peer_permission(
+                    folder_name, peer_fp, "rw",
+                )
+                granted_temporarily = True
+            result = await self.push_folder_to_peer(peer, folder_name)
+            return {**result, "one_shot": True}
+        finally:
+            if granted_temporarily:
+                with contextlib.suppress(Exception):
+                    self.state.unshare_folder_with(folder_name, peer_fp)
+
     async def push_folder_to_peer(
         self,
         peer: Peer,

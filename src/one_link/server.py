@@ -14611,6 +14611,81 @@ class UIServer:
                     archive_path.unlink(missing_ok=True)
             registry.pop(key, None)
 
+    async def _send_folder_manifest_push(
+        self, *, peer, peer_fp: str, folder_name: str,
+        scope: str, ident: str,
+    ) -> None:
+        """v0.21.x DEFAULT one-shot folder send. Reuses the existing
+        folder-sync MANIFEST_PUSH path via
+        daemon.send_folder_one_shot_via_manifest:
+          - Temporarily grants the peer in shared_with
+          - Sends MANIFEST_PUSH (receiver gets Accept/Decline card if
+            they don't have the folder; otherwise diffs + pulls deltas)
+          - Streams blobs requested via MANIFEST_WANTS reply path
+          - Cleans up the temp grant after completion
+        Broadcasts folder_send_complete with mode='manifest_push'.
+        """
+        registry = self._ensure_folder_send_registry()
+        key = self._folder_send_key(scope, ident, peer_fp)
+        try:
+            result = await self.daemon.send_folder_one_shot_via_manifest(
+                peer, folder_name,
+            )
+            self.broadcast({
+                "type": "folder_send_complete",
+                "name": folder_name,
+                "peer_fp": peer_fp,
+                "scope": scope,
+                "mode": "manifest_push",
+                "sent": int(result.get("blobs_sent") or 0),
+                "failed": 0 if result.get("ok") else 1,
+                "dedup_files": 0, "dedup_bytes": 0,
+                "ok": bool(result.get("ok")),
+                "error": result.get("error"),
+            })
+        except asyncio.CancelledError:
+            self.broadcast({
+                "type": "folder_send_cancelled",
+                "name": folder_name,
+                "peer_fp": peer_fp,
+                "scope": scope,
+                "mode": "manifest_push",
+            })
+            raise
+        except Exception as e:
+            log.warning(
+                "manifest-push folder send %s/%s failed: %s",
+                scope, ident, e,
+            )
+            self.broadcast({
+                "type": "folder_send_complete",
+                "name": folder_name,
+                "peer_fp": peer_fp,
+                "scope": scope,
+                "mode": "manifest_push",
+                "sent": 0, "failed": 1,
+                "ok": False, "error": str(e),
+            })
+        finally:
+            registry.pop(key, None)
+
+    def _kick_folder_manifest_task(
+        self, *, scope: str, ident: str, peer, peer_fp: str,
+        folder_name: str,
+    ) -> str:
+        registry = self._ensure_folder_send_registry()
+        key = self._folder_send_key(scope, ident, peer_fp)
+        if key in registry and not registry[key].done():
+            return key
+        task = asyncio.get_running_loop().create_task(
+            self._send_folder_manifest_push(
+                peer=peer, peer_fp=peer_fp, folder_name=folder_name,
+                scope=scope, ident=ident,
+            ),
+        )
+        registry[key] = task
+        return key
+
     def _kick_folder_archive_task(
         self, *, scope: str, ident: str, peer, peer_fp: str,
         folder_root: Path, folder_name: str,
@@ -14981,38 +15056,49 @@ class UIServer:
                 {"error": "folder is empty", "code": "folder_empty"},
                 status=409,
             )
-        # v0.21.x: archive mode is the DEFAULT now. Receiver gets ONE
-        # transfer (one chat bubble, one progress bar, one extraction)
-        # instead of N separate file deliveries. Opt out via the
-        # ``archive: false`` body field if you specifically want
-        # per-file transfers (rarely useful — folder one-shot's
-        # intent is "send the folder", not "send these files
-        # individually that happen to be in a folder").
-        archive_mode = bool(data.get("archive", True))
+        # v0.21.x: route by explicit mode, default = MANIFEST_PUSH
+        # ceremony (reuses folder-sync's chunk-level dedup +
+        # receiver-side Accept/Decline card). Opt-in alternatives:
+        #   - archive=true  → zip + send-as-one-file (atomic, big
+        #     compression win for text/code, but no chunk dedup)
+        #   - per_file=true → legacy explicit per-file send_file calls
+        #     with BLOB_INVENTORY pre-flight + FILE_OFFER_BATCH
+        archive_mode = bool(data.get("archive", False))
+        per_file_mode = bool(data.get("per_file", False))
         if archive_mode:
             self._kick_folder_archive_task(
                 scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
                 folder_root=local_path, folder_name=name,
             )
             return web.json_response({
-                "ok": True, "started": True,
-                "mode": "archive",
+                "ok": True, "started": True, "mode": "archive",
                 "file_count": len(files),
                 "total_bytes": total_bytes,
                 "skipped": skipped,
             })
-        # Legacy per-file path (opt-in).
-        self._kick_folder_send_task(
+        if per_file_mode:
+            self._kick_folder_send_task(
+                scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
+                files=files,
+                on_complete_broadcast={
+                    "type": "folder_send_complete",
+                    "name": name, "peer_fp": peer_fp, "mode": "per_file",
+                },
+            )
+            return web.json_response({
+                "ok": True, "started": True, "mode": "per_file",
+                "file_count": len(files),
+                "total_bytes": total_bytes,
+                "skipped": skipped,
+            })
+        # DEFAULT: MANIFEST_PUSH ceremony — receiver gets an Accept/
+        # Decline card via the existing folder-offers-section flow.
+        self._kick_folder_manifest_task(
             scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
-            files=files,
-            on_complete_broadcast={
-                "type": "folder_send_complete",
-                "name": name, "peer_fp": peer_fp, "mode": "per_file",
-            },
+            folder_name=name,
         )
         return web.json_response({
-            "ok": True, "started": True,
-            "mode": "per_file",
+            "ok": True, "started": True, "mode": "manifest_push",
             "file_count": len(files),
             "total_bytes": total_bytes,
             "skipped": skipped,
