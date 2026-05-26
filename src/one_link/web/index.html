@@ -19431,12 +19431,20 @@
       }
       for (const f of state.folders) {
         const row = el("div", "file-row");
-        row.appendChild(el("div", "icon", "Folder"));
+        // v0.21.x: was literal text "Folder" which overflowed the
+        // 26px-wide icon grid cell into the meta column, producing
+        // "Folderles · 99 local blobs" instead of "📁 99 files".
+        // Use the actual folder glyph (same one the empty state uses).
+        row.appendChild(el("div", "icon", "📁"));
         const meta = el("div", "meta");
         meta.appendChild(el("div", "name", f.name));
         meta.appendChild(el("div", "size", `${f.files || 0} files · ${f.in_store || 0} local blobs · ${f.shared_with?.length || 0} peers`));
         meta.appendChild(el("div", "size", f.local_path));
         row.appendChild(meta);
+        // v0.21.x: wrap actions in .file-actions so the grid template
+        // (26px icon + 1fr meta + auto actions) collapses them into a
+        // single cell instead of flowing into new rows.
+        const actions = el("div", "file-actions");
         const share = el("button", null, "Share");
         share.onclick = async () => {
           const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
@@ -19473,9 +19481,10 @@
             toast(`Remove didn't work: ${e.message || e}`, "bad", 6000);
           }
         };
-        row.appendChild(share);
-        row.appendChild(sync);
-        row.appendChild(remove);
+        actions.appendChild(share);
+        actions.appendChild(sync);
+        actions.appendChild(remove);
+        row.appendChild(actions);
         list.appendChild(row);
       }
     } catch (e) { console.warn(e); }
