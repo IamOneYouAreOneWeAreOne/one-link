@@ -14194,7 +14194,51 @@ class UIServer:
         self._ensure_folder_caps_for(
             peer_fp, note=f"folder={name}/share/{mode}",
         )
-        return web.json_response({"ok": True})
+        # v0.21.x: Share USED to only grant permission — the bytes
+        # didn't actually move until the user also clicked Sync.
+        # That meant clicking 'Share' looked like nothing happened
+        # on the peer side. Now: kick off an immediate MANIFEST_PUSH
+        # to the just-shared peer in a background task. UI returns
+        # right away with push_status='triggered' so it can show
+        # progress without waiting on the full transfer to finish.
+        triggered = False
+        if mode in ("push", "rw"):
+            peer = None
+            if self.daemon.discovery:
+                for p in self.daemon.discovery.registry.list():
+                    cand = self.daemon._peer_fp_from_peer(p)
+                    if cand == peer_fp:
+                        peer = p
+                        break
+            if peer is not None:
+                async def _bg_push() -> None:
+                    try:
+                        r = await self.daemon.push_folder_to_peer(peer, name)
+                        self.broadcast({
+                            "type": "folder_share_pushed",
+                            "name": name,
+                            "peer_fp": peer_fp,
+                            "result": r,
+                        })
+                    except Exception as e:  # pragma: no cover - bg
+                        log.warning(
+                            "auto-push after share failed (%s -> %s): %s",
+                            name, peer_fp[:8], e,
+                        )
+                        self.broadcast({
+                            "type": "folder_share_push_failed",
+                            "name": name,
+                            "peer_fp": peer_fp,
+                            "error": str(e),
+                        })
+                asyncio.get_running_loop().create_task(_bg_push())
+                triggered = True
+        return web.json_response({
+            "ok": True,
+            "push_status": "triggered" if triggered
+                else "peer_offline" if mode in ("push", "rw")
+                else "pull_only_no_push",
+        })
 
     async def api_unshare_folder(self, request: web.Request) -> web.Response:
         if self.daemon.state is None or self.daemon.folder_engine is None:
