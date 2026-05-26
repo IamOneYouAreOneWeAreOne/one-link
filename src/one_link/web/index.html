@@ -24938,6 +24938,15 @@
       } else if (m.type === "folder_send_cancelled") {
         toast(`Send cancelled — sent ${m.sent || 0}, ${m.remaining || 0} not sent.`, "info", 5000);
         hideFolderSendProgress();
+      } else if (m.type === "folder_self_mesh_auto_accepted") {
+        // v0.21.x: own paired device sent us a folder. Auto-accepted
+        // (implicit consent for self-mesh) — show ONE notification
+        // instead of an Accept/Decline card.
+        toast(
+          `Folder ${m.folder_name || ""} arriving from your other device`,
+          "good", 6000,
+        );
+        if (typeof refreshFolders === "function") refreshFolders();
       } else if (m.type === "folder_archive_received") {
         // v0.21.x: receiver-side notification when a folder archive
         // arrives + extracts. ONE toast for the whole folder; users

@@ -10399,6 +10399,25 @@ class Daemon:
                         "type": "folder_offer_received",
                         "offer": offer,
                     })
+            # v0.21.x: SELF-MESH AUTO-ACCEPT. When the sender is one of
+            # OUR own paired devices (same identity root, different
+            # physical device per self_mesh_devices), implicit consent
+            # applies — auto-accept the offer instead of waiting for a
+            # human click. Picks a sensible default local_path under
+            # inbox_dir() / folder_name. The user can always Move it
+            # later via the folder Settings → Folder location → Browse.
+            is_self_mesh = False
+            with contextlib.suppress(Exception):
+                is_self_mesh = self.state.is_self_mesh_peer(peer_fp)
+            if is_self_mesh:
+                with contextlib.suppress(Exception):
+                    asyncio.get_running_loop().create_task(
+                        self._auto_accept_self_mesh_folder_offer(
+                            offer_id=offer.get("id"),
+                            peer_fp=peer_fp,
+                            folder_name=folder_name,
+                        ),
+                    )
             # Acknowledge receipt with an empty WANTS + pending flag
             # so the sender doesn't sit waiting on a 15s timeout.
             with contextlib.suppress(Exception):
@@ -18915,6 +18934,85 @@ class Daemon:
         return len(peers)
 
     # ─── folder sync orchestration ─────────────────────────────────────
+    async def _auto_accept_self_mesh_folder_offer(
+        self,
+        *,
+        offer_id: int | None,
+        peer_fp: str,
+        folder_name: str,
+    ) -> None:
+        """v0.21.x self-mesh implicit consent: when the sender of a
+        MANIFEST_PUSH for an unknown folder is OUR OWN device (same
+        identity root, different physical device), accept the offer
+        without waiting for a human click. Picks a default local
+        path under inbox_dir() / folder_name.
+
+        Mirrors what api_accept_folder_offer does, just programmatic.
+        Failures (folder name conflict, can't reach sender, etc.)
+        get logged + the offer stays in pending state so the user
+        can still click Accept manually.
+        """
+        if self.state is None or self.folder_engine is None:
+            return
+        try:
+            from one_link.paths import inbox_dir as _inbox
+        except Exception:
+            return
+        local_path = (_inbox() / folder_name).resolve()
+        # Don't clobber an existing folder with the same name.
+        if self.state.get_folder(folder_name) is not None:
+            log.info(
+                "self-mesh auto-accept skipped: folder %r already exists",
+                folder_name,
+            )
+            return
+        try:
+            self.folder_engine.add_folder(
+                name=folder_name,
+                local_path=local_path,
+                shared_with=[peer_fp],
+                conflict_policy="latest-wins",
+            )
+        except Exception as e:
+            log.warning(
+                "self-mesh auto-accept failed at add_folder %s: %s",
+                folder_name, e,
+            )
+            return
+        with contextlib.suppress(Exception):
+            if offer_id is not None:
+                self.state.mark_folder_offer_accepted(
+                    offer_id, local_path=str(local_path),
+                )
+        # Notify UI: one consolidated event instead of the standard
+        # accept flow that goes through the offer card.
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "folder_self_mesh_auto_accepted",
+                    "folder_name": folder_name,
+                    "local_path": str(local_path),
+                    "peer_fp": peer_fp,
+                })
+        # Pull the data: dial sender back with bidirectional MANIFEST_PUSH
+        # so its existing folder-sync flow streams the blobs.
+        peer = self._peer_from_fp(peer_fp)
+        if peer is None:
+            log.info(
+                "self-mesh auto-accept: %s — peer not online for pull-back",
+                folder_name,
+            )
+            return
+        try:
+            await self.push_folder_to_peer(
+                peer, folder_name, bidirectional=True,
+            )
+        except Exception as e:
+            log.warning(
+                "self-mesh auto-accept pull-back failed (%s/%s): %s",
+                peer_fp[:8], folder_name, e,
+            )
+
     async def send_adhoc_folder_one_shot_via_manifest(
         self,
         peer: Peer,

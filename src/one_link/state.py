@@ -4946,6 +4946,36 @@ class State:
                 "previous_hash": prev_hash,
             }
 
+    def is_self_mesh_peer(self, peer_fp: str) -> bool:
+        """v0.21.x: True iff the peer fingerprint matches one of OUR
+        self-mesh devices (same identity-root, different physical
+        device). Used by folder receive flow to AUTO-ACCEPT incoming
+        folder offers from our own devices — implicit consent.
+
+        Compares fingerprint_of(device_pub) for every non-revoked
+        self_mesh_devices row against the supplied peer_fp. Returns
+        False on any malformed input rather than raising.
+        """
+        from one_link.identity import fingerprint_of
+        if not isinstance(peer_fp, str) or not peer_fp:
+            return False
+        target = peer_fp.lower()
+        try:
+            rows = self.list_self_mesh_devices(include_revoked=False)
+        except Exception:
+            return False
+        for row in rows:
+            pub = row.get("device_pub")
+            if not isinstance(pub, (bytes, bytearray)) or len(pub) != 32:
+                continue
+            try:
+                fp = fingerprint_of(bytes(pub))
+            except Exception:
+                continue
+            if fp and fp.lower() == target:
+                return True
+        return False
+
     def list_self_mesh_devices(
         self,
         *,
