@@ -87,6 +87,27 @@ def test_folder_offers_section_exists_in_dom(ui_page):
 # that nukes them gets caught.
 
 
+def test_folder_card_actions_row_wraps_on_narrow_panels(ui_page):
+    """The folder card's actions row (Open / Share / Sync / Settings /
+    Remove) MUST wrap to a second line when the panel is too narrow
+    to fit all 5 buttons at a readable width. Without flex-wrap the
+    "Settings" label gets clipped to "Settin..." in the ~400px-wide
+    folders aside. Verified by inspecting the computed style of
+    .file-actions in the bundled CSS."""
+    src = ui_page.content()
+    # The rule MUST set flex-wrap: wrap on .file-actions and a
+    # readable min-width on the buttons. Pin both so a future CSS
+    # tidy can't silently revert.
+    assert "flex-wrap: wrap" in src, (
+        ".file-actions must set flex-wrap: wrap so 5 buttons in a "
+        "narrow aside don't clip the Settings label"
+    )
+    assert "min-width: 70px" in src or "min-width:70px" in src, (
+        ".file-actions button must set min-width so buttons stay "
+        "readable rather than squishing to fit on one row"
+    )
+
+
 def test_openFolderBrowser_definition_present_in_source(ui_page):
     """The Ship 1 folder browser entry point must remain defined in
     the bundled JS. If a refactor deletes it, the Folder card Open

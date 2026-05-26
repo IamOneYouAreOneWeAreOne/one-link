@@ -2295,17 +2295,23 @@
     text-overflow: ellipsis;
     cursor: help;
   }
-  /* Actions row sits below the meta, full content width, buttons
-     share the row equally. */
+  /* Actions row sits below the meta, full content width. Buttons
+     share the row equally UNTIL they hit a readable min-width — at
+     that point they wrap to a second row instead of clipping the
+     label. The folders panel is an aside (~400px) and 5 actions
+     (Open / Share / Sync / Settings / Remove) won't fit on one row
+     without truncating "Settings"; wrapping is the right answer. */
   .file-row .file-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
     margin-top: 8px;
   }
   .file-row .file-actions button {
-    flex: 1;
-    min-width: 0;
+    flex: 1 1 70px;
+    min-width: 70px;
     text-align: center;
+    white-space: nowrap;
   }
   /* v0.21.x folder-offer cards. Sits between the help-card and the
      folder list. Hidden when there are zero offers pending. */
