@@ -5258,6 +5258,14 @@ class Daemon:
                 return
             size = self._safe_transfer_size(msg.get("size"))
             name = self._safe_transfer_name(msg.get("name"))
+            # v0.21.x folder-send: optional rel_path mirrors the
+            # sender's directory tree under our inbox. We re-sanitize
+            # everything the sender claimed — never trust the wire.
+            # If the sender's rel_path doesn't pass validation we
+            # silently fall back to flat placement (the file still
+            # arrives; just at inbox/<basename> instead of nested).
+            rel_path_raw = msg.get("rel_path")
+            clean_rel_path = self._safe_transfer_rel_path(rel_path_raw)
             if size is None:
                 await self._reject_file_offer(
                     channel,
@@ -5498,7 +5506,9 @@ class Daemon:
                     # an existing inbox file.
                     if sc_match is not None:
                         _delete_resume_sidecar(inbox_dir(), blob)
-                    out_path = self._unique_inbox_path(blob, name)
+                    out_path = self._unique_inbox_path(
+                        blob, name, rel_path=clean_rel_path,
+                    )
                     # ``x+b`` (create-exclusive, read+write) instead
                     # of plain ``xb`` so ``_finish_cdc_file`` can
                     # stream-hash the file back through BLAKE3
@@ -6962,6 +6972,81 @@ class Daemon:
         "LPT6", "LPT7", "LPT8", "LPT9",
     })
 
+    def _safe_transfer_rel_path(self, value) -> str | None:
+        """v0.21.x folder-send: validate a sender-supplied relative
+        path the receiver should mirror under their inbox.
+
+        Returns the cleaned forward-slash-separated path, or None if
+        the input is unsafe / malformed. None means the receiver
+        falls back to flat placement under the inbox.
+
+        Rejects:
+          - empty / non-string input
+          - absolute paths ("/foo", "C:\\foo", UNC "\\\\srv\\share")
+          - path traversal (".." segment anywhere)
+          - NUL / control chars
+          - Windows reserved-device names (CON, NUL, COM1..9, etc.)
+            in any segment
+          - trailing dot/space on any segment (Windows silently
+            strips them; collision risk)
+          - oversize (>1024 bytes total)
+        """
+        if not value or not isinstance(value, str):
+            return None
+        if not value.strip():
+            return None
+        # Reject absolute / UNC / drive-letter starts BEFORE any
+        # normalization that would mask them.
+        if (
+            value.startswith("/")
+            or value.startswith("\\")
+            or (len(value) >= 2 and value[1] == ":")
+        ):
+            return None
+        # Reject NUL + control chars anywhere.
+        if any(ord(c) < 0x20 or ord(c) == 0x7f for c in value):
+            return None
+        norm = value.replace("\\", "/")
+        if not norm:
+            return None
+        # Raw-segment pass: PurePosixPath would silently collapse
+        # ``./a`` to ``a`` (the ``.`` disappears), so check raw
+        # segments BEFORE feeding to pathlib. ``.`` and ``..``
+        # appearing as a raw segment is always a rejection.
+        raw_parts = [seg for seg in norm.split("/") if seg != ""]
+        for seg in raw_parts:
+            if seg in (".", ".."):
+                return None
+        # Walk normalized segments.
+        try:
+            from pathlib import PurePosixPath
+            parts = PurePosixPath(norm).parts
+        except Exception:
+            return None
+        if not parts:
+            return None
+        clean_parts: list[str] = []
+        for part in parts:
+            if part in (".", ".."):
+                return None
+            if part != part.rstrip(". "):
+                return None
+            if ":" in part:
+                return None
+            stem = part.split(".")[0].upper()
+            if stem in self._WINDOWS_RESERVED_BASENAMES:
+                return None
+            # Final per-segment basename check reuses the same
+            # cleaner that single-file transfers go through.
+            cleaned = self._safe_transfer_name(part)
+            if cleaned == "unnamed.bin" and part != "unnamed.bin":
+                return None
+            clean_parts.append(cleaned)
+        rel = "/".join(clean_parts)
+        if len(rel.encode("utf-8", errors="ignore")) > 1024:
+            return None
+        return rel
+
     def _safe_transfer_name(self, value) -> str:
         name = Path(str(value or "")).name
         if not name or name in (".", ".."):
@@ -7011,7 +7096,9 @@ class Daemon:
             ).strip()
         return clipped or "unnamed.bin"
 
-    def _unique_inbox_path(self, blob: str, name: str) -> Path:
+    def _unique_inbox_path(
+        self, blob: str, name: str, *, rel_path: str | None = None,
+    ) -> Path:
         """v0.20.7 (security audit H16): allocate a write-only inbox
         path that does not overwrite an existing file.
 
@@ -7023,8 +7110,39 @@ class Daemon:
         contents until the prefix matches an existing inbox file and
         truncate it. We now open with ``"xb"`` (exclusive create) and
         on collision append a numeric suffix until we find a free name.
+
+        v0.21.x folder-send: when ``rel_path`` is provided + safe,
+        place the file at ``inbox/<rel_path>`` (creating intermediate
+        directories) instead of the flat blob-prefixed name. Caller
+        is responsible for passing a rel_path that has already been
+        validated by ``_safe_transfer_rel_path``.
         """
-        base = inbox_dir()
+        base = inbox_dir().resolve()
+        if rel_path:
+            # rel_path was validated to be relative, no traversal, no
+            # absolute roots. Build the candidate and assert the
+            # resolved path still sits under base — defense in depth
+            # against a sanitizer regression.
+            candidate = (base / rel_path).resolve()
+            try:
+                candidate.relative_to(base)
+            except ValueError:
+                # Containment broken — fall through to flat placement.
+                candidate = base / f"{blob[:8]}_{name}"
+            else:
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                if not candidate.exists():
+                    return candidate
+                # Collision under rel_path: insert "(N)" before suffix.
+                stem = candidate.stem
+                suffix = candidate.suffix
+                for n in range(1, 1000):
+                    alt = candidate.with_name(f"{stem} ({n}){suffix}")
+                    if not alt.exists():
+                        return alt
+                return candidate.with_name(
+                    f"{stem}.{secrets.token_hex(4)}{suffix}"
+                )
         candidate = base / f"{blob[:8]}_{name}"
         if not candidate.exists():
             return candidate
@@ -18359,7 +18477,20 @@ class Daemon:
         path: Path,
         *,
         transfer_id: str | None = None,
+        rel_path: str | None = None,
     ) -> dict:
+        """Send a single file to a paired peer.
+
+        ``rel_path``: optional folder-relative path the recipient
+        should mirror under their inbox. Used by the folder-send
+        flow so a "papers/2026/abstract.txt" arrives as
+        ``inbox/papers/2026/abstract.txt`` instead of a flat
+        ``abstract.txt``. When None (default), the receiver places
+        the file flat under the inbox using the file's basename.
+        Sanitization (no ``..`` / no absolute / no drive letters /
+        no NUL / no reserved-device-name segments) happens both
+        sender-side (here) and receiver-side (defense in depth).
+        """
         block = self._check_outbound_trust(peer)
         if block:
             raise RuntimeError(block)
@@ -18865,6 +18996,12 @@ class Daemon:
                 "transfer_mode": intent.compatibility.transfer_mode,
             },
         }
+        # v0.21.x folder-send: include a sanitized rel_path so the
+        # receiver mirrors the sender-side directory tree under
+        # their inbox. Receiver re-sanitizes (defense in depth).
+        clean_rel_path = self._safe_transfer_rel_path(rel_path) if rel_path else None
+        if clean_rel_path:
+            offer_fields["rel_path"] = clean_rel_path
         if can_offer_cdc:
             offer_fields["chunks"] = cdc_index
         offer = make_msg("FILE_OFFER", self.me.short_id, **offer_fields)

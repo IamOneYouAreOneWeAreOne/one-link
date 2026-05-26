@@ -2407,6 +2407,12 @@ class UIServer:
         # different machine).
         r.add_post(r"/api/folders/{name}/relocate",
                    self._guarded(self.api_relocate_folder))
+        # v0.21.x: one-shot folder send (no sync, no manifest, no
+        # ongoing two-way mirror). Walks the local folder and sends
+        # each file via the standard send_file pipeline with rel_path
+        # set so the recipient's inbox mirrors the folder tree.
+        r.add_post(r"/api/folders/{name}/send-to",
+                   self._guarded(self.api_send_folder_to_peer))
         r.add_post(r"/api/folders/{name}/reveal", self._guarded(self.api_folder_reveal))
         # v0.21.x file browser — per-file preview / raw stream / reveal
         r.add_get(r"/api/folders/{name}/file/{path:.+}/preview",
@@ -14462,6 +14468,115 @@ class UIServer:
                 return web.json_response({"error": str(e)}, status=400)
         return web.json_response({
             "ok": True, "folder": self.daemon.state.get_folder(name),
+        })
+
+    async def api_send_folder_to_peer(
+        self, request: web.Request,
+    ) -> web.Response:
+        """v0.21.x: ONE-SHOT folder send to a paired peer.
+
+        Body: { peer_fp: str }
+
+        Walks the folder on disk and sends each file via the standard
+        send_file pipeline with rel_path set so the recipient's inbox
+        mirrors the folder tree. NO MANIFEST PUSH, NO PERMISSION GRANT,
+        NO SYNC — this is "I literally send this folder to that person
+        and it arrives." Future edits do NOT propagate.
+
+        Response: { ok, started, file_count, skipped }
+        Actual file transfers run in a background task; clients can
+        watch the regular file-transfer WebSocket events for progress.
+        """
+        if self.daemon.state is None:
+            return web.json_response(
+                {"error": "state not initialized"}, status=503,
+            )
+        name = request.match_info["name"]
+        folder = self.daemon.state.get_folder(name)
+        if folder is None:
+            return web.json_response({"error": "no such folder"}, status=404)
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        peer_fp = (data.get("peer_fp") or "").strip()
+        if not peer_fp:
+            return web.json_response(
+                {"error": "peer_fp required"}, status=400,
+            )
+        peer = None
+        if self.daemon.discovery:
+            for p in self.daemon.discovery.registry.list():
+                cand = self.daemon._peer_fp_from_peer(p)
+                if cand == peer_fp:
+                    peer = p
+                    break
+        if peer is None:
+            return web.json_response(
+                {"error": "peer not currently online", "code": "peer_offline"},
+                status=503,
+            )
+        local_path = Path(folder["local_path"])
+        if not local_path.is_dir():
+            return web.json_response(
+                {
+                    "error": (
+                        f"folder location missing on this device: {local_path}"
+                    ),
+                    "code": "folder_path_missing",
+                },
+                status=409,
+            )
+        # Walk the folder + collect file list before kicking the
+        # background sender so the caller gets an immediate count.
+        files: list[tuple[Path, str]] = []  # (abs path, rel_path)
+        skipped = 0
+        for p in local_path.rglob("*"):
+            try:
+                if not p.is_file():
+                    continue
+                rel = p.relative_to(local_path).as_posix()
+                # Prefix every entry with the folder name so the
+                # recipient ends up with inbox/<folder_name>/<rel>
+                # — a clean, browseable folder rather than loose
+                # files mixed into their flat inbox.
+                rel_with_root = f"{name}/{rel}"
+                files.append((p, rel_with_root))
+            except OSError:
+                skipped += 1
+        if not files:
+            return web.json_response(
+                {"error": "folder is empty", "code": "folder_empty"},
+                status=409,
+            )
+
+        async def _bg_send() -> None:
+            sent = 0
+            failed = 0
+            for path_obj, rel in files:
+                try:
+                    await self.daemon.send_file(peer, path_obj, rel_path=rel)
+                    sent += 1
+                except Exception as e:
+                    failed += 1
+                    log.warning(
+                        "folder send %s -> %s: %s failed: %s",
+                        name, peer_fp[:8], rel, e,
+                    )
+            self.broadcast({
+                "type": "folder_send_complete",
+                "name": name,
+                "peer_fp": peer_fp,
+                "sent": sent,
+                "failed": failed,
+            })
+
+        asyncio.get_running_loop().create_task(_bg_send())
+        return web.json_response({
+            "ok": True,
+            "started": True,
+            "file_count": len(files),
+            "skipped": skipped,
         })
 
     async def api_relocate_folder(self, request: web.Request) -> web.Response:

@@ -20011,10 +20011,12 @@
         // button does without having to be told. Same pattern for
         // every action button on this row.
         share.title = (
-            "Let the currently-selected paired device sync this folder. "
-            + "Pick a peer in the sidebar first, then click Share."
+            "Start a LIVE two-way sync of this folder with the "
+            + "selected device. Future edits on either side propagate "
+            + "to the other. (Pick a peer in the sidebar first.) "
+            + "For a one-shot copy with NO sync, use Send instead."
         );
-        share.setAttribute("aria-label", "Share folder with selected peer");
+        share.setAttribute("aria-label", "Live-sync folder with selected peer");
         share.onclick = async () => {
           const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
           if (!peer?.fingerprint || peer.trust !== "pinned") {
@@ -20027,6 +20029,38 @@
             await refreshFolders();
           } catch (e) {
             toast(`Share didn't work: ${e.message || e}`, "bad", 6000);
+          }
+        };
+        // v0.21.x: one-shot Send. Mirrors a file send — the recipient
+        // gets the folder contents in their inbox with the directory
+        // tree preserved, and there's NO ongoing sync. Sits next to
+        // Share so users see both options together and the tooltips
+        // make the distinction explicit.
+        const send = el("button", null, "Send");
+        send.title = (
+            "Send a ONE-SHOT copy of this folder to the selected "
+            + "device. Recipient gets the folder tree in their inbox; "
+            + "there is NO ongoing sync. (Pick a peer in the sidebar "
+            + "first.) For a live two-way sync, use Share instead."
+        );
+        send.setAttribute("aria-label", "Send one-shot folder copy");
+        send.onclick = async () => {
+          const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
+          if (!peer?.fingerprint || peer.trust !== "pinned") {
+            toast("Pick a paired peer first", "info");
+            return;
+          }
+          try {
+            const r = await api.post(
+              `/api/folders/${encodeURIComponent(f.name)}/send-to`,
+              { peer_fp: peer.fingerprint },
+            );
+            toast(
+              `Sending ${r.file_count} file${r.file_count === 1 ? "" : "s"} to ${peer.hostname || peer.short_id}`,
+              "good", 4000,
+            );
+          } catch (e) {
+            toast(`Send didn't work: ${errorToastBody(e) || e}`, "bad", 6000);
           }
         };
         const sync = el("button", null, "Sync");
@@ -20073,6 +20107,7 @@
         settings.setAttribute("aria-label", `Sync settings for ${f.name}`);
         settings.onclick = () => openFolderSettings(f);
         actions.appendChild(share);
+        actions.appendChild(send);
         actions.appendChild(sync);
         actions.appendChild(settings);
         actions.appendChild(remove);
