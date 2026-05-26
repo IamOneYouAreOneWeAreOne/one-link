@@ -19054,8 +19054,17 @@ class Daemon:
             temp_name = f"{base}__adhoc_{uuid.uuid4().hex[:8]}"
         registered = False
         try:
-            self.folder_engine.add_folder(
-                name=temp_name, local_path=folder_path, shared_with=[],
+            # v0.21.x lightweight path: register the folder row +
+            # a NO-OP watcher entry. Skips spawning a watchdog Observer
+            # thread that we'd just tear down within seconds. The
+            # initial scan + manifest insert still run normally; only
+            # the FS event listener is skipped.
+            self.state.add_folder(
+                name=temp_name, local_path=str(folder_path),
+                shared_with=[],
+            )
+            self.folder_engine.register_for_one_shot_no_watcher(
+                temp_name, folder_path,
             )
             registered = True
             # Run the initial scan off the event loop so the

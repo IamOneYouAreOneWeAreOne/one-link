@@ -1084,6 +1084,39 @@ class FolderEngine:
             if p.is_file():
                 self._reconcile_file(name, p)
 
+    def register_for_one_shot_no_watcher(
+        self, name: str, root: Path,
+    ) -> None:
+        """v0.21.x: register a folder under a NO-OP watcher entry so
+        scan + manifest population work, but no Observer thread is
+        ever started. Used by ad-hoc one-shot folder send:
+
+          1. state.add_folder + this method   (no watcher overhead)
+          2. start_initial_scan(name)         (populates manifest)
+          3. push_folder_to_peer(...)         (uses the manifest)
+          4. remove_folder(name)              (cleans state row + this entry)
+
+        Saves the ~3-30ms spent spawning a watchdog Observer thread
+        for a folder we'll tear down within seconds. Critically:
+        avoids leaving an Observer thread leaked on cleanup edge
+        cases — there's no thread to stop.
+        """
+        if name in self._folders:
+            return
+        root = Path(root).resolve()
+        # Use a sentinel observer + handler — both shapes the rest of
+        # the code can call into harmlessly. remove_folder unconditionally
+        # calls observer.stop() + .join() which work fine on the stub.
+        class _NoopObserver:
+            def stop(self): pass
+            def join(self, timeout=None): pass
+        noop_observer = _NoopObserver()
+        noop_handler = _Handler(lambda *_a, **_kw: None)
+        self._folders[name] = FolderState(
+            name=name, root=root,
+            observer=noop_observer, handler=noop_handler,
+        )
+
     async def _periodic_scan(self) -> None:
         while not self._stop.is_set():
             try:

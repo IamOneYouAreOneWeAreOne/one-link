@@ -198,6 +198,32 @@ async def test_push_failure_still_cleans_up(adhoc_ctx, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_adhoc_uses_no_watcher_path(adhoc_ctx, tmp_path):
+    """v0.21.x lightweight path: ad-hoc one-shot send must NOT spawn
+    a watchdog Observer thread for the temp folder registration. The
+    folder_engine.register_for_one_shot_no_watcher helper installs a
+    no-op observer instead. Pin via runtime type check on the
+    observer attribute the wrapper installs."""
+    src = _make_folder(tmp_path, "src")
+    # Hook the no-watcher registration so we can assert it was called.
+    real = adhoc_ctx["daemon"].folder_engine.register_for_one_shot_no_watcher
+    call_count = {"n": 0}
+
+    def spy(name, root):
+        call_count["n"] += 1
+        return real(name, root)
+    adhoc_ctx["daemon"].folder_engine.register_for_one_shot_no_watcher = spy
+    await adhoc_ctx["daemon"].send_adhoc_folder_one_shot_via_manifest(
+        adhoc_ctx["peer"], src, "src",
+    )
+    assert call_count["n"] == 1, (
+        "ad-hoc one-shot must use register_for_one_shot_no_watcher, "
+        "not folder_engine.add_folder (which spawns a watchdog Observer "
+        "thread we'd just tear down)."
+    )
+
+
+@pytest.mark.asyncio
 async def test_adhoc_endpoint_default_is_manifest_push(adhoc_ctx, tmp_path):
     """POST /api/fs/send-folder with no mode flags defaults to
     manifest_push — calls send_adhoc_folder_one_shot_via_manifest."""
