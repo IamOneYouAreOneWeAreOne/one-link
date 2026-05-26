@@ -22367,11 +22367,35 @@
   const PAGE_BUILT_FOR = "0.21.0-alpha";
   const PAGE_SOURCE_FINGERPRINT = "__ONE_LINK_SOURCE_FINGERPRINT__";
 
+  // v0.21.x: silent-retry helper for boot-time API calls. The
+  // initial /api/me fetch races with the cookie that _index just
+  // set (especially when the daemon was just restarted and the
+  // browser is replaying a stale-cookie cache); a single failure
+  // shouldn't fire the "Can't reach One Link" toast. Try 3 times
+  // over ~3s with a small backoff before treating it as a real
+  // outage. Returns the parsed body or rethrows the LAST error
+  // so callers can decide what to do.
+  async function _bootApiGetWithRetry(path, attempts = 3, baseDelayMs = 350) {
+    let lastErr = null;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await api.get(path);
+      } catch (e) {
+        lastErr = e;
+        if (i < attempts - 1) {
+          // Linear backoff: 350ms, 700ms, 1050ms — total under 3s.
+          await new Promise((r) => setTimeout(r, baseDelayMs * (i + 1)));
+        }
+      }
+    }
+    throw lastErr;
+  }
+
   // ── Initial load ───────────────────────────────────────────────────
   async function init() {
     loadLocalCollections();
     try {
-      const me = await api.get("/api/me");
+      const me = await _bootApiGetWithRetry("/api/me");
       state.me = me;
       $("#me-host").textContent = me.display_name || me.hostname;
       // v0.10.4: apply persisted presence on load so the dot

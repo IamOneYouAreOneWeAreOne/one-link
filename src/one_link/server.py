@@ -1439,6 +1439,40 @@ class UIServer:
         bind = (self.bind_host or "127.0.0.1").lower()
         return bind in self._LOOPBACK_BIND_HOSTS
 
+    # v0.21.x: the OLD recovery path gated stale-token/stale-cookie
+    # silent recovery on `_is_loopback_bound()` — i.e. the daemon had
+    # to be bound to 127.0.0.1. A LAN-bound daemon (0.0.0.0) saw a
+    # local browser as a "could be anyone" request and refused to
+    # recover, sending the user to the ACCESS DENIED help page.
+    #
+    # `_request_from_loopback` looks at the SOURCE of the request
+    # instead. A request whose peer IP is 127.0.0.1 / ::1 came from
+    # a process on the SAME machine as the daemon. That process can
+    # already read `ui.token` from disk (same uid context), so
+    # trusting it for silent recovery adds no attack surface — same
+    # local-process-trust model Jupyter / Docker Desktop / VSCode
+    # tunnel rely on. LAN requests (peer IP != loopback) stay on the
+    # strict token gate; nothing about the cross-machine path
+    # changes.
+    _LOOPBACK_SOURCE_IPS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+    def _request_from_loopback(self, request: web.Request) -> bool:
+        peer_ip: str | None = None
+        if request.transport is not None:
+            peer = request.transport.get_extra_info("peername")
+            if isinstance(peer, tuple) and peer:
+                peer_ip = str(peer[0]).lower()
+        if not peer_ip:
+            peer_ip = (request.remote or "").lower()
+        if not peer_ip:
+            return False
+        # Some IPv6 loopback representations leak in as ::ffff:127.0.0.1
+        # (IPv4-mapped IPv6) on dual-stack listeners. Treat that as
+        # loopback too.
+        if peer_ip.startswith("::ffff:"):
+            peer_ip = peer_ip[len("::ffff:"):]
+        return peer_ip in self._LOOPBACK_SOURCE_IPS
+
     def _accept_request_host(self, request: web.Request) -> bool:
         if not self._is_loopback_bound():
             return True
@@ -2781,7 +2815,16 @@ class UIServer:
         return resp
 
     def _is_local_document_navigation(self, request: web.Request) -> bool:
-        if not self._is_loopback_bound() or not self._accept_request_host(request):
+        # v0.21.x: trust either bind config (existing) OR request
+        # source IP. A LAN-bound daemon must still recover for tabs
+        # opened on the same machine — those are loopback-sourced
+        # even when the listener is 0.0.0.0. See _request_from_loopback
+        # for the local-process-trust justification.
+        loopback_listener = (
+            self._is_loopback_bound() and self._accept_request_host(request)
+        )
+        loopback_source = self._request_from_loopback(request)
+        if not (loopback_listener or loopback_source):
             return False
         dest = (request.headers.get("Sec-Fetch-Dest") or "").lower()
         if dest:

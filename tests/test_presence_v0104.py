@@ -219,8 +219,17 @@ def test_apply_presence_helper_present(index_html: str):
 
 def test_init_applies_persisted_presence(index_html: str):
     """init() reads /api/me and calls applyPresenceUI so the dot
-    matches the user's last choice across reloads."""
-    idx = index_html.find('await api.get("/api/me")')
+    matches the user's last choice across reloads. v0.21.x routes
+    init()'s /api/me through _bootApiGetWithRetry (silent 3-retry
+    helper for boot-time auth races); the persisted-presence
+    snippet must still follow that boot call."""
+    # Prefer the boot-retry path (new); fall back to the legacy
+    # api.get path so this pin keeps working if a future refactor
+    # removes the retry wrapper.
+    idx = index_html.find('_bootApiGetWithRetry("/api/me")')
+    if idx < 0:
+        idx = index_html.find('await api.get("/api/me")')
+    assert idx > 0
     snippet = index_html[idx:idx + 800]
     assert "applyPresenceUI(me.presence" in snippet
 
