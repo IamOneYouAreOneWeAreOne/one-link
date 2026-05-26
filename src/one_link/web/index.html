@@ -2257,39 +2257,53 @@
     max-height: 38vh;
   }
   .files .section-h { padding: 16px 16px 10px; }
+  /* v0.21.x: 2-column grid (icon | content); content stacks
+     meta-rows + actions vertically inside its single column.
+     Previous 3-column shape (icon | meta | actions) squeezed the
+     meta into the narrow middle which collapsed text into a tiny
+     wrapping column. Stacking actions BELOW gives the meta the
+     full panel width. */
   .file-row {
     display: grid;
-    grid-template-columns: 26px minmax(0, 1fr) auto;
-    align-items: center; gap: 10px;
-    padding: 10px 14px; border-radius: var(--radius-sm); margin: 0 8px 4px;
+    grid-template-columns: 26px minmax(0, 1fr);
+    align-items: start;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: var(--radius-sm);
+    margin: 0 8px 6px;
     transition: background .12s;
   }
   .file-row:hover { background: var(--bg-2); }
-  .file-row .icon { font-size: 20px; flex-shrink: 0; }
-  .file-row .meta { flex: 1; min-width: 0; }
-  .file-row .meta .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
-  .file-row .meta .size { font-size: 11px; color: var(--text-dim); }
-  /* v0.21.x: folder paths (no spaces, no natural break points)
-     would overflow the meta column and force a horizontal scroll.
-     overflow-wrap: anywhere lets the browser break before/after
-     path separators so the full string is always visible. The
-     monospace family + tighter line-height makes the wrapped path
-     readable without taking more vertical room than needed. */
+  .file-row .icon { font-size: 20px; flex-shrink: 0; line-height: 1; padding-top: 2px; }
+  .file-row .content { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .file-row .meta { min-width: 0; }
+  .file-row .meta .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; color: var(--text); }
+  .file-row .meta .size { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* v0.21.x: path is now ALWAYS single-line (clean, calm). JS
+     middle-truncates the string so the meaningful end is visible
+     (folder name) plus the start anchors it (C:\Users\...). Full
+     path in the tooltip + cursor:help indicator. */
   .file-row .meta .folder-path {
-    overflow-wrap: anywhere;
-    word-break: break-word;
     font-family: var(--font-mono, ui-monospace, Menlo, monospace);
     font-size: 10.5px;
     line-height: 1.35;
-    margin-top: 2px;
     color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: help;
   }
+  /* Actions row sits below the meta, full content width, buttons
+     share the row equally. */
   .file-row .file-actions {
     display: flex;
     gap: 6px;
-    align-items: center;
-    justify-content: flex-end;
+    margin-top: 8px;
+  }
+  .file-row .file-actions button {
+    flex: 1;
     min-width: 0;
+    text-align: center;
   }
   .file-row a, .file-row button {
     color: var(--text-dim); padding: 6px 9px; border-radius: 6px; background: var(--bg-2); font-size: 12px;
@@ -11335,6 +11349,32 @@
     const m = String(name).match(/^\d{13}_[0-9a-fA-F]{16}_(.+)$/);
     return m ? m[1] : name;
   }
+  // v0.21.x: middle-truncate a long path for display so the start
+  // (root anchor like C:\Users\Josh) AND the meaningful end (the
+  // actual folder leaf) stay visible. The whole path goes in the
+  // element's title= so hovering still reveals it. Splits on the
+  // path separator first to keep segment boundaries clean; falls
+  // back to raw char split for paths that don't contain `\` or `/`.
+  function _middleTruncatePath(p, maxChars) {
+    const s = String(p || "");
+    if (s.length <= maxChars) return s;
+    // Try to keep complete leading + trailing segments.
+    const sep = s.includes("\\") ? "\\" : "/";
+    const parts = s.split(sep);
+    if (parts.length >= 4) {
+      // Always show drive/root + last 2 segments.
+      const head = parts.slice(0, 2).join(sep);
+      const tail = parts.slice(-2).join(sep);
+      const candidate = head + sep + "…" + sep + tail;
+      if (candidate.length <= maxChars) return candidate;
+      // Last 2 alone if even head + tail is too long.
+      const candidate2 = "…" + sep + tail;
+      if (candidate2.length <= maxChars) return candidate2;
+    }
+    // Generic char-based middle elision.
+    const keep = Math.max(8, Math.floor((maxChars - 1) / 2));
+    return s.slice(0, keep) + "…" + s.slice(-keep);
+  }
   const fileIcon = (name) => {
     const ext = (name.split(".").pop() || "").toLowerCase();
     if (["png","jpg","jpeg","gif","webp","bmp"].includes(ext)) return "🖼";
@@ -19452,27 +19492,23 @@
       }
       for (const f of state.folders) {
         const row = el("div", "file-row");
-        // v0.21.x: was literal text "Folder" which overflowed the
-        // 26px-wide icon grid cell into the meta column, producing
-        // "Folderles · 99 local blobs" instead of "📁 99 files".
-        // Use the actual folder glyph (same one the empty state uses).
         row.appendChild(el("div", "icon", "📁"));
+        // v0.21.x: icon + content layout. content stacks meta + actions
+        // vertically, giving each row the full panel width instead of
+        // squeezing them into competing flex slots.
+        const content = el("div", "content");
         const meta = el("div", "meta");
         meta.appendChild(el("div", "name", f.name));
         meta.appendChild(el("div", "size", `${f.files || 0} files · ${f.in_store || 0} local blobs · ${f.shared_with?.length || 0} peers`));
-        // v0.21.x: paths have no spaces so they don't wrap by
-        // default and overflowed the panel horizontally (forcing a
-        // scrollbar). Dedicated class lets the path wrap at any
-        // char (overflow-wrap: anywhere) so the full path is always
-        // visible. Tooltip carries the full string too in case a
-        // future style change clips it.
-        const pathEl = el("div", "size folder-path", f.local_path);
+        // Middle-truncate the path: keep the start (C:\Users\...) and
+        // the meaningful end (the actual folder name) visible, elide
+        // the middle. Full path in the tooltip so nothing is hidden
+        // permanently.
+        const pathEl = el("div", "size folder-path", _middleTruncatePath(f.local_path, 44));
         pathEl.title = f.local_path;
         meta.appendChild(pathEl);
-        row.appendChild(meta);
-        // v0.21.x: wrap actions in .file-actions so the grid template
-        // (26px icon + 1fr meta + auto actions) collapses them into a
-        // single cell instead of flowing into new rows.
+        content.appendChild(meta);
+        row.appendChild(content);
         const actions = el("div", "file-actions");
         const share = el("button", null, "Share");
         // v0.21.x: native hover tooltips so users know what each
@@ -19532,7 +19568,10 @@
         actions.appendChild(share);
         actions.appendChild(sync);
         actions.appendChild(remove);
-        row.appendChild(actions);
+        // v0.21.x: actions live INSIDE .content (stacked below the
+        // meta) instead of in a third grid column. Gives the meta
+        // and the buttons the full row width respectively.
+        content.appendChild(actions);
         list.appendChild(row);
       }
     } catch (e) { console.warn(e); }
