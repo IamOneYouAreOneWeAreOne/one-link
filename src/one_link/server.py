@@ -1622,6 +1622,48 @@ class UIServer:
             return False
         return host in self._LOOPBACK_VALID_HOSTS
 
+    @staticmethod
+    def _bind_exclusive_socket(host: str, port: int) -> Optional[socket.socket]:
+        """Windows-only: bind a listening socket with SO_EXCLUSIVEADDRUSE
+        so a hostile local process that sets SO_REUSEADDR can't steal
+        our port out from under us.
+
+        Linux + macOS use polite SO_REUSEADDR semantics (TIME_WAIT
+        rebind only, no port stealing), so there's no equivalent
+        footgun and we let aiohttp's TCPSite do its normal thing
+        on those platforms.
+
+        Returns the bound + listening socket on success, or None on
+        failure (typically EADDRINUSE — caller should fall through
+        to the next candidate port). Family is inferred from the
+        host string: IPv6 binds happen when host contains a colon
+        OR is the IPv6 ANY ('::') / loopback ('::1') sentinel; all
+        other cases use AF_INET."""
+        if os.name != "nt":
+            return None
+        try:
+            family = socket.AF_INET6 if (":" in host) else socket.AF_INET
+            s = socket.socket(family, socket.SOCK_STREAM)
+        except OSError:
+            return None
+        try:
+            # SO_EXCLUSIVEADDRUSE: introduced in Python 3.5 for win32.
+            # Hard-coded fallback uses the actual Win32 constant if the
+            # stdlib enum is missing on this build.
+            exclusive_opt = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+            if exclusive_opt is None:
+                exclusive_opt = -5  # MS-Windows SO_EXCLUSIVEADDRUSE = (~SO_REUSEADDR)
+            with contextlib.suppress(OSError):
+                s.setsockopt(socket.SOL_SOCKET, exclusive_opt, 1)
+            s.bind((host, port))
+            s.listen(128)
+            s.setblocking(False)
+            return s
+        except OSError:
+            with contextlib.suppress(OSError):
+                s.close()
+            return None
+
     async def _probe_owned_http_port(self, bind_host: str, port: int) -> bool:
         """Return True only if the HTTP listener reached on this port is us.
 
@@ -18491,6 +18533,29 @@ class UIServer:
         for candidate in range(
             PREFERRED_UI_PORT, PREFERRED_UI_PORT + UI_PORT_FALLBACK_RANGE
         ):
+            # v0.21.x: on Windows, pre-bind with SO_EXCLUSIVEADDRUSE
+            # so a hostile local process that sets SO_REUSEADDR can't
+            # steal our port. On other platforms the option doesn't
+            # exist and the default semantics already prevent stealing.
+            ex_sock = self._bind_exclusive_socket(bind_host, candidate)
+            if ex_sock is not None:
+                site = web.SockSite(self.runner, ex_sock)
+                try:
+                    await site.start()
+                except OSError:
+                    with contextlib.suppress(OSError):
+                        ex_sock.close()
+                    continue
+                self.site = site
+                self.port = candidate
+                bound = True
+                break
+            if os.name == "nt":
+                # The exclusive bind failed (port truly in use).
+                # Skip to next candidate; don't fall through to a
+                # non-exclusive TCPSite that could shadow another
+                # daemon via the REUSEADDR loophole.
+                continue
             try:
                 site = web.TCPSite(self.runner, host=bind_host, port=candidate)
                 await site.start()
@@ -18589,6 +18654,24 @@ class UIServer:
         bound = False
         for offset in range(1, UI_PORT_FALLBACK_RANGE + 1):
             candidate = self.port + offset
+            # v0.21.x: same SO_EXCLUSIVEADDRUSE hardening as the
+            # HTTP listener above so the TLS port can't be stolen
+            # either.
+            ex_sock = self._bind_exclusive_socket(bind_host, candidate)
+            if ex_sock is not None:
+                site = web.SockSite(self.runner, ex_sock, ssl_context=ctx)
+                try:
+                    await site.start()
+                except OSError:
+                    with contextlib.suppress(OSError):
+                        ex_sock.close()
+                    continue
+                self.https_site = site
+                self.https_port = candidate
+                bound = True
+                break
+            if os.name == "nt":
+                continue
             try:
                 site = web.TCPSite(
                     self.runner, host=bind_host, port=candidate, ssl_context=ctx,

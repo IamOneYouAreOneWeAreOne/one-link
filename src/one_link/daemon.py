@@ -2005,33 +2005,28 @@ class Daemon:
             Windows network shares, copies of the lock file moved between
             homes). If the PID inside the file maps to a different live
             process we refuse even if the kernel lock granted.
+
+        v0.21.x: race-window compression. The previous order was
+        open → READ existing PID → liveness check → ACQUIRE OS LOCK.
+        Between the read and the lock there was a window where two
+        daemons could both pass the liveness check (stale PID file
+        from a prior crash, say) before either held the OS lock; one
+        would then win the lock, the other would fail, but in the
+        meantime the bind-attempt code in serve() could already have
+        progressed. Now: acquire the OS lock IMMEDIATELY after open,
+        before reading anything. Both racing daemons block at the
+        kernel-level lock call; only one returns from it. Then we do
+        the PID-file liveness check INSIDE the held lock as defence
+        in depth, then write our own PID.
         """
         lock_path = data_dir() / DAEMON_LOCK_FILE
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         f = open(lock_path, "a+b")
         try:
-            # Pre-lock liveness check on existing PID.
-            #
-            # On Windows, msvcrt.locking byte-locks make the *file* readable
-            # only by the holder, so a sibling daemon attempting this read
-            # will get PermissionError — which is itself diagnostic
-            # (someone has the lock). We still want to fall through to the
-            # OS-level lock attempt below so we get the canonical
-            # "already running" error path the rest of the system expects.
-            try:
-                f.seek(0)
-                raw = f.read(64).decode("ascii", errors="ignore").strip()
-                if raw:
-                    existing_pid = int(raw)
-                    if existing_pid != os.getpid() and _pid_is_alive(existing_pid):
-                        raise RuntimeError(
-                            "One Link daemon is already running "
-                            f"(pid {existing_pid}) for this ONE_LINK_HOME"
-                        )
-            except (ValueError, UnicodeDecodeError, PermissionError, OSError):
-                # Garbage / locked-by-other / I/O blip — overwrite below
-                # once we hold the lock (or fail at the OS-lock step).
-                pass
+            # Step 1: acquire the OS-level lock IMMEDIATELY — before
+            # any read, before any check. This is the critical-section
+            # entry point; nothing else may happen until the lock is
+            # held (or we've bailed out).
             if os.name == "nt":
                 import msvcrt
 
@@ -2039,8 +2034,18 @@ class Daemon:
                 try:
                     msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
                 except OSError as e:
+                    # Read whatever PID is in the file for a friendlier
+                    # error message; if we can't read it, fall back to
+                    # the generic message.
+                    f.seek(0)
+                    pid_hint = ""
+                    with contextlib.suppress(Exception):
+                        raw = f.read(64).decode("ascii", errors="ignore").strip()
+                        if raw and raw.isdigit():
+                            pid_hint = f" (pid {raw})"
                     raise RuntimeError(
-                        "One Link daemon is already running for this ONE_LINK_HOME"
+                        "One Link daemon is already running"
+                        f"{pid_hint} for this ONE_LINK_HOME"
                     ) from e
             elif sys.platform != "win32":
                 # ``sys.platform != "win32"`` is a guard mypy
@@ -2054,9 +2059,41 @@ class Daemon:
                         fcntl.LOCK_EX | fcntl.LOCK_NB,
                     )
                 except OSError as e:
+                    f.seek(0)
+                    pid_hint = ""
+                    with contextlib.suppress(Exception):
+                        raw = f.read(64).decode("ascii", errors="ignore").strip()
+                        if raw and raw.isdigit():
+                            pid_hint = f" (pid {raw})"
                     raise RuntimeError(
-                        "One Link daemon is already running for this ONE_LINK_HOME"
+                        "One Link daemon is already running"
+                        f"{pid_hint} for this ONE_LINK_HOME"
                     ) from e
+
+            # Step 2: now (with the OS lock held) defence-in-depth
+            # check on the PID file. If a previous daemon crashed
+            # without the kernel releasing the lock (Windows network
+            # share weirdness, etc.) AND the recorded PID still maps
+            # to a live process, refuse. The kernel lock check above
+            # is the primary defence; this catches the corner case
+            # where the lock isn't authoritative.
+            try:
+                f.seek(0)
+                raw = f.read(64).decode("ascii", errors="ignore").strip()
+                if raw:
+                    existing_pid = int(raw)
+                    if existing_pid != os.getpid() and _pid_is_alive(existing_pid):
+                        raise RuntimeError(
+                            "One Link daemon is already running "
+                            f"(pid {existing_pid}) for this ONE_LINK_HOME "
+                            "— stale lock or corrupted state"
+                        )
+            except (ValueError, UnicodeDecodeError):
+                # Garbage file content — overwrite below.
+                pass
+
+            # Step 3: stamp our own PID so a future daemon's
+            # defence-in-depth check sees us correctly.
             f.seek(0)
             f.truncate()
             f.write(str(os.getpid()).encode("ascii"))
