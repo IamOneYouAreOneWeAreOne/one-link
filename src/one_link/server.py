@@ -2421,6 +2421,9 @@ class UIServer:
                   self._guarded(self.api_blob_preview))
         r.add_get(r"/api/blobs/{hash}/raw",
                   self._guarded(self.api_blob_raw))
+        # v0.21.x Ship 7: power + network status (on battery, metered)
+        # + resulting sync gate state.
+        r.add_get("/api/power-status", self._guarded(self.api_power_status))
         r.add_get(r"/api/folders/{name}/audit", self._guarded(self.api_folder_audit))
         r.add_get(r"/api/folders/{name}/tree", self._guarded(self.api_folder_tree))
         # v0.21.x folder-share ceremony: incoming offers (proposals
@@ -13265,6 +13268,10 @@ class UIServer:
             "sync_quiet_start": s.get("sync_quiet_start", "22:00"),
             "sync_quiet_end": s.get("sync_quiet_end", "07:00"),
             "sync_pause_on_metered": s.get("sync_pause_on_metered", "true") == "true",
+            # v0.21.x Ship 7: battery awareness. Defaults FALSE so
+            # we don't surprise a laptop user whose folder isn't
+            # syncing 'because we're on battery' until they opt in.
+            "sync_pause_on_battery": s.get("sync_pause_on_battery", "false") == "true",
             "sync_paused": s.get("sync_paused", "false") == "true",
             # Theme: 'dark' (default) | 'light' | 'auto' (follow OS)
             "theme": s.get("theme", "dark"),
@@ -13398,7 +13405,8 @@ class UIServer:
                 )
             self.daemon.state.set_setting("sync_bandwidth_kbps", str(v))
         for key in (
-            "sync_quiet_hours_enabled", "sync_pause_on_metered", "sync_paused",
+            "sync_quiet_hours_enabled", "sync_pause_on_metered",
+            "sync_pause_on_battery", "sync_paused",
         ):
             if key in data:
                 v = data[key]
@@ -18460,6 +18468,25 @@ class UIServer:
         except OSError as e:
             return web.json_response({"error": f"reveal failed: {e}"}, status=500)
         return web.json_response({"ok": True})
+
+    async def api_power_status(self, request: web.Request) -> web.Response:
+        """v0.21.x Ship 7: surface battery + metered detection results
+        + the resulting sync gate state so the UI can show 'on
+        battery' / 'metered' / 'paused' badges. Cached server-side
+        for 30s so polling is cheap."""
+        if self.daemon.state is None:
+            return web.json_response({
+                "on_battery": False, "metered": False,
+                "sync_paused": False, "reason": "",
+            })
+        state = self.daemon._power_state()
+        skip, reason = self.daemon._sync_paused_or_quiet()
+        return web.json_response({
+            "on_battery": state.get("on_battery", False),
+            "metered": state.get("metered", False),
+            "sync_paused": bool(skip),
+            "reason": reason,
+        })
 
     async def api_folder_file_history(self, request: web.Request) -> web.Response:
         """v0.21.x Ship 5: per-file version history. Returns the

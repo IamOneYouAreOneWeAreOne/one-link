@@ -14939,7 +14939,10 @@ class Daemon:
                     return (True, f"quiet hours active ({start}–{end})")
             if self.state.get_setting("sync_pause_on_metered") in ("1", "true", "yes"):
                 if self._network_is_metered():
-                    return (True, "network is metered")
+                    return (True, "network is metered (Variable or OverDataLimit)")
+            if self.state.get_setting("sync_pause_on_battery") in ("1", "true", "yes"):
+                if self._power_state()["on_battery"]:
+                    return (True, "running on battery (sync_pause_on_battery is on)")
         except Exception:
             pass
         return (False, "")
@@ -14964,27 +14967,100 @@ class Daemon:
         # Wraps midnight: e.g. 22:00 → 07:00.
         return cur >= s or cur < e
 
+    # v0.21.x Ship 7: cache battery + metered detection results
+    # for 30s so we don't ctypes-call kernel32 / shell-out to
+    # PowerShell on every chunk send.
+    _power_cache: dict = {"ts": 0.0, "on_battery": False, "metered": False}
+    _POWER_CACHE_TTL_S = 30.0
+
+    @classmethod
+    def _power_state(cls) -> dict:
+        """Return cached {on_battery: bool, metered: bool}. Refreshes
+        from the OS at most once per _POWER_CACHE_TTL_S so heavy
+        loops can call this freely."""
+        now = time.monotonic()
+        if (now - cls._power_cache["ts"]) < cls._POWER_CACHE_TTL_S:
+            return cls._power_cache
+        cls._power_cache = {
+            "ts": now,
+            "on_battery": cls._detect_on_battery(),
+            "metered": cls._detect_metered(),
+        }
+        return cls._power_cache
+
     @staticmethod
-    def _network_is_metered() -> bool:
-        """v0.21.x Ship 6: best-effort metered-network detection on
-        Windows. Returns False on non-Windows + on any error (we
-        don't want a broken detection to silently block sync; users
-        can still set the manual sync_paused if their connection
-        actually is metered)."""
+    def _detect_on_battery() -> bool:
+        """Windows: GetSystemPowerStatus().ACLineStatus.
+          0 = on battery, 1 = on AC, 255 = unknown.
+        Non-Windows: return False (no portable check; macOS would
+        use IOPowerSources, Linux would parse /sys/class/power_supply).
+        Best-effort — any exception → False so a flaky detection
+        doesn't silently pause sync."""
         if os.name != "nt":
             return False
         try:
             import ctypes
-            from ctypes import wintypes
-            # NetworkCostType from Windows.Networking.Connectivity
-            # 1 = Unrestricted, 2 = Fixed, 3 = Variable, 4 = OverDataLimit.
-            # Easier path: use the WinRT NetworkInformation via a tiny
-            # PowerShell shellout. For now we just return False; the
-            # manual pause + quiet hours cover the user-action gap.
-            # Full WinRT integration is a follow-up Ship.
-            return False
+
+            class SYSTEM_POWER_STATUS(ctypes.Structure):
+                _fields_ = [
+                    ("ACLineStatus", ctypes.c_byte),
+                    ("BatteryFlag", ctypes.c_byte),
+                    ("BatteryLifePercent", ctypes.c_byte),
+                    ("SystemStatusFlag", ctypes.c_byte),
+                    ("BatteryLifeTime", ctypes.c_ulong),
+                    ("BatteryFullLifeTime", ctypes.c_ulong),
+                ]
+            status = SYSTEM_POWER_STATUS()
+            ok = ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(status))
+            if not ok:
+                return False
+            return status.ACLineStatus == 0
         except Exception:
             return False
+
+    @staticmethod
+    def _detect_metered() -> bool:
+        """Windows: WinRT NetworkInformation.GetInternetConnectionProfile()
+        .GetConnectionCost().NetworkCostType. We invoke it via a brief
+        PowerShell -NoProfile shellout; cached for 30s by the caller so
+        the ~150ms cost amortises.
+
+        NetworkCostType: 1=Unrestricted, 2=Fixed, 3=Variable, 4=OverDataLimit.
+        We treat 3 (Variable) and 4 (OverDataLimit) as metered. Fixed
+        (most home broadband) is NOT metered."""
+        if os.name != "nt":
+            return False
+        try:
+            import subprocess
+            script = (
+                "[void][Windows.Networking.Connectivity.NetworkInformation,"
+                " Windows.Networking.Connectivity, ContentType = WindowsRuntime];"
+                "$p = [Windows.Networking.Connectivity.NetworkInformation]::"
+                "GetInternetConnectionProfile();"
+                "if ($p -eq $null) { Write-Output 0; exit }"
+                "$c = $p.GetConnectionCost();"
+                "Write-Output $c.NetworkCostType.value__"
+            )
+            r = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive",
+                 "-Command", script],
+                capture_output=True, text=True, timeout=2.0,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if r.returncode != 0:
+                return False
+            out = (r.stdout or "").strip()
+            try:
+                code = int(out)
+            except (ValueError, TypeError):
+                return False
+            return code in (3, 4)  # Variable or OverDataLimit
+        except Exception:
+            return False
+
+    @classmethod
+    def _network_is_metered(cls) -> bool:
+        return cls._power_state()["metered"]
 
     async def _throttle_chunk(self, bytes_sent: int, started_at: float) -> None:
         """v0.21.x Ship 6: enforce the global sync_bandwidth_kbps
