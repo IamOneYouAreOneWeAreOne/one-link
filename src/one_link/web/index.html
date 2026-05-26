@@ -3940,6 +3940,27 @@
   .pair-peer-info .who-name { font-weight: 600; }
   .pair-peer-info .who-sub  { font-size: 12px; color: var(--text-dim); }
 
+  /* v0.21.x Wave D: folder-send group rendering on the transfers
+     panel. Collapses N per-file rows from the same folder send into
+     ONE summary row with a ▸ toggle for the file detail. */
+  .transfer-group { margin-bottom: 8px; }
+  .transfer-group-header { background: rgba(118, 87, 244, 0.05); border-left: 3px solid var(--accent); }
+  .transfer-group-toggle {
+    display: inline-block;
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--accent);
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .transfer-group-toggle:hover { text-decoration: underline; }
+  .transfer-group-children {
+    margin-left: 16px;
+    border-left: 1px dashed var(--bg-3);
+    padding-left: 8px;
+  }
+  .transfer-group-child { padding: 4px 8px; font-size: 12px; }
+
   /* v0.21.x: folder offer preview (collapsible file list). Lets the
      user see what they're about to accept BEFORE clicking Accept. */
   .offer-preview-toggle {
@@ -22181,6 +22202,79 @@
     } catch (e) { console.warn(e); }
   }
 
+  function _renderTransferGroup(grpKey, members) {
+    // v0.21.x Wave D: render a folder-send group as ONE row +
+    // collapsible per-file rows underneath. Aggregates progress
+    // across all member transfers.
+    const wrap = el("div", "transfer-group");
+    // Extract the folder name from the group key:
+    //   "folder:papers:aabbccdd" → "papers"
+    //   "adhoc:/path/to/papers:aabbccdd" → "papers" (leaf)
+    let folderName = "folder";
+    const parts = grpKey.split(":");
+    if (parts.length >= 3) {
+      const ident = parts.slice(1, -1).join(":");
+      const leaf = ident.split(/[\\/]/).filter(Boolean).pop();
+      folderName = leaf || ident;
+    }
+    const total = members.length;
+    const done = members.filter(t => t.status === "complete").length;
+    const failed = members.filter(t => t.status === "failed").length;
+    const active = members.filter(t => t.status === "active" || t.status === "offered").length;
+    const totalBytes = members.reduce((s, t) => s + (t.total_bytes || 0), 0);
+    const progressBytes = members.reduce((s, t) => s + (t.progress_bytes || 0), 0);
+    const pct = totalBytes > 0
+      ? Math.round((progressBytes / totalBytes) * 100) : 0;
+    // Header row.
+    const header = el("div", "file-row transfer-group-header");
+    header.appendChild(el("div", "icon", "Folder"));
+    const meta = el("div", "meta");
+    meta.appendChild(el("div", "name", folderName));
+    const statusLine = (
+      `${done}/${total} done`
+      + (active > 0 ? ` · ${active} active` : "")
+      + (failed > 0 ? ` · ${failed} failed` : "")
+      + ` · ${fmtBytes(progressBytes)} / ${fmtBytes(totalBytes)}`
+    );
+    meta.appendChild(el("div", "size", statusLine));
+    const bar = el("div", "bar");
+    const fill = el("span");
+    fill.style.width = `${pct}%`;
+    bar.appendChild(fill);
+    meta.appendChild(bar);
+    const toggle = document.createElement("a");
+    toggle.href = "#";
+    toggle.className = "transfer-group-toggle";
+    toggle.textContent = `▸ Show files (${total})`;
+    meta.appendChild(toggle);
+    header.appendChild(meta);
+    wrap.appendChild(header);
+    // Children container (hidden by default).
+    const children = el("div", "transfer-group-children");
+    children.style.display = "none";
+    for (const t of members) {
+      const childRow = el("div", "file-row transfer-group-child");
+      childRow.appendChild(el("div", "icon", t.direction === "in" ? "In" : "Out"));
+      const childMeta = el("div", "meta");
+      childMeta.appendChild(el("div", "name", t.name || "file"));
+      const childLabel = statusLabel(t, t.status || "Queued");
+      childMeta.appendChild(el(
+        "div", "size",
+        `${childLabel} - ${fmtBytes(t.progress_bytes)} / ${fmtBytes(t.total_bytes)}`,
+      ));
+      childRow.appendChild(childMeta);
+      children.appendChild(childRow);
+    }
+    wrap.appendChild(children);
+    toggle.onclick = (ev) => {
+      ev.preventDefault();
+      const open = children.style.display !== "none";
+      children.style.display = open ? "none" : "block";
+      toggle.textContent = (open ? "▸" : "▾") + ` Show files (${total})`;
+    };
+    return wrap;
+  }
+
   function renderTransfers() {
     const list = $("#transferlist");
     if (!list) return;
@@ -22190,7 +22284,27 @@
       list.appendChild(el("div", "empty", "No activity yet. Sent files and folder sync will appear here."));
       return;
     }
+    // v0.21.x Wave D: group per-file transfers from the same
+    // folder-send operation. Each transfer tagged with
+    // metadata.folder_send_group ("folder:papers:aabbccdd") gets
+    // collapsed into ONE group row + a "▸ Show files (N)" toggle.
+    // Ungrouped transfers render as individual rows like before.
+    const grouped = new Map();  // group_key → [transfers]
+    const ungrouped = [];
     for (const t of state.transfers) {
+      const grp = t?.metadata?.folder_send_group;
+      if (grp) {
+        if (!grouped.has(grp)) grouped.set(grp, []);
+        grouped.get(grp).push(t);
+      } else {
+        ungrouped.push(t);
+      }
+    }
+    // Render grouped folder-sends first (more important).
+    for (const [grpKey, members] of grouped.entries()) {
+      list.appendChild(_renderTransferGroup(grpKey, members));
+    }
+    for (const t of ungrouped) {
       const row = el("div", "file-row");
       row.appendChild(el("div", "icon", t.direction === "in" ? "In" : "Out"));
       const meta = el("div", "meta");

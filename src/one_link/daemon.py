@@ -19621,8 +19621,15 @@ class Daemon:
         *,
         transfer_id: str | None = None,
         rel_path: str | None = None,
+        extra_metadata: dict | None = None,
     ) -> dict:
         """Send a single file to a paired peer.
+
+        ``extra_metadata``: optional dict merged into the transfer
+        ledger row's metadata. Used by the per-file folder-send loop
+        to tag all sibling transfers with a ``folder_send_group``
+        key so the UI can group N file-transfer rows into one
+        "Folder paper · 47 files" row on the transfers panel.
 
         ``rel_path``: optional folder-relative path the recipient
         should mirror under their inbox. Used by the folder-send
@@ -19737,6 +19744,12 @@ class Daemon:
             "path": str(path),
             "delivery_state": "queued",
         }
+        # v0.21.x Wave D: merge caller-supplied tags (e.g.
+        # folder_send_group) so the transfers UI can group sibling
+        # per-file rows from the same folder-send operation.
+        if isinstance(extra_metadata, dict):
+            for k, v in extra_metadata.items():
+                base_metadata[k] = v
         self._upsert_transfer(
             id=transfer_id,
             direction="out",

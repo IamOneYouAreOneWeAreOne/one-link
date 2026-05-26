@@ -15152,6 +15152,11 @@ class UIServer:
         """
         registry = self._ensure_folder_send_registry()
         key = self._folder_send_key(scope, ident, peer_fp)
+        # v0.21.x Wave D: tag all per-file transfers with a shared
+        # folder_send_group so the transfers UI can collapse N rows
+        # into one "Folder X · N files · M MB total" entry.
+        folder_send_group = f"{scope}:{ident}:{peer_fp[:16]}"
+        send_file_extra = {"folder_send_group": folder_send_group}
         sent = 0
         failed = 0
         dedup_files = 0
@@ -15242,6 +15247,7 @@ class UIServer:
                         try:
                             await self.daemon.send_file(
                                 peer, path_obj, rel_path=rel,
+                                extra_metadata=send_file_extra,
                             )
                             sent += 1
                         except asyncio.CancelledError:
@@ -15259,6 +15265,7 @@ class UIServer:
                 try:
                     result = await self.daemon.send_file(
                         peer, path_obj, rel_path=rel,
+                        extra_metadata=send_file_extra,
                     )
                     sent += 1
                     if isinstance(result, dict):

@@ -243,6 +243,27 @@ async def send_ctx(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_per_file_mode_tags_transfers_with_folder_send_group(send_ctx):
+    """v0.21.x Wave D: per-file folder send tags every send_file call
+    with extra_metadata={folder_send_group: '<scope>:<ident>:<fp16>'}
+    so the transfers UI can group N rows into ONE folder summary."""
+    r = await send_ctx["client"].post(
+        "/api/folders/papers/send-to",
+        headers=_h(send_ctx["token"]),
+        json={"peer_fp": send_ctx["peer_fp"], "per_file": True},
+    )
+    assert r.status == 200
+    await asyncio.sleep(0.05)
+    calls = send_ctx["daemon"].send_file.await_args_list
+    assert len(calls) >= 1
+    for call in calls:
+        extra = call.kwargs.get("extra_metadata")
+        assert extra is not None, "send_file missing extra_metadata kwarg"
+        assert "folder_send_group" in extra
+        assert extra["folder_send_group"].startswith("folder:papers:")
+
+
+@pytest.mark.asyncio
 async def test_send_endpoint_per_file_mode_opt_in(send_ctx):
     """Legacy per-file mode is opt-in via per_file=true."""
     r = await send_ctx["client"].post(
