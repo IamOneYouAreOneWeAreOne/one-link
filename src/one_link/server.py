@@ -2361,6 +2361,13 @@ class UIServer:
         r.add_post(r"/api/folders/{name}/policy", self._guarded(self.api_set_folder_policy))
         r.add_get(r"/api/folders/{name}/audit", self._guarded(self.api_folder_audit))
         r.add_get(r"/api/folders/{name}/tree", self._guarded(self.api_folder_tree))
+        # v0.21.x folder-share ceremony: incoming offers (proposals
+        # from peers to share a folder we haven't created locally).
+        r.add_get(r"/api/folder-offers", self._guarded(self.api_list_folder_offers))
+        r.add_post(r"/api/folder-offers/{offer_id}/accept",
+                   self._guarded(self.api_accept_folder_offer))
+        r.add_post(r"/api/folder-offers/{offer_id}/decline",
+                   self._guarded(self.api_decline_folder_offer))
         r.add_post(r"/api/peers/{fp}/trust", self._guarded(self.api_set_trust))
         r.add_get(r"/api/peers/{fp}/capabilities", self._guarded(self.api_get_peer_capabilities))
         r.add_post(r"/api/peers/{fp}/capabilities", self._guarded(self.api_set_peer_capabilities))
@@ -14497,6 +14504,203 @@ class UIServer:
             except Exception as e:
                 results.append(_sync_result(peer_fp, "error", ok=False, error=str(e)))
         return web.json_response({"ok": True, "results": results})
+
+    # ─── folder-share ceremony (v0.21.x) ──────────────────────────────
+    #
+    # Sender clicks Share → daemon pushes MANIFEST_PUSH → receiver's
+    # daemon caches the offer (since the folder is unknown locally) +
+    # broadcasts folder_offer_received WS event. The receiver's UI
+    # surfaces a 'Computer A wants to share folder X' card with a
+    # path picker + Accept/Decline. Accept creates the folder at the
+    # chosen path, adds the sender to shared_with, and dials back to
+    # the sender with an empty MANIFEST_PUSH + request_reverse=True
+    # so the sender's existing bidi-folder-sync path streams the
+    # blobs over.
+
+    async def api_list_folder_offers(self, request: web.Request) -> web.Response:
+        """List incoming folder offers from paired peers. Default
+        filter is state='pending'; query ?state=all returns the full
+        decision audit (accepted + declined too)."""
+        if self.daemon.state is None:
+            return web.json_response({"offers": []})
+        state_filter: Optional[str] = "pending"
+        q = (request.query.get("state") or "").strip().lower()
+        if q == "all":
+            state_filter = None
+        elif q in ("pending", "accepted", "declined"):
+            state_filter = q
+        limit = 50
+        with contextlib.suppress(Exception):
+            limit = max(1, min(int(request.query.get("limit") or 50), 200))
+        offers = self.daemon.state.list_folder_offers(
+            state_filter=state_filter, limit=limit,
+        )
+        # Enrich with peer hostname / short_id so the UI can render
+        # the sender's friendly name without a second roundtrip.
+        for o in offers:
+            with contextlib.suppress(Exception):
+                p = self.daemon.state.get_peer(o["peer_fp"])
+                if p:
+                    o["peer_hostname"] = p.get("hostname")
+                    o["peer_short_id"] = p.get("short_id")
+        return web.json_response({"offers": offers})
+
+    async def api_accept_folder_offer(self, request: web.Request) -> web.Response:
+        """Accept an incoming folder offer. Body: {local_path: str}.
+
+        Creates a folder at local_path, adds the sender to its
+        shared_with list, grants folder-sync caps to the sender, and
+        dials back via empty-manifest-push-with-request-reverse so
+        the sender's existing bidi flow streams the blobs."""
+        if self.daemon.state is None or self.daemon.folder_engine is None:
+            return web.json_response(
+                {"error": "folder sync not initialized"}, status=503,
+            )
+        try:
+            offer_id = int(request.match_info["offer_id"])
+        except (KeyError, ValueError):
+            return web.json_response({"error": "bad offer_id"}, status=400)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": "bad json body", "code": "bad_json"}, status=400,
+            )
+        local_path = (data.get("local_path") or "").strip()
+        if not local_path:
+            return web.json_response(
+                {"error": "local_path required"}, status=400,
+            )
+        offer = self.daemon.state.get_folder_offer(offer_id)
+        if not offer:
+            return web.json_response(
+                {"error": "no such offer"}, status=404,
+            )
+        if offer.get("state") != "pending":
+            return web.json_response(
+                {"error": f"offer is already {offer.get('state')}"},
+                status=409,
+            )
+        peer_fp = offer["peer_fp"]
+        if not self.daemon._is_pinned(peer_fp):
+            return web.json_response(
+                {"error": "offer is from an unpinned peer; pair first"},
+                status=403,
+            )
+        folder_name = offer["folder_name"]
+        # If a folder with this name already exists locally (e.g.
+        # user accepted via the regular Add form before clicking
+        # Accept on the offer), refuse with a clear message so the
+        # user can rename or decline.
+        if self.daemon.state.get_folder(folder_name) is not None:
+            return web.json_response({
+                "error": (
+                    f"a folder named {folder_name!r} already exists "
+                    "on this device. Rename it or remove it, then "
+                    "accept this offer again."
+                ),
+                "code": "folder_name_conflict",
+            }, status=409)
+        try:
+            self.daemon.folder_engine.add_folder(
+                name=folder_name,
+                local_path=Path(local_path),
+                shared_with=[peer_fp],
+                conflict_policy="latest-wins",
+            )
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=409)
+        except Exception as e:
+            log.warning(
+                "accept folder offer failed (%s/%s): %s",
+                peer_fp[:8], folder_name, e,
+            )
+            return web.json_response(
+                {"error": "could not create folder", "detail": str(e)},
+                status=500,
+            )
+        # Capability grant: explicit Accept = consent for folder
+        # traffic with this peer. Mirrors what api_share_folder does
+        # on the sender side.
+        self._ensure_folder_caps_for(
+            peer_fp, note=f"folder={folder_name}/accept",
+        )
+        self.daemon.state.mark_folder_offer_accepted(
+            offer_id, local_path=local_path,
+        )
+        # Kick the sender to push the actual data. We dial the sender
+        # with an empty manifest + request_reverse=true; the sender's
+        # bidi handler will then push its real manifest back over the
+        # same channel, we'll reply with WANTS for every blob, blobs
+        # stream over. All existing code paths; no new wire frames.
+        peer = None
+        if self.daemon.discovery:
+            for p in self.daemon.discovery.registry.list():
+                if self.daemon._peer_fp_from_peer(p) == peer_fp:
+                    peer = p
+                    break
+        triggered = False
+        if peer is not None:
+            async def _bg_pull() -> None:
+                try:
+                    r = await self.daemon.push_folder_to_peer(
+                        peer, folder_name, bidirectional=True,
+                    )
+                    self.broadcast({
+                        "type": "folder_offer_pull_complete",
+                        "offer_id": offer_id,
+                        "folder_name": folder_name,
+                        "peer_fp": peer_fp,
+                        "result": r,
+                    })
+                except Exception as e:  # pragma: no cover - bg
+                    log.warning(
+                        "accept-pull failed (%s/%s): %s",
+                        peer_fp[:8], folder_name, e,
+                    )
+                    self.broadcast({
+                        "type": "folder_offer_pull_failed",
+                        "offer_id": offer_id,
+                        "folder_name": folder_name,
+                        "peer_fp": peer_fp,
+                        "error": str(e),
+                    })
+            asyncio.get_running_loop().create_task(_bg_pull())
+            triggered = True
+        return web.json_response({
+            "ok": True,
+            "folder_name": folder_name,
+            "local_path": local_path,
+            "pull_status": "triggered" if triggered else "peer_offline",
+        })
+
+    async def api_decline_folder_offer(self, request: web.Request) -> web.Response:
+        """Decline an incoming folder offer. Records the decline so
+        the UI can hide the card; the sender is NOT notified (their
+        view shows the transfer as still pending; on next push the
+        receiver will re-decline silently)."""
+        if self.daemon.state is None:
+            return web.json_response(
+                {"error": "state not available"}, status=503,
+            )
+        try:
+            offer_id = int(request.match_info["offer_id"])
+        except (KeyError, ValueError):
+            return web.json_response({"error": "bad offer_id"}, status=400)
+        offer = self.daemon.state.get_folder_offer(offer_id)
+        if not offer:
+            return web.json_response({"error": "no such offer"}, status=404)
+        if offer.get("state") != "pending":
+            return web.json_response(
+                {"error": f"offer is already {offer.get('state')}"},
+                status=409,
+            )
+        self.daemon.state.mark_folder_offer_declined(offer_id)
+        self.broadcast({
+            "type": "folder_offer_declined",
+            "offer_id": offer_id,
+        })
+        return web.json_response({"ok": True})
 
     # ─── POST /api/peers/{fp}/trust ───────────────────────────────────
     async def api_set_trust(self, request: web.Request) -> web.Response:

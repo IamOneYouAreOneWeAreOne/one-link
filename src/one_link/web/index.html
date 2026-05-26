@@ -2305,6 +2305,96 @@
     min-width: 0;
     text-align: center;
   }
+  /* v0.21.x folder-offer cards. Sits between the help-card and the
+     folder list. Hidden when there are zero offers pending. */
+  #folder-offers-section {
+    margin: 0 14px 12px;
+    padding: 12px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: linear-gradient(180deg,
+      rgba(118, 87, 244, 0.08), rgba(118, 87, 244, 0.02));
+  }
+  .folder-offers-header {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px; font-weight: 600;
+    color: var(--text);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .folder-offers-header .count {
+    background: var(--accent);
+    color: #fff;
+    border-radius: 999px;
+    padding: 1px 8px;
+    font-size: 10px;
+    font-weight: 700;
+  }
+  .folder-offer-card {
+    background: var(--bg-2);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+  }
+  .folder-offer-card:last-child { margin-bottom: 0; }
+  .folder-offer-card .offer-from {
+    font-size: 11px; color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+  .folder-offer-card .offer-name {
+    font-size: 14px; font-weight: 600; color: var(--text);
+    margin-bottom: 2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .folder-offer-card .offer-meta {
+    font-size: 11px; color: var(--text-dim);
+    margin-bottom: 10px;
+  }
+  .folder-offer-card .offer-path-row {
+    display: flex; gap: 6px; margin-bottom: 8px;
+  }
+  .folder-offer-card .offer-path-row input {
+    flex: 1; min-width: 0;
+    background: var(--bg);
+    border: 1px solid var(--bg-3);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 7px 9px;
+    font-size: 11px;
+    font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  }
+  .folder-offer-card .offer-path-row input:focus {
+    border-color: var(--accent); outline: none;
+  }
+  .folder-offer-card .offer-path-row button {
+    background: var(--bg-3); color: var(--text-dim);
+    border-radius: 6px; padding: 7px 10px; font-size: 11px;
+    white-space: nowrap;
+  }
+  .folder-offer-card .offer-path-row button:hover {
+    color: var(--text); background: var(--bg);
+  }
+  .folder-offer-card .offer-actions {
+    display: flex; gap: 6px;
+  }
+  .folder-offer-card .offer-actions button {
+    flex: 1; padding: 8px 10px; border-radius: 6px;
+    font-size: 12px; font-weight: 500;
+    text-align: center;
+  }
+  .folder-offer-card .offer-actions .btn-accept {
+    background: var(--accent); color: #fff;
+  }
+  .folder-offer-card .offer-actions .btn-accept:hover {
+    background: var(--accent-2);
+  }
+  .folder-offer-card .offer-actions .btn-decline {
+    background: var(--bg-3); color: var(--text-dim);
+  }
+  .folder-offer-card .offer-actions .btn-decline:hover {
+    color: var(--text);
+  }
   .file-row a, .file-row button {
     color: var(--text-dim); padding: 6px 9px; border-radius: 6px; background: var(--bg-2); font-size: 12px;
     white-space: nowrap;
@@ -8826,6 +8916,16 @@
       <div class="help-card">
         <strong>Folder location</strong> means a folder on this computer, like
         <code id="folder-path-example">C:\Users\you\Documents\One Link</code>. Pair a device first; sharing without one is just a folder watching itself.
+      </div>
+      <!-- v0.21.x folder-share ceremony: incoming offers from paired
+           peers land here as cards with [Accept] / [Decline]. Hidden
+           when zero offers pending. -->
+      <div id="folder-offers-section" style="display:none;">
+        <div class="folder-offers-header">
+          <span>Incoming shares</span>
+          <span class="count" id="folder-offers-count">0</span>
+        </div>
+        <div id="folder-offers-list"></div>
       </div>
       <div id="folderlist" style="overflow-y:auto; flex:1; padding-bottom: 12px;">
         <div class="empty rich">
@@ -19577,6 +19677,139 @@
     } catch (e) { console.warn(e); }
   }
 
+  // v0.21.x folder-share ceremony: incoming offers from paired peers
+  // that want to share a folder we haven't accepted yet.
+  state.folderOffers = [];
+
+  function _humanBytes(n) {
+    const x = Number(n) || 0;
+    if (x < 1024) return `${x} B`;
+    if (x < 1024 ** 2) return `${(x / 1024).toFixed(1)} KB`;
+    if (x < 1024 ** 3) return `${(x / 1024 ** 2).toFixed(1)} MB`;
+    return `${(x / 1024 ** 3).toFixed(2)} GB`;
+  }
+
+  function _defaultLocalPathForOffer(folderName) {
+    // Suggest <suggested_folder>/<folder_name> where suggested_folder
+    // is already pulled by /api/me (e.g. C:\Users\Josh\Documents\One Link).
+    const base = state.me?.suggested_folder || "";
+    if (!base) return folderName || "";
+    const sep = base.includes("\\") ? "\\" : "/";
+    return base + sep + (folderName || "");
+  }
+
+  function _renderFolderOffer(o) {
+    const card = el("div", "folder-offer-card");
+    const fromName = o.peer_hostname || o.peer_short_id || (o.peer_fp || "").slice(0, 12);
+    const fromEl = el("div", "offer-from", `From ${fromName} wants to share`);
+    card.appendChild(fromEl);
+    const nameEl = el("div", "offer-name", o.folder_name);
+    nameEl.title = o.folder_name;
+    card.appendChild(nameEl);
+    card.appendChild(el(
+      "div", "offer-meta",
+      `${o.entry_count || 0} file${o.entry_count === 1 ? "" : "s"} · ${_humanBytes(o.total_bytes)}`,
+    ));
+    // Path picker row.
+    const pathRow = el("div", "offer-path-row");
+    const pathInput = document.createElement("input");
+    pathInput.type = "text";
+    pathInput.value = _defaultLocalPathForOffer(o.folder_name);
+    pathInput.setAttribute("aria-label", "Where to save this folder on your computer");
+    pathInput.title = "Where this folder will live on your computer. You can edit it before clicking Accept.";
+    pathRow.appendChild(pathInput);
+    const browseBtn = document.createElement("button");
+    browseBtn.type = "button";
+    browseBtn.textContent = "Browse…";
+    browseBtn.title = "Pick the parent folder via the OS folder picker.";
+    browseBtn.onclick = async () => {
+      try {
+        const r = await api.post("/api/fs/pick-folder", {});
+        if (r && r.path) {
+          const sep = r.path.includes("\\") ? "\\" : "/";
+          pathInput.value = r.path + sep + o.folder_name;
+        }
+      } catch (_e) { /* user cancelled or picker unavailable */ }
+    };
+    pathRow.appendChild(browseBtn);
+    card.appendChild(pathRow);
+    // Accept / Decline row.
+    const actions = el("div", "offer-actions");
+    const acceptBtn = document.createElement("button");
+    acceptBtn.type = "button";
+    acceptBtn.className = "btn-accept";
+    acceptBtn.textContent = "Accept";
+    acceptBtn.title = "Create the folder at the path above + start receiving the files.";
+    acceptBtn.onclick = async () => {
+      const local_path = (pathInput.value || "").trim();
+      if (!local_path) {
+        toast("Pick where to save the folder first", "info", 4000);
+        return;
+      }
+      acceptBtn.disabled = true;
+      acceptBtn.textContent = "Accepting…";
+      try {
+        const r = await api.post(
+          `/api/folder-offers/${o.id}/accept`, { local_path },
+        );
+        toast(
+          `Accepted "${o.folder_name}". Files will arrive shortly.`,
+          "good", 4500,
+        );
+        await refreshFolderOffers();
+        await refreshFolders();
+      } catch (e) {
+        acceptBtn.disabled = false;
+        acceptBtn.textContent = "Accept";
+        toast(`Couldn't accept: ${errorToastBody(e)}`, "bad", 7000);
+      }
+    };
+    const declineBtn = document.createElement("button");
+    declineBtn.type = "button";
+    declineBtn.className = "btn-decline";
+    declineBtn.textContent = "Decline";
+    declineBtn.title = "Reject this folder offer. The other device won't sync files for it.";
+    declineBtn.onclick = async () => {
+      declineBtn.disabled = true;
+      try {
+        await api.post(`/api/folder-offers/${o.id}/decline`, {});
+        toast(`Declined "${o.folder_name}".`, "info", 3500);
+        await refreshFolderOffers();
+      } catch (e) {
+        declineBtn.disabled = false;
+        toast(`Couldn't decline: ${errorToastBody(e)}`, "bad", 6000);
+      }
+    };
+    actions.appendChild(acceptBtn);
+    actions.appendChild(declineBtn);
+    card.appendChild(actions);
+    return card;
+  }
+
+  async function refreshFolderOffers() {
+    try {
+      const r = await api.get("/api/folder-offers");
+      state.folderOffers = r.offers || [];
+    } catch (_e) {
+      state.folderOffers = [];
+    }
+    const section = $("#folder-offers-section");
+    const list = $("#folder-offers-list");
+    const count = $("#folder-offers-count");
+    if (!section || !list || !count) return;
+    list.replaceChildren();
+    if (state.folderOffers.length === 0) {
+      section.style.display = "none";
+      count.textContent = "0";
+      return;
+    }
+    section.style.display = "";
+    count.textContent = String(state.folderOffers.length);
+    for (const o of state.folderOffers) {
+      list.appendChild(_renderFolderOffer(o));
+    }
+  }
+
   // v0.8.9: folder-sync divergent-edit conflict UI.
 
   // Cache of unresolved-conflict count + freshest list. Banner derives
@@ -22534,6 +22767,7 @@
     // maybeShowOnboarding() runs below, after refreshPeers() has loaded pairing state.
     await loadHistory();
     await refreshFolders();
+    await refreshFolderOffers();
       await refreshTransfers();
       await refreshStatus();
       await refreshFabricTruth();
@@ -23097,6 +23331,40 @@
         if ($("#conflicts-backdrop").classList.contains("show")) {
           renderConflictsModal();
         }
+      } else if (m.type === "folder_offer_received") {
+        // v0.21.x: a paired peer wants to share a folder we
+        // don't have. Refresh the offers section + flash a toast
+        // so the user notices even if they're not on the Folders
+        // tab right now.
+        refreshFolderOffers();
+        const o = m.offer || {};
+        toast(
+          `New folder share offer: "${o.folder_name || "?"}". Open Folders to Accept or Decline.`,
+          "info", 6000,
+        );
+      } else if (m.type === "folder_offer_declined") {
+        refreshFolderOffers();
+      } else if (m.type === "folder_offer_pull_complete") {
+        // Accept-pull finished: the blobs arrived. Refresh the
+        // folders list so the new folder + its file count show.
+        const fname = m.folder_name || "?";
+        const blobs = m?.result?.blobs_sent;
+        if (typeof blobs === "number" && blobs > 0) {
+          toast(`"${fname}" is ready (${blobs} file${blobs === 1 ? "" : "s"} synced).`, "good", 5000);
+        }
+        refreshFolders();
+      } else if (m.type === "folder_offer_pull_failed") {
+        toast(
+          `Couldn't sync "${m.folder_name || "?"}" yet: ${m.error || "the other device may be offline."}`,
+          "warn", 7000,
+        );
+      } else if (m.type === "folder_share_pushed") {
+        // Sender-side: confirmation that our auto-push-after-Share
+        // landed at the peer (may still be in_pending state if peer
+        // hasn't accepted yet). Quiet refresh.
+        refreshFolders();
+      } else if (m.type === "folder_scan_complete") {
+        refreshFolders();
       } else if (m.type === "key_change_acked" || m.type === "key_change_acked_all") {
         // v0.7.8: another tab acknowledged. Refresh peers so the
         // banner / overlay clears for everyone live.

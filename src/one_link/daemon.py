@@ -9513,8 +9513,57 @@ class Daemon:
         if not folder_name:
             return
         f = self.state.get_folder(folder_name)
-        if not f or peer_fp not in f["shared_with"]:
-            log.info("MANIFEST_PUSH for folder we don't share with this peer")
+        if not f:
+            # v0.21.x folder-share ceremony: the sender wants to share
+            # a folder we've never registered locally. Cache the offer
+            # so the UI can show 'Peer X wants to share Y — pick where
+            # to save it. [Accept] [Decline]'. Pre-v0.21.x this was a
+            # silent drop, so 'Share' on the sender's UI did nothing
+            # visible on the receiver. Acceptance flow (api_accept_
+            # folder_offer) will create the local folder, add the
+            # sender to shared_with, and dial back via empty MANIFEST_
+            # PUSH + request_reverse=True to pull the actual blobs
+            # (reuses the existing FOLDER_SYNC_BIDI_V1 path).
+            remote_root = msg.get("merkle_root")
+            entries = msg.get("entries", []) or []
+            try:
+                offer = self.state.upsert_pending_folder_offer(
+                    peer_fp=peer_fp,
+                    folder_name=folder_name,
+                    merkle_root=remote_root,
+                    entries=entries,
+                )
+            except Exception as e:  # pragma: no cover - defense
+                log.warning(
+                    "could not cache folder offer (%s/%s): %s",
+                    peer_fp[:8], folder_name, e,
+                )
+                return
+            log.info(
+                "MANIFEST_PUSH from %s for unknown folder %r — cached as "
+                "pending offer #%d (%d entries, %d bytes)",
+                peer_fp[:8], folder_name, offer.get("id"),
+                offer.get("entry_count"), offer.get("total_bytes"),
+            )
+            if getattr(self, "ui_server", None) is not None:
+                with contextlib.suppress(Exception):
+                    self.ui_server.broadcast({
+                        "type": "folder_offer_received",
+                        "offer": offer,
+                    })
+            # Acknowledge receipt with an empty WANTS + pending flag
+            # so the sender doesn't sit waiting on a 15s timeout.
+            with contextlib.suppress(Exception):
+                await channel.send(encode_msg(make_msg(
+                    "MANIFEST_WANTS", self.me.short_id,
+                    folder=folder_name, wants=[],
+                    pending_offer=True,
+                )))
+            return
+        if peer_fp not in f["shared_with"]:
+            log.info(
+                "MANIFEST_PUSH for folder we don't share with this peer",
+            )
             return
         if not self.state.folder_peer_allows(folder_name, peer_fp, "pull"):
             log.info("MANIFEST_PUSH denied by folder capability for %s", peer_fp[:8])

@@ -630,6 +630,7 @@ class State:
                     (22, self._migrate_v22_transfer_status_index),
                     (23, self._migrate_v23_rotation_announcements),
                     (24, self._migrate_v24_held_recovery_shares),
+                    (25, self._migrate_v25_pending_folder_offers),
                 ]
                 for target_version, apply_fn in steps:
                     self._run_atomic_migration(
@@ -950,6 +951,61 @@ class State:
                 END
             WHERE revoked = 1 AND safety_state != 'revoked'
             """
+        )
+
+    def _migrate_v25_pending_folder_offers(self, c: sqlite3.Cursor) -> None:
+        """v0.21.x folder-share ceremony: queue of folder manifests
+        peers have offered us that we haven't accepted yet.
+
+        Pre-v0.21.x, when peer A sent MANIFEST_PUSH for a folder that
+        the receiving daemon B didn't already have registered locally,
+        B silently dropped the frame. That meant 'Share' on the
+        sender's UI did nothing visible on the receiver — there was
+        no mechanism to PROPOSE sharing a new folder.
+
+        This table caches such proposals so the receiver's UI can
+        show 'Peer X wants to share folder Y (147 files, 50 MB) —
+        pick where to save it on this device. [Accept] [Decline]'.
+
+        Schema:
+          id              INTEGER PRIMARY KEY AUTOINCREMENT
+          peer_fp         TEXT    NOT NULL  -- sender's fingerprint
+          folder_name     TEXT    NOT NULL  -- proposed folder name
+          merkle_root     TEXT              -- sender's manifest root
+          entries_json    TEXT    NOT NULL  -- serialized manifest entries
+          entry_count     INTEGER NOT NULL  -- denormalized for UI
+          total_bytes     INTEGER NOT NULL  -- denormalized for UI
+          offered_ms      INTEGER NOT NULL  -- when we received the offer
+          state           TEXT    NOT NULL  -- 'pending' | 'accepted' | 'declined'
+          decided_ms      INTEGER           -- when user accepted/declined
+          local_path      TEXT              -- chosen path (set on accept)
+
+        UNIQUE(peer_fp, folder_name) so a re-offer of the same folder
+        from the same peer updates the existing row instead of
+        accumulating duplicates. State='accepted' or 'declined' rows
+        are kept for audit until the user clears them.
+        """
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_folder_offers (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                peer_fp       TEXT    NOT NULL,
+                folder_name   TEXT    NOT NULL,
+                merkle_root   TEXT,
+                entries_json  TEXT    NOT NULL,
+                entry_count   INTEGER NOT NULL,
+                total_bytes   INTEGER NOT NULL,
+                offered_ms    INTEGER NOT NULL,
+                state         TEXT    NOT NULL DEFAULT 'pending',
+                decided_ms    INTEGER,
+                local_path    TEXT,
+                UNIQUE(peer_fp, folder_name)
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_folder_offers_state"
+            " ON pending_folder_offers(state, offered_ms)"
         )
 
     def _migrate_v24_held_recovery_shares(self, c: sqlite3.Cursor) -> None:
@@ -5926,6 +5982,171 @@ class State:
             }
             for r in rows
         ]
+
+    # ─── pending folder offers (v25) ──────────────────────────────────
+
+    def upsert_pending_folder_offer(
+        self,
+        *,
+        peer_fp: str,
+        folder_name: str,
+        merkle_root: Optional[str],
+        entries: list[dict],
+        offered_ms: Optional[int] = None,
+    ) -> dict:
+        """Cache an incoming folder-share proposal so the UI can
+        surface it. UNIQUE(peer_fp, folder_name) → re-offers from
+        the same peer update the existing row.
+
+        Resets state to 'pending' on re-offer (a refresh from the
+        sender after we declined SHOULD give the user the choice
+        again, since the act of re-proposing is fresh user intent
+        on the sender's side)."""
+        if offered_ms is None:
+            offered_ms = int(time.time() * 1000)
+        import json as _json
+        entries_json = _json.dumps(list(entries or []))
+        entry_count = len(entries or [])
+        total_bytes = sum(
+            int(e.get("size") or 0) for e in (entries or [])
+            if e.get("blob_hash")
+        )
+        with self._write_lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO pending_folder_offers(
+                    peer_fp, folder_name, merkle_root,
+                    entries_json, entry_count, total_bytes,
+                    offered_ms, state, decided_ms, local_path
+                ) VALUES(?,?,?,?,?,?,?, 'pending', NULL, NULL)
+                ON CONFLICT(peer_fp, folder_name) DO UPDATE SET
+                    merkle_root  = excluded.merkle_root,
+                    entries_json = excluded.entries_json,
+                    entry_count  = excluded.entry_count,
+                    total_bytes  = excluded.total_bytes,
+                    offered_ms   = excluded.offered_ms,
+                    state        = 'pending',
+                    decided_ms   = NULL,
+                    local_path   = NULL
+                """,
+                (peer_fp, folder_name, merkle_root,
+                 entries_json, entry_count, total_bytes,
+                 offered_ms),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT id FROM pending_folder_offers"
+                " WHERE peer_fp=? AND folder_name=?",
+                (peer_fp, folder_name),
+            ).fetchone()
+            offer_id = int(row["id"]) if row else int(cur.lastrowid or 0)
+        return self.get_folder_offer(offer_id) or {
+            "id": offer_id,
+            "peer_fp": peer_fp,
+            "folder_name": folder_name,
+            "merkle_root": merkle_root,
+            "entry_count": entry_count,
+            "total_bytes": total_bytes,
+            "offered_ms": offered_ms,
+            "state": "pending",
+        }
+
+    def get_folder_offer(self, offer_id: int) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT id, peer_fp, folder_name, merkle_root, entries_json,"
+            " entry_count, total_bytes, offered_ms, state, decided_ms,"
+            " local_path FROM pending_folder_offers WHERE id=?",
+            (int(offer_id),),
+        ).fetchone()
+        if not row:
+            return None
+        import json as _json
+        try:
+            entries = _json.loads(row["entries_json"] or "[]")
+        except Exception:
+            entries = []
+        return {
+            "id": int(row["id"]),
+            "peer_fp": row["peer_fp"],
+            "folder_name": row["folder_name"],
+            "merkle_root": row["merkle_root"],
+            "entries": entries,
+            "entry_count": int(row["entry_count"] or 0),
+            "total_bytes": int(row["total_bytes"] or 0),
+            "offered_ms": int(row["offered_ms"] or 0),
+            "state": row["state"] or "pending",
+            "decided_ms": int(row["decided_ms"]) if row["decided_ms"] else None,
+            "local_path": row["local_path"],
+        }
+
+    def list_folder_offers(
+        self, *, state_filter: Optional[str] = "pending", limit: int = 50,
+    ) -> list[dict]:
+        sql = (
+            "SELECT id, peer_fp, folder_name, merkle_root, entry_count,"
+            " total_bytes, offered_ms, state, decided_ms, local_path"
+            " FROM pending_folder_offers"
+        )
+        params: list[Any] = []
+        if state_filter:
+            sql += " WHERE state = ?"
+            params.append(state_filter)
+        sql += " ORDER BY offered_ms DESC LIMIT ?"
+        params.append(int(limit))
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [
+            {
+                "id": int(r["id"]),
+                "peer_fp": r["peer_fp"],
+                "folder_name": r["folder_name"],
+                "merkle_root": r["merkle_root"],
+                "entry_count": int(r["entry_count"] or 0),
+                "total_bytes": int(r["total_bytes"] or 0),
+                "offered_ms": int(r["offered_ms"] or 0),
+                "state": r["state"] or "pending",
+                "decided_ms": int(r["decided_ms"]) if r["decided_ms"] else None,
+                "local_path": r["local_path"],
+            }
+            for r in rows
+        ]
+
+    def mark_folder_offer_accepted(
+        self, offer_id: int, *, local_path: str,
+    ) -> Optional[dict]:
+        now = int(time.time() * 1000)
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE pending_folder_offers"
+                " SET state='accepted', decided_ms=?, local_path=?"
+                " WHERE id=? AND state='pending'",
+                (now, local_path, int(offer_id)),
+            )
+            self._conn.commit()
+        return self.get_folder_offer(offer_id)
+
+    def mark_folder_offer_declined(self, offer_id: int) -> Optional[dict]:
+        now = int(time.time() * 1000)
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE pending_folder_offers"
+                " SET state='declined', decided_ms=?"
+                " WHERE id=? AND state='pending'",
+                (now, int(offer_id)),
+            )
+            self._conn.commit()
+        return self.get_folder_offer(offer_id)
+
+    def find_folder_offer_for(
+        self, peer_fp: str, folder_name: str,
+    ) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT id FROM pending_folder_offers"
+            " WHERE peer_fp=? AND folder_name=?",
+            (peer_fp, folder_name),
+        ).fetchone()
+        if not row:
+            return None
+        return self.get_folder_offer(int(row["id"]))
 
     @staticmethod
     def folder_path_matches_ignored(

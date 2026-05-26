@@ -49,10 +49,23 @@ def test_files_empty_uses_rich(index_html: str):
 
 
 def test_folders_empty_uses_rich(index_html: str):
-    idx = index_html.find("if (state.folders.length === 0) {")
+    """The empty branch of refreshFolders must use richEmpty (the
+    standard glyph + heading + body shape) so the folders pane
+    visual rhythm matches other empty states. v0.21.x renamed the
+    inline gate from `if (state.folders.length === 0) {` to a
+    pre-computed `isEmpty` flag so the secondary actions
+    (Clear/Refresh) can be hidden in the same branch; the pin
+    now looks for that flag + the richEmpty call within range."""
+    idx = index_html.find("async function refreshFolders()")
     assert idx > 0
-    snippet = index_html[idx:idx + 800]
-    assert "richEmpty(" in snippet
+    body = index_html[idx:idx + 3000]
+    assert "isEmpty" in body, (
+        "refreshFolders should use an isEmpty flag for the empty branch"
+    )
+    assert "richEmpty(" in body, (
+        "folders empty state must use the richEmpty(glyph, heading, body) "
+        "shape so it matches other empty surfaces in the app"
+    )
 
 
 def test_activity_empty_uses_rich(index_html: str):
