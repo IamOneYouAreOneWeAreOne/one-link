@@ -24938,6 +24938,24 @@
       } else if (m.type === "folder_send_cancelled") {
         toast(`Send cancelled — sent ${m.sent || 0}, ${m.remaining || 0} not sent.`, "info", 5000);
         hideFolderSendProgress();
+      } else if (m.type === "folder_recv_blob_done") {
+        // v0.21.x Wave 6: per-blob progress as we receive a folder.
+        // Aggregate live so the Folders pane shows a progress count
+        // without polling. Stash in state.folderRecvProgress; the
+        // folder card renderer reads from it.
+        state.folderRecvProgress = state.folderRecvProgress || {};
+        const peerKey = String(m.peer_fp || "anon").slice(0, 16);
+        const cur = state.folderRecvProgress[peerKey] || {
+          blobsDone: 0, bytesDone: 0, lastSeen: 0,
+        };
+        cur.blobsDone += 1;
+        cur.bytesDone += Number(m.size || 0);
+        cur.remaining = Number(m.remaining || 0);
+        cur.lastSeen = Date.now();
+        state.folderRecvProgress[peerKey] = cur;
+        if (typeof refreshFolders === "function" && cur.blobsDone % 5 === 0) {
+          refreshFolders();
+        }
       } else if (m.type === "folder_self_mesh_auto_accepted") {
         // v0.21.x: own paired device sent us a folder. Auto-accepted
         // (implicit consent for self-mesh) — show ONE notification

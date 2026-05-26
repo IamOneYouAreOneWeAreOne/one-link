@@ -219,3 +219,36 @@ def test_handle_blob_chunk_calls_decode_payload():
         "write zlib-compressed bytes raw to blob_store and the hash "
         "check would fail"
     )
+
+
+# ── Wave 6: per-blob progress broadcast ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_handle_blob_chunk_broadcasts_per_blob_progress(receiver_ctx):
+    """Successful BLOB_CHUNK eof emits a folder_recv_blob_done WS
+    event so the UI can show live progress during folder receive."""
+    daemon = receiver_ctx["daemon"]
+    daemon.ui_server = MagicMock()
+    daemon.ui_server.broadcast = MagicMock()
+    plain = receiver_ctx["plain"]
+    blob_hash = receiver_ctx["blob_hash"]
+    peer_fp = receiver_ctx["peer_fp"]
+    msg = {
+        "t": "BLOB_CHUNK", "blob": blob_hash, "seq": 0,
+        "data": base64.b64encode(plain).decode("ascii"),
+        "enc": "raw", "eof": True,
+    }
+    chan = MagicMock()
+    chan.send = AsyncMock()
+    await daemon._handle_blob_chunk(chan, msg, peer_fp)
+    # Find the folder_recv_blob_done broadcast.
+    calls = daemon.ui_server.broadcast.call_args_list
+    payloads = [c.args[0] for c in calls if c.args]
+    progress_events = [
+        p for p in payloads if p.get("type") == "folder_recv_blob_done"
+    ]
+    assert len(progress_events) == 1
+    assert progress_events[0]["blob"] == blob_hash
+    assert progress_events[0]["peer_fp"] == peer_fp
+    assert progress_events[0]["size"] == len(plain)

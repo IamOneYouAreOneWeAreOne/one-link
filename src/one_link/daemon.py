@@ -10953,6 +10953,21 @@ class Daemon:
                 self._dedupe_sites.record_have(got_hash, peer_fp)
             except Exception:
                 pass
+            # v0.21.x Wave 6: per-blob progress broadcast during folder
+            # receive. UI uses these events to render a live "Receiving
+            # folder X · 23 of 147 blobs" indicator. Includes peer_fp
+            # so the UI can correlate to a specific folder offer card.
+            if self.ui_server is not None:
+                with contextlib.suppress(Exception):
+                    self.ui_server.broadcast({
+                        "type": "folder_recv_blob_done",
+                        "blob": got_hash,
+                        "size": ctx.get("size", 0),
+                        "peer_fp": peer_fp,
+                        "remaining": len(
+                            self._expected_blob_pulls.get(peer_fp, set()),
+                        ),
+                    })
             # State + folder_engine are both initialised inside
             # ``start()`` before any chunk can land here; the wider
             # nullable typing is for the boot window.
