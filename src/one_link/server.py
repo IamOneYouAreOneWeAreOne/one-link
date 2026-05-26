@@ -2424,6 +2424,11 @@ class UIServer:
         # v0.21.x Ship 7: power + network status (on battery, metered)
         # + resulting sync gate state.
         r.add_get("/api/power-status", self._guarded(self.api_power_status))
+        # v0.21.x Ship 8: explicit swarm-pull a single file's blob
+        # from any peer that has it (used by the file browser's
+        # 'pull this now' on ☁ pending files).
+        r.add_post(r"/api/folders/{name}/file/{path:.+}/pull",
+                   self._guarded(self.api_folder_file_pull))
         r.add_get(r"/api/folders/{name}/audit", self._guarded(self.api_folder_audit))
         r.add_get(r"/api/folders/{name}/tree", self._guarded(self.api_folder_tree))
         # v0.21.x folder-share ceremony: incoming offers (proposals
@@ -18468,6 +18473,41 @@ class UIServer:
         except OSError as e:
             return web.json_response({"error": f"reveal failed: {e}"}, status=500)
         return web.json_response({"ok": True})
+
+    async def api_folder_file_pull(self, request: web.Request) -> web.Response:
+        """v0.21.x Ship 8: explicitly trigger a swarm pull for one
+        file in a folder. Looks up the manifest entry's blob_hash,
+        kicks daemon.swarm_pull_blob, returns the result.
+
+        Used by the file browser's '☁ pending' files to let users
+        say 'I want this NOW' instead of waiting for the daemon's
+        next sync cycle. Returns the source-peer count + final
+        success/failure so the UI can render a useful toast."""
+        if self.daemon.state is None or self.daemon.blob_store is None:
+            return web.json_response({"error": "folder sync not initialized"}, status=503)
+        name = request.match_info["name"]
+        rel = request.match_info.get("path", "").strip("/")
+        folder = self.daemon.state.get_folder(name)
+        if not folder:
+            return web.json_response({"error": "no such folder"}, status=404)
+        entry = self.daemon.state.get_manifest_entry(name, rel)
+        if not entry or not entry.get("blob_hash"):
+            return web.json_response({"error": "no manifest entry"}, status=404)
+        blob_hash = entry["blob_hash"]
+        if self.daemon.blob_store.has(blob_hash):
+            return web.json_response({"ok": True, "already_local": True, "blob_hash": blob_hash})
+        candidates = self.daemon.state.list_peers_with_blob(
+            blob_hash, folder_name=name,
+        )
+        ok = await self.daemon.swarm_pull_blob(
+            blob_hash, folder_name=name, max_parallel=3,
+        )
+        return web.json_response({
+            "ok": ok,
+            "blob_hash": blob_hash,
+            "candidates": len(candidates),
+            "size": entry.get("size"),
+        })
 
     async def api_power_status(self, request: web.Request) -> web.Response:
         """v0.21.x Ship 7: surface battery + metered detection results

@@ -14553,6 +14553,199 @@ class Daemon:
                 return p
         return None
 
+    # ─── v0.21.x Ship 8: multi-peer swarm pull ────────────────────────
+
+    async def _request_blob_from_peer(
+        self, peer: Peer, blob_hash: str,
+        *, folder_name: Optional[str] = None,
+        timeout_s: float = 30.0,
+    ) -> bool:
+        """Open a fresh channel to one peer and pull a single blob
+        by hash. Sends BLOB_REQUEST, awaits BLOB_OFFER + BLOB_CHUNKs,
+        validates the streaming hash matches what we asked for,
+        writes to local store. Returns True iff the blob is now in
+        store. Used by swarm_pull_blob to race multiple peers."""
+        if self.blob_store is None:
+            return False
+        if self.blob_store.has(blob_hash):
+            return True  # already done
+        peer_fp = self._peer_fp_from_peer(peer)
+        if not peer_fp or not self._is_pinned(peer_fp):
+            return False
+        try:
+            reader, writer = await asyncio.wait_for(
+                self._dial_peer(peer), timeout=5.0,
+            )
+        except Exception as e:
+            log.debug("swarm: dial failed for %s: %s", peer.short_id, e)
+            return False
+        try:
+            channel = await ch.initiate(
+                reader, writer, self.me,
+                expected_responder_ed_pub=bytes.fromhex(peer.ed_pub_hex),
+            )
+            with contextlib.suppress(Exception):
+                await channel.send(encode_msg(
+                    self._build_my_caps_for_channel(channel),
+                ))
+                channel.note_caps_sent()
+                channel.maybe_activate_ratchet()
+            req = {"blob": blob_hash}
+            if folder_name:
+                req["folder"] = folder_name
+            await channel.send(encode_msg(make_msg(
+                "BLOB_REQUEST", self.me.short_id, **req,
+            )))
+            # Drain frames until BLOB_OFFER + all BLOB_CHUNKs arrive.
+            chunks: list[bytes] = []
+            expected_size: Optional[int] = None
+            deadline = time.monotonic() + timeout_s
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    log.debug("swarm: timeout pulling %s from %s",
+                              blob_hash[:12], peer.short_id)
+                    return False
+                raw = await asyncio.wait_for(channel.recv(), timeout=remaining)
+                m = decode_msg(raw)
+                t = m.get("t")
+                if t == "CAPS":
+                    continue
+                if t == "BLOB_OFFER" and m.get("blob") == blob_hash:
+                    expected_size = int(m.get("size") or 0)
+                    continue
+                if t == "BLOB_CHUNK" and m.get("blob") == blob_hash:
+                    data = base64.b64decode(m.get("data") or "")
+                    chunks.append(data)
+                    if m.get("eof"):
+                        break
+                    continue
+                # Ignore unrelated frames.
+            payload = b"".join(chunks)
+            if expected_size is not None and len(payload) != expected_size:
+                log.debug("swarm: size mismatch %s/%s for %s",
+                          len(payload), expected_size, blob_hash[:12])
+                return False
+            # blob_store.put_bytes verifies the hash; mismatch raises.
+            try:
+                stored = self.blob_store.put_bytes(payload)
+                if stored != blob_hash:
+                    log.warning(
+                        "swarm: peer %s served %s when we asked for %s",
+                        peer.short_id, stored[:12], blob_hash[:12],
+                    )
+                    return False
+            except Exception as e:
+                log.debug("swarm: put_bytes failed: %s", e)
+                return False
+            self.state.record_blob(blob_hash, len(payload)) if self.state else None
+            log.info(
+                "swarm: pulled blob %s from %s (%d bytes)",
+                blob_hash[:12], peer.short_id, len(payload),
+            )
+            return True
+        finally:
+            with contextlib.suppress(Exception):
+                await channel.close()  # type: ignore[has-type]
+            with contextlib.suppress(Exception):
+                writer.close()
+                await writer.wait_closed()
+
+    async def swarm_pull_blob(
+        self,
+        blob_hash: str,
+        *,
+        folder_name: Optional[str] = None,
+        max_parallel: int = 3,
+        timeout_s: float = 45.0,
+    ) -> bool:
+        """v0.21.x Ship 8: race a blob fetch against multiple peers
+        that have it. First success wins; the rest get cancelled.
+
+        Candidate set is derived from folder_audit (any peer who's
+        ever advertised this blob via a manifest push). Limited to
+        ``max_parallel`` concurrent dials so we don't open 50
+        sockets if a popular file is shared across a wide group.
+
+        Returns True iff the blob is in the local store at exit.
+        Idempotent — if the blob is already local, returns True
+        immediately."""
+        if self.blob_store is None:
+            return False
+        if self.blob_store.has(blob_hash):
+            return True
+        if self.state is None:
+            return False
+        candidates = self.state.list_peers_with_blob(
+            blob_hash, folder_name=folder_name,
+        )
+        # Resolve to live discovery peers + filter to pinned + online.
+        peers: list[Peer] = []
+        for fp in candidates:
+            if not self._is_pinned(fp):
+                continue
+            peer = self._peer_from_fp(fp)
+            if peer is None:
+                continue
+            peers.append(peer)
+        if not peers:
+            log.info(
+                "swarm: no online peers known to have blob %s%s",
+                blob_hash[:12],
+                f" (folder={folder_name})" if folder_name else "",
+            )
+            return False
+        # Cap parallelism. Prefer peers we know are reachable; the
+        # discovery registry already orders by last-seen / latency
+        # so taking the first N is a reasonable heuristic.
+        peers = peers[:max(1, int(max_parallel))]
+        log.info(
+            "swarm: racing %d peer(s) for blob %s",
+            len(peers), blob_hash[:12],
+        )
+        tasks = [
+            asyncio.create_task(
+                self._request_blob_from_peer(
+                    p, blob_hash, folder_name=folder_name,
+                    timeout_s=timeout_s,
+                ),
+                name=f"swarm-pull-{p.short_id}-{blob_hash[:8]}",
+            )
+            for p in peers
+        ]
+        try:
+            done, pending = await asyncio.wait(
+                tasks,
+                timeout=timeout_s,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            # Keep checking until we find a True result or all done.
+            success = False
+            while done:
+                for t in done:
+                    if t.exception() is None and t.result() is True:
+                        success = True
+                        break
+                if success:
+                    break
+                if not pending:
+                    break
+                done, pending = await asyncio.wait(
+                    pending,
+                    timeout=max(0.5, timeout_s),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            return success
+        finally:
+            # Cancel any racers still running.
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            # Wait briefly for cancellations to settle so we don't
+            # leak sockets / channels.
+            with contextlib.suppress(Exception):
+                await asyncio.gather(*tasks, return_exceptions=True)
+
     def _peer_pub_for_fp(self, peer_fp: str) -> Optional[bytes]:
         """Resolve a hex fingerprint back to the 32-byte raw pubkey
         from the peer registry, when known. Used by Bundle 56's

@@ -5938,6 +5938,39 @@ class State:
             assert cur.lastrowid is not None, "INSERT did not return a rowid"
             return int(cur.lastrowid)
 
+    def list_peers_with_blob(
+        self,
+        blob_hash: str,
+        *,
+        folder_name: Optional[str] = None,
+    ) -> list[str]:
+        """v0.21.x Ship 8: which paired peers have advertised this
+        blob? Returns distinct peer_fps from folder_audit (which
+        records every accepted write the peer pushed us; if a peer
+        ever sent us a manifest entry for this blob, they had the
+        blob at that time).
+
+        Used by the swarm-pull path: when we want a blob and the
+        original source peer is unreachable, this gives us the list
+        of fallback peers to race fetches against.
+
+        folder_name scopes to one folder; None = any folder where
+        this blob has been advertised (cross-folder dedupe)."""
+        if not blob_hash:
+            return []
+        sql = (
+            "SELECT DISTINCT peer_fp FROM folder_audit"
+            " WHERE blob_hash = ? AND peer_fp IS NOT NULL"
+            " AND peer_fp != ''"
+            " AND action IN ('write', 'renamed', 'restored')"
+        )
+        params: list[Any] = [blob_hash]
+        if folder_name:
+            sql += " AND folder_name = ?"
+            params.append(folder_name)
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [r["peer_fp"] for r in rows if r["peer_fp"]]
+
     def list_folder_file_history(
         self,
         *,
