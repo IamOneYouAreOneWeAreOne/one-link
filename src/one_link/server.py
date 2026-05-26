@@ -2401,6 +2401,7 @@ class UIServer:
         r.add_post(r"/api/folders/{name}/unshare", self._guarded(self.api_unshare_folder))
         r.add_post(r"/api/folders/{name}/sync", self._guarded(self.api_sync_folder_now))
         r.add_post(r"/api/folders/{name}/policy", self._guarded(self.api_set_folder_policy))
+        r.add_post(r"/api/folders/{name}/reveal", self._guarded(self.api_folder_reveal))
         r.add_get(r"/api/folders/{name}/audit", self._guarded(self.api_folder_audit))
         r.add_get(r"/api/folders/{name}/tree", self._guarded(self.api_folder_tree))
         # v0.21.x folder-share ceremony: incoming offers (proposals
@@ -18108,6 +18109,56 @@ class UIServer:
                 # the hood). Reuses an existing Explorer window if
                 # one is open, displays significantly faster than
                 # spawning a fresh explorer.exe via subprocess.
+                os.startfile(str(path))
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", str(path)])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", str(path)])
+        except OSError as e:
+            return web.json_response({"error": f"reveal failed: {e}"}, status=500)
+        return web.json_response({"ok": True, "path": str(path)})
+
+    async def api_folder_reveal(self, request: web.Request) -> web.Response:
+        """v0.21.x: open a synced folder's local path in the OS file
+        manager. Users wanted a way to actually SEE the files that
+        had been synced into the folder; the only previous option
+        was manually navigating to the path via Explorer / Finder
+        themselves. Now a one-click 'Open' on the folder card does
+        it. Same throttling + ONE_LINK_DISABLE_REVEAL kill-switch
+        as api_inbox_reveal so test runs can't pop real Explorer
+        windows."""
+        if self.daemon.state is None:
+            return web.json_response(
+                {"error": "state not available"}, status=503,
+            )
+        name = request.match_info.get("name")
+        if not name:
+            return web.json_response({"error": "folder name required"}, status=400)
+        f = self.daemon.state.get_folder(name)
+        if not f:
+            return web.json_response({"error": "no such folder"}, status=404)
+        try:
+            path = Path(f["local_path"]).resolve()
+        except OSError as e:
+            return web.json_response({"error": f"bad path: {e}"}, status=500)
+        if not path.exists():
+            return web.json_response(
+                {"error": "folder no longer exists on disk", "path": str(path)},
+                status=404,
+            )
+        if self._reveal_throttled():
+            return web.json_response(
+                {"ok": True, "path": str(path), "throttled": True},
+            )
+        if os.environ.get("ONE_LINK_DISABLE_REVEAL") == "1":
+            return web.json_response(
+                {"ok": True, "path": str(path), "disabled": True},
+            )
+        import sys
+        try:
+            if sys.platform == "win32":
                 os.startfile(str(path))
             elif sys.platform == "darwin":
                 import subprocess

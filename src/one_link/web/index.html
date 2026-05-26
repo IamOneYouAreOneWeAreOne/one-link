@@ -2278,6 +2278,8 @@
   .file-row .content { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
   .file-row .meta { min-width: 0; }
   .file-row .meta .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; color: var(--text); }
+  .file-row .meta .folder-name-clickable:hover { color: var(--accent); text-decoration: underline; }
+  .file-row .meta .folder-path:hover { color: var(--accent); text-decoration: underline; }
   .file-row .meta .size { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* v0.21.x: path is now ALWAYS single-line (clean, calm). JS
      middle-truncates the string so the meaningful end is visible
@@ -19598,18 +19600,51 @@
         // squeezing them into competing flex slots.
         const content = el("div", "content");
         const meta = el("div", "meta");
-        meta.appendChild(el("div", "name", f.name));
+        // v0.21.x: folder name + path are now click-to-open shortcuts.
+        // Clicking either opens the local path in the OS file
+        // manager (Explorer / Finder) so users can actually SEE the
+        // synced files — the previous flow had NO way to do this
+        // from the One Link UI.
+        const openInExplorer = async () => {
+          try {
+            await api.post(
+              `/api/folders/${encodeURIComponent(f.name)}/reveal`, {},
+            );
+          } catch (e) {
+            toast(`Couldn't open folder: ${errorToastBody(e)}`, "bad", 6000);
+          }
+        };
+        const nameEl = el("div", "name folder-name-clickable", f.name);
+        nameEl.title = `Open ${f.name} in your file manager`;
+        nameEl.style.cursor = "pointer";
+        nameEl.onclick = openInExplorer;
+        meta.appendChild(nameEl);
         meta.appendChild(el("div", "size", `${f.files || 0} files · ${f.in_store || 0} local blobs · ${f.shared_with?.length || 0} peers`));
         // Middle-truncate the path: keep the start (C:\Users\...) and
         // the meaningful end (the actual folder name) visible, elide
         // the middle. Full path in the tooltip so nothing is hidden
-        // permanently.
+        // permanently. Clicking the path also opens in Explorer.
         const pathEl = el("div", "size folder-path", _middleTruncatePath(f.local_path, 44));
-        pathEl.title = f.local_path;
+        pathEl.title = `${f.local_path}\n\nClick to open in your file manager.`;
+        pathEl.onclick = openInExplorer;
         meta.appendChild(pathEl);
         content.appendChild(meta);
         row.appendChild(content);
         const actions = el("div", "file-actions");
+        // v0.21.x: explicit Open button so the click-to-open
+        // affordance is discoverable even without hovering. Sits
+        // BEFORE Share/Sync/Remove so the most common action
+        // (look at the files) is the leftmost option.
+        const openBtn = el("button", null, "Open");
+        openBtn.title = (
+            "Open this folder in your computer's file manager. "
+            + "Lets you SEE and EDIT the synced files. Edits get "
+            + "picked up automatically by the watcher and synced "
+            + "back to every paired device."
+        );
+        openBtn.setAttribute("aria-label", `Open ${f.name} folder in file manager`);
+        openBtn.onclick = openInExplorer;
+        actions.appendChild(openBtn);
         const share = el("button", null, "Share");
         // v0.21.x: native hover tooltips so users know what each
         // button does without having to be told. Same pattern for
