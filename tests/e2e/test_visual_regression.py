@@ -82,9 +82,14 @@ def test_capture_top_navigation(ui_page):
 def test_capture_sidebar(ui_page):
     """Left sidebar with identity + devices + pair button."""
     ui_page.wait_for_load_state("networkidle")
-    sidebar = ui_page.locator(".sidebar, #sidebar").first
-    if sidebar.count() == 0:
-        pytest.skip("sidebar not found")
+    # Index.html uses <aside class="side"> for the left rail; older
+    # builds used .sidebar / #sidebar so we keep those as fallbacks.
+    sidebar = ui_page.locator("aside.side, .sidebar, #sidebar").first
+    assert sidebar.count() > 0, (
+        "sidebar selector matched no element — left rail missing "
+        "from the rendered UI (this is a real coverage gap, not a "
+        "skip-worthy condition)"
+    )
     path = _capture(ui_page, "03_sidebar_empty", locator=sidebar)
     assert path.is_file()
 
@@ -132,24 +137,36 @@ def test_capture_search_input_open(ui_page):
     so we don't depend on the parent .convo-h visibility (which
     requires a peer to be selected)."""
     ui_page.wait_for_load_state("networkidle")
-    # Force the search wrap visible regardless of parent state by
-    # injecting CSS that overrides the conditional display.
+    # The search-wrap lives inside `.convo-h` (header above the
+    # conversation), which has its own display rules. To capture it
+    # regardless of parent state, REPARENT the element to <body> so
+    # no ancestor visibility rule can hide it, then apply the
+    # fixed-position style + open class.
     ui_page.evaluate(
         """() => {
             const w = document.getElementById('search-wrap');
             if (!w) return;
+            // Remove any ancestor that could be hiding it.
+            document.body.appendChild(w);
             w.classList.add('open');
             w.style.cssText =
                 'position:fixed;top:8px;right:8px;'
               + 'display:flex;width:280px;z-index:99999;'
-              + 'background:var(--bg-2);padding:6px;border-radius:6px;';
+              + 'background:var(--bg-2);padding:6px;border-radius:6px;'
+              + 'visibility:visible;opacity:1;pointer-events:auto;';
         }"""
     )
     ui_page.wait_for_timeout(300)
     search = ui_page.locator("#search-wrap").first
-    if search.count() == 0:
-        pytest.skip("search wrap not present in this build")
-    if not search.is_visible():
-        pytest.skip("could not force search wrap visible")
+    assert search.count() > 0, (
+        "#search-wrap missing from the rendered UI — search input "
+        "not wired into index.html"
+    )
+    assert search.is_visible(), (
+        "#search-wrap exists but is not visible even after we "
+        "reparented it to <body> with explicit fixed-position CSS "
+        "— a CSS rule is overriding inline styles or display:none "
+        "is being re-applied by JS"
+    )
     path = _capture(ui_page, "07_search_input_open", locator=search)
     assert path.is_file()

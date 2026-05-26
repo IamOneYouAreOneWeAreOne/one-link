@@ -188,6 +188,15 @@ def test_i4_i6_end_to_end_replay_cache_blocks_in_handler(monkeypatch):
         _telemetry_lock=None,
     )
     mgr = prtc.BrowserPeerManager(daemon)
+    # ES-44 HWM persistence: __init__ loads from disk via
+    # _load_master_vk_hwm(), so a prior test in the run that wrote
+    # the HWM file would prepopulate _master_vk_last_issued_unix
+    # and the assert at "hwm_after_first == 1_000_200" would fail
+    # if the disk already had a different HWM for b"V"*1984. Clear
+    # the in-memory dict + no-op the persistence to fully isolate.
+    monkeypatch.setattr(mgr, "_persist_master_vk_hwm", lambda *_a, **_kw: None)
+    mgr._master_vk_last_issued_unix.clear()
+    mgr._seen_doc_ids.clear()
     # Fake out the verify_doc path so we drive the gate logic without
     # needing a real ML-DSA attestation.
     # ``verify_doc`` is imported INSIDE the handler from

@@ -70,11 +70,16 @@ def test_recovery_wizard_button_opens_three_track_modal(ui_page):
     # The wizard opens via a settings entry or a recovery-status
     # CTA - find it via text.
     # Open Settings first (gear icon at the top right).
+    # Index.html uses #btn-settings; older builds used #btn-open-settings
+    # or .btn-settings. Keep all selectors as fallbacks.
     settings_btn = ui_page.locator(
-        "#btn-open-settings, .btn-settings, [aria-label*='Settings']"
+        "#btn-settings, #btn-open-settings, .btn-settings, "
+        "[aria-label*='Settings']"
     ).first
-    if settings_btn.count() == 0:
-        pytest.skip("settings entry not found (UI restructure)")
+    assert settings_btn.count() > 0, (
+        "settings button not found — every selector failed; the "
+        "Settings entry point is no longer reachable from the UI"
+    )
     settings_btn.click()
     ui_page.wait_for_timeout(500)
     # Look for the recovery wizard launcher within settings.
