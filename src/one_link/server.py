@@ -2401,6 +2401,12 @@ class UIServer:
         r.add_post(r"/api/folders/{name}/unshare", self._guarded(self.api_unshare_folder))
         r.add_post(r"/api/folders/{name}/sync", self._guarded(self.api_sync_folder_now))
         r.add_post(r"/api/folders/{name}/policy", self._guarded(self.api_set_folder_policy))
+        # v0.21.x: relocate an existing folder to a new on-disk path
+        # (when the original local_path is stale — renamed user
+        # account / deleted directory / folder imported from a
+        # different machine).
+        r.add_post(r"/api/folders/{name}/relocate",
+                   self._guarded(self.api_relocate_folder))
         r.add_post(r"/api/folders/{name}/reveal", self._guarded(self.api_folder_reveal))
         # v0.21.x file browser — per-file preview / raw stream / reveal
         r.add_get(r"/api/folders/{name}/file/{path:.+}/preview",
@@ -14457,6 +14463,69 @@ class UIServer:
         return web.json_response({
             "ok": True, "folder": self.daemon.state.get_folder(name),
         })
+
+    async def api_relocate_folder(self, request: web.Request) -> web.Response:
+        """v0.21.x: point an existing folder at a new on-disk path.
+
+        Body: { local_path: str }
+
+        Validates the target exists or can be created, stops the old
+        watcher, updates state.local_path, starts a fresh watcher at
+        the new root, and kicks an initial re-scan in the background
+        so the manifest gets re-seeded from the new directory's
+        contents without blocking the HTTP request.
+        """
+        if self.daemon.state is None or self.daemon.folder_engine is None:
+            return web.json_response(
+                {"error": "folder sync not initialized"}, status=503,
+            )
+        name = request.match_info["name"]
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        new_path_raw = (data.get("local_path") or "").strip()
+        if not new_path_raw:
+            return web.json_response(
+                {"error": "local_path required"}, status=400,
+            )
+        try:
+            new_path = Path(new_path_raw).expanduser().resolve()
+        except (OSError, ValueError) as e:
+            return web.json_response(
+                {"error": f"bad local_path: {e}"}, status=400,
+            )
+        try:
+            row = self.daemon.folder_engine.relocate_folder(name, new_path)
+        except KeyError as e:
+            return web.json_response({"error": str(e)}, status=404)
+        except NotADirectoryError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except FileNotFoundError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+        # Kick a background re-scan so the manifest gets re-seeded
+        # from the new directory's contents. Same pattern as
+        # api_add_folder — non-blocking, status surfaces via the
+        # folder_scan_complete WS broadcast.
+        loop = asyncio.get_running_loop()
+
+        async def _bg_scan() -> None:
+            try:
+                await loop.run_in_executor(
+                    None,
+                    self.daemon.folder_engine.start_initial_scan, name,
+                )
+                self.broadcast({
+                    "type": "folder_scan_complete",
+                    "name": name,
+                    "trigger": "relocate",
+                })
+            except Exception as e:
+                log.warning("relocate rescan for %s failed: %s", name, e)
+        loop.create_task(_bg_scan())
+        return web.json_response({"ok": True, "folder": row})
 
     async def api_folder_audit(self, request: web.Request) -> web.Response:
         if self.daemon.state is None:

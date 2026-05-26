@@ -52,7 +52,7 @@ def test_folder_browser_modal_exists_in_dom(ui_page):
 def test_folder_settings_modal_exists_in_dom(ui_page):
     """The Ship 4 per-folder settings modal must be present in the
     DOM. If it's missing, users can't set ignored_patterns /
-    max_file_bytes / conflict policy on a folder."""
+    folder location / conflict policy on a folder."""
     backdrop = ui_page.locator("#folder-settings-backdrop")
     assert backdrop.count() == 1, (
         "#folder-settings-backdrop missing — Ship 4 folder settings "
@@ -61,6 +61,11 @@ def test_folder_settings_modal_exists_in_dom(ui_page):
     for sel in [
         "#folder-settings-ignored",
         "#folder-settings-close", "#folder-settings-target",
+        # v0.21.x: Folder location section — input + browse + move btn.
+        "#folder-settings-path",
+        "#folder-settings-browse-path",
+        "#folder-settings-relocate",
+        "#folder-settings-relocate-status",
     ]:
         assert ui_page.locator(sel).count() == 1, (
             f"{sel} missing — Ship 4 folder settings modal incomplete"

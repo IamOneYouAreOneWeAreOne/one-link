@@ -3770,6 +3770,18 @@
   .folder-path-row {
     display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: stretch;
   }
+  /* v0.21.x: settings-modal "Move to this location" row sits below
+     the path input. Inline status text (right of the button) shows
+     last action result (e.g. "Folder moved." or an error). */
+  .folder-settings-relocate-row {
+    display: flex; gap: 10px; align-items: center; margin-top: 8px;
+  }
+  .settings-help-inline {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .settings-help-inline.bad { color: var(--bad, #e85c5c); }
+  .settings-help-inline.good { color: var(--good, #6acc7a); }
   .folder-browse-btn {
     padding: 0 12px;
     white-space: nowrap;
@@ -11414,6 +11426,31 @@
     <div class="modal" style="max-width:560px;">
       <h2 style="margin:0 0 4px;">Sync settings</h2>
       <div class="folder-settings-target" id="folder-settings-target"></div>
+
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Folder location</span></div>
+        <p class="settings-help">
+          The folder on this computer that One Link mirrors. Move or
+          rename it from inside One Link instead of from your file
+          manager so the watcher stays attached.
+        </p>
+        <div class="folder-path-row">
+          <input type="text" id="folder-settings-path"
+                 placeholder="C:\Users\you\Documents\One Link\folder"
+                 aria-label="Folder location on this computer" />
+          <button type="button" id="folder-settings-browse-path"
+                  class="folder-browse-btn"
+                  title="Open the OS folder picker so you don't have to type the path.">Browse…</button>
+        </div>
+        <div class="folder-settings-relocate-row">
+          <button type="button" id="folder-settings-relocate"
+                  class="btn-ghost btn-sm"
+                  title="Point this synced folder at a different on-disk location. Used when the original location is no longer on this device (renamed user account, deleted directory, folder imported from another machine).">
+            Move to this location
+          </button>
+          <span class="settings-help-inline" id="folder-settings-relocate-status"></span>
+        </div>
+      </div>
 
       <div class="settings-section">
         <div class="settings-section-h"><span>Skip these files + folders</span></div>
@@ -20766,6 +20803,16 @@
     // v0.21.x: max_file_bytes section removed from the UI entirely.
     // One Link does not impose a file size limit. Any existing
     // max_file_bytes value on the folder gets cleared on save.
+    // v0.21.x: Folder location section — current path pre-filled so
+    // the user can edit OR pick a new one via Browse. Save is a
+    // separate button from the main Save (it's a heavier operation:
+    // stops + restarts the watcher + kicks a re-scan).
+    $("#folder-settings-path").value = folder.local_path || "";
+    const relocateStatus = $("#folder-settings-relocate-status");
+    if (relocateStatus) {
+      relocateStatus.textContent = "";
+      relocateStatus.className = "settings-help-inline";
+    }
     const policy = folder.conflict_policy || "latest-wins";
     const radio = document.querySelector(`input[name="conflict-policy"][value="${policy}"]`);
     if (radio) radio.checked = true;
@@ -31306,6 +31353,54 @@
   });
   $("#folder-settings-close")?.addEventListener("click", closeFolderSettings);
   $("#folder-settings-save")?.addEventListener("click", saveFolderSettings);
+  // v0.21.x: Folder location section — Browse picks an OS folder,
+  // Move-to-this-location calls /api/folders/{name}/relocate.
+  $("#folder-settings-browse-path")?.addEventListener("click", async () => {
+    try {
+      const r = await api.post("/api/fs/pick-folder", {});
+      if (r && r.path) {
+        $("#folder-settings-path").value = r.path;
+      }
+    } catch (e) {
+      toast(
+        `Browse unavailable on this device: ${errorToastBody(e)}`,
+        "info", 4000,
+      );
+    }
+  });
+  $("#folder-settings-relocate")?.addEventListener("click", async () => {
+    const name = state.folderSettingsTarget;
+    const newPath = ($("#folder-settings-path").value || "").trim();
+    const status = $("#folder-settings-relocate-status");
+    if (!name) return;
+    if (!newPath) {
+      if (status) {
+        status.textContent = "Pick a folder first.";
+        status.className = "settings-help-inline bad";
+      }
+      return;
+    }
+    if (status) {
+      status.textContent = "Moving…";
+      status.className = "settings-help-inline";
+    }
+    try {
+      const r = await api.post(
+        `/api/folders/${encodeURIComponent(name)}/relocate`,
+        { local_path: newPath },
+      );
+      if (status) {
+        status.textContent = `Moved to ${r.folder?.local_path || newPath}. Re-scanning in the background.`;
+        status.className = "settings-help-inline good";
+      }
+      await refreshFolders();
+    } catch (e) {
+      if (status) {
+        status.textContent = `Move failed: ${errorToastBody(e) || e}`;
+        status.className = "settings-help-inline bad";
+      }
+    }
+  });
   // Preset buttons: append to current ignored list, de-duped.
   document.querySelectorAll("#folder-settings-backdrop [data-preset]").forEach((btn) => {
     btn.addEventListener("click", () => {

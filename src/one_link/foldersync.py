@@ -577,6 +577,59 @@ class FolderEngine:
                 pass
         self.state.remove_folder(name)
 
+    def relocate_folder(self, name: str, new_local_path: Path) -> dict:
+        """v0.21.x: point an existing folder at a different on-disk
+        location. Stops the current watcher, updates state.local_path,
+        starts a fresh watcher at the new root. Caller is responsible
+        for triggering start_initial_scan if they want the manifest
+        re-seeded from the new directory's contents (we don't do it
+        automatically — re-scan on a large tree can take minutes).
+
+        Raises:
+          - KeyError if the folder isn't registered
+          - FileNotFoundError if new_local_path doesn't exist + can't
+            be created
+          - NotADirectoryError if new_local_path exists but isn't a
+            directory
+        """
+        new_local_path = Path(new_local_path).expanduser().resolve()
+        if not self.state.get_folder(name):
+            raise KeyError(f"no such folder: {name!r}")
+        # Validate the target. We accept missing-but-creatable paths
+        # (mkdir parents=True) so a user can relocate to a new spot,
+        # but we reject things that exist as files etc.
+        if new_local_path.exists() and not new_local_path.is_dir():
+            raise NotADirectoryError(
+                f"target path exists but is not a directory: {new_local_path}"
+            )
+        try:
+            new_local_path.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise FileNotFoundError(
+                f"could not create target path {new_local_path}: {e}"
+            ) from e
+        # Stop the old watcher (if any) BEFORE flipping the row so a
+        # late event from the old root can't write to the new manifest.
+        fs = self._folders.pop(name, None)
+        if fs:
+            try:
+                fs.observer.stop()
+                fs.observer.join(timeout=2.0)
+            except Exception:
+                pass
+        # Flip the state row, then start the new watcher.
+        self.state.set_folder_local_path(name, str(new_local_path))
+        try:
+            self._start_watch(name, new_local_path)
+        except Exception:
+            # Best-effort: restart at the OLD path so we're not left
+            # without any watcher. The state row has already moved
+            # though, so re-raise to surface the failure to the caller.
+            raise
+        row = self.state.get_folder(name)
+        assert row is not None
+        return row
+
     def share_with(self, name: str, peer_fp: str, mode: str = "rw") -> None:
         self.state.share_folder_with(name, peer_fp)
         self.state.set_folder_peer_permission(name, peer_fp, mode)

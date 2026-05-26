@@ -5895,6 +5895,25 @@ class State:
                 (policy, folder_name),
             )
 
+    def set_folder_local_path(
+        self, folder_name: str, new_local_path: str,
+    ) -> None:
+        """v0.21.x: point an existing folder at a different on-disk
+        location. Used when the original local_path is stale (renamed
+        user account, deleted directory, folder imported from a
+        different machine). Callers are responsible for restarting
+        the folder watcher so the FS observer picks up the new root.
+        """
+        if not self.get_folder(folder_name):
+            raise KeyError(f"no such folder: {folder_name!r}")
+        if not isinstance(new_local_path, str) or not new_local_path.strip():
+            raise ValueError("new_local_path must be a non-empty string")
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE folders SET local_path = ? WHERE name = ?",
+                (new_local_path, folder_name),
+            )
+
     def record_folder_audit_event(
         self,
         *,
