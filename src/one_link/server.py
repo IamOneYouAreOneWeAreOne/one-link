@@ -700,29 +700,76 @@ def _pick_win_ifiledialog(title: str):
 
         # v0.21.x: the dialog was opening BEHIND the browser tab,
         # so users clicked Browse and "nothing happened" — the
-        # picker was just sitting invisible. Two things needed:
-        #
-        # (1) Hand the dialog the user's CURRENTLY-FOCUSED window
-        #     (the browser) as its owner via Show(hwnd). Owning a
-        #     foreground window makes Windows Z-order the modal on
-        #     top of it instead of dropping it behind.
-        #
-        # (2) Call AllowSetForegroundWindow(ASFW_ANY) before Show()
-        #     so the foreground-lock policy doesn't suppress our
-        #     activation request (the daemon process didn't put the
-        #     browser in front, so Windows would normally refuse to
-        #     let the daemon's window take focus).
+        # picker was just sitting invisible. Passing the BROWSER's
+        # HWND as parent doesn't reliably help because cross-process
+        # owner HWNDs don't force Z-order on Windows. The pattern
+        # that works (same one PowerShell's _pick_win_powershell
+        # uses): create a TopMost invisible owner window IN THE
+        # DAEMON'S process via CreateWindowExW. The IFileOpenDialog
+        # modal inherits TopMost from its owner and appears in
+        # front. AllowSetForegroundWindow lets the daemon bypass
+        # Windows' foreground-lock policy.
+        owner_hwnd = None
+        user32 = None
         try:
             user32 = _ct.WinDLL("user32")
-            user32.GetForegroundWindow.restype = _wt.HWND
             user32.AllowSetForegroundWindow.restype = _ct.c_int
             user32.AllowSetForegroundWindow.argtypes = [_wt.DWORD]
+            user32.CreateWindowExW.restype = _wt.HWND
+            user32.CreateWindowExW.argtypes = [
+                _wt.DWORD, _wt.LPCWSTR, _wt.LPCWSTR, _wt.DWORD,
+                _ct.c_int, _ct.c_int, _ct.c_int, _ct.c_int,
+                _wt.HWND, _wt.HMENU, _wt.HINSTANCE, c_void_p,
+            ]
+            user32.DestroyWindow.restype = _wt.BOOL
+            user32.DestroyWindow.argtypes = [_wt.HWND]
+            user32.SetForegroundWindow.restype = _wt.BOOL
+            user32.SetForegroundWindow.argtypes = [_wt.HWND]
+            user32.SetLayeredWindowAttributes.restype = _wt.BOOL
+            user32.SetLayeredWindowAttributes.argtypes = [
+                _wt.HWND, _wt.COLORREF, _ct.c_ubyte, _wt.DWORD,
+            ]
             ASFW_ANY = 0xFFFFFFFF
+            WS_POPUP = 0x80000000
+            WS_VISIBLE = 0x10000000
+            WS_EX_TOPMOST = 0x00000008
+            WS_EX_TOOLWINDOW = 0x00000080  # don't show in taskbar
+            WS_EX_LAYERED = 0x00080000     # alpha-blending
+            WS_EX_NOACTIVATE = 0x08000000  # don't steal focus on click
+            LWA_ALPHA = 0x00000002
             user32.AllowSetForegroundWindow(ASFW_ANY)
-            parent_hwnd = user32.GetForegroundWindow()
+            # Owner MUST be WS_VISIBLE for Windows to treat it as a
+            # real Z-order anchor — IFileOpenDialog's Show() with an
+            # invisible-but-existing owner fails silently with
+            # CANCELLED_HR. Make it 1x1 px, fully transparent, off
+            # the taskbar, no-focus-steal, so the user never sees or
+            # interacts with it.
+            owner_hwnd = user32.CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW
+                | WS_EX_LAYERED | WS_EX_NOACTIVATE,
+                "STATIC",
+                "one-link-picker-owner",
+                WS_POPUP | WS_VISIBLE,
+                -32000, -32000,  # off-screen so it's never seen
+                1, 1,            # 1x1 px even if it ever became visible
+                None, None, None, None,
+            )
+            if owner_hwnd:
+                # Belt-and-suspenders: zero alpha so even if the
+                # off-screen position somehow scrolled into view, it
+                # would be 100% transparent.
+                user32.SetLayeredWindowAttributes(
+                    owner_hwnd, 0, 0, LWA_ALPHA,
+                )
+                user32.SetForegroundWindow(owner_hwnd)
         except Exception:
-            parent_hwnd = None
-        hr = Show(ppv, parent_hwnd)
+            owner_hwnd = None
+        try:
+            hr = Show(ppv, owner_hwnd)
+        finally:
+            if owner_hwnd and user32:
+                with contextlib.suppress(Exception):
+                    user32.DestroyWindow(owner_hwnd)
         # From here on, the dialog has been shown to the user.
         # Any further failure (including user cancellation) returns
         # None so the dispatcher DOES NOT fall through to the legacy
@@ -924,24 +971,31 @@ def _native_folder_picker(title: str) -> Optional[str]:
     if os.environ.get("ONE_LINK_DISABLE_NATIVE_PICKER"):
         return None
     if sys.platform == "win32":
-        # v0.21.x: modern Win10/11 IFileOpenDialog first - matches
-        # File Explorer's chrome and is instant (no subprocess).
-        # Returns _PICKER_UNAVAILABLE if COM/CLSID setup failed;
-        # str/None otherwise. Cancellation (None) MUST NOT fall
-        # through - the user just saw + dismissed a dialog, a
-        # second one popping up would be confusing.
-        picked = _pick_win_ifiledialog(title)
-        if picked is not _PICKER_UNAVAILABLE:
-            return picked  # str (picked path) or None (cancelled)
-        # Legacy PowerShell + WinForms FolderBrowserDialog as a
-        # second resort. Only reached when the modern picker
-        # failed to initialize (REGDB_E_CLASSNOTREG on stripped
-        # Windows installs, COM init failure, etc.).
+        # v0.21.x: PowerShell + WinForms FolderBrowserDialog as the
+        # PRIMARY Windows picker. Previously the modern ctypes
+        # IFileOpenDialog ran first, but on Win11 builds that only
+        # register the BrokerFileOpenDialog (most current Win11
+        # installs!) the dialog appeared to the user but Show()
+        # returned CANCELLED_HR even when the user picked a folder
+        # and clicked Select Folder. Symptom: user clicks Browse,
+        # sees dialog, picks folder, dialog closes, path never
+        # appears. The PowerShell picker uses a hidden TopMost
+        # owner form (which IS visible to Windows' Z-order and IS
+        # cross-thread / cross-process safe) and reliably returns
+        # the picked path. Visual downside: WinForms folder
+        # dialog has a slightly older look than the IFileOpenDialog
+        # one — but a working picker beats a pretty broken one.
         picked = _pick_win_powershell(title)
         if picked is not None:
             return picked
-        # If PowerShell is missing or restricted, fall back to the
-        # DPI-aware tk dialog so the user isn't completely stuck.
+        # Modern IFileOpenDialog as second resort. If PowerShell
+        # is missing / locked-down (rare), at least try the modern
+        # COM picker before giving up.
+        picked = _pick_win_ifiledialog(title)
+        if picked is not _PICKER_UNAVAILABLE and picked is not None:
+            return picked
+        # Final fallback: DPI-aware tk dialog. Locked-down boxes
+        # with no PowerShell + no COM init still get something.
         return _pick_tkinter_fallback(title)
     if sys.platform == "darwin":
         picked = _pick_mac_osascript(title)

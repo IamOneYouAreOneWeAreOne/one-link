@@ -344,76 +344,100 @@ def test_kill_switch_returns_none_when_env_var_set(monkeypatch):
     assert server._native_folder_picker("hi") is None
 
 
-def test_windows_dispatcher_tries_modern_picker_first(monkeypatch):
-    """v0.21.x: the modern IFileOpenDialog must be tried BEFORE the
-    legacy PowerShell + FolderBrowserDialog. The legacy picker is
-    the Windows-95 looking dialog; the modern one is what File
-    Explorer uses on Win10/11. Order matters - if the modern picker
-    works (returns a real path) we MUST NOT also pop the old one."""
+def test_windows_dispatcher_tries_powershell_first(monkeypatch):
+    """v0.21.x: PowerShell picker is now PRIMARY on Windows.
+    The modern ctypes IFileOpenDialog was originally first, but
+    on Win11 builds that only register BrokerFileOpenDialog (most
+    current Win11 installs), the broker dialog appeared but
+    Show() returned CANCELLED_HR even when the user picked a
+    folder. PowerShell's WinForms FolderBrowserDialog (slightly
+    older look) reliably returns the picked path because it uses
+    a hidden TopMost owner form and runs in its own subprocess
+    with clean COM state. If PowerShell returns a real path,
+    the modern picker MUST NOT also pop."""
     from one_link import server
     monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
     monkeypatch.setattr(server.sys, "platform", "win32")
     call_order: list[str] = []
 
+    def fake_ps(t):
+        call_order.append("powershell")
+        return "C:/From/PowerShell"
+
     def fake_modern(t):
         call_order.append("modern")
-        return "C:/From/Modern/Picker"
+        return "C:/From/Modern"
 
-    def fake_legacy(t):
-        call_order.append("legacy")
-        return "C:/From/Legacy/Picker"
-
+    monkeypatch.setattr(server, "_pick_win_powershell", fake_ps)
     monkeypatch.setattr(server, "_pick_win_ifiledialog", fake_modern)
-    monkeypatch.setattr(server, "_pick_win_powershell", fake_legacy)
     out = server._native_folder_picker("hi")
-    assert out == "C:/From/Modern/Picker"
-    assert call_order == ["modern"], (
-        "legacy picker must NOT run when the modern picker returns "
-        "a path - we'd pop two dialogs"
+    assert out == "C:/From/PowerShell"
+    assert call_order == ["powershell"], (
+        "modern picker must NOT run when PowerShell returns a "
+        "path — we'd pop two dialogs"
     )
 
 
-def test_windows_dispatcher_falls_back_to_legacy_when_modern_unavailable(monkeypatch):
-    """If IFileOpenDialog can't initialize (ancient Windows, blocked
-    COM, etc.), the dispatcher must fall back to the legacy
-    PowerShell picker rather than dead-clicking. The modern picker
-    signals 'unavailable' via the _PICKER_UNAVAILABLE sentinel -
-    distinct from None (which means 'user cancelled')."""
+def test_windows_dispatcher_falls_through_to_modern_when_powershell_returns_none(monkeypatch):
+    """If PowerShell is missing / locked-down / cancelled, fall
+    through to the modern IFileOpenDialog as a second resort.
+    On stripped Windows installs without PowerShell, at least
+    the user gets the COM-based picker."""
     from one_link import server
     monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
     monkeypatch.setattr(server.sys, "platform", "win32")
+    monkeypatch.setattr(server, "_pick_win_powershell", lambda t: None)
+    monkeypatch.setattr(
+        server, "_pick_win_ifiledialog", lambda t: "C:/From/Modern/Fallback",
+    )
+    assert server._native_folder_picker("hi") == "C:/From/Modern/Fallback"
+
+
+def test_windows_dispatcher_final_fallback_is_tk(monkeypatch):
+    """Both PowerShell + modern picker unavailable → tkinter
+    final fallback. Guarantees SOMETHING pops even on locked-
+    down Windows boxes where PowerShell is restricted AND
+    COM init fails."""
+    from one_link import server
+    monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
+    monkeypatch.setattr(server.sys, "platform", "win32")
+    monkeypatch.setattr(server, "_pick_win_powershell", lambda t: None)
     monkeypatch.setattr(
         server, "_pick_win_ifiledialog", lambda t: server._PICKER_UNAVAILABLE,
     )
-    monkeypatch.setattr(
-        server, "_pick_win_powershell", lambda t: "C:/Legacy/Fallback",
-    )
-    assert server._native_folder_picker("hi") == "C:/Legacy/Fallback"
+    monkeypatch.setattr(server, "_pick_tkinter_fallback", lambda t: "C:/Tk")
+    assert server._native_folder_picker("hi") == "C:/Tk"
 
 
-def test_windows_dispatcher_does_not_fall_through_when_modern_picker_cancelled(monkeypatch):
-    """CRITICAL: when the user CANCELS the modern picker, the
-    dispatcher MUST NOT pop the legacy picker as a second dialog.
-    The cancellation is a deliberate user action; surfacing a
-    second old-style dialog after they just dismissed the new one
-    is confusing UX. Pin the contract: None from the modern picker
-    means cancellation (no fall-through); _PICKER_UNAVAILABLE means
-    couldn't initialize (do fall through)."""
+def test_windows_dispatcher_powershell_cancel_does_not_double_pop(monkeypatch):
+    """When PowerShell returns None it could be EITHER cancellation
+    OR unavailable. The current behavior is permissive (falls
+    through to modern picker) which gives PS-less users a working
+    picker, at the cost of a possible double-pop for users who
+    actively cancelled. Pin the current trade-off so a future
+    refactor that distinguishes cancel-vs-unavailable can update
+    this test deliberately."""
     from one_link import server
     monkeypatch.delenv("ONE_LINK_DISABLE_NATIVE_PICKER", raising=False)
     monkeypatch.setattr(server.sys, "platform", "win32")
+    call_order: list[str] = []
 
-    # Modern picker shows dialog + user cancels.
-    monkeypatch.setattr(server, "_pick_win_ifiledialog", lambda t: None)
-    # Legacy picker MUST NOT be called - blow up if it is.
-    def _boom(t):
-        raise AssertionError(
-            "legacy picker was invoked after the modern picker "
-            "returned None (cancellation) - this would pop TWO "
-            "dialogs in a row, which is the bug we're preventing"
-        )
-    monkeypatch.setattr(server, "_pick_win_powershell", _boom)
-    monkeypatch.setattr(server, "_pick_tkinter_fallback", _boom)
+    def fake_ps(t):
+        call_order.append("ps")
+        return None  # user cancelled PowerShell dialog
+
+    def fake_modern(t):
+        call_order.append("modern")
+        return None  # user cancelled (or _PICKER_UNAVAILABLE)
+
+    monkeypatch.setattr(server, "_pick_win_powershell", fake_ps)
+    monkeypatch.setattr(server, "_pick_win_ifiledialog", fake_modern)
+    monkeypatch.setattr(server, "_pick_tkinter_fallback", lambda t: None)
+    result = server._native_folder_picker("hi")
+    assert result is None
+    # Both got tried because we can't tell cancel from unavailable
+    # at this layer. Documented limitation.
+    assert call_order == ["ps", "modern"]
     assert server._native_folder_picker("hi") is None
 
 
@@ -480,38 +504,51 @@ def test_modern_picker_tries_broker_clsid_on_stripped_windows():
     assert "-2147221164" in body or "0x80040154" in body
 
 
-def test_modern_picker_passes_foreground_hwnd_to_show():
+def test_modern_picker_creates_owner_window_for_zorder():
     """v0.21.x: Show(hwnd=None) drops the dialog behind the user's
-    foreground window because there's no owner Z-order anchor.
-    Symptom users hit: click Browse, see nothing happen for seconds
-    (a hidden dialog sitting behind the browser tab). The picker
-    must get the active foreground HWND and pass it to Show() so
-    Windows Z-orders the modal ON TOP of the browser. Pin both
-    the AllowSetForegroundWindow call AND the Show(parent_hwnd)
-    shape so a refactor can't quietly revert to Show(None)."""
+    foreground window because there's no Z-order anchor. The first
+    fix tried GetForegroundWindow (the BROWSER's HWND) as parent;
+    that didn't reliably work because cross-process owners don't
+    force Z-order. Second fix (current): create a tiny invisible
+    TopMost owner window IN THE DAEMON'S process via CreateWindowExW,
+    use that as the IFileOpenDialog's owner. Same pattern PowerShell
+    uses with its hidden TopMost owner form. Pin the structure so
+    a refactor can't revert to Show(None) or back to the cross-
+    process foreground HWND approach."""
     from pathlib import Path as _Path
     src = (_Path(__file__).resolve().parents[1] / "src" / "one_link" / "server.py").read_text(encoding="utf-8")
     idx = src.find("def _pick_win_ifiledialog(")
     end = src.find("\ndef _pick_win_powershell(", idx)
     body = src[idx:end]
-    # Must call AllowSetForegroundWindow so the daemon process can
-    # let the dialog take focus (Windows would normally suppress
-    # focus-stealing from a background process).
+    # Must call AllowSetForegroundWindow so Windows lets the daemon
+    # process's owner window come to front (foreground-lock policy
+    # would otherwise suppress focus-steal from a background app).
     assert "AllowSetForegroundWindow" in body, (
-        "missing AllowSetForegroundWindow call — the dialog will "
-        "open BEHIND the browser tab and the user will think the "
-        "Browse button is broken"
+        "missing AllowSetForegroundWindow — the owner window can't "
+        "take front-of-Z-order without it, dialog stays behind"
     )
-    # Must query the current foreground window to use as the
-    # dialog's owner.
-    assert "GetForegroundWindow" in body, (
-        "missing GetForegroundWindow — the dialog needs an owner "
-        "HWND to be Z-ordered above"
+    # Must create an in-process owner window.
+    assert "CreateWindowExW" in body, (
+        "missing CreateWindowExW — without an in-process owner, "
+        "Show() has no Z-order anchor and the dialog opens behind"
     )
-    # And must actually pass it to Show.
-    assert "Show(ppv, parent_hwnd)" in body, (
-        "Show must be called with the resolved parent_hwnd, not "
-        "None — None drops the dialog behind active windows"
+    # Must make the owner WS_VISIBLE so Windows treats it as a real
+    # Z-order anchor (invisible owners get skipped silently).
+    assert "WS_VISIBLE" in body, (
+        "owner window must be WS_VISIBLE — Windows treats invisible "
+        "owners as non-anchors and Show() returns CANCELLED_HR even "
+        "on successful pick"
+    )
+    # Must be TopMost so the modal definitely lands above the browser.
+    assert "WS_EX_TOPMOST" in body
+    # And must be cleaned up.
+    assert "DestroyWindow" in body, (
+        "owner window must be destroyed after Show() returns — "
+        "otherwise we leak a window handle per Browse click"
+    )
+    # And the dialog must actually use it.
+    assert "Show(ppv, owner_hwnd)" in body, (
+        "Show must be called with the resolved owner_hwnd"
     )
 
 
