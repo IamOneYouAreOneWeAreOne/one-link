@@ -3928,6 +3928,55 @@
   .pair-peer-info .who-name { font-weight: 600; }
   .pair-peer-info .who-sub  { font-size: 12px; color: var(--text-dim); }
 
+  /* v0.21.x: per-folder Sync settings — conflict-policy card grid.
+     Three radio-button cards stand side-by-side on wider modals
+     and stack vertically on narrow ones. The card is the clickable
+     surface (label wraps the input + body) so users don't need to
+     hit the tiny radio dot. */
+  .conflict-policy-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .policy-card {
+    display: grid;
+    grid-template-columns: 18px 1fr;
+    gap: 10px;
+    align-items: start;
+    padding: 12px 12px 10px;
+    border: 1px solid var(--bg-3);
+    border-radius: 10px;
+    background: var(--bg-2);
+    cursor: pointer;
+    transition: border-color .12s, background .12s;
+  }
+  .policy-card:hover { border-color: var(--accent-dim, rgba(118,87,244,.45)); }
+  .policy-card input[type="radio"] {
+    margin: 2px 0 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .policy-card:has(input:checked) {
+    border-color: var(--accent);
+    background: linear-gradient(180deg,
+      rgba(118, 87, 244, 0.10), rgba(118, 87, 244, 0.02));
+  }
+  .policy-card-body { display: flex; flex-direction: column; gap: 3px; }
+  .policy-card-title { font-weight: 600; font-size: 13.5px; color: var(--text); }
+  .policy-card-desc { font-size: 12px; color: var(--text-dim); line-height: 1.4; }
+  .policy-card-badge {
+    align-self: flex-start;
+    margin-top: 4px;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--accent);
+    background: rgba(118, 87, 244, 0.12);
+    padding: 2px 7px;
+    border-radius: 999px;
+    letter-spacing: 0.02em;
+  }
+
   /* Settings form */
   .settings-row {
     display: grid; grid-template-columns: 130px 1fr; gap: 14px;
@@ -11394,40 +11443,34 @@
       </div>
 
       <div class="settings-section">
-        <div class="settings-section-h"><span>Max file size</span></div>
+        <div class="settings-section-h"><span>If both devices change the same file</span></div>
         <p class="settings-help">
-          Files larger than this won't sync. Useful for staying under
-          a quota or skipping huge video files. Set to 0 for no
-          limit.
+          When you and a paired device edit the same file at the same
+          time, pick which version One Link keeps. You can change this
+          later, and the Conflicts banner lets you override per file.
         </p>
-        <div style="display:flex; gap:8px; align-items:center;">
-          <input type="number" id="folder-settings-maxmb" min="0" step="1"
-                 style="flex:1; max-width:160px;"
-                 aria-label="Maximum file size in megabytes" />
-          <span style="color: var(--text-dim); font-size: 12px;">MB (0 = unlimited)</span>
-        </div>
-      </div>
-
-      <div class="settings-section">
-        <div class="settings-section-h"><span>When both devices change a file at the same time</span></div>
-        <p class="settings-help">
-          The CRDT detects when you and a paired device edited the
-          same file concurrently. Pick how to break the tie. You can
-          always change this later, and use the conflicts banner to
-          override per-file.
-        </p>
-        <div class="settings-row">
-          <label class="cap-toggle" style="display:flex; align-items:center; gap:8px; cursor:pointer; padding:8px;" for="cp-latest-wins">
-            <input type="radio" name="conflict-policy" value="latest-wins" id="cp-latest-wins" aria-label="Conflict policy: newest wins" />
-            <span><strong>Newest wins</strong> — whichever device saved the file last keeps it. (Recommended.)</span>
+        <div class="conflict-policy-grid">
+          <label class="policy-card" for="cp-latest-wins">
+            <input type="radio" name="conflict-policy" value="latest-wins" id="cp-latest-wins" />
+            <span class="policy-card-body">
+              <span class="policy-card-title">Newest wins</span>
+              <span class="policy-card-desc">Whichever device saved the file last keeps it.</span>
+              <span class="policy-card-badge">Recommended</span>
+            </span>
           </label>
-          <label class="cap-toggle" style="display:flex; align-items:center; gap:8px; cursor:pointer; padding:8px;" for="cp-local">
-            <input type="radio" name="conflict-policy" value="local-priority" id="cp-local" aria-label="Conflict policy: this device wins" />
-            <span><strong>This device wins</strong> — your local edits always trump the peer's.</span>
+          <label class="policy-card" for="cp-local">
+            <input type="radio" name="conflict-policy" value="local-priority" id="cp-local" />
+            <span class="policy-card-body">
+              <span class="policy-card-title">This device wins</span>
+              <span class="policy-card-desc">Your local edits always trump the peer's.</span>
+            </span>
           </label>
-          <label class="cap-toggle" style="display:flex; align-items:center; gap:8px; cursor:pointer; padding:8px;" for="cp-peer">
-            <input type="radio" name="conflict-policy" value="peer-priority" id="cp-peer" aria-label="Conflict policy: peer wins" />
-            <span><strong>Peer wins</strong> — the other device's edits always trump yours.</span>
+          <label class="policy-card" for="cp-peer">
+            <input type="radio" name="conflict-policy" value="peer-priority" id="cp-peer" />
+            <span class="policy-card-body">
+              <span class="policy-card-title">Peer wins</span>
+              <span class="policy-card-desc">The other device's edits always trump yours.</span>
+            </span>
           </label>
         </div>
       </div>
@@ -19871,7 +19914,24 @@
               `/api/folders/${encodeURIComponent(f.name)}/reveal`, {},
             );
           } catch (e) {
-            toast(`Couldn't open folder: ${errorToastBody(e)}`, "bad", 6000);
+            // v0.21.x: when the folder's local_path is missing on
+            // disk (renamed user account / deleted directory /
+            // synced from a different machine) the daemon returns
+            // a 404 with "folder no longer exists on disk". Surface
+            // a concrete actionable message rather than a generic
+            // "couldn't open" so the user knows the path itself is
+            // the problem and can re-locate via Settings.
+            const status = e && e.status;
+            const body = errorToastBody(e) || "";
+            if (status === 404 && /no longer exists on disk/i.test(body)) {
+              toast(
+                `Folder location missing on this device: ${f.local_path}. `
+                + "Re-locate it in Settings → folder path.",
+                "bad", 9000,
+              );
+            } else {
+              toast(`Couldn't open folder: ${body || e}`, "bad", 6000);
+            }
           }
         };
         const openInline = () => openFolderBrowser(f.name);
@@ -20703,10 +20763,9 @@
     targetEl.appendChild(head);
     const patterns = Array.isArray(folder.ignored_patterns) ? folder.ignored_patterns : [];
     $("#folder-settings-ignored").value = patterns.join("\n");
-    const maxBytes = folder.max_file_bytes;
-    $("#folder-settings-maxmb").value = maxBytes
-      ? Math.round(maxBytes / (1024 * 1024))
-      : 0;
+    // v0.21.x: max_file_bytes section removed from the UI entirely.
+    // One Link does not impose a file size limit. Any existing
+    // max_file_bytes value on the folder gets cleared on save.
     const policy = folder.conflict_policy || "latest-wins";
     const radio = document.querySelector(`input[name="conflict-policy"][value="${policy}"]`);
     if (radio) radio.checked = true;
@@ -20727,14 +20786,14 @@
       .split(/\r?\n/)
       .map((s) => s.trim())
       .filter(Boolean);
-    let maxMb = Number($("#folder-settings-maxmb").value) || 0;
-    if (maxMb < 0) maxMb = 0;
-    const maxBytes = maxMb > 0 ? maxMb * 1024 * 1024 : null;
     const policyEl = document.querySelector('input[name="conflict-policy"]:checked');
     const policy = policyEl ? policyEl.value : "latest-wins";
+    // v0.21.x: always send max_file_bytes: null so any pre-existing
+    // size cap on the folder (set on an older client) gets cleared.
+    // One Link does not impose a file size limit.
     const body = {
       ignored_patterns: ignored,
-      max_file_bytes: maxBytes,
+      max_file_bytes: null,
       conflict_policy: policy,
     };
     try {

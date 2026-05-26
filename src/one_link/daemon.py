@@ -9359,7 +9359,13 @@ class Daemon:
         if self.state is None:
             return entries
         folder_name = folder["name"]
-        max_size = folder.get("max_file_bytes")
+        # v0.21.x: file size limits removed by product decision —
+        # One Link must accept files of any size. The
+        # max_file_bytes column on the folders table is intentionally
+        # left in the schema for back-compat with older clients but
+        # is NEVER read here: the size-cap branch below is now dead
+        # code by force.
+        max_size = None
         patterns = folder.get("ignored_patterns") or []
         kept: list = []
         for e in entries:

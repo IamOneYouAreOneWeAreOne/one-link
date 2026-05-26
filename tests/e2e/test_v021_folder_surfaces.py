@@ -59,7 +59,7 @@ def test_folder_settings_modal_exists_in_dom(ui_page):
         "modal not wired into index.html"
     )
     for sel in [
-        "#folder-settings-ignored", "#folder-settings-maxmb",
+        "#folder-settings-ignored",
         "#folder-settings-close", "#folder-settings-target",
     ]:
         assert ui_page.locator(sel).count() == 1, (
@@ -85,6 +85,41 @@ def test_folder_offers_section_exists_in_dom(ui_page):
 # Checking window.* would falsely fail. Instead we verify the
 # functions are DEFINED in the bundled page source, so a refactor
 # that nukes them gets caught.
+
+
+def test_settings_modal_has_no_file_size_limit_ui(ui_page):
+    """v0.21.x product decision: One Link does NOT impose a per-folder
+    file size limit. The Folder Settings modal must NOT surface a
+    Max-file-size field. Scope is just the folder-settings modal
+    (an inbox auto-accept size still exists elsewhere — that's a
+    separate concern about disk-space-on-incoming-files, not a sync
+    cap)."""
+    src = ui_page.content()
+    assert "folder-settings-maxmb" not in src, (
+        "folder-settings-maxmb input was removed in v0.21.x; "
+        "re-adding it ships a per-folder file-size limit which "
+        "contradicts the no-limit product decision"
+    )
+    # The folder-settings modal must not carry a Max-file-size
+    # section. Locate the modal in the DOM and search inside it.
+    modal = ui_page.locator("#folder-settings-backdrop")
+    assert modal.count() == 1
+    modal_html = modal.inner_html()
+    assert "Max file size" not in modal_html, (
+        "'Max file size' heading found inside folder-settings modal — "
+        "the per-folder size cap was supposed to be removed in v0.21.x"
+    )
+
+
+def test_settings_modal_uses_policy_card_layout(ui_page):
+    """v0.21.x cleanup: the conflict-policy radio buttons live in
+    .policy-card / .conflict-policy-grid cards, not the old squashed
+    .settings-row layout. Pin the new class names so a refactor
+    that reverts to the cramped vertical-stack version gets caught."""
+    src = ui_page.content()
+    assert "conflict-policy-grid" in src
+    assert "policy-card" in src
+    assert "policy-card-title" in src
 
 
 def test_folder_card_actions_row_wraps_on_narrow_panels(ui_page):

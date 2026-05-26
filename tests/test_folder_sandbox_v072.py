@@ -312,11 +312,16 @@ def test_sandbox_filter_rejects_pattern_matches(tmp_path: Path):
     state.close()
 
 
-def test_sandbox_filter_rejects_oversize(tmp_path: Path):
+def test_sandbox_filter_ignores_max_file_bytes_after_v021(tmp_path: Path):
+    """v0.21.x product decision: One Link does NOT impose a file
+    size limit. Even when a folder row still has max_file_bytes set
+    (e.g. left over from an older client), the daemon must accept
+    every entry regardless of size — zero ``reject_size`` audit rows."""
     me = _new_identity()
     state = State(db_path=tmp_path / "s.db")
     state.add_folder(
         name="x", local_path=str(tmp_path / "x"), shared_with=[],
+        # Legacy cap still on the row; daemon must ignore it.
         max_file_bytes=1_000,
     )
     daemon = Daemon(me)
@@ -326,16 +331,18 @@ def test_sandbox_filter_rejects_oversize(tmp_path: Path):
     fp = "cc" * 32
     entries = [
         {"file_path": "small.txt", "blob_hash": "bb" * 32, "size": 500},
-        {"file_path": "huge.bin", "blob_hash": "bb" * 32, "size": 10_000},
+        {"file_path": "huge.bin", "blob_hash": "bb" * 32, "size": 10_000_000_000},
     ]
     kept = daemon._sandbox_filter_manifest_entries(
         folder=folder, peer_fp=fp, entries=entries,
     )
-    assert [e["file_path"] for e in kept] == ["small.txt"]
+    # Both kept — no size cap enforced.
+    assert [e["file_path"] for e in kept] == ["small.txt", "huge.bin"]
     audit = state.list_folder_audit(folder_name="x")
     rejects = [e for e in audit if e["action"] == "reject_size"]
-    assert len(rejects) == 1
-    assert rejects[0]["file_path"] == "huge.bin"
+    assert len(rejects) == 0, (
+        f"v0.21.x must not produce reject_size rows; got {rejects}"
+    )
     state.close()
 
 
