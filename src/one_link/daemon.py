@@ -10374,6 +10374,18 @@ class Daemon:
             # (reuses the existing FOLDER_SYNC_BIDI_V1 path).
             remote_root = msg.get("merkle_root")
             entries = msg.get("entries", []) or []
+            # v0.21.x: SELF-MESH FAST-PATH. When the sender is one of
+            # OUR own paired devices, implicit consent applies — we
+            # auto-accept. To avoid a race where the user clicks
+            # Accept on the offer card WHILE the auto-accept is
+            # running (concurrent state.add_folder → UNIQUE collision
+            # surfacing as "could not create folder"), we DO NOT
+            # broadcast folder_offer_received for self-mesh senders.
+            # The auto-accept emits folder_self_mesh_auto_accepted
+            # instead and the UI shows ONE consolidated notification.
+            is_self_mesh = False
+            with contextlib.suppress(Exception):
+                is_self_mesh = self.state.is_self_mesh_peer(peer_fp)
             try:
                 offer = self.state.upsert_pending_folder_offer(
                     peer_fp=peer_fp,
@@ -10389,26 +10401,17 @@ class Daemon:
                 return
             log.info(
                 "MANIFEST_PUSH from %s for unknown folder %r — cached as "
-                "pending offer #%d (%d entries, %d bytes)",
+                "pending offer #%d (%d entries, %d bytes); self_mesh=%s",
                 peer_fp[:8], folder_name, offer.get("id"),
                 offer.get("entry_count"), offer.get("total_bytes"),
+                is_self_mesh,
             )
-            if getattr(self, "ui_server", None) is not None:
+            if not is_self_mesh and getattr(self, "ui_server", None) is not None:
                 with contextlib.suppress(Exception):
                     self.ui_server.broadcast({
                         "type": "folder_offer_received",
                         "offer": offer,
                     })
-            # v0.21.x: SELF-MESH AUTO-ACCEPT. When the sender is one of
-            # OUR own paired devices (same identity root, different
-            # physical device per self_mesh_devices), implicit consent
-            # applies — auto-accept the offer instead of waiting for a
-            # human click. Picks a sensible default local_path under
-            # inbox_dir() / folder_name. The user can always Move it
-            # later via the folder Settings → Folder location → Browse.
-            is_self_mesh = False
-            with contextlib.suppress(Exception):
-                is_self_mesh = self.state.is_self_mesh_peer(peer_fp)
             if is_self_mesh:
                 with contextlib.suppress(Exception):
                     asyncio.get_running_loop().create_task(

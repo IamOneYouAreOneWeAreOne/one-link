@@ -24959,12 +24959,15 @@
       } else if (m.type === "folder_self_mesh_auto_accepted") {
         // v0.21.x: own paired device sent us a folder. Auto-accepted
         // (implicit consent for self-mesh) — show ONE notification
-        // instead of an Accept/Decline card.
+        // instead of an Accept/Decline card. Also refresh the
+        // folder-offers list so any stale "pending" card from before
+        // the auto-accept marked it accepted gets cleared.
         toast(
           `Folder ${m.folder_name || ""} arriving from your other device`,
           "good", 6000,
         );
         if (typeof refreshFolders === "function") refreshFolders();
+        if (typeof refreshFolderOffers === "function") refreshFolderOffers();
       } else if (m.type === "folder_archive_received") {
         // v0.21.x: receiver-side notification when a folder archive
         // arrives + extracts. ONE toast for the whole folder; users

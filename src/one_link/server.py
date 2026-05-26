@@ -15879,6 +15879,16 @@ class UIServer:
                 {"error": "no such offer"}, status=404,
             )
         if offer.get("state") != "pending":
+            # v0.21.x: idempotent — if the offer was auto-accepted by
+            # the self-mesh fast-path between the UI render and the
+            # user's click, return success instead of a confusing
+            # "offer is already accepted" error.
+            if offer.get("state") == "accepted":
+                return web.json_response({
+                    "ok": True, "already_accepted": True,
+                    "local_path": offer.get("local_path"),
+                    "folder_name": offer.get("folder_name"),
+                })
             return web.json_response(
                 {"error": f"offer is already {offer.get('state')}"},
                 status=409,

@@ -179,6 +179,14 @@ async def test_self_mesh_sender_auto_accepted(receive_ctx):
     calls = daemon.ui_server.broadcast.call_args_list
     types_broadcast = [c.args[0].get("type") for c in calls if c.args]
     assert "folder_self_mesh_auto_accepted" in types_broadcast
+    # v0.21.x bug fix: for self-mesh senders we must NOT broadcast
+    # folder_offer_received (which would show an Accept/Decline card
+    # the user could click WHILE auto-accept is running → race causes
+    # "could not create folder" UNIQUE-collision errors).
+    assert "folder_offer_received" not in types_broadcast, (
+        "self-mesh fast-path must NOT broadcast folder_offer_received "
+        "— that would race with the auto-accept's add_folder call"
+    )
 
 
 @pytest.mark.asyncio
