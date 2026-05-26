@@ -795,9 +795,17 @@ def _pick_win_ifiledialog(title: str):
             "IFileOpenDialog: GetResult returned hr=0x%08X psi=%r",
             hr & 0xFFFFFFFF, psi.value,
         )
-        if hr != S_OK or not psi.value:
+        # v0.21.x: GetResult on some broker / cloud-synced (OneDrive
+        # Files-On-Demand) shell items returns a non-S_OK HRESULT
+        # like 0x8007109A but DOES populate psi with a valid shell
+        # item. Treat psi != NULL as authoritative; only bail when
+        # the pointer itself is null. This is the bug that caused
+        # the user-reported "I pick a folder, click Select Folder,
+        # dialog closes, nothing in the input."
+        if not psi.value:
             log.warning(
-                "IFileDialog.GetResult failed: 0x%08X", hr & 0xFFFFFFFF,
+                "IFileDialog.GetResult returned null psi: 0x%08X",
+                hr & 0xFFFFFFFF,
             )
             Release(ppv)
             return None
@@ -809,20 +817,45 @@ def _pick_win_ifiledialog(title: str):
             SI_GetDisplayName = _ct.WINFUNCTYPE(
                 _ct.c_long, c_void_p, _wt.DWORD, POINTER(c_void_p),
             )(psi_vtbl[5])
-            name_ptr = c_void_p()
-            hr = SI_GetDisplayName(psi, SIGDN_FILESYSPATH, byref(name_ptr))
-            log.info(
-                "IFileOpenDialog: GetDisplayName(FILESYSPATH) hr=0x%08X name_ptr=%r",
-                hr & 0xFFFFFFFF, name_ptr.value,
+            # Try multiple SIGDN variants. FILESYSPATH is best for
+            # regular folders; DESKTOPABSOLUTEPARSING handles items
+            # the shell doesn't directly map to a fs path (cloud
+            # placeholders, library nodes, etc.); FILESYSPATH retry
+            # at the end as a last resort.
+            SIGDN_DESKTOPABSOLUTEPARSING = 0x80028000
+            for sigdn, label in (
+                (SIGDN_FILESYSPATH, "FILESYSPATH"),
+                (SIGDN_DESKTOPABSOLUTEPARSING, "DESKTOPABSOLUTEPARSING"),
+            ):
+                name_ptr = c_void_p()
+                hr = SI_GetDisplayName(psi, sigdn, byref(name_ptr))
+                log.info(
+                    "IFileOpenDialog: GetDisplayName(%s) hr=0x%08X name_ptr=%r",
+                    label, hr & 0xFFFFFFFF, name_ptr.value,
+                )
+                if hr == S_OK and name_ptr.value:
+                    try:
+                        picked = _ct.wstring_at(name_ptr.value)
+                        # Filter out shell-only paths (e.g. starting
+                        # with "::{GUID}" desktop-namespace items)
+                        # that aren't real filesystem locations. We
+                        # need a path the OS can stat().
+                        if picked and not picked.startswith("::"):
+                            log.info(
+                                "IFileOpenDialog: picked path=%r (via %s)",
+                                picked, label,
+                            )
+                            return picked
+                        log.info(
+                            "IFileOpenDialog: %s returned shell-only %r, trying next form",
+                            label, picked,
+                        )
+                    finally:
+                        ole32.CoTaskMemFree(name_ptr)
+            log.warning(
+                "IFileOpenDialog: every SIGDN form failed for picked item",
             )
-            if hr != S_OK or not name_ptr.value:
-                return None
-            try:
-                picked = _ct.wstring_at(name_ptr.value)
-                log.info("IFileOpenDialog: picked path=%r", picked)
-                return picked
-            finally:
-                ole32.CoTaskMemFree(name_ptr)
+            return None
         finally:
             SI_Release(psi)
             Release(ppv)
