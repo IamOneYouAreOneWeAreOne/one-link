@@ -24956,6 +24956,22 @@
         if (typeof refreshFolders === "function" && cur.blobsDone % 5 === 0) {
           refreshFolders();
         }
+      } else if (m.type === "folder_send_declined_by_peer") {
+        // v0.21.x: receiver explicitly declined our folder send.
+        // The daemon already cancelled any in-flight task + revoked
+        // the temp share grant; UI just shows the user what happened
+        // and tears down the inflight progress overlay.
+        toast(
+          `${m.folder_name || "Folder"} declined by the other device.`
+            + (m.cancelled_in_flight
+                ? " In-flight transfer cancelled."
+                : ""),
+          "info", 7000,
+        );
+        if (typeof hideFolderSendProgress === "function") {
+          hideFolderSendProgress();
+        }
+        if (typeof refreshFolders === "function") refreshFolders();
       } else if (m.type === "folder_self_mesh_auto_accepted") {
         // v0.21.x: own paired device sent us a folder. Auto-accepted
         // (implicit consent for self-mesh) — show ONE notification

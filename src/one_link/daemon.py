@@ -6208,6 +6208,17 @@ class Daemon:
                 self._emit_capability_request(peer_fp, peer_sid, FOLDER_SYNC)
                 return
             await self._handle_blob_request(channel, msg, peer_fp)
+        elif t == "FOLDER_OFFER_DECLINED":
+            # v0.21.x: receiver explicitly declined our folder offer.
+            # Cancel any in-flight folder-send task targeting this
+            # peer + folder, revoke the temp share grant, broadcast
+            # UI event so the sender's tab shows "X declined the
+            # folder you sent".
+            if not self._capability_allowed(peer_fp, FOLDER_SYNC):
+                return
+            await self._handle_folder_offer_declined(
+                channel, msg, peer_fp,
+            )
         elif t == "BLOB_INVENTORY_QUERY":
             # v0.21.x: pre-flight dedup check. Sender asks "of these
             # whole-file BLAKE3 hashes, which do you already have
@@ -18964,6 +18975,107 @@ class Daemon:
         return len(peers)
 
     # ─── folder sync orchestration ─────────────────────────────────────
+    async def notify_peer_folder_declined(
+        self, peer: Peer, folder_name: str,
+    ) -> bool:
+        """v0.21.x: receiver-side hook. Send a FOLDER_OFFER_DECLINED
+        frame to peer so they can:
+          1. Cancel any in-flight folder-send task targeting us
+          2. Revoke the temporary shared_with grant they added when
+             setting up the one-shot send
+
+        Returns True on best-effort send success; False if peer is
+        unreachable / channel error / not authorized. Either way the
+        receiver-side decline still works locally — the notification
+        is courtesy."""
+        block = self._check_outbound_trust(peer)
+        if block:
+            return False
+        peer_fp = self._peer_fp_from_peer(peer)
+        if not peer_fp or not self._capability_allowed(peer_fp, FOLDER_SYNC):
+            return False
+        try:
+            sess = await self._get_outbound_session(peer)
+        except Exception:
+            return False
+        try:
+            async with sess.lock:
+                msg = make_msg(
+                    "FOLDER_OFFER_DECLINED", self.me.short_id,
+                    folder=folder_name,
+                )
+                await sess.channel.send(encode_msg(msg))
+            return True
+        except Exception as e:
+            log.debug(
+                "notify_peer_folder_declined to %s for %r failed: %s",
+                peer_fp[:8], folder_name, e,
+            )
+            return False
+
+    async def _handle_folder_offer_declined(
+        self, channel, msg, peer_fp: str,
+    ) -> None:
+        """v0.21.x: receiver of OUR folder offer explicitly declined.
+        Stop everything we're doing for that folder + peer.
+
+          1. Cancel any in-flight folder-send task targeting them
+             (covers folder-card scope + adhoc scope)
+          2. Revoke the temp share grant from
+             send_folder_one_shot_via_manifest so we don't keep that
+             peer in shared_with persistently
+          3. Broadcast folder_send_declined_by_peer so the sender's
+             UI shows "<peer> declined" — explicit feedback, no
+             silent hang
+        """
+        folder_name = str(msg.get("folder") or "")
+        if not folder_name:
+            return
+        cancelled_any = False
+        if self.ui_server is not None:
+            # Folder-card scope: ident == folder_name.
+            with contextlib.suppress(Exception):
+                if self.ui_server._cancel_folder_send_task(
+                    "folder", folder_name, peer_fp,
+                ):
+                    cancelled_any = True
+            # Ad-hoc scope: ident == folder_path. We don't know the
+            # path from this end; cancel any adhoc task that targets
+            # this peer. Multi-adhoc-to-same-peer is an edge case;
+            # cancelling all of them on a decline is the safe choice.
+            reg = getattr(self.ui_server, "_folder_send_tasks", None)
+            if isinstance(reg, dict):
+                for key in list(reg.keys()):
+                    if (
+                        key.startswith("adhoc:")
+                        and key.endswith(f":{peer_fp}")
+                    ):
+                        task = reg.get(key)
+                        if task is not None and not task.done():
+                            with contextlib.suppress(Exception):
+                                task.cancel()
+                                cancelled_any = True
+        # Revoke the temp share grant. unshare_folder_with is a no-op
+        # if the peer wasn't in shared_with, so this is safe even when
+        # the user explicitly Shared this folder with this peer.
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                f = self.state.get_folder(folder_name)
+                if f and peer_fp in f.get("shared_with", []):
+                    self.state.unshare_folder_with(folder_name, peer_fp)
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "folder_send_declined_by_peer",
+                    "folder_name": folder_name,
+                    "peer_fp": peer_fp,
+                    "cancelled_in_flight": cancelled_any,
+                })
+        log.info(
+            "peer %s declined folder %r; cancelled_in_flight=%s",
+            peer_fp[:8], folder_name, cancelled_any,
+        )
+
     async def _auto_accept_self_mesh_folder_offer(
         self,
         *,

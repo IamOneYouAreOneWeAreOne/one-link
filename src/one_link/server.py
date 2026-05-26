@@ -15987,10 +15987,11 @@ class UIServer:
         })
 
     async def api_decline_folder_offer(self, request: web.Request) -> web.Response:
-        """Decline an incoming folder offer. Records the decline so
-        the UI can hide the card; the sender is NOT notified (their
-        view shows the transfer as still pending; on next push the
-        receiver will re-decline silently)."""
+        """v0.21.x: decline an incoming folder offer. Records the
+        decline AND sends FOLDER_OFFER_DECLINED to the sender so they
+        can cancel any in-flight folder-send task + revoke the temp
+        share grant. Sender notification is best-effort — if the
+        sender's offline, the local decline still succeeds."""
         if self.daemon.state is None:
             return web.json_response(
                 {"error": "state not available"}, status=503,
@@ -16007,12 +16008,26 @@ class UIServer:
                 {"error": f"offer is already {offer.get('state')}"},
                 status=409,
             )
+        peer_fp = offer.get("peer_fp")
+        folder_name = offer.get("folder_name")
         self.daemon.state.mark_folder_offer_declined(offer_id)
+        # Best-effort notify the sender so they stop transmitting.
+        notified = False
+        if peer_fp and folder_name:
+            peer = self._resolve_online_peer(peer_fp)
+            if peer is not None:
+                with contextlib.suppress(Exception):
+                    notified = await self.daemon.notify_peer_folder_declined(
+                        peer, folder_name,
+                    )
         self.broadcast({
             "type": "folder_offer_declined",
             "offer_id": offer_id,
+            "sender_notified": notified,
         })
-        return web.json_response({"ok": True})
+        return web.json_response({
+            "ok": True, "sender_notified": notified,
+        })
 
     # ─── POST /api/peers/{fp}/trust ───────────────────────────────────
     async def api_set_trust(self, request: web.Request) -> web.Response:
