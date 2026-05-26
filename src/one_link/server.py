@@ -2409,6 +2409,13 @@ class UIServer:
                   self._guarded(self.api_folder_file_raw))
         r.add_post(r"/api/folders/{name}/file/{path:.+}/reveal",
                    self._guarded(self.api_folder_file_reveal))
+        # v0.21.x Ship 3: blob preview for side-by-side conflict
+        # resolution. Content-addressed; hash validation prevents
+        # path-traversal abuse.
+        r.add_get(r"/api/blobs/{hash}/preview",
+                  self._guarded(self.api_blob_preview))
+        r.add_get(r"/api/blobs/{hash}/raw",
+                  self._guarded(self.api_blob_raw))
         r.add_get(r"/api/folders/{name}/audit", self._guarded(self.api_folder_audit))
         r.add_get(r"/api/folders/{name}/tree", self._guarded(self.api_folder_tree))
         # v0.21.x folder-share ceremony: incoming offers (proposals
@@ -18126,6 +18133,102 @@ class UIServer:
         except OSError as e:
             return web.json_response({"error": f"reveal failed: {e}"}, status=500)
         return web.json_response({"ok": True, "path": str(path)})
+
+    async def api_blob_preview(self, request: web.Request) -> web.Response:
+        """v0.21.x Ship 3: fetch a content-addressed blob from the
+        local store for side-by-side conflict preview.
+
+        Lets the conflict resolver show 'mine' AND 'theirs' content
+        live before the user picks. Auth-gated; only blobs already
+        in our local store are reachable (no path-traversal vector
+        because the hash IS the path, content-addressed). Returns
+        a small JSON wrapper with text-content inline (capped) or a
+        stream_url for binary types — same shape as folder file
+        preview so the UI can reuse the renderer."""
+        blob_hash = request.match_info.get("hash", "").strip()
+        # Hash must be 64 hex chars (BLAKE3 / SHA-256 shape) so we
+        # can't be tricked into opening arbitrary paths.
+        if len(blob_hash) != 64 or not all(c in "0123456789abcdefABCDEF" for c in blob_hash):
+            return web.json_response({"error": "bad blob hash"}, status=400)
+        if self.daemon.blob_store is None or not self.daemon.blob_store.has(blob_hash):
+            return web.json_response({"error": "blob not in store"}, status=404)
+        size = self.daemon.blob_store.size(blob_hash)
+        # Caller may supply ?as=ext to hint the preview kind (we
+        # don't know the file extension from a content hash).
+        ext = (request.query.get("as") or "").lstrip(".").lower()
+        kind = self.PREVIEW_KINDS.get(ext) if ext else None
+        if kind in ("pdf", "video", "audio", "image", "html-sandboxed"):
+            return web.json_response({
+                "blob_hash": blob_hash,
+                "kind": kind,
+                "size": size,
+                "previewable": True,
+                "stream_url": f"/api/blobs/{blob_hash}/raw" + (f"?as={ext}" if ext else ""),
+            })
+        # Text-y inline (capped). Anything we can't classify falls
+        # back to a text attempt with replace-decoding.
+        cap = self.PREVIEW_MAX_BYTES
+        truncated = size > cap
+        try:
+            with self.daemon.blob_store.open_read(blob_hash) as f:
+                raw = f.read(cap)
+        except OSError as e:
+            return web.json_response({"error": f"read: {e}"}, status=500)
+        try:
+            content = raw.decode("utf-8")
+            encoding = "utf-8"
+        except UnicodeDecodeError:
+            content = raw.decode("utf-8", errors="replace")
+            encoding = "utf-8-replace"
+        return web.json_response({
+            "blob_hash": blob_hash,
+            "kind": kind or "text",
+            "encoding": encoding,
+            "size": size,
+            "preview_bytes": len(raw),
+            "truncated": truncated,
+            "previewable": True,
+            "content": content,
+        })
+
+    async def api_blob_raw(self, request: web.Request) -> web.Response:
+        """Stream a blob's raw bytes for <img>/<video>/<iframe>
+        previews. Same hash validation as api_blob_preview."""
+        blob_hash = request.match_info.get("hash", "").strip()
+        if len(blob_hash) != 64 or not all(c in "0123456789abcdefABCDEF" for c in blob_hash):
+            return web.json_response({"error": "bad blob hash"}, status=400)
+        if self.daemon.blob_store is None or not self.daemon.blob_store.has(blob_hash):
+            return web.json_response({"error": "blob not in store"}, status=404)
+        import mimetypes
+        ext = (request.query.get("as") or "").lstrip(".").lower()
+        ctype = "application/octet-stream"
+        if ext:
+            guess, _ = mimetypes.guess_type(f"x.{ext}")
+            if guess:
+                ctype = guess
+        size = self.daemon.blob_store.size(blob_hash)
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": ctype,
+                "Content-Length": str(size),
+                "X-Frame-Options": "SAMEORIGIN",
+                "Content-Security-Policy": "default-src 'self'; frame-ancestors 'self'",
+                "Cache-Control": "private, max-age=300",
+            },
+        )
+        await resp.prepare(request)
+        try:
+            with self.daemon.blob_store.open_read(blob_hash) as f:
+                while True:
+                    chunk = f.read(64 * 1024)
+                    if not chunk:
+                        break
+                    await resp.write(chunk)
+        except OSError:
+            pass
+        await resp.write_eof()
+        return resp
 
     async def api_folder_file_preview(self, request: web.Request) -> web.Response:
         """v0.21.x: preview a single file inside a synced folder.

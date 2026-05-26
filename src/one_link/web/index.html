@@ -20277,6 +20277,26 @@
     head.appendChild(nameEl);
     const actions = document.createElement("div");
     actions.className = "preview-actions";
+    // v0.21.x Ship 3: if this file has an unresolved conflict, the
+    // single most useful action is to OPEN the resolver right
+    // here. Surface it as the leading primary action.
+    if (state.folderBrowser.conflicts[entry.path]) {
+      const resolveBtn = document.createElement("button");
+      resolveBtn.type = "button";
+      resolveBtn.textContent = "Resolve conflict…";
+      resolveBtn.title = (
+        "This file was changed on both devices at the same time. "
+        + "Open the conflict resolver to see both versions and pick."
+      );
+      resolveBtn.style.background = "#fbbf24";
+      resolveBtn.style.color = "#0a0a0a";
+      resolveBtn.onclick = () => {
+        closeFolderBrowser();
+        $("#conflicts-backdrop").classList.add("show");
+        renderConflictsModal();
+      };
+      actions.appendChild(resolveBtn);
+    }
     const showBtn = document.createElement("button");
     showBtn.type = "button";
     showBtn.textContent = "Show in folder";
@@ -20496,6 +20516,81 @@
     v.appendChild(makeMetaLine(
       "from", peer === "this device" ? peer : peer.slice(0, 12) + "…"
     ));
+    // v0.21.x Ship 3: inline preview button. Lets the user SEE
+    // what's actually in each version before picking Keep mine /
+    // theirs / both. Text-y files render inline; binary files
+    // get a download link via the raw blob endpoint.
+    const blobHash = c[side + "_blob_hash"];
+    if (blobHash) {
+      const previewBtn = el("button", "ver-preview-btn", "Preview");
+      previewBtn.type = "button";
+      previewBtn.title = (
+        side === "local"
+          ? "Show what YOUR version of this file contains."
+          : "Show what the OTHER device's version contains."
+      );
+      const previewSlot = el("div", "ver-preview-slot");
+      previewSlot.style.display = "none";
+      previewBtn.onclick = async () => {
+        if (previewSlot.style.display !== "none") {
+          previewSlot.style.display = "none";
+          previewBtn.textContent = "Preview";
+          return;
+        }
+        previewBtn.textContent = "Loading…";
+        previewBtn.disabled = true;
+        try {
+          const ext = (c.file_path || "").split(".").pop() || "";
+          const url = `/api/blobs/${blobHash}/preview` + (ext ? `?as=${encodeURIComponent(ext)}` : "");
+          const r = await api.get(url);
+          previewSlot.replaceChildren();
+          if (r.stream_url && r.kind === "image") {
+            const img = document.createElement("img");
+            img.src = r.stream_url + (ext ? `&as=${encodeURIComponent(ext)}` : `?as=${encodeURIComponent(ext)}`);
+            img.alt = `${side} version`;
+            img.style.maxWidth = "100%";
+            img.style.maxHeight = "300px";
+            previewSlot.appendChild(img);
+          } else if (r.content !== undefined) {
+            const pre = document.createElement("pre");
+            pre.textContent = r.content;
+            pre.style.maxHeight = "300px";
+            pre.style.overflow = "auto";
+            pre.style.fontFamily = "var(--font-mono, ui-monospace, Menlo, monospace)";
+            pre.style.fontSize = "11px";
+            pre.style.background = "var(--bg)";
+            pre.style.padding = "8px";
+            pre.style.borderRadius = "4px";
+            pre.style.whiteSpace = "pre-wrap";
+            pre.style.wordBreak = "break-word";
+            previewSlot.appendChild(pre);
+            if (r.truncated) {
+              const note = document.createElement("div");
+              note.style.fontSize = "10px";
+              note.style.color = "var(--text-dim)";
+              note.style.marginTop = "4px";
+              note.textContent = `Showing first ${fmtBytes(r.preview_bytes || 0)} of ${fmtBytes(r.size || 0)}.`;
+              previewSlot.appendChild(note);
+            }
+          } else {
+            const note = document.createElement("div");
+            note.style.fontSize = "11px";
+            note.style.color = "var(--text-dim)";
+            note.textContent = "No inline preview for this file type.";
+            previewSlot.appendChild(note);
+          }
+          previewSlot.style.display = "block";
+          previewBtn.textContent = "Hide preview";
+        } catch (e) {
+          toast(`Couldn't load preview: ${errorToastBody(e)}`, "bad", 5000);
+          previewBtn.textContent = "Preview";
+        } finally {
+          previewBtn.disabled = false;
+        }
+      };
+      v.appendChild(previewBtn);
+      v.appendChild(previewSlot);
+    }
     return v;
   }
   function makeMetaLine(label, val) {
