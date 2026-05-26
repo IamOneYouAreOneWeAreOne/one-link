@@ -684,11 +684,44 @@ def test_refresh_button_is_now_icon(index_html: str):
     class so it doesn't render full-width like the old text button."""
     idx = index_html.find('id="btn-refresh-folders"')
     assert idx > 0
-    snippet = index_html[idx:idx + 300]
+    snippet = index_html[idx:idx + 400]
     assert "↻" in snippet
     assert 'class="folder-refresh-btn"' in snippet
-    assert 'title="Refresh folder list"' in snippet
+    # Title text was tightened in v0.21.x but must still be present
+    # so hover discovers what the icon does.
+    assert 'title="' in snippet, (
+        "refresh icon button needs a hover tooltip — without one "
+        "the ↻ glyph is undiscoverable"
+    )
     assert 'aria-label="Refresh folder list"' in snippet
+
+
+def test_folder_row_action_buttons_have_tooltips(index_html: str):
+    """v0.21.x: Share / Sync / Remove buttons on each folder row
+    must carry .title text so hovering reveals what they do. The
+    labels alone ('Share', 'Sync', 'Remove') don't tell a new user
+    that Share is one-time peer-grant vs Sync being a manual push
+    vs Remove only severing the One Link link (not deleting files)."""
+    # JS sets these via element.title = "..."
+    idx = index_html.find("for (const f of state.folders)")
+    assert idx > 0
+    body = index_html[idx:idx + 4000]
+    # Share tooltip must mention the selected-peer requirement.
+    assert "share.title" in body, (
+        "Share button missing hover tooltip"
+    )
+    assert "sync.title" in body, (
+        "Sync button missing hover tooltip"
+    )
+    assert "remove.title" in body, (
+        "Remove button missing hover tooltip"
+    )
+    # Remove tooltip MUST tell the user it doesn't delete files on
+    # disk — that's the load-bearing reassurance for the action.
+    assert "NOT" in body and "deleted" in body, (
+        "Remove tooltip must explicitly say files on disk are NOT "
+        "deleted — without that reassurance users will fear clicking it"
+    )
 
 
 def test_refresh_button_spins_while_loading(index_html: str):

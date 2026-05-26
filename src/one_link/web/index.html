@@ -8812,17 +8812,23 @@
              typing a path. -->
         <div class="folder-path-row">
           <input id="folder-path" type="text" placeholder="Folder location on this computer" aria-label="Folder path on this computer" />
-          <button id="btn-browse-folder" class="folder-browse-btn" title="Browse for a folder">Browse…</button>
+          <button id="btn-browse-folder" class="folder-browse-btn"
+                  title="Open the OS folder picker so you don't have to type the path by hand.">Browse…</button>
         </div>
         <div class="mini-actions">
-          <button id="btn-add-folder">Add</button>
+          <button id="btn-add-folder"
+                  title="Add this folder to One Link. Once added, you can share it with any paired device.">
+            Add
+          </button>
           <button id="btn-clear-folder-traces" class="btn-danger"
-                  title="Remove folder records from One Link without deleting folders from disk">
+                  title="Stop tracking every folder. Your files on disk are NOT deleted; only One Link's records of them go away.">
             Clear folder traces
           </button>
           <!-- v0.10.6: small icon refresh button (browser-style ↻)
                instead of a wide text button. -->
-          <button id="btn-refresh-folders" class="folder-refresh-btn" title="Refresh folder list" aria-label="Refresh folder list">↻</button>
+          <button id="btn-refresh-folders" class="folder-refresh-btn"
+                  title="Re-read the folder list from the daemon (manual refresh)."
+                  aria-label="Refresh folder list">↻</button>
         </div>
       </div>
     </aside>
@@ -19446,6 +19452,14 @@
         // single cell instead of flowing into new rows.
         const actions = el("div", "file-actions");
         const share = el("button", null, "Share");
+        // v0.21.x: native hover tooltips so users know what each
+        // button does without having to be told. Same pattern for
+        // every action button on this row.
+        share.title = (
+            "Let the currently-selected paired device sync this folder. "
+            + "Pick a peer in the sidebar first, then click Share."
+        );
+        share.setAttribute("aria-label", "Share folder with selected peer");
         share.onclick = async () => {
           const peer = state.selectedPeer ? state.peers.get(state.selectedPeer) : null;
           if (!peer?.fingerprint || peer.trust !== "pinned") {
@@ -19461,6 +19475,12 @@
           }
         };
         const sync = el("button", null, "Sync");
+        sync.title = (
+            "Push this folder's current contents to every paired device "
+            + "you've already shared it with. Useful right after edits; "
+            + "the daemon also syncs in the background on its own."
+        );
+        sync.setAttribute("aria-label", "Push folder contents now");
         sync.onclick = async () => {
           try {
             const r = await api.post(`/api/folders/${encodeURIComponent(f.name)}/sync`, {});
@@ -19472,6 +19492,11 @@
           }
         };
         const remove = el("button", null, "Remove");
+        remove.title = (
+            "Stop tracking this folder. Your files on disk are NOT "
+            + "deleted; only the One Link sync record goes away."
+        );
+        remove.setAttribute("aria-label", "Stop tracking this folder");
         remove.onclick = async () => {
           try {
             await api.del(`/api/folders/${encodeURIComponent(f.name)}`);
