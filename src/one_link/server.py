@@ -14611,6 +14611,139 @@ class UIServer:
                     archive_path.unlink(missing_ok=True)
             registry.pop(key, None)
 
+    # v0.21.x smart auto-routing for folder Send. When the caller
+    # doesn't force a mode, this picks the best one based on file
+    # count, total bytes, content compressibility, and (when peer is
+    # reachable) BLOB_INVENTORY_QUERY dedup probability.
+    #
+    # Decision matrix:
+    #   - >30% bytes already on peer  → manifest_push (chunk dedup wins)
+    #   - All-new, >50% compressible  → archive       (compression wins)
+    #   - All-new, mostly binary,
+    #     many files >16 MB total     → per_file      (parallelism wins)
+    #   - Default                     → manifest_push (safe baseline)
+    _COMPRESSIBLE_EXTS = frozenset({
+        "txt", "md", "rst", "tex", "log", "csv", "tsv",
+        "py", "js", "ts", "jsx", "tsx", "html", "htm", "css", "scss",
+        "less", "vue", "svelte", "json", "xml", "yaml", "yml", "toml",
+        "ini", "conf", "cfg", "lock", "makefile", "cmake",
+        "sh", "ps1", "bat", "cmd",
+        "c", "cpp", "h", "hpp", "cs", "java", "kt", "swift", "rs",
+        "go", "rb", "php", "sql", "r", "lua", "pl", "scala", "clj",
+        "ex", "exs", "erl", "hs", "ml", "fs",
+        "svg", "po", "pot",
+    })
+    _ALREADY_COMPRESSED_EXTS = frozenset({
+        "zip", "gz", "tgz", "bz2", "xz", "7z", "rar", "tar",
+        "jpg", "jpeg", "png", "gif", "webp", "bmp", "ico", "heic",
+        "heif", "avif",
+        "mp4", "mkv", "mov", "avi", "wmv", "webm", "flv",
+        "mp3", "m4a", "ogg", "flac", "wav", "opus",
+        "pdf", "docx", "xlsx", "pptx", "odt", "ods", "odp",
+        "epub", "mobi",
+    })
+
+    def _classify_compressibility(
+        self, files: list[tuple[Path, str]],
+    ) -> dict:
+        """Walk the file list once; return {compressible_bytes,
+        compressed_bytes, other_bytes, total_bytes}. ``other`` is
+        unknown extensions — treated as 'might compress' by the
+        decision rule below."""
+        comp = 0
+        already = 0
+        other = 0
+        total = 0
+        for p, _rel in files:
+            try:
+                sz = p.stat().st_size
+            except OSError:
+                continue
+            total += sz
+            ext = p.suffix.lower().lstrip(".")
+            if ext in self._ALREADY_COMPRESSED_EXTS:
+                already += sz
+            elif ext in self._COMPRESSIBLE_EXTS:
+                comp += sz
+            else:
+                other += sz
+        return {
+            "compressible_bytes": comp,
+            "already_compressed_bytes": already,
+            "other_bytes": other,
+            "total_bytes": total,
+        }
+
+    async def _pick_folder_send_mode(
+        self, *, peer, files: list[tuple[Path, str]],
+        check_peer_inventory: bool = True,
+    ) -> tuple[str, dict]:
+        """Return (mode, reasoning). mode in {"manifest_push", "archive",
+        "per_file"}. reasoning is a dict explaining the choice that
+        the UI can surface ('Picked archive because 78% of bytes are
+        compressible text/code')."""
+        n = len(files)
+        comp_stats = self._classify_compressibility(files)
+        total = comp_stats["total_bytes"]
+        comp_ratio = (
+            comp_stats["compressible_bytes"] / max(1, total)
+            if total > 0 else 0.0
+        )
+        # Pre-flight dedup probe — skipped when caller asked us to
+        # OR when peer isn't reachable.
+        dedup_ratio = 0.0
+        if check_peer_inventory and peer is not None:
+            try:
+                from one_link.cdc import hash_path
+                # Fast hash off the event loop (cached via file_index_cache).
+                hashes = await asyncio.to_thread(
+                    lambda: [hash_path(p) for p, _ in files if p.is_file()],
+                )
+                if hashes:
+                    have = await self.daemon.query_peer_blob_inventory(
+                        peer, hashes,
+                    )
+                    if have is not None:
+                        dedup_bytes = sum(
+                            p.stat().st_size for (p, _), h in zip(files, hashes)
+                            if h in have
+                        )
+                        dedup_ratio = dedup_bytes / max(1, total)
+            except Exception:
+                dedup_ratio = 0.0
+        # Decision rule.
+        reasoning = {
+            "file_count": n,
+            "total_bytes": total,
+            "compressible_ratio": round(comp_ratio, 3),
+            "dedup_ratio": round(dedup_ratio, 3),
+        }
+        # Heavy dedup overlap → manifest_push wins big (chunk dedup
+        # never re-sends what the peer has).
+        if dedup_ratio > 0.30:
+            reasoning["why"] = (
+                f"{int(dedup_ratio * 100)}% of bytes already on the "
+                "other device — sending only what's new (manifest_push)"
+            )
+            return "manifest_push", reasoning
+        # No useful dedup + lots of compressible bytes → archive.
+        # Threshold: total >= 64 KB (compression overhead worth it)
+        # AND compressible_ratio >= 0.5 (>=50% wins from compression).
+        if total >= 64 * 1024 and comp_ratio >= 0.5:
+            reasoning["why"] = (
+                f"{int(comp_ratio * 100)}% of bytes are compressible "
+                "(text/code); shipping as a compressed archive saves "
+                "wire bytes"
+            )
+            return "archive", reasoning
+        # Default: manifest_push. Chunk-level dedup still works on
+        # re-sends, per-file resumability, receiver Accept flow.
+        reasoning["why"] = (
+            "general-purpose default: per-file streaming with "
+            "chunk-level dedup + receiver Accept ceremony"
+        )
+        return "manifest_push", reasoning
+
     async def _send_folder_manifest_push(
         self, *, peer, peer_fp: str, folder_name: str,
         scope: str, ident: str,
@@ -15128,27 +15261,29 @@ class UIServer:
                 {"error": "folder is empty", "code": "folder_empty"},
                 status=409,
             )
-        # v0.21.x: route by explicit mode, default = MANIFEST_PUSH
-        # ceremony (reuses folder-sync's chunk-level dedup +
-        # receiver-side Accept/Decline card). Opt-in alternatives:
-        #   - archive=true  → zip + send-as-one-file (atomic, big
-        #     compression win for text/code, but no chunk dedup)
-        #   - per_file=true → legacy explicit per-file send_file calls
-        #     with BLOB_INVENTORY pre-flight + FILE_OFFER_BATCH
+        # v0.21.x: mode routing — explicit flags always win; default
+        # is SMART AUTO-ROUTING (_pick_folder_send_mode picks the
+        # best mode based on file content + peer dedup state).
         archive_mode = bool(data.get("archive", False))
         per_file_mode = bool(data.get("per_file", False))
-        if archive_mode:
+        mode_override = (data.get("mode") or "").strip().lower()
+        if mode_override in {"archive", "per_file", "manifest_push"}:
+            mode = mode_override
+            reasoning = {"why": f"explicit mode override: {mode}"}
+        elif archive_mode:
+            mode, reasoning = "archive", {"why": "archive=true override"}
+        elif per_file_mode:
+            mode, reasoning = "per_file", {"why": "per_file=true override"}
+        else:
+            mode, reasoning = await self._pick_folder_send_mode(
+                peer=peer, files=files,
+            )
+        if mode == "archive":
             self._kick_folder_archive_task(
                 scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
                 folder_root=local_path, folder_name=name,
             )
-            return web.json_response({
-                "ok": True, "started": True, "mode": "archive",
-                "file_count": len(files),
-                "total_bytes": total_bytes,
-                "skipped": skipped,
-            })
-        if per_file_mode:
+        elif mode == "per_file":
             self._kick_folder_send_task(
                 scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
                 files=files,
@@ -15157,20 +15292,14 @@ class UIServer:
                     "name": name, "peer_fp": peer_fp, "mode": "per_file",
                 },
             )
-            return web.json_response({
-                "ok": True, "started": True, "mode": "per_file",
-                "file_count": len(files),
-                "total_bytes": total_bytes,
-                "skipped": skipped,
-            })
-        # DEFAULT: MANIFEST_PUSH ceremony — receiver gets an Accept/
-        # Decline card via the existing folder-offers-section flow.
-        self._kick_folder_manifest_task(
-            scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
-            folder_name=name,
-        )
+        else:  # manifest_push (default safe fallback)
+            self._kick_folder_manifest_task(
+                scope="folder", ident=name, peer=peer, peer_fp=peer_fp,
+                folder_name=name,
+            )
         return web.json_response({
-            "ok": True, "started": True, "mode": "manifest_push",
+            "ok": True, "started": True, "mode": mode,
+            "auto_routing": reasoning,
             "file_count": len(files),
             "total_bytes": total_bytes,
             "skipped": skipped,
@@ -15310,25 +15439,28 @@ class UIServer:
                 {"error": "folder is empty", "code": "folder_empty"},
                 status=409,
             )
-        # v0.21.x: same mode routing as api_send_folder_to_peer. Default
-        # is MANIFEST_PUSH (chunk-level dedup + receiver Accept/Decline
-        # card). archive/per_file are opt-ins.
+        # v0.21.x mode routing — explicit flags win; default = smart
+        # auto-routing (same logic as api_send_folder_to_peer).
         archive_mode = bool(data.get("archive", False))
         per_file_mode = bool(data.get("per_file", False))
-        if archive_mode:
+        mode_override = (data.get("mode") or "").strip().lower()
+        if mode_override in {"archive", "per_file", "manifest_push"}:
+            mode = mode_override
+            reasoning = {"why": f"explicit mode override: {mode}"}
+        elif archive_mode:
+            mode, reasoning = "archive", {"why": "archive=true override"}
+        elif per_file_mode:
+            mode, reasoning = "per_file", {"why": "per_file=true override"}
+        else:
+            mode, reasoning = await self._pick_folder_send_mode(
+                peer=peer, files=files,
+            )
+        if mode == "archive":
             self._kick_folder_archive_task(
                 scope="adhoc", ident=str(path), peer=peer, peer_fp=peer_fp,
                 folder_root=path, folder_name=root_name,
             )
-            return web.json_response({
-                "ok": True, "started": True, "mode": "archive",
-                "name": root_name,
-                "local_path": str(path),
-                "file_count": len(files),
-                "total_bytes": total_bytes,
-                "skipped": skipped,
-            })
-        if per_file_mode:
+        elif mode == "per_file":
             self._kick_folder_send_task(
                 scope="adhoc", ident=str(path), peer=peer, peer_fp=peer_fp,
                 files=files,
@@ -15341,23 +15473,14 @@ class UIServer:
                     "mode": "per_file",
                 },
             )
-            return web.json_response({
-                "ok": True, "started": True, "mode": "per_file",
-                "name": root_name,
-                "local_path": str(path),
-                "file_count": len(files),
-                "total_bytes": total_bytes,
-                "skipped": skipped,
-            })
-        # DEFAULT: MANIFEST_PUSH ceremony via the ad-hoc wrapper
-        # (temp-registers the picked folder in state, runs scan,
-        # sends, cleans up).
-        self._kick_adhoc_folder_manifest_task(
-            scope="adhoc", ident=str(path), peer=peer, peer_fp=peer_fp,
-            folder_path=path, folder_name=root_name,
-        )
+        else:  # manifest_push
+            self._kick_adhoc_folder_manifest_task(
+                scope="adhoc", ident=str(path), peer=peer, peer_fp=peer_fp,
+                folder_path=path, folder_name=root_name,
+            )
         return web.json_response({
-            "ok": True, "started": True, "mode": "manifest_push",
+            "ok": True, "started": True, "mode": mode,
+            "auto_routing": reasoning,
             "name": root_name,
             "local_path": str(path),
             "file_count": len(files),
