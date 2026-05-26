@@ -493,25 +493,66 @@ def test_error_toast_body_strips_internal_codes(index_html):
     assert "wire_version_mismatch" in body
 
 
-def test_folders_empty_state_has_add_a_folder_cta(index_html):
-    """The folders empty state used to be 'No folders synced
-    yet' + a passive description that mentioned 'CRDT' (jargon!).
-    Now it has a concrete CTA button that scrolls + focuses the
-    Add Folder form."""
-    # CRDT jargon out of the empty-state description.
+def test_folders_empty_state_points_to_form_below(index_html):
+    """The folders empty state must (1) avoid CRDT jargon, (2) be
+    accurate about where the Add form lives, and (3) NOT spawn an
+    orphan 'Add a folder now' CTA button as a sibling of the empty
+    state. The earlier orphan-button approach rendered as broken,
+    left-aligned text in the middle of the panel because the empty
+    state itself is centered while the appended sibling button was
+    not. The form is always visible at the bottom of the panel, so
+    the empty-state copy just needs to point users at it."""
+    # CRDT jargon stays out of the empty-state description.
     assert "CRDT detects concurrent edits" not in index_html, (
         "folders empty state still leaks 'CRDT' jargon; users "
         "have no context for what CRDT means"
     )
-    # Add CTA button is constructed programmatically + the
-    # textContent + scroll behavior must be present.
-    assert 'addCta.textContent = "Add a folder now"' in index_html, (
-        "folders empty state missing the 'Add a folder now' "
-        "CTA button that scrolls the user to the Add form"
+    # No orphan CTA button. The form is always visible directly
+    # below; an in-the-middle button just added visual noise.
+    assert 'addCta.textContent = "Add a folder now"' not in index_html, (
+        "the orphan 'Add a folder now' button is back. It rendered "
+        "as broken left-aligned text mid-panel and was confusing "
+        "users about where the add flow actually lives."
     )
-    # Verify the scroll-to-form behavior is wired.
-    assert 'folder-name' in index_html
-    assert 'scrollIntoView' in index_html
+    # Empty-state copy must accurately point users at the form
+    # below (NOT 'right above' — the form sits at the bottom of
+    # the panel, not the top).
+    assert "form just below" in index_html, (
+        "empty state must direct users to the form at the BOTTOM "
+        "of the panel; the previous 'right above' copy was wrong"
+    )
+    assert "is right above" not in index_html or (
+        "is right above" in index_html
+        and "form just below" in index_html
+    ), (
+        "stale 'right above' copy needs to be removed; the form "
+        "lives at the bottom of the folders panel"
+    )
+
+
+def test_folders_empty_state_hides_secondary_actions(index_html):
+    """When there are zero folders, the destructive 'Clear folder
+    traces' button + the 'refresh list' button serve no purpose —
+    nothing to clear, nothing to refresh. Pin that they get hidden
+    so the empty state has a single primary path (fill form, click
+    Add) instead of three buttons of cognitive load."""
+    idx = index_html.find("async function refreshFolders()")
+    assert idx > 0
+    body = index_html[idx:idx + 2000]
+    # Both buttons must be toggled by the empty-state branch.
+    assert "btn-clear-folder-traces" in body, (
+        "refreshFolders must hide btn-clear-folder-traces when "
+        "folders is empty; otherwise the destructive button is "
+        "showing with nothing to act on"
+    )
+    assert "btn-refresh-folders" in body, (
+        "refreshFolders must hide btn-refresh-folders when "
+        "folders is empty; nothing to refresh, just noise"
+    )
+    # Look for the gating pattern. Either an isEmpty flag set
+    # before the branch, OR a direct .length === 0 check applied
+    # to display style.
+    assert "isEmpty" in body or "length === 0" in body
 
 
 def test_settings_about_has_daemon_log_location_button(index_html):

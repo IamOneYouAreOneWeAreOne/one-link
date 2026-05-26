@@ -2311,7 +2311,12 @@
   .mini-actions { display: flex; gap: 8px; align-items: center; }
   .files .mini-actions {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    /* v0.21.x: layout adapts to the actual button count via
+       grid-template-columns auto-fill. Folders pane shipped 3
+       buttons in a 4-column grid which squeezed every label and
+       wrapped 'Clear folder traces' to 2 lines. auto-fill +
+       minmax keeps each cell wide enough for its label. */
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
     gap: 8px;
   }
   .mini-actions.wrap { flex-wrap: wrap; }
@@ -19408,28 +19413,20 @@
       const list = $("#folderlist");
       list.innerHTML = "";
       $("#folders-count").textContent = state.folders.length;
-      if (state.folders.length === 0) {
+      // v0.21.x: hide the secondary actions (Clear traces + Refresh)
+      // when there's nothing to act on. Keeps the empty state focused
+      // on the single primary path: fill in the form, click Add.
+      const clearBtn = document.getElementById("btn-clear-folder-traces");
+      const refreshBtn = document.getElementById("btn-refresh-folders");
+      const isEmpty = state.folders.length === 0;
+      if (clearBtn) clearBtn.style.display = isEmpty ? "none" : "";
+      if (refreshBtn) refreshBtn.style.display = isEmpty ? "none" : "";
+
+      if (isEmpty) {
         list.appendChild(richEmpty(
           "📂", "No folders synced yet",
-          "A synced folder updates both ways. Name it, pick where it lives on this computer, and click Add. The form is right above.",
+          "A synced folder updates both ways. Name it, pick where it lives on this computer, then click Add in the form just below.",
         ));
-        // v0.21.x: scroll the user to the Add Folder form so the
-        // 'add one above' callout is actually visible. On smaller
-        // viewports the empty-state can sit far below the form.
-        const addCta = document.createElement("button");
-        addCta.type = "button";
-        addCta.className = "btn-primary";
-        addCta.style.marginTop = "10px";
-        addCta.textContent = "Add a folder now";
-        addCta.onclick = (ev) => {
-          ev.preventDefault();
-          const nameInput = document.getElementById("folder-name");
-          if (nameInput) {
-            nameInput.scrollIntoView({ behavior: "smooth", block: "center" });
-            nameInput.focus();
-          }
-        };
-        list.appendChild(addCta);
         return;
       }
       for (const f of state.folders) {
