@@ -25014,6 +25014,16 @@
             }
           });
         }
+      } else if (m.type === "folder_send_retrying") {
+        // v0.21.x: folder send dropped mid-flight on a transient
+        // error (link drop, timeout). We're retrying. Receiver's
+        // chunk cache means resume is free; just need to wait the
+        // backoff + reconnect. Surface as a soft info toast.
+        toast(
+          `Retrying ${m.name || "folder"} (attempt ${m.attempt}/${m.max_attempts}, `
+            + `${m.backoff_seconds}s)`,
+          "info", 3500,
+        );
       } else if (m.type === "folder_send_declined_by_peer") {
         // v0.21.x: receiver explicitly declined our folder send.
         // The daemon already cancelled any in-flight task + revoked

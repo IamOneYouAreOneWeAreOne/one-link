@@ -14744,6 +14744,41 @@ class UIServer:
         )
         return "manifest_push", reasoning
 
+    # v0.21.x: retry policy for mid-folder-send disconnects. push_folder_
+    # _to_peer is one connection cycle; if the link drops at 80%, the
+    # receiver has 80% of the chunks in cache + the next push will only
+    # need the missing 20%. Wrapping in a retry loop turns this into
+    # transparent resume.
+    _FOLDER_SEND_MAX_RETRIES = 3
+    _FOLDER_SEND_BACKOFF_SECONDS = (1.0, 5.0, 15.0)
+
+    def _is_transient_folder_send_error(self, result_or_exc) -> bool:
+        """A folder-send result/exception is transient (worth retrying)
+        if it's network-y: dropped connection, timeout, peer offline.
+        Non-transient: capability denied, folder not found, trust
+        rejected — retrying won't help."""
+        if isinstance(result_or_exc, Exception):
+            name = type(result_or_exc).__name__
+            return name in {
+                "ConnectionError", "ConnectionResetError",
+                "ConnectionAbortedError", "TimeoutError",
+                "asyncio.TimeoutError",
+                "OSError", "BrokenPipeError",
+                "IncompleteReadError",
+            }
+        if isinstance(result_or_exc, dict):
+            err = (result_or_exc.get("error") or "").lower()
+            if not err:
+                return False
+            for pat in (
+                "timeout", "connection", "reset", "closed",
+                "broken pipe", "peer not online", "unreachable",
+                "no route",
+            ):
+                if pat in err:
+                    return True
+        return False
+
     async def _send_folder_manifest_push(
         self, *, peer, peer_fp: str, folder_name: str,
         scope: str, ident: str,
@@ -14756,14 +14791,65 @@ class UIServer:
             they don't have the folder; otherwise diffs + pulls deltas)
           - Streams blobs requested via MANIFEST_WANTS reply path
           - Cleans up the temp grant after completion
-        Broadcasts folder_send_complete with mode='manifest_push'.
+
+        v0.21.x RESUME: wraps the push in a bounded retry loop. On
+        transient failure (network-y errors) waits a backoff +
+        retries; the next attempt only needs to send blobs the
+        receiver STILL doesn't have (chunk cache provides the
+        free-resume substrate). Broadcasts folder_send_retrying
+        between attempts so the UI shows what's happening.
         """
         registry = self._ensure_folder_send_registry()
         key = self._folder_send_key(scope, ident, peer_fp)
+        last_result = None
         try:
-            result = await self.daemon.send_folder_one_shot_via_manifest(
-                peer, folder_name,
-            )
+            for attempt in range(1, self._FOLDER_SEND_MAX_RETRIES + 1):
+                try:
+                    result = await self.daemon.send_folder_one_shot_via_manifest(
+                        peer, folder_name,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    last_result = e
+                    if not self._is_transient_folder_send_error(e):
+                        raise
+                    if attempt >= self._FOLDER_SEND_MAX_RETRIES:
+                        raise
+                else:
+                    if result.get("ok") or not self._is_transient_folder_send_error(result):
+                        last_result = result
+                        break
+                    last_result = result
+                    if attempt >= self._FOLDER_SEND_MAX_RETRIES:
+                        break
+                # Schedule the retry. Broadcast so UI surfaces it.
+                backoff = self._FOLDER_SEND_BACKOFF_SECONDS[
+                    min(attempt - 1, len(self._FOLDER_SEND_BACKOFF_SECONDS) - 1)
+                ]
+                self.broadcast({
+                    "type": "folder_send_retrying",
+                    "name": folder_name, "peer_fp": peer_fp,
+                    "scope": scope, "mode": "manifest_push",
+                    "attempt": attempt,
+                    "max_attempts": self._FOLDER_SEND_MAX_RETRIES,
+                    "backoff_seconds": backoff,
+                })
+                log.info(
+                    "folder send %s/%s attempt %d/%d failed (transient); "
+                    "retrying in %.1fs",
+                    scope, ident, attempt,
+                    self._FOLDER_SEND_MAX_RETRIES, backoff,
+                )
+                await asyncio.sleep(backoff)
+            result = last_result if isinstance(last_result, dict) else {
+                "ok": False,
+                "error": (
+                    f"folder send failed after {self._FOLDER_SEND_MAX_RETRIES} "
+                    f"attempts: {last_result}"
+                ),
+                "blobs_sent": 0,
+            }
             self.broadcast({
                 "type": "folder_send_complete",
                 "name": folder_name,
@@ -14808,13 +14894,61 @@ class UIServer:
     ) -> None:
         """Ad-hoc folder MANIFEST_PUSH wrapper. Calls the daemon-level
         send_adhoc_folder_one_shot_via_manifest which handles the
-        temp-folder-registration dance."""
+        temp-folder-registration dance.
+
+        v0.21.x: bounded retry loop for transient errors. Same
+        free-resume substrate (receiver's chunk cache) as the regular
+        path; we just need to re-attempt on link drops."""
         registry = self._ensure_folder_send_registry()
         key = self._folder_send_key(scope, ident, peer_fp)
+        last_result = None
         try:
-            result = await self.daemon.send_adhoc_folder_one_shot_via_manifest(
-                peer, folder_path, folder_name,
-            )
+            for attempt in range(1, self._FOLDER_SEND_MAX_RETRIES + 1):
+                try:
+                    result = await self.daemon.send_adhoc_folder_one_shot_via_manifest(
+                        peer, folder_path, folder_name,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    last_result = e
+                    if not self._is_transient_folder_send_error(e):
+                        raise
+                    if attempt >= self._FOLDER_SEND_MAX_RETRIES:
+                        raise
+                else:
+                    if result.get("ok") or not self._is_transient_folder_send_error(result):
+                        last_result = result
+                        break
+                    last_result = result
+                    if attempt >= self._FOLDER_SEND_MAX_RETRIES:
+                        break
+                backoff = self._FOLDER_SEND_BACKOFF_SECONDS[
+                    min(attempt - 1, len(self._FOLDER_SEND_BACKOFF_SECONDS) - 1)
+                ]
+                self.broadcast({
+                    "type": "folder_send_retrying",
+                    "name": folder_name, "peer_fp": peer_fp,
+                    "scope": scope, "mode": "manifest_push",
+                    "attempt": attempt,
+                    "max_attempts": self._FOLDER_SEND_MAX_RETRIES,
+                    "backoff_seconds": backoff,
+                })
+                log.info(
+                    "adhoc folder send %s/%s attempt %d/%d failed (transient); "
+                    "retrying in %.1fs",
+                    scope, ident, attempt,
+                    self._FOLDER_SEND_MAX_RETRIES, backoff,
+                )
+                await asyncio.sleep(backoff)
+            result = last_result if isinstance(last_result, dict) else {
+                "ok": False,
+                "error": (
+                    f"folder send failed after {self._FOLDER_SEND_MAX_RETRIES} "
+                    f"attempts: {last_result}"
+                ),
+                "blobs_sent": 0,
+            }
             self.broadcast({
                 "type": "folder_send_complete",
                 "name": folder_name,
