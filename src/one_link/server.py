@@ -14584,6 +14584,19 @@ class UIServer:
         """Background task: send each file, broadcast completion +
         dedup summary, clean up the task entry. Cancellable via
         task.cancel() from api_send_folder_cancel.
+
+        FAST-PATH DEDUP (v0.21.x): before the per-file send loop, do
+        ONE BLOB_INVENTORY_QUERY for every file in the batch. Any
+        file whose whole-file BLAKE3 the peer reports as already
+        present is COMPLETELY SKIPPED — no FILE_OFFER, no FILE_WANTS,
+        no round-trip whatsoever. For a folder that's already fully
+        on the peer this collapses N per-file round-trips (~50ms
+        each on LAN, more on WAN) to a single batched probe.
+
+        Files the peer does NOT have fully still go through send_file
+        as before; chunk-level CDC dedup kicks in for partial matches
+        so re-sending a 1 GB file with a 1-paragraph edit still only
+        streams the changed chunks.
         """
         registry = self._ensure_folder_send_registry()
         key = self._folder_send_key(scope, ident, peer_fp)
@@ -14592,18 +14605,58 @@ class UIServer:
         dedup_files = 0
         dedup_bytes = 0
         try:
-            for path_obj, rel in files:
+            # Pre-flight: which whole-file blobs does the peer already
+            # have? hash_path is cheap (cached via file_index_cache);
+            # the query itself is one round-trip for up to 2048 hashes.
+            from one_link.cdc import hash_path
+            peer_has: set[str] = set()
+            file_hashes: list[tuple[Path, str, str | None]] = []
+            try:
+                # Compute hashes off the event loop so a folder with
+                # thousands of files doesn't stall the loop.
+                def _compute_hashes() -> list[tuple[Path, str, str | None]]:
+                    out: list[tuple[Path, str, str | None]] = []
+                    for p, rel in files:
+                        try:
+                            out.append((p, rel, hash_path(p)))
+                        except Exception:
+                            out.append((p, rel, None))
+                    return out
+                file_hashes = await asyncio.to_thread(_compute_hashes)
+                valid_hashes = [h for _, _, h in file_hashes if h]
+                if valid_hashes:
+                    inv = await self.daemon.query_peer_blob_inventory(
+                        peer, valid_hashes,
+                    )
+                    if inv is not None:
+                        peer_has = inv
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning(
+                    "folder send %s/%s: pre-flight dedup probe failed: %s "
+                    "(falling through to per-file send_file)",
+                    scope, ident, e,
+                )
+                file_hashes = [(p, rel, None) for p, rel in files]
+            # Per-file send loop with fast-path for dedup hits.
+            for path_obj, rel, blob_hash in file_hashes:
                 try:
+                    if blob_hash and blob_hash in peer_has:
+                        # Fast path: peer already has this file
+                        # complete. Skip FILE_OFFER round-trip
+                        # entirely.
+                        dedup_files += 1
+                        with contextlib.suppress(OSError):
+                            dedup_bytes += path_obj.stat().st_size
+                        continue
                     result = await self.daemon.send_file(
                         peer, path_obj, rel_path=rel,
                     )
                     sent += 1
-                    # send_file may return progress / dedup hints; if
-                    # the receiver answered FILE_WANTS=[] the
-                    # transfer recorded zero progress_bytes despite
-                    # 'sent'. Use 'progress_bytes == 0' as a dedup
-                    # heuristic. Some pipelines return None metadata;
-                    # treat absence as 'unknown'.
+                    # Chunk-level dedup heuristic for files where the
+                    # peer had SOME but not all chunks (BLOB_INVENTORY
+                    # only reports whole-file matches).
                     if isinstance(result, dict):
                         meta = result.get("metadata") or {}
                         pb = result.get("progress_bytes")
@@ -14640,7 +14693,7 @@ class UIServer:
                 ),
                 "sent": sent,
                 "failed": failed,
-                "remaining": max(0, len(files) - sent - failed),
+                "remaining": max(0, len(files) - sent - failed - dedup_files),
             })
             raise
         finally:

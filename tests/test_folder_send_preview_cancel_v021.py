@@ -360,6 +360,11 @@ async def test_cancel_400_missing_peer_fp(preview_ctx):
 
 @pytest.mark.asyncio
 async def test_adhoc_send_folder_happy_path(preview_ctx):
+    """Happy path with FAST-PATH dedup active. The fixture's
+    query_peer_blob_inventory stub reports known.txt's hash as
+    already-on-peer, so the background task short-circuits that file
+    BEFORE calling send_file — only the 2 new files go through the
+    full send pipeline. dedup_files is bookkept on the way out."""
     r = await preview_ctx["client"].post(
         "/api/fs/send-folder",
         headers=_h(preview_ctx["token"]),
@@ -374,15 +379,70 @@ async def test_adhoc_send_folder_happy_path(preview_ctx):
     assert body["started"] is True
     assert body["file_count"] == 3
     assert body["name"] == "to_send"
-    await asyncio.sleep(0.05)
-    # send_file was awaited per file
-    assert preview_ctx["daemon"].send_file.await_count == 3
-    # rel_paths prefixed with the folder leaf name.
+    # Wait for the background task to walk + send the non-dedup'd files.
+    for _ in range(50):
+        await asyncio.sleep(0.02)
+        if preview_ctx["daemon"].send_file.await_count >= 2:
+            break
+    # Only 2 of the 3 files reach send_file — the third is dedup'd
+    # via the pre-flight fast-path with zero round-trips.
+    assert preview_ctx["daemon"].send_file.await_count == 2
     rel_paths = sorted(
         c.kwargs["rel_path"]
         for c in preview_ctx["daemon"].send_file.await_args_list
     )
-    assert rel_paths == ["to_send/known.txt", "to_send/new1.txt", "to_send/new2.txt"]
+    assert rel_paths == ["to_send/new1.txt", "to_send/new2.txt"], (
+        f"known.txt should have been skipped via fast-path; "
+        f"actual rel_paths: {rel_paths}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_adhoc_send_folder_fast_path_skips_all_dedup_files(preview_ctx):
+    """When EVERY file in the folder is already on the peer, the
+    fast-path skips send_file entirely — zero per-file FILE_OFFER
+    round-trips. This is the big win for re-send-same-folder."""
+    from one_link.cdc import hash_path
+    # Make every file's hash "already on peer".
+    root = preview_ctx["folder_root"]
+    all_hashes = {hash_path(p) for p in root.rglob("*") if p.is_file()}
+    preview_ctx["daemon"].query_peer_blob_inventory = AsyncMock(
+        return_value=all_hashes,
+    )
+    r = await preview_ctx["client"].post(
+        "/api/fs/send-folder",
+        headers=_h(preview_ctx["token"]),
+        json={
+            "peer_fp": preview_ctx["peer_fp"],
+            "local_path": str(root),
+        },
+    )
+    assert r.status == 200
+    await asyncio.sleep(0.1)
+    # Zero send_file calls — fast-path covered all files.
+    assert preview_ctx["daemon"].send_file.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_adhoc_send_folder_no_fast_path_when_probe_fails(preview_ctx):
+    """When BLOB_INVENTORY_QUERY returns None (peer doesn't speak
+    the protocol / timeout), every file still goes through send_file
+    — chunk-level dedup at FILE_OFFER time is the fallback."""
+    preview_ctx["daemon"].query_peer_blob_inventory = AsyncMock(return_value=None)
+    r = await preview_ctx["client"].post(
+        "/api/fs/send-folder",
+        headers=_h(preview_ctx["token"]),
+        json={
+            "peer_fp": preview_ctx["peer_fp"],
+            "local_path": str(preview_ctx["folder_root"]),
+        },
+    )
+    assert r.status == 200
+    for _ in range(50):
+        await asyncio.sleep(0.02)
+        if preview_ctx["daemon"].send_file.await_count >= 3:
+            break
+    assert preview_ctx["daemon"].send_file.await_count == 3
 
 
 @pytest.mark.asyncio
