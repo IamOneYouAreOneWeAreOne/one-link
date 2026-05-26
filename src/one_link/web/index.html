@@ -11352,6 +11352,87 @@
     </div>
   </div>
 
+  <!-- v0.21.x Ship 4: per-folder settings modal — ignored patterns
+       (selective-sync), max file size, conflict policy. Opens via
+       the Settings (⚙) button on each folder row. -->
+  <div class="modal-backdrop" id="folder-settings-backdrop">
+    <div class="modal" style="max-width:560px;">
+      <h2 style="margin:0 0 4px;">Sync settings</h2>
+      <div class="folder-settings-target" id="folder-settings-target"></div>
+
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Skip these files + folders</span></div>
+        <p class="settings-help">
+          Glob patterns, one per line. Anything that matches gets
+          left out of sync. <code>node_modules/</code> excludes that
+          directory, <code>*.log</code> excludes log files anywhere.
+        </p>
+        <textarea id="folder-settings-ignored"
+                  placeholder="node_modules/&#10;.git/&#10;*.log&#10;.DS_Store"
+                  rows="6"
+                  style="width:100%; font-family:var(--font-mono,ui-monospace,Menlo,monospace); font-size:12px;"></textarea>
+        <div class="mini-actions" style="margin-top:6px; flex-wrap:wrap; gap:4px;">
+          <button type="button" class="btn-ghost btn-sm" data-preset="dev"
+                  title="Add common developer patterns: node_modules, .git, __pycache__, dist, build, .venv">
+            + Dev (node_modules, .git, …)
+          </button>
+          <button type="button" class="btn-ghost btn-sm" data-preset="osjunk"
+                  title="Add OS-generated junk: .DS_Store, Thumbs.db, desktop.ini">
+            + OS junk
+          </button>
+          <button type="button" class="btn-ghost btn-sm" data-preset="logs"
+                  title="Add *.log, *.tmp, *.swp, *.bak">
+            + Logs + temp
+          </button>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-h"><span>Max file size</span></div>
+        <p class="settings-help">
+          Files larger than this won't sync. Useful for staying under
+          a quota or skipping huge video files. Set to 0 for no
+          limit.
+        </p>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input type="number" id="folder-settings-maxmb" min="0" step="1"
+                 style="flex:1; max-width:160px;"
+                 aria-label="Maximum file size in megabytes" />
+          <span style="color: var(--text-dim); font-size: 12px;">MB (0 = unlimited)</span>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-h"><span>When both devices change a file at the same time</span></div>
+        <p class="settings-help">
+          The CRDT detects when you and a paired device edited the
+          same file concurrently. Pick how to break the tie. You can
+          always change this later, and use the conflicts banner to
+          override per-file.
+        </p>
+        <div class="settings-row">
+          <label class="cap-toggle" style="display:flex; align-items:center; gap:8px; cursor:pointer; padding:8px;" for="cp-latest-wins">
+            <input type="radio" name="conflict-policy" value="latest-wins" id="cp-latest-wins" aria-label="Conflict policy: newest wins" />
+            <span><strong>Newest wins</strong> — whichever device saved the file last keeps it. (Recommended.)</span>
+          </label>
+          <label class="cap-toggle" style="display:flex; align-items:center; gap:8px; cursor:pointer; padding:8px;" for="cp-local">
+            <input type="radio" name="conflict-policy" value="local-priority" id="cp-local" aria-label="Conflict policy: this device wins" />
+            <span><strong>This device wins</strong> — your local edits always trump the peer's.</span>
+          </label>
+          <label class="cap-toggle" style="display:flex; align-items:center; gap:8px; cursor:pointer; padding:8px;" for="cp-peer">
+            <input type="radio" name="conflict-policy" value="peer-priority" id="cp-peer" aria-label="Conflict policy: peer wins" />
+            <span><strong>Peer wins</strong> — the other device's edits always trump yours.</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="actions" style="margin-top: 16px; display:flex; gap:8px; justify-content:flex-end;">
+        <button class="btn-ghost" id="folder-settings-close">Cancel</button>
+        <button class="btn-primary" id="folder-settings-save">Save</button>
+      </div>
+    </div>
+  </div>
+
   <!-- v0.21.x: inline folder file browser. Opens on folder-name
        click in the Folders panel. Shows the file tree with per-file
        sync status, supports click-to-preview for text + image +
@@ -19877,8 +19958,20 @@
             toast(`Remove didn't work: ${e.message || e}`, "bad", 6000);
           }
         };
+        // v0.21.x Ship 4: per-folder settings (ignored patterns,
+        // max file size, conflict policy). Sits between Sync and
+        // Remove because it's tuning, not a primary action.
+        const settings = el("button", null, "Settings");
+        settings.title = (
+          "Sync settings: which subfolders / files to skip "
+          + "(selective sync), max file size, and how to break "
+          + "concurrent-edit ties."
+        );
+        settings.setAttribute("aria-label", `Sync settings for ${f.name}`);
+        settings.onclick = () => openFolderSettings(f);
         actions.appendChild(share);
         actions.appendChild(sync);
+        actions.appendChild(settings);
         actions.appendChild(remove);
         // v0.21.x: actions live INSIDE .content (stacked below the
         // meta) instead of in a third grid column. Gives the meta
@@ -20386,6 +20479,76 @@
       err.className = "folder-browser-preview-empty";
       err.textContent = `Couldn't preview: ${errorToastBody(e)}`;
       body.appendChild(err);
+    }
+  }
+
+  // v0.21.x Ship 4: per-folder sync settings (selective sync via
+  // ignored_patterns + max_file_bytes + conflict_policy).
+  const _IGNORE_PRESETS = {
+    dev: [
+      "node_modules/", ".git/", "__pycache__/", "dist/", "build/",
+      "target/", ".venv/", "venv/", ".tox/", ".mypy_cache/",
+      ".pytest_cache/", ".next/", ".cache/",
+    ],
+    osjunk: [
+      ".DS_Store", "Thumbs.db", "desktop.ini", "$RECYCLE.BIN/",
+    ],
+    logs: ["*.log", "*.tmp", "*.swp", "*.swo", "*.bak", "*~"],
+  };
+
+  function openFolderSettings(folder) {
+    state.folderSettingsTarget = folder.name;
+    const targetEl = $("#folder-settings-target");
+    targetEl.innerHTML = "";
+    const head = document.createElement("div");
+    head.style.fontSize = "12px";
+    head.style.color = "var(--text-dim)";
+    head.style.marginBottom = "12px";
+    head.textContent = `${folder.name} · ${folder.local_path}`;
+    targetEl.appendChild(head);
+    const patterns = Array.isArray(folder.ignored_patterns) ? folder.ignored_patterns : [];
+    $("#folder-settings-ignored").value = patterns.join("\n");
+    const maxBytes = folder.max_file_bytes;
+    $("#folder-settings-maxmb").value = maxBytes
+      ? Math.round(maxBytes / (1024 * 1024))
+      : 0;
+    const policy = folder.conflict_policy || "latest-wins";
+    const radio = document.querySelector(`input[name="conflict-policy"][value="${policy}"]`);
+    if (radio) radio.checked = true;
+    $("#folder-settings-backdrop").classList.add("show");
+    document.body.classList.add("modal-open");
+  }
+
+  function closeFolderSettings() {
+    $("#folder-settings-backdrop").classList.remove("show");
+    document.body.classList.remove("modal-open");
+    state.folderSettingsTarget = null;
+  }
+
+  async function saveFolderSettings() {
+    const name = state.folderSettingsTarget;
+    if (!name) return;
+    const ignored = ($("#folder-settings-ignored").value || "")
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    let maxMb = Number($("#folder-settings-maxmb").value) || 0;
+    if (maxMb < 0) maxMb = 0;
+    const maxBytes = maxMb > 0 ? maxMb * 1024 * 1024 : null;
+    const policyEl = document.querySelector('input[name="conflict-policy"]:checked');
+    const policy = policyEl ? policyEl.value : "latest-wins";
+    const body = {
+      ignored_patterns: ignored,
+      max_file_bytes: maxBytes,
+      conflict_policy: policy,
+    };
+    try {
+      await api.post(`/api/folders/${encodeURIComponent(name)}/policy`, body);
+      toast("Sync settings saved.", "good", 3500);
+      closeFolderSettings();
+      await refreshFolders();
+    } catch (e) {
+      toast(`Couldn't save: ${errorToastBody(e)}`, "bad", 6000);
     }
   }
 
@@ -30779,6 +30942,28 @@
     if ($("#folder-browser-backdrop")?.classList.contains("show")) {
       closeFolderBrowser();
     }
+    if ($("#folder-settings-backdrop")?.classList.contains("show")) {
+      closeFolderSettings();
+    }
+  });
+  // v0.21.x Ship 4: folder settings modal handlers.
+  $("#folder-settings-backdrop")?.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeFolderSettings();
+  });
+  $("#folder-settings-close")?.addEventListener("click", closeFolderSettings);
+  $("#folder-settings-save")?.addEventListener("click", saveFolderSettings);
+  // Preset buttons: append to current ignored list, de-duped.
+  document.querySelectorAll("#folder-settings-backdrop [data-preset]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const preset = btn.dataset.preset;
+      const patterns = _IGNORE_PRESETS[preset] || [];
+      const ta = $("#folder-settings-ignored");
+      const current = new Set(
+        (ta.value || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
+      );
+      for (const p of patterns) current.add(p);
+      ta.value = [...current].join("\n");
+    });
   });
   $("#btn-refresh-mesh").onclick = async () => {
     await refreshTransfers();

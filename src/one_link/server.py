@@ -14047,6 +14047,12 @@ class UIServer:
                 "created_ms": f["created_ms"],
                 "files": local,
                 "in_store": in_store,
+                # v0.21.x: surface policy fields so the UI's
+                # per-folder Settings modal can pre-fill them on
+                # open without a second roundtrip.
+                "ignored_patterns": f.get("ignored_patterns") or [],
+                "max_file_bytes": f.get("max_file_bytes"),
+                "conflict_policy": f.get("conflict_policy") or "latest-wins",
             })
         return web.json_response({"folders": out})
 
