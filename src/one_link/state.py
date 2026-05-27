@@ -547,9 +547,11 @@ class State:
         # shutdown (crash / power loss / first boot) flags a deferred
         # check, which the daemon then runs in a BACKGROUND thread after
         # the UI is already serving — see run_deferred_integrity_check().
-        self._clean_marker = self.db_path.with_name(
-            self.db_path.name + ".clean"
-        )
+        # self.db_path may be a str (some callers pass a string path);
+        # coerce locally so .with_name works without changing its type
+        # for the rest of the class.
+        _dbp = Path(self.db_path)
+        self._clean_marker = _dbp.with_name(_dbp.name + ".clean")
         prior_clean = False
         with contextlib.suppress(Exception):
             prior_clean = self._clean_marker.is_file()
@@ -6505,6 +6507,55 @@ class State:
             )
             assert cur.lastrowid is not None, "INSERT did not return a rowid"
             return int(cur.lastrowid)
+
+    # folder_audit retention. The table is BOTH an append-only record of
+    # peer write attempts AND the blob->peer index for swarm-pull
+    # fallback (list_peers_with_blob). Continuous folder sync appends an
+    # event per file per cycle, so without a cap it grows unbounded —
+    # observed at ~400k rows / 222 MB on a long-running two-machine pair,
+    # which bloated the DB (and made the boot integrity check crawl).
+    # Keep the newest MAX_FOLDER_AUDIT_ROWS; prune the oldest in bounded
+    # batches so a single DELETE never holds the write lock for long
+    # (secure_delete=ON zeroes every pruned row).
+    MAX_FOLDER_AUDIT_ROWS = 20_000
+    # Small batch so each DELETE's write-lock hold is short (~0.2s) and
+    # never stalls the daemon's event loop long enough to drop a peer.
+    # A backlog clears over several minutes of prune-loop ticks; steady
+    # state deletes ~0 rows per tick (instant).
+    _FOLDER_AUDIT_PRUNE_BATCH = 2_000
+
+    def prune_folder_audit(
+        self,
+        keep_max: Optional[int] = None,
+        batch: Optional[int] = None,
+    ) -> int:
+        """Trim folder_audit to at most keep_max rows, deleting up to
+        ``batch`` of the oldest per call. Returns the number deleted.
+        Call repeatedly (e.g. once per prune-loop tick) to clear a large
+        backlog incrementally and then hold the cap cheaply. The newest
+        rows are kept, so the swarm-pull blob->peer index stays warm for
+        recently-synced blobs."""
+        keep_max = self.MAX_FOLDER_AUDIT_ROWS if keep_max is None else keep_max
+        batch = self._FOLDER_AUDIT_PRUNE_BATCH if batch is None else batch
+        with self._write_lock:
+            # id of the (keep_max+1)-th newest row; everything with id
+            # <= cutoff is beyond the cap and prunable.
+            row = self._conn.execute(
+                "SELECT id FROM folder_audit ORDER BY id DESC "
+                "LIMIT 1 OFFSET ?",
+                (keep_max,),
+            ).fetchone()
+            if row is None:
+                return 0  # at or below the cap; nothing to prune
+            cutoff_id = row[0]
+            cur = self._conn.execute(
+                "DELETE FROM folder_audit WHERE id IN ("
+                "  SELECT id FROM folder_audit WHERE id <= ? "
+                "  ORDER BY id ASC LIMIT ?"
+                ")",
+                (cutoff_id, batch),
+            )
+            return cur.rowcount or 0
 
     def list_peers_with_blob(
         self,

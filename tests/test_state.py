@@ -696,3 +696,54 @@ def test_unclean_shutdown_runs_check_and_passes(tmp_path: Path):
         assert s2.get_setting("k") == "v"  # data intact
     finally:
         s2.close()
+
+
+# ───────── folder_audit retention ─────────────────────────────────
+#
+# folder_audit is append-only AND the swarm-pull blob->peer index.
+# Continuous sync appends a row per file per cycle, so uncapped it grew
+# to ~400k rows / 222 MB. prune_folder_audit caps it, keeping the newest
+# rows (so recent blob->peer mappings stay warm) and deleting the oldest
+# in bounded batches.
+
+
+def _seed_folder_audit(state: State, n: int) -> None:
+    with state._write_lock:
+        state._conn.executemany(
+            "INSERT INTO folder_audit(ts_ms, folder_name, root_id, "
+            "peer_fp, action, file_path) VALUES(?,?,?,?,?,?)",
+            [(1000 + i, "f", "r", "aa" * 32, "write", f"file{i}.bin")
+             for i in range(n)],
+        )
+
+
+def test_prune_folder_audit_caps_to_keep_max_in_batches(state: State):
+    _seed_folder_audit(state, 5000)
+    # keep_max=1000, batch=2000: each call deletes up to 2000 of the
+    # oldest beyond the cap.
+    deleted1 = state.prune_folder_audit(keep_max=1000, batch=2000)
+    assert deleted1 == 2000
+    deleted2 = state.prune_folder_audit(keep_max=1000, batch=2000)
+    assert deleted2 == 2000  # 4000 over the cap; second batch clears more
+    deleted3 = state.prune_folder_audit(keep_max=1000, batch=2000)
+    assert deleted3 == 0  # now exactly at the cap
+    remaining = state._conn.execute(
+        "SELECT COUNT(*) FROM folder_audit"
+    ).fetchone()[0]
+    assert remaining == 1000
+    # The NEWEST rows are the ones kept (highest ids / latest files).
+    kept_paths = {
+        r[0] for r in state._conn.execute(
+            "SELECT file_path FROM folder_audit"
+        ).fetchall()
+    }
+    assert "file4999.bin" in kept_paths  # newest kept
+    assert "file0.bin" not in kept_paths  # oldest pruned
+
+
+def test_prune_folder_audit_noop_below_cap(state: State):
+    _seed_folder_audit(state, 50)
+    assert state.prune_folder_audit(keep_max=20000) == 0
+    assert state._conn.execute(
+        "SELECT COUNT(*) FROM folder_audit"
+    ).fetchone()[0] == 50

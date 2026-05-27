@@ -332,7 +332,13 @@ def test_launcher_prefers_control_reported_ui_port(monkeypatch):
     from one_link.build_identity import runtime_build_identity
 
     _sf = runtime_build_identity()["source_fingerprint"]
-    monkeypatch.setattr(app_mod.daemon_mod, "read_control_port", lambda: 43210)
+    # read_control_port now takes clear_stale (the launcher's detection
+    # poll passes clear_stale=False so it never deletes a booting
+    # daemon's control.port). The mock must accept it.
+    monkeypatch.setattr(
+        app_mod.daemon_mod, "read_control_port",
+        lambda clear_stale=True: 43210,
+    )
     monkeypatch.setattr(app_mod, "_alive", lambda port: port == 43210)
     monkeypatch.setattr(app_mod.server_mod, "read_ui_token", lambda: "token")
     monkeypatch.setattr(

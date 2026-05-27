@@ -23597,6 +23597,17 @@ class Daemon:
                     # chunk, so this only catches actually-stuck rows.
                     with contextlib.suppress(Exception):
                         self._reap_stuck_transfers()
+                    # folder_audit retention. Continuous sync appends an
+                    # audit row per file per cycle; uncapped it grew to
+                    # ~400k rows / 222 MB on a long-running pair. Trim a
+                    # bounded batch of the oldest each tick (run in a
+                    # worker thread — the DELETE zeroes secure_delete
+                    # pages and we don't want it on the event loop).
+                    if self.state is not None:
+                        with contextlib.suppress(Exception):
+                            await asyncio.to_thread(
+                                self.state.prune_folder_audit
+                            )
                     with contextlib.suppress(Exception):
                         self._schedule_due_transfer_retries()
                     with contextlib.suppress(Exception):
