@@ -27,6 +27,54 @@ from typing import Iterator
 import pytest
 
 
+# v0.21.x: gate the browser E2E suite behind an explicit opt-in.
+#
+# These Playwright (chromium) tests require a real browser + a built
+# UI and drive a live daemon. Playwright's sync driver runs its own
+# event loop; running it in the SAME pytest process as the ~7000
+# unit/integration tests leaves a loop active that pytest-asyncio's
+# per-test runner then trips over ("Runner.run() cannot be called
+# from a running event loop"), cascading into 500+ spurious setup
+# errors on every async test that runs afterward. This is a well-
+# known upstream pytest-playwright / pytest-asyncio coexistence
+# limitation, not a defect in either our product or these tests.
+#
+# The correct architecture (used by virtually every project with a
+# browser E2E layer) is to run the browser suite in its OWN session:
+#
+#     ONE_LINK_RUN_BROWSER_E2E=1 pytest tests/e2e/
+#
+# A bare ``pytest tests/`` (the unit/integration gate) skips them, so
+# the unit run stays green AND fully isolated from the Playwright
+# loop. The daemon_pair integration tests (tests/test_*_e2e.py) are
+# NOT browser tests and continue to run in the normal suite.
+_BROWSER_E2E_ENV = "ONE_LINK_RUN_BROWSER_E2E"
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip every test under tests/e2e/ unless the opt-in env flag is
+    set. Skipping at collection time means the Playwright ``page``
+    fixture never starts its event loop, so nothing leaks into the
+    rest of the session."""
+    if os.environ.get(_BROWSER_E2E_ENV) == "1":
+        return
+    skip_browser = pytest.mark.skip(
+        reason=(
+            "browser E2E gated; run with "
+            f"{_BROWSER_E2E_ENV}=1 pytest tests/e2e/ "
+            "(Playwright loop is isolated from the unit suite)"
+        ),
+    )
+    here = Path(__file__).resolve().parent
+    for item in items:
+        try:
+            item_path = Path(str(item.fspath)).resolve()
+        except Exception:
+            continue
+        if here in item_path.parents or item_path.parent == here:
+            item.add_marker(skip_browser)
+
+
 @dataclass
 class LiveDaemon:
     home: Path
