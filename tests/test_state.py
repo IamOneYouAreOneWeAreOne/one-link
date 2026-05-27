@@ -632,3 +632,67 @@ def test_delete_setting(state: State):
     state.set_setting("k", "v")
     state.delete_setting("k")
     assert state.get_setting("k") is None
+
+
+# ───────── deferred boot integrity check (dirty-bit) ───────────────
+#
+# PRAGMA quick_check on an encrypted 200 MB+ state.db is 13-18s of
+# full-file decrypt. It used to run inline in State() on EVERY boot and
+# dominated startup. It now runs ONLY after an unclean shutdown, off the
+# boot path. These pin the dirty-bit state machine.
+
+
+def test_first_boot_flags_integrity_check(tmp_path: Path):
+    """A brand-new DB (no clean marker) is treated as needing a check."""
+    s = State(db_path=tmp_path / "state.db")
+    try:
+        assert s._needs_integrity_check is True
+        # The marker is absent during a run (removed on open).
+        assert not s._clean_marker.exists()
+    finally:
+        s.close()
+
+
+def test_clean_close_then_reopen_skips_check(tmp_path: Path):
+    """Clean close writes the marker; the next open sees it, skips the
+    check, and the deferred check is a no-op."""
+    db = tmp_path / "state.db"
+    s1 = State(db_path=db)
+    s1.close()
+    assert s1._clean_marker.exists(), "clean close must write the marker"
+
+    s2 = State(db_path=db)
+    try:
+        assert s2._needs_integrity_check is False
+        assert s2.run_deferred_integrity_check() == "skipped"
+        # Opening removed the marker again (so a crash THIS run is caught).
+        assert not s2._clean_marker.exists()
+    finally:
+        s2.close()
+
+
+def test_unclean_shutdown_runs_check_and_passes(tmp_path: Path):
+    """Simulate a crash: open cleanly, then abandon the next session
+    WITHOUT State.close() (marker stays absent), reopen. The reopen
+    flags the check; running it returns 'ok' on a healthy DB and then
+    won't re-run until the next unclean boot."""
+    db = tmp_path / "state.db"
+    s1 = State(db_path=db)
+    s1.set_setting("k", "v")  # write something real
+    s1.close()  # clean — marker written
+
+    # Crash sim: reopen (clears marker), then hard-close the raw conn
+    # WITHOUT State.close() so the marker is never rewritten.
+    s_crash = State(db_path=db)
+    assert s_crash._needs_integrity_check is False  # prior close was clean
+    s_crash._conn.close()  # hard close, NOT State.close() → no marker
+
+    s2 = State(db_path=db)
+    try:
+        assert s2._needs_integrity_check is True
+        assert s2.run_deferred_integrity_check() == "ok"
+        # Second call is now a no-op for this run.
+        assert s2.run_deferred_integrity_check() == "skipped"
+        assert s2.get_setting("k") == "v"  # data intact
+    finally:
+        s2.close()

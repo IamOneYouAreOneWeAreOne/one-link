@@ -23544,6 +23544,21 @@ class Daemon:
             # Flip them to waiting/retryable now (within ms of boot).
             with contextlib.suppress(Exception):
                 self._reconcile_orphaned_transfers_on_boot()
+            # Deferred DB integrity check. quick_check on an encrypted
+            # 200 MB+ state.db is 13-18s of full-file decrypt — it used
+            # to run inline in State() and dominated boot. It now runs
+            # here, off the critical path, ONLY after an unclean prior
+            # shutdown (State sets the dirty bit). Blocking C call, so
+            # hand it to a worker thread; the UI is already serving.
+            if self.state is not None:
+                with contextlib.suppress(Exception):
+                    status = await asyncio.to_thread(
+                        self.state.run_deferred_integrity_check
+                    )
+                    if status not in ("skipped", "ok"):
+                        log.warning(
+                            "deferred state.db integrity check: %s", status,
+                        )
             # Initial settle: wait a bit for mDNS to fully populate, then
             # an aggressive first prune to clear ghosts.
             try:

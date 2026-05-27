@@ -535,6 +535,30 @@ class State:
         # is transparent to read paths via lockbox.maybe_unwrap so a
         # mid-life passphrase opt-in coexists with legacy rows.
         self._lockbox = None  # set via set_lockbox()
+        # Boot-integrity dirty-bit. PRAGMA quick_check on an encrypted
+        # DB decrypts + HMAC-verifies EVERY page — ~13-18s on a large
+        # (200 MB+) state.db. Running it on every boot dominated startup
+        # and blocked the UI. Instead we use a crash-detecting dirty
+        # bit: a sidecar marker is written on clean close and removed on
+        # open. If it's present at open, the prior shutdown was clean and
+        # the DB is consistent (SQLCipher already HMAC-verifies every
+        # page it reads at runtime, so silent on-disk corruption surfaces
+        # the moment a row is touched regardless). Only an UNCLEAN prior
+        # shutdown (crash / power loss / first boot) flags a deferred
+        # check, which the daemon then runs in a BACKGROUND thread after
+        # the UI is already serving — see run_deferred_integrity_check().
+        self._clean_marker = self.db_path.with_name(
+            self.db_path.name + ".clean"
+        )
+        prior_clean = False
+        with contextlib.suppress(Exception):
+            prior_clean = self._clean_marker.is_file()
+        self._needs_integrity_check = not prior_clean
+        # Remove the marker now; close() re-creates it on a clean
+        # shutdown. A crash (no close) leaves it absent → next boot
+        # integrity-checks.
+        with contextlib.suppress(Exception):
+            self._clean_marker.unlink()
         self._init_pragmas()
         self._migrate()
 
@@ -598,6 +622,10 @@ class State:
         from one_link import state_encryption as _se
 
         passphrase = _kc.ensure_passphrase()
+        # Stash for run_deferred_integrity_check(), which opens its OWN
+        # read connection (so the multi-second check never blocks the
+        # live write connection). None in legacy plaintext mode.
+        self._db_passphrase = passphrase
         if not passphrase or not _se._have_sqlcipher():
             # Legacy plaintext path. Log so the user sees it once
             # at boot — operators can install `keyring` + `sqlcipher3`
@@ -695,27 +723,66 @@ class State:
         # does not linger in state.db-wal between application
         # checkpoints. 50 pages ~= ~200KB worst case.
         c.execute("PRAGMA wal_autocheckpoint = 50")
-        # 2026-05-21 audit T3-X: surface a corrupt state.db on boot
-        # instead of the first ad-hoc query crashing the daemon.
-        # ``quick_check`` validates page integrity + WAL consistency;
-        # full check would walk every index too (expensive). On a
-        # corrupt DB we LOG the failure and keep going — the operator
-        # can then decide whether to rename-and-rebootstrap. We do
-        # NOT auto-rename: silently rebuilding state.db would lose
-        # pinned peers / keys / audit log on a transient I/O blip.
+        # NOTE: the boot integrity check (PRAGMA quick_check) is NO
+        # LONGER run here. On an encrypted 200 MB+ DB it cost 13-18s of
+        # full-file decrypt on EVERY boot and blocked the UI. It now runs
+        # only after an unclean shutdown, in a background thread, via
+        # run_deferred_integrity_check(). See the dirty-bit in __init__.
+        c.close()
+
+    def run_deferred_integrity_check(self) -> str:
+        """Run PRAGMA quick_check IF the prior shutdown was unclean.
+
+        Blocking (full-file decrypt on an encrypted DB), so the daemon
+        calls this from a background thread AFTER the UI is already
+        serving — it must never sit on the boot critical path. Returns
+        "skipped" (clean prior shutdown), "ok" (checked, healthy), or
+        the integrity-error string (checked, corrupt — logged at ERROR).
+
+        2026-05-21 audit T3-X intent preserved: surface a corrupt
+        state.db without silently rebuilding it (which would lose pinned
+        peers / keys / audit log on a transient I/O blip)."""
+        if not getattr(self, "_needs_integrity_check", False):
+            return "skipped"
         try:
-            res = c.execute("PRAGMA quick_check").fetchone()
-            if res and res[0] != "ok":
-                log.error(
-                    "state.db integrity check FAILED: %s. "
-                    "The daemon will keep running but operations "
-                    "against the corrupted store may fail. Consider "
-                    "renaming the file and bootstrapping fresh.",
-                    res[0],
+            # Open a SEPARATE read connection for the check. quick_check
+            # takes seconds on a large encrypted DB; running it on the
+            # live connection would either block every write (held under
+            # _write_lock) or unsafely share one connection across
+            # threads. WAL mode lets this independent reader see a
+            # consistent snapshot while the daemon keeps writing.
+            if self.is_encrypted and getattr(self, "_db_passphrase", None):
+                from one_link import state_encryption as _se
+                check_conn = _se.open_encrypted_connection(
+                    self.db_path, self._db_passphrase,
                 )
+            else:
+                check_conn = sqlite3.connect(
+                    str(self.db_path), check_same_thread=False,
+                )
+            try:
+                res = check_conn.execute("PRAGMA quick_check").fetchone()
+            finally:
+                check_conn.close()
+            status = res[0] if res else "ok"
+            if status != "ok":
+                log.error(
+                    "state.db integrity check FAILED (post-crash): %s. "
+                    "The daemon will keep running but operations against "
+                    "the corrupted store may fail. Consider renaming the "
+                    "file and bootstrapping fresh.", status,
+                )
+            else:
+                log.info(
+                    "state.db integrity check passed (ran because the "
+                    "prior shutdown was unclean)"
+                )
+            # Whether ok or not, don't re-run until the next unclean boot.
+            self._needs_integrity_check = False
+            return status
         except Exception as exc:  # pragma: no cover — defensive
             log.warning("state.db integrity check raised: %s", exc)
-        c.close()
+            return "error"
 
     def _migrate(self) -> None:
         """Run schema migrations atomically.
@@ -7951,3 +8018,10 @@ class State:
     def close(self) -> None:
         with self._write_lock:
             self._conn.close()
+        # Clean-shutdown marker: its presence at the next open means the
+        # DB was closed cleanly, so the next boot can skip the expensive
+        # full-file integrity check. Written LAST, after the connection
+        # is closed and all pages are flushed. A crash never reaches
+        # here, so the marker stays absent and the next boot verifies.
+        with contextlib.suppress(Exception):
+            self._clean_marker.write_text("ok", encoding="utf-8")
