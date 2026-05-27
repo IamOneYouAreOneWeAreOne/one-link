@@ -56,7 +56,11 @@ def _held_transfer(d: Daemon, tid: str, peer_fp: str) -> None:
 # ── setting default ─────────────────────────────────────────────
 
 
-def test_require_accept_defaults_on(tmp_path):
+def test_require_accept_defaults_on(tmp_path, monkeypatch):
+    # The suite-wide conftest sets the env OFF; clear it to verify the
+    # true production default (env absent, no setting → ON). __init__
+    # reads the env, so delenv must precede Daemon construction.
+    monkeypatch.delenv("ONE_LINK_REQUIRE_FILE_ACCEPT", raising=False)
     d = _daemon(tmp_path)
     try:
         d.refresh_runtime_settings()
@@ -65,12 +69,26 @@ def test_require_accept_defaults_on(tmp_path):
         d.state.close()
 
 
-def test_require_accept_can_be_turned_off(tmp_path):
+def test_require_accept_can_be_turned_off(tmp_path, monkeypatch):
+    monkeypatch.delenv("ONE_LINK_REQUIRE_FILE_ACCEPT", raising=False)
     d = _daemon(tmp_path)
     try:
         d.state.set_setting("incoming_files_require_accept", "false")
         d.refresh_runtime_settings()
         assert d._incoming_files_require_accept is False
+    finally:
+        d.state.close()
+
+
+def test_env_override_wins_over_setting(tmp_path, monkeypatch):
+    """ONE_LINK_REQUIRE_FILE_ACCEPT overrides the stored setting (used
+    by the integration harness)."""
+    monkeypatch.setenv("ONE_LINK_REQUIRE_FILE_ACCEPT", "0")
+    d = _daemon(tmp_path)
+    try:
+        d.state.set_setting("incoming_files_require_accept", "true")
+        d.refresh_runtime_settings()
+        assert d._incoming_files_require_accept is False  # env wins
     finally:
         d.state.close()
 

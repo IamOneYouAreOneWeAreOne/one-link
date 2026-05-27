@@ -37,6 +37,13 @@ os.environ.setdefault("ONE_LINK_DISABLE_NATIVE_PICKER", "1")
 # ONE_LINK_PASSPHRASE explicitly (that always overrides this flag).
 os.environ.setdefault("ONE_LINK_DISABLE_AT_REST_ENCRYPTION", "1")
 
+# v0.21.x accept-first: a standalone incoming file is HELD pending the
+# user's accept by DEFAULT in production. Most tests exercise the
+# FILE_OFFER transfer mechanics and expect the receiver to proceed, so
+# default the policy OFF for the suite. Tests that specifically cover
+# accept-first delenv / setenv this to control it explicitly.
+os.environ.setdefault("ONE_LINK_REQUIRE_FILE_ACCEPT", "0")
+
 
 @pytest.fixture
 def isolated_home(tmp_path: Path, monkeypatch) -> Path:

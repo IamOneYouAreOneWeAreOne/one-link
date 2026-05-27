@@ -1513,7 +1513,15 @@ class Daemon:
         # incoming FILE offer from a peer is HELD pending the user's
         # explicit accept instead of downloading silently. Folder syncs
         # (explicitly shared) flow on the BLOB path and are unaffected.
-        self._incoming_files_require_accept: bool = True
+        # Honor the env override at construction too (default "1" =
+        # production-on) so a Daemon built without a later
+        # refresh_runtime_settings() call still respects it; the test
+        # suite sets ONE_LINK_REQUIRE_FILE_ACCEPT=0 so handler-mechanics
+        # tests aren't gated.
+        self._incoming_files_require_accept: bool = (
+            os.environ.get("ONE_LINK_REQUIRE_FILE_ACCEPT", "1").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
         # transfer_id -> held-offer context so an accept/decline API
         # call can resume (send FILE_WANTS) or reject (FILE_DECLINED) on
         # the original peer channel.
