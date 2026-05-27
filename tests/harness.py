@@ -205,6 +205,12 @@ def _spawn(home: Path, log: Path, mdns_type: str | None = None) -> tuple[subproc
     # 404 unless this env is set — keeps the surface inert in
     # production builds.
     env.setdefault("ONE_LINK_ENABLE_TEST_API", "1")
+    # Accept-first is ON by default in production, but the existing
+    # two-daemon file-send tests expect the receiver to auto-receive.
+    # Default it OFF for harness daemons; a test that specifically
+    # exercises accept-first sets ONE_LINK_REQUIRE_FILE_ACCEPT=1 in
+    # its own environment (setdefault preserves that override).
+    env.setdefault("ONE_LINK_REQUIRE_FILE_ACCEPT", "0")
     log.parent.mkdir(parents=True, exist_ok=True)
     f = open(log, "wb")
     proc = subprocess.Popen(

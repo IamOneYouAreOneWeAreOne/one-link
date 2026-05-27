@@ -278,6 +278,12 @@ OUTBOUND_SESSION_IDLE_S = 300.0
 # floor — slow but not stuck).
 HANDSHAKE_DEADLINE_OUTBOUND_S = 8.0
 FILE_ACK_DEADLINE_S = 30.0
+# How long a SENDER keeps an offered file's session open after the
+# receiver replies FILE_OFFER_HELD (i.e. it's waiting for the user on
+# the other end to accept). Generous so a human has time to click; if
+# they don't decide in this window the send times out and retries
+# later (the receiver re-shows the pending prompt on the retry).
+FILE_OFFER_ACCEPT_WAIT_S = 300.0
 FILE_SEND_TOTAL_DEADLINE_S = 600.0
 FILE_FINAL_ACK_MIN_GRACE_S = 120.0
 FILE_FINAL_ACK_BYTES_PER_S = 2 * 1024 * 1024
@@ -1503,6 +1509,19 @@ class Daemon:
         self.bandwidth_pacer = BandwidthPacer(cap_kbps=0)
         self._auto_accept_max_size_bytes: int = 0  # 0 = no limit
         self._auto_accept_extensions: set[str] = set()  # empty = no filter
+        # Accept-first policy. When True (the default), a standalone
+        # incoming FILE offer from a peer is HELD pending the user's
+        # explicit accept instead of downloading silently. Folder syncs
+        # (explicitly shared) flow on the BLOB path and are unaffected.
+        self._incoming_files_require_accept: bool = True
+        # transfer_id -> held-offer context so an accept/decline API
+        # call can resume (send FILE_WANTS) or reject (FILE_DECLINED) on
+        # the original peer channel.
+        self._pending_file_offers: dict[str, dict] = {}
+        # peer_fps the user chose "accept all from this device" for, this
+        # session — subsequent offers from them skip the hold (so a
+        # multi-file send prompts once, not N times).
+        self._file_accept_allow: set[str] = set()
         # v0.20.7 (security audit M8): inbound-peer concurrency
         # accounting. Global counter for the absolute cap; per-fp
         # counter for the one-key-many-channels case.
@@ -4091,6 +4110,25 @@ class Daemon:
                 e.strip().lstrip(".").lower()
                 for e in raw.split(",") if e.strip()
             }
+        with contextlib.suppress(Exception):
+            # Accept-first. Default ON (ask). Stored as "1"/"0"/"true"/
+            # "false"; only an explicit falsey value turns it off. The
+            # ONE_LINK_REQUIRE_FILE_ACCEPT env var overrides the stored
+            # setting + default — used by the integration harness so
+            # existing two-daemon file-send tests keep auto-receiving.
+            env_override = os.environ.get("ONE_LINK_REQUIRE_FILE_ACCEPT")
+            if env_override is not None:
+                self._incoming_files_require_accept = (
+                    env_override.strip().lower() in ("1", "true", "yes", "on")
+                )
+            else:
+                raw = self.state.get_setting("incoming_files_require_accept")
+                if raw is None:
+                    self._incoming_files_require_accept = True
+                else:
+                    self._incoming_files_require_accept = (
+                        str(raw).strip().lower() in ("1", "true", "yes", "on")
+                    )
         # F1 — User mode setting. Validated via selector_native to
         # match the Rust core's accepted vocabulary; unknown / missing
         # values default to "normal" silently.
@@ -5748,6 +5786,66 @@ class Daemon:
             )
             ev = self._persist(msg=msg, direction="in", peer_fp=peer_fp, peer_short_id=peer_sid)
             self._broadcast_tail(ev)
+            # Accept-first: hold a standalone incoming file until the user
+            # explicitly accepts, instead of downloading it silently.
+            # (Shared-folder syncs flow on the BLOB path and never reach
+            # here, so explicitly-shared folders are unaffected.) Skip the
+            # hold when the user has chosen "accept all from this device"
+            # this session. The IncomingFile + open handle stay live so an
+            # accept resumes instantly; FILE_OFFER_HELD tells the sender to
+            # keep its session open while the user decides.
+            if (
+                self._incoming_files_require_accept
+                and peer_fp not in self._file_accept_allow
+            ):
+                self._pending_file_offers[transfer_id] = {
+                    "channel": channel,
+                    "peer_fp": peer_fp,
+                    "peer_sid": peer_sid,
+                    "blob": blob,
+                    "msg_id": msg["id"],
+                    "msg": msg,
+                    "mode": "cdc" if cdc_chunks is not None else "stream",
+                    "missing": sorted(missing or []) if cdc_chunks is not None else None,
+                    "name": name,
+                    "size": size,
+                    "created_ms": int(time.time() * 1000),
+                }
+                self._update_transfer(
+                    transfer_id,
+                    status="offered",
+                    metadata={
+                        "mode": "cdc" if cdc_chunks else "stream",
+                        "path": str(out_path),
+                        "missing_chunks": len(missing or []),
+                        "admission": admission.to_metadata(),
+                        "file_risk": classify_file_risk(name),
+                        "needs_accept": True,
+                        "delivery_state": "awaiting_acceptance",
+                        "user_message": "Waiting for you to accept this file.",
+                    },
+                )
+                with contextlib.suppress(Exception):
+                    await channel.send(encode_msg(make_msg(
+                        "FILE_OFFER_HELD", self.me.short_id,
+                        of=msg["id"], blob=blob,
+                    )))
+                if self.ui_server is not None:
+                    with contextlib.suppress(Exception):
+                        self.ui_server.broadcast({
+                            "type": "file_offer_pending",
+                            "transfer_id": transfer_id,
+                            "peer_fp": peer_fp,
+                            "peer_short_id": peer_sid,
+                            "name": name,
+                            "size": size,
+                            "file_risk": classify_file_risk(name),
+                        })
+                log.info(
+                    "file offer HELD pending accept: %s (%d bytes) from %s",
+                    name, size, peer_sid,
+                )
+                return
             if cdc_chunks is not None:
                 # Phase B Bloom-init honor mode: when ONE_LINK_BLOOM_HONOR=1
                 # AND peer advertises BLOOM_INIT_V1 AND native crate is
@@ -8327,6 +8425,44 @@ class Daemon:
                         # inbound dispatcher when this lock releases.
                         continue
                     it = offer_index_by_id[of_id]
+                    if t == "FILE_OFFER_HELD":
+                        # Receiver is asking its user to accept first.
+                        # Keep this offer outstanding and hold the
+                        # session open generously so they have time to
+                        # decide; the eventual FILE_WANTS (accept) or
+                        # FILE_DECLINED lands on this same loop. Surface
+                        # the wait on our side so the sender's UI reads
+                        # "waiting for them to accept" instead of stalled.
+                        response_deadline = max(
+                            response_deadline,
+                            time.monotonic() + FILE_OFFER_ACCEPT_WAIT_S,
+                        )
+                        it["held"] = True
+                        _tid = it.get("transfer_id")
+                        if _tid:
+                            with contextlib.suppress(Exception):
+                                self._update_transfer(
+                                    _tid,
+                                    status="offered",
+                                    metadata=self._merge_transfer_metadata(
+                                        _tid,
+                                        {
+                                            "delivery_state": "awaiting_remote_acceptance",
+                                            "user_message": "Waiting for them to accept.",
+                                        },
+                                    ),
+                                )
+                        # Do NOT discard of_id — keep waiting.
+                        continue
+                    if t == "FILE_DECLINED":
+                        it["rejected"] = "declined"
+                        results.append({
+                            "rel_path": it["rel"], "ok": False,
+                            "error": "declined by recipient",
+                        })
+                        failed += 1
+                        outstanding_responses.discard(of_id)
+                        continue
                     if t == "FILE_WANTS":
                         raw_wants = m.get("wants") or m.get("missing") or []
                         if not isinstance(raw_wants, list):
@@ -13273,6 +13409,145 @@ class Daemon:
         # same blob doesn't try to resurrect this aborted transfer.
         _delete_resume_sidecar(inbox_dir(), blob)
         self._update_transfer(f.transfer_id, status="failed")
+
+    # ─── accept-first: held incoming-file offers ─────────────────────
+
+    def _merge_transfer_metadata(self, transfer_id: str, updates: dict) -> dict:
+        """Read the current transfer metadata and merge ``updates`` on
+        top. update_transfer REPLACES metadata when passed, so callers
+        that only want to add a few keys must merge first."""
+        cur = self.state.get_transfer(transfer_id) if self.state else None
+        base = dict(cur.metadata or {}) if cur is not None else {}
+        base.update(updates)
+        return base
+
+    async def accept_file_offer(
+        self, transfer_id: str, *, accept_all: bool = False,
+    ) -> dict:
+        """User accepted a HELD incoming file. Resume the pull by
+        sending the deferred FILE_WANTS (CDC) / ACK (stream) on the
+        original peer channel. ``accept_all`` also auto-accepts the rest
+        of this peer's offers for the session so a multi-file send
+        prompts once."""
+        ctx = self._pending_file_offers.pop(transfer_id, None)
+        if ctx is None:
+            return {"ok": False, "error": "no pending offer for this transfer"}
+        if accept_all:
+            self._file_accept_allow.add(ctx["peer_fp"])
+        ch = ctx["channel"]
+        try:
+            if ctx["mode"] == "cdc":
+                if not self._bloom_only_for_peer(ctx["peer_fp"]):
+                    await ch.send(encode_msg(make_msg(
+                        "FILE_WANTS", self.me.short_id,
+                        of=ctx["msg_id"], blob=ctx["blob"],
+                        wants=ctx["missing"] or [],
+                    )))
+                await self._maybe_send_bloom_init_advisory(
+                    ch, msg_id=ctx["msg_id"], blob=ctx["blob"],
+                    peer_fp=ctx["peer_fp"],
+                )
+                if not ctx["missing"]:
+                    self._schedule_finish_cdc_file(
+                        ctx["blob"], ctx["peer_fp"], ctx["peer_sid"], ctx["msg"],
+                    )
+            else:
+                await ch.send(encode_msg(make_msg(
+                    "ACK", self.me.short_id, of=ctx["msg_id"],
+                )))
+        except Exception as e:
+            # Channel almost certainly closed (sender timed out + went
+            # away). Keep the partial; the sender retries + re-offers.
+            log.info("accept_file_offer %s: send failed: %s", transfer_id, e)
+            self._update_transfer(
+                transfer_id, status="paused",
+                metadata=self._merge_transfer_metadata(transfer_id, {
+                    "needs_accept": False,
+                    "delivery_state": "waiting_for_device",
+                    "transient": True,
+                    "user_message": (
+                        "The sender went offline before you accepted. "
+                        "It will resend automatically."
+                    ),
+                }),
+            )
+            return {"ok": False, "error": "sender offline; it will resend"}
+        self._update_transfer(
+            transfer_id, status="active",
+            metadata=self._merge_transfer_metadata(transfer_id, {
+                "needs_accept": False,
+                "delivery_state": "receiving",
+                "user_message": "",
+            }),
+        )
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "file_offer_resolved",
+                    "transfer_id": transfer_id, "action": "accepted",
+                })
+        if accept_all:
+            for tid in [
+                t for t, c in list(self._pending_file_offers.items())
+                if c["peer_fp"] == ctx["peer_fp"]
+            ]:
+                with contextlib.suppress(Exception):
+                    await self.accept_file_offer(tid)
+        return {"ok": True}
+
+    async def decline_file_offer(
+        self, transfer_id: str, *, decline_all: bool = False,
+    ) -> dict:
+        """User declined a HELD incoming file. Tell the sender, abort
+        the partial, and mark the transfer declined."""
+        ctx = self._pending_file_offers.pop(transfer_id, None)
+        if ctx is None:
+            return {"ok": False, "error": "no pending offer for this transfer"}
+        with contextlib.suppress(Exception):
+            await ctx["channel"].send(encode_msg(make_msg(
+                "FILE_DECLINED", self.me.short_id,
+                of=ctx["msg_id"], blob=ctx["blob"],
+            )))
+        f = self._incoming_files.get(ctx["blob"])
+        if f is not None:
+            self._abort_incoming_file(ctx["blob"], f)
+        self._update_transfer(
+            transfer_id, status="failed",
+            metadata=self._merge_transfer_metadata(transfer_id, {
+                "needs_accept": False,
+                "delivery_state": "declined",
+                "transient": False,
+                "user_message": "You declined this file.",
+            }),
+        )
+        if self.ui_server is not None:
+            with contextlib.suppress(Exception):
+                self.ui_server.broadcast({
+                    "type": "file_offer_resolved",
+                    "transfer_id": transfer_id, "action": "declined",
+                })
+        if decline_all:
+            for tid in [
+                t for t, c in list(self._pending_file_offers.items())
+                if c["peer_fp"] == ctx["peer_fp"]
+            ]:
+                with contextlib.suppress(Exception):
+                    await self.decline_file_offer(tid)
+        return {"ok": True}
+
+    def list_pending_file_offers(self) -> list[dict]:
+        """Snapshot of held incoming-file offers for the UI."""
+        return [
+            {
+                "transfer_id": tid,
+                "peer_fp": c["peer_fp"],
+                "peer_short_id": c.get("peer_sid"),
+                "name": c["name"],
+                "size": c["size"],
+                "created_ms": c.get("created_ms"),
+            }
+            for tid, c in self._pending_file_offers.items()
+        ]
 
     def _ack_batch_size_from_chunk(self, msg: dict) -> int:
         try:

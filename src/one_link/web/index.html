@@ -10678,6 +10678,17 @@
             <!-- v0.11.6: auto-accept rules. Toggle + size cap +
                  extension allowlist. -->
             <div class="settings-section">
+              <div class="settings-section-h"><span>Incoming files</span></div>
+              <div class="settings-row">
+                <label for="set-require-accept">Always ask before accepting files</label>
+                <input type="checkbox" id="set-require-accept" />
+              </div>
+              <p class="settings-help">
+                On (recommended): a file someone sends you waits for your
+                OK before it lands. Off: files from people you've paired
+                with download automatically. Folders you've chosen to
+                share always sync without asking.
+              </p>
               <div class="settings-section-h"><span>Auto-accept files</span></div>
               <div class="settings-row">
                 <label for="set-auto-accept-size">Max file size (MB)</label>
@@ -13883,6 +13894,81 @@
     setTimeout(() => { t.style.opacity = 0; t.style.transition = "opacity .25s"; setTimeout(() => t.remove(), 280); }, ttl);
     return t;
   };
+
+  // ── Accept-first: incoming-file offer prompts ───────────────────
+  // A standalone file someone sends now WAITS for the user's OK (unless
+  // the "Always ask" setting is off). The daemon broadcasts
+  // file_offer_pending; we show a persistent prompt with Accept /
+  // Decline (and Accept-all-from-them so a multi-file send is one tap).
+  function _fileOfferBytes(n) {
+    try { return _humanBytes(n || 0); } catch (_e) { return `${n || 0} B`; }
+  }
+  async function acceptFileOffer(tid, all) {
+    try {
+      await api.post(
+        `/api/transfers/${encodeURIComponent(tid)}/accept${all ? "?all=1" : ""}`, {},
+      );
+    } catch (e) { toast(`Couldn't accept: ${e}`, "error", 4000); }
+  }
+  async function declineFileOffer(tid, all) {
+    try {
+      await api.post(
+        `/api/transfers/${encodeURIComponent(tid)}/decline${all ? "?all=1" : ""}`, {},
+      );
+    } catch (e) { toast(`Couldn't decline: ${e}`, "error", 4000); }
+  }
+  function _removeFileOfferPrompt(tid) {
+    state.pendingFileOfferEls = state.pendingFileOfferEls || {};
+    const elx = state.pendingFileOfferEls[tid];
+    if (elx) { elx.remove(); delete state.pendingFileOfferEls[tid]; }
+  }
+  function showFileOfferPrompt(o) {
+    if (!o || !o.transfer_id) return;
+    state.pendingFileOfferEls = state.pendingFileOfferEls || {};
+    if (state.pendingFileOfferEls[o.transfer_id]) return;  // already up
+    const card = el("div", "toast info file-offer-prompt");
+    card.style.display = "flex";
+    card.style.flexDirection = "column";
+    card.style.gap = "8px";
+    const who = o.peer_short_id || (o.peer_fp || "").slice(0, 12) || "Someone";
+    card.appendChild(el("div", "", `${who} wants to send you:`));
+    const nm = el("div", "", `${o.name || "a file"} · ${_fileOfferBytes(o.size)}`);
+    nm.style.fontWeight = "600";
+    nm.title = o.name || "";
+    card.appendChild(nm);
+    const row = el("div", "");
+    row.style.display = "flex";
+    row.style.gap = "8px";
+    row.style.flexWrap = "wrap";
+    const accept = el("button", "btn-accept", "Accept");
+    accept.onclick = async () => {
+      _removeFileOfferPrompt(o.transfer_id);
+      await acceptFileOffer(o.transfer_id, false);
+    };
+    const decline = el("button", "", "Decline");
+    decline.onclick = async () => {
+      _removeFileOfferPrompt(o.transfer_id);
+      await declineFileOffer(o.transfer_id, false);
+    };
+    const acceptAll = el("button", "", "Accept all from them");
+    acceptAll.onclick = async () => {
+      _removeFileOfferPrompt(o.transfer_id);
+      await acceptFileOffer(o.transfer_id, true);
+    };
+    row.appendChild(accept);
+    row.appendChild(decline);
+    row.appendChild(acceptAll);
+    card.appendChild(row);
+    const host = $("#toasts");
+    if (host) host.appendChild(card);
+    state.pendingFileOfferEls[o.transfer_id] = card;
+  }
+  async function refreshPendingFileOffers() {
+    try {
+      const r = await api.get("/api/transfers/pending");
+      for (const o of (r.offers || [])) showFileOfferPrompt(o);
+    } catch (_e) { /* offline / not ready */ }
+  }
 
   // ── Render: peer list ──────────────────────────────────────────────
   // v0.4: sidebar is paired-only. The server filters; the UI renders
@@ -25066,6 +25152,7 @@
     await refreshFolders();
     await refreshFolderOffers();
       await refreshTransfers();
+      try { await refreshPendingFileOffers(); } catch (_e) {}
       await refreshStatus();
       await refreshFabricTruth();
       await refreshOneHealth();
@@ -26233,6 +26320,12 @@
           refreshTransfers();
         }
         refreshStorageUsage();
+      } else if (m.type === "file_offer_pending") {
+        // Accept-first: someone is sending a standalone file and it's
+        // waiting for our OK. Show the Accept/Decline prompt.
+        showFileOfferPrompt(m);
+      } else if (m.type === "file_offer_resolved") {
+        _removeFileOfferPrompt(m.transfer_id);
       } else if (m.type === "transfer") {
         const idx = state.transfers.findIndex(t => t.id === m.transfer.id);
         if (idx >= 0) state.transfers.splice(idx, 1, m.transfer);
@@ -34948,6 +35041,11 @@
       const r = await api.get("/api/settings");
       $("#set-name").value = r.display_name || "";
       $("#set-autoaccept").checked = !!r.auto_accept_lan;
+      // Accept-first: default ON when the server omits it.
+      {
+        const ra = $("#set-require-accept");
+        if (ra) ra.checked = (r.incoming_files_require_accept !== false);
+      }
       // v0.7.3: default-allow-all on pair (true by default).
       $("#set-pair-allow-all").checked =
         r.pair_default_allow_all !== false;
@@ -35155,6 +35253,7 @@
     const payload = {
       display_name: $("#set-name").value.trim() || null,
       auto_accept_lan: $("#set-autoaccept").checked,
+      incoming_files_require_accept: !!($("#set-require-accept") && $("#set-require-accept").checked),
       pair_default_allow_all: $("#set-pair-allow-all").checked,
       // v0.10.0 settings polish.
       theme: $("#set-theme").value || "dark",

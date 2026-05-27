@@ -2730,6 +2730,10 @@ class UIServer:
         r.add_post("/api/transfers/prune", self._guarded(self.api_prune_transfers))
         r.add_post(r"/api/transfers/{transfer_id:.+}/retry", self._guarded(self.api_retry_transfer))
         r.add_post(r"/api/transfers/{transfer_id:.+}/cancel", self._guarded(self.api_cancel_transfer))
+        # Accept-first: held incoming-file offers.
+        r.add_get("/api/transfers/pending", self._guarded(self.api_pending_file_offers))
+        r.add_post(r"/api/transfers/{transfer_id:.+}/accept", self._guarded(self.api_accept_file_offer))
+        r.add_post(r"/api/transfers/{transfer_id:.+}/decline", self._guarded(self.api_decline_file_offer))
         r.add_post(r"/api/peers/{fp}/resume", self._guarded(self.api_resume_peer_transfers))
         r.add_get("/api/outbox", self._guarded(self.api_list_outbox))
         r.add_post(r"/api/outbox/{id:\d+}/cancel", self._guarded(self.api_cancel_outbox))
@@ -13858,6 +13862,10 @@ class UIServer:
         return web.json_response({
             "display_name": s.get("display_name"),
             "auto_accept_lan": s.get("auto_accept_lan", "false") == "true",
+            # Accept-first: require explicit acceptance for incoming
+            # files from a peer. Default ON (true) when unset.
+            "incoming_files_require_accept":
+                s.get("incoming_files_require_accept", "true") != "false",
             "pair_default_allow_all": pair_allow_all,
             "auto_install_updates": auto_install,
             # v0.21.x Ship 6: sync bandwidth + scheduling.
@@ -14039,6 +14047,17 @@ class UIServer:
                 "onboarding_completed",
                 "true" if data["onboarding_completed"] else "false",
             )
+        # Accept-first: require explicit acceptance for incoming files
+        # from a peer (default ON). When off, files auto-download as
+        # before. refresh_runtime_settings() below applies it live.
+        if "incoming_files_require_accept" in data:
+            v = data["incoming_files_require_accept"]
+            stored = (
+                "true"
+                if (v is True or str(v).lower() in ("1", "true", "yes", "on"))
+                else "false"
+            )
+            self.daemon.state.set_setting("incoming_files_require_accept", stored)
         # v0.10.0 — settings polish. Each branch validates its input
         # so a malformed value can't poison the database.
         if "theme" in data:
@@ -20065,6 +20084,34 @@ class UIServer:
             },
         )
         return web.json_response({"ok": True})
+
+    async def api_pending_file_offers(self, request: web.Request) -> web.Response:
+        """Accept-first: list incoming file offers held pending the
+        user's acceptance."""
+        return web.json_response({
+            "ok": True,
+            "offers": self.daemon.list_pending_file_offers(),
+        })
+
+    async def api_accept_file_offer(self, request: web.Request) -> web.Response:
+        """Accept a held incoming file (resume the transfer). ?all=1
+        also auto-accepts the rest of this peer's offers this session."""
+        transfer_id = request.match_info["transfer_id"]
+        accept_all = request.query.get("all", "") in ("1", "true", "yes")
+        result = await self.daemon.accept_file_offer(
+            transfer_id, accept_all=accept_all,
+        )
+        return web.json_response(result)
+
+    async def api_decline_file_offer(self, request: web.Request) -> web.Response:
+        """Decline a held incoming file (tell the sender, delete the
+        partial). ?all=1 declines the rest of this peer's offers too."""
+        transfer_id = request.match_info["transfer_id"]
+        decline_all = request.query.get("all", "") in ("1", "true", "yes")
+        result = await self.daemon.decline_file_offer(
+            transfer_id, decline_all=decline_all,
+        )
+        return web.json_response(result)
 
     async def api_resume_peer_transfers(self, request: web.Request) -> web.Response:
         """v0.7.4: manually trigger the resume orchestrator for a
