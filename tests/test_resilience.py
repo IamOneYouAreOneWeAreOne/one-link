@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.harness import daemon_pair, request
+from tests.harness import daemon_pair, request, require_live_daemon
 
 
 pytestmark = pytest.mark.timeout(120)
@@ -45,6 +45,7 @@ def test_cli_import_has_no_windows_wmi_startup_hang():
 def test_stale_port_files_dont_break_daemon():
     """Drop a port file from a 'previous' daemon run, then start a new daemon
     in the same home. The new daemon must overwrite cleanly."""
+    require_live_daemon()  # spawns a real daemon subprocess
     tmp = Path(tempfile.mkdtemp(prefix="one_link_stale_"))
     try:
         home = tmp / "H"
@@ -196,6 +197,7 @@ def test_two_daemons_in_same_home_second_fails_gracefully():
     The second process must not stay alive and advertise the same local
     device again; that duplicate advertising is what fills the sidebar
     with repeated entries."""
+    require_live_daemon()  # spawns real daemon subprocesses
     tmp = Path(tempfile.mkdtemp(prefix="one_link_dup_"))
     try:
         home = tmp / "H"

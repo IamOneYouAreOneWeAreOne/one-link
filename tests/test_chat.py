@@ -112,6 +112,9 @@ def test_format_file_done_bad():
 def test_chat_command_runs_and_exits_cleanly():
     """Pipe `/quit` into `one-link chat`. Verify auto-starts daemon, prints
     welcome, and exits."""
+    from tests.harness import require_live_daemon
+
+    require_live_daemon()  # `one-link chat` auto-starts a real daemon
     tmp = Path(tempfile.mkdtemp(prefix="one_link_chat_"))
     try:
         env = dict(os.environ)

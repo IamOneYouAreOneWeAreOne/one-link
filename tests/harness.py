@@ -15,10 +15,60 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
+
+
+# ── live-daemon integration gate ───────────────────────────────────
+#
+# Tests that spawn REAL daemon subprocesses (this harness, plus a few
+# files with their own _spawn_daemon helpers) bind ports in the
+# well-known range, open many file descriptors, and drive real mDNS.
+# Run en masse inside the ~7000-test suite ON A MACHINE ALREADY RUNNING
+# LIVE DAEMONS, they starve the host (fd / port / CPU exhaustion) and a
+# rotating subset flakes — including hermetic source-inspection tests
+# whose inspect.getsource() open() fails when the fd table is full.
+#
+# So they run in their own quiet lane, gated like the browser-E2E suite:
+#
+#     ONE_LINK_RUN_LIVE_INTEGRATION=1 pytest tests/   # everything
+#     pytest tests/                                    # default: skips
+#                                                      # the live lane,
+#                                                      # stays hermetic +
+#                                                      # deterministic
+#
+# The gate is applied at the SPAWN PRIMITIVE (here + each local
+# _spawn_daemon), so it skips PER TEST: a hermetic test sharing a file
+# with a daemon-spawning one still runs in the default gate.
+LIVE_INTEGRATION_ENV = "ONE_LINK_RUN_LIVE_INTEGRATION"
+
+
+def live_integration_enabled() -> bool:
+    return os.environ.get(LIVE_INTEGRATION_ENV) == "1"
+
+
+def require_live_daemon() -> None:
+    """Skip the calling test unless the live-daemon lane is enabled.
+    Call this from any code path that spawns a real daemon subprocess."""
+    if not live_integration_enabled():
+        import pytest
+
+        pytest.skip(
+            "live-daemon integration gated; run with "
+            f"{LIVE_INTEGRATION_ENV}=1 pytest (keeps the default gate "
+            "hermetic + deterministic even on a busy host)"
+        )
+
+
+def private_mdns_type() -> str:
+    """A unique, RFC-6335-valid mDNS service type for one cohort of
+    test daemons, so they only ever discover each other — never the
+    developer's live daemons (or other concurrent test cohorts) on the
+    same LAN. Protocol label kept <=15 chars."""
+    return f"_olp{uuid.uuid4().hex[:8]}._tcp.local."
 
 
 @dataclass
@@ -122,7 +172,7 @@ def request(control_port: int, *, timeout: float = 30.0, **req) -> dict:
     return json.loads(last_buf.decode("utf-8").strip() or "{}")
 
 
-def _spawn(home: Path, log: Path) -> tuple[subprocess.Popen, object]:
+def _spawn(home: Path, log: Path, mdns_type: str | None = None) -> tuple[subprocess.Popen, object]:
     """Returns (proc, log_fh). Caller stores the log_fh on the handle
     and closes it after the proc exits — keeps Python's GC from
     emitting ResourceWarning at random later moments."""
@@ -130,6 +180,11 @@ def _spawn(home: Path, log: Path) -> tuple[subprocess.Popen, object]:
     env["ONE_LINK_HOME"] = str(env.get("ONE_LINK_HOME") or "") or str(home)
     env["ONE_LINK_HOME"] = str(home)  # always per-test
     env["ONE_LINK_ALLOW_SAME_HOST_PEERS"] = "1"
+    # Private mDNS scope so this cohort never cross-discovers the
+    # developer's live daemons (or another concurrent test cohort) on
+    # the same LAN — the live lane stays reliable on a busy host.
+    if mdns_type:
+        env["ONE_LINK_MDNS_SERVICE_TYPE"] = mdns_type
     # 2026-05-22 UX: the production default changed to LAN-bind
     # (0.0.0.0) so phones can complete the pair flow without an env
     # var. Tests stay loopback-only — they don't need LAN exposure
@@ -217,8 +272,8 @@ def _read_log(p: Path, n: int = 4000) -> str:
         return "<no log>"
 
 
-def _bring_up(home: Path, log: Path, label: str) -> DaemonHandle:
-    proc, log_fh = _spawn(home, log)
+def _bring_up(home: Path, log: Path, label: str, mdns_type: str | None = None) -> DaemonHandle:
+    proc, log_fh = _spawn(home, log, mdns_type=mdns_type)
     try:
         ctrl = _read_port(home, "control.port")
         peer = _read_port(home, "peer.port")
@@ -281,6 +336,12 @@ def _bring_up(home: Path, log: Path, label: str) -> DaemonHandle:
 @contextmanager
 def daemon_pair() -> Iterator[DaemonPair]:
     """Spin up two daemons, wait for mDNS convergence, yield, then tear down."""
+    # Gate: spawning real daemon subprocesses is the live-integration
+    # lane. Skip the calling test in the default (hermetic) gate.
+    require_live_daemon()
+    # One private mDNS scope shared by A + B so they discover each other
+    # but nothing else — immune to ambient daemons on the LAN.
+    mdns_type = private_mdns_type()
     tmp = Path(tempfile.mkdtemp(prefix="one_link_it_"))
     a_home = tmp / "A"
     b_home = tmp / "B"
@@ -291,8 +352,8 @@ def daemon_pair() -> Iterator[DaemonPair]:
     a: DaemonHandle | None = None
     b: DaemonHandle | None = None
     try:
-        a = _bring_up(a_home, a_log, "A")
-        b = _bring_up(b_home, b_log, "B")
+        a = _bring_up(a_home, a_log, "A", mdns_type=mdns_type)
+        b = _bring_up(b_home, b_log, "B", mdns_type=mdns_type)
         # Wait for cross-discovery
         deadline = time.time() + 20.0
         while time.time() < deadline:

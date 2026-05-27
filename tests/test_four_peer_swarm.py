@@ -74,6 +74,10 @@ _SWARM_MDNS_TYPE = f"_olt{os.getpid() % 100000:05d}._tcp.local."
 def _spawn_daemon(home: Path, log: Path, label: str) -> tuple[subprocess.Popen, object]:
     """Spawn one daemon subprocess. Modeled on harness._spawn but
     re-implemented inline so this test can later run independently."""
+    # Live-daemon lane only: skip in the default hermetic gate.
+    from tests.harness import require_live_daemon
+
+    require_live_daemon()
     env = dict(os.environ)
     env["ONE_LINK_HOME"] = str(home)
     env["ONE_LINK_ALLOW_SAME_HOST_PEERS"] = "1"

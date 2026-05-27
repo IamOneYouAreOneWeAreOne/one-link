@@ -108,8 +108,15 @@ def _read_text(home: Path, name: str, timeout: float = 12.0) -> str:
 
 
 def _spawn_daemon(home: Path, log: Path) -> subprocess.Popen:
+    # Live-daemon lane only: skip in the default hermetic gate.
+    from tests.harness import private_mdns_type, require_live_daemon
+
+    require_live_daemon()
     env = dict(os.environ)
     env["ONE_LINK_HOME"] = str(home)
+    # Private mDNS scope so this daemon never cross-discovers ambient
+    # daemons on the LAN while the lifecycle test exercises port/token.
+    env["ONE_LINK_MDNS_SERVICE_TYPE"] = private_mdns_type()
     log.parent.mkdir(parents=True, exist_ok=True)
     return subprocess.Popen(
         [sys.executable, "-m", "one_link.cli", "daemon"],
