@@ -104,6 +104,7 @@ from one_link.capabilities import (
     FILE_OFFER_BATCH_V1,
     FILES,
     FILE_SWARM,
+    FILE_COMPRESSION,
     BLOB_REQUEST_V1,
     COVER_TRAFFIC_V1,
     FOLDER_SYNC,
