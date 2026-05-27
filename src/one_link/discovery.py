@@ -30,7 +30,39 @@ if TYPE_CHECKING:
         AsyncZeroconf,
     )
 
-SERVICE_TYPE = "_onelink._tcp.local."
+_DEFAULT_SERVICE_TYPE = "_onelink._tcp.local."
+
+
+def _resolve_service_type() -> str:
+    """The mDNS service type this daemon advertises + browses.
+
+    Defaults to ``_onelink._tcp.local.`` so every real install shares one
+    discovery namespace. ONE_LINK_MDNS_SERVICE_TYPE overrides it, which
+    lets an isolated cohort (a test swarm, or a private "household" that
+    doesn't want to cross-discover other One Link daemons on the same
+    LAN) advertise + browse a private scope. Both the register and the
+    browse side read this same value, so an overriding daemon only ever
+    sees peers on its own type.
+
+    The override must be a valid DNS-SD type: the application-protocol
+    label (between the leading underscore and ``._tcp``) is capped at 15
+    chars by RFC 6335, so an out-of-spec value silently falls back to
+    the default rather than breaking discovery entirely.
+    """
+    raw = (os.environ.get("ONE_LINK_MDNS_SERVICE_TYPE") or "").strip()
+    if not raw:
+        return _DEFAULT_SERVICE_TYPE
+    if not raw.endswith("._tcp.local.") or not raw.startswith("_"):
+        return _DEFAULT_SERVICE_TYPE
+    proto_label = raw[1:].split(".", 1)[0]  # between leading "_" and "._tcp"
+    if not (1 <= len(proto_label) <= 15) or not proto_label.replace("-", "").isalnum():
+        return _DEFAULT_SERVICE_TYPE
+    return raw
+
+
+# Resolved once at import. Daemons are spawned as fresh processes, so a
+# subprocess that sets ONE_LINK_MDNS_SERVICE_TYPE picks it up here.
+SERVICE_TYPE = _resolve_service_type()
 ZEROCONF_IMPORT_TIMEOUT_S = 3.0
 
 log = logging.getLogger("one_link.discovery")

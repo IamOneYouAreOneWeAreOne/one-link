@@ -60,6 +60,17 @@ def _native_loadable_in_subprocess() -> bool:
 _NATIVE_SUBPROC_OK = _native_loadable_in_subprocess()
 
 
+# Per-run private mDNS scope so the swarm only ever discovers its own
+# 4 cohort daemons — never the developer's live daemons (or a CI host's
+# other One Link instances) broadcasting on the same LAN. Without this,
+# a machine running several real daemons floods the cohort's browse with
+# foreign peers and a genuine cohort member can be crowded out, failing
+# convergence through no fault of the code. The label is kept short
+# (RFC 6335 caps the protocol label at 15 chars). os.getpid() makes it
+# unique to this test process.
+_SWARM_MDNS_TYPE = f"_olt{os.getpid() % 100000:05d}._tcp.local."
+
+
 def _spawn_daemon(home: Path, log: Path, label: str) -> tuple[subprocess.Popen, object]:
     """Spawn one daemon subprocess. Modeled on harness._spawn but
     re-implemented inline so this test can later run independently."""
@@ -67,6 +78,7 @@ def _spawn_daemon(home: Path, log: Path, label: str) -> tuple[subprocess.Popen, 
     env["ONE_LINK_HOME"] = str(home)
     env["ONE_LINK_ALLOW_SAME_HOST_PEERS"] = "1"
     env["ONE_LINK_DISABLE_REVEAL"] = "1"
+    env["ONE_LINK_MDNS_SERVICE_TYPE"] = _SWARM_MDNS_TYPE
     env["PYTHONIOENCODING"] = "utf-8"
     log.parent.mkdir(parents=True, exist_ok=True)
     f = open(log, "wb")

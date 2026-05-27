@@ -140,3 +140,38 @@ def test_on_change_callback():
     r.remove("a")
     r.remove("nope")  # should NOT fire (nothing removed)
     assert len(seen) == 3
+
+
+# ─── ONE_LINK_MDNS_SERVICE_TYPE private-scope override ─────────────
+
+
+def test_service_type_defaults_when_env_unset(monkeypatch):
+    from one_link import discovery as d
+
+    monkeypatch.delenv("ONE_LINK_MDNS_SERVICE_TYPE", raising=False)
+    assert d._resolve_service_type() == "_onelink._tcp.local."
+
+
+def test_service_type_honours_valid_private_scope(monkeypatch):
+    """An isolated cohort (test swarm / private household) can browse +
+    advertise its own scope so it never cross-discovers ambient daemons."""
+    from one_link import discovery as d
+
+    monkeypatch.setenv("ONE_LINK_MDNS_SERVICE_TYPE", "_olt00042._tcp.local.")
+    assert d._resolve_service_type() == "_olt00042._tcp.local."
+
+
+def test_service_type_rejects_malformed_override(monkeypatch):
+    """Out-of-spec values fall back to the default rather than breaking
+    discovery entirely (RFC 6335 caps the protocol label at 15 chars)."""
+    from one_link import discovery as d
+
+    for bad in (
+        "garbage",                       # no ._tcp.local.
+        "nounderscore._tcp.local.",      # missing leading underscore
+        "_waytoolongprotolabel._tcp.local.",  # >15 char label
+        "_bad space._tcp.local.",        # non-alnum label
+        "   ",                            # blank
+    ):
+        monkeypatch.setenv("ONE_LINK_MDNS_SERVICE_TYPE", bad)
+        assert d._resolve_service_type() == "_onelink._tcp.local.", bad

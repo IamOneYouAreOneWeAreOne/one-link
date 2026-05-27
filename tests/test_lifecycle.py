@@ -19,6 +19,49 @@ from pathlib import Path
 import pytest
 
 
+# The daemon's UI port discovery prefers the well-known range
+# [7117, 7117+16) and falls back to an OS-assigned port only when EVERY
+# slot is occupied (see server.py _start). On a dev box already running
+# several daemons that range can be saturated, in which case binding a
+# high port is the CORRECT behaviour, not a regression. These constants
+# + probe let the port assertions verify the real contract: "prefer the
+# well-known range when a slot is free."
+_WELL_KNOWN_BASE = 7117
+_WELL_KNOWN_SPAN = 16
+
+
+def _well_known_range_has_free_slot(host: str = "127.0.0.1") -> bool:
+    """True iff at least one port in the well-known UI range can be
+    bound right now. A 0.0.0.0-bound rival on a port also blocks the
+    matching 127.0.0.1 bind, so probing loopback correctly detects
+    saturation regardless of how other daemons bound."""
+    for candidate in range(_WELL_KNOWN_BASE, _WELL_KNOWN_BASE + _WELL_KNOWN_SPAN):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind((host, candidate))
+            return True
+        except OSError:
+            continue
+        finally:
+            s.close()
+    return False
+
+
+def _assert_well_known_or_saturated_fallback(port: int) -> None:
+    """The daemon must land in the well-known range — unless that range
+    was fully occupied, in which case an OS-assigned fallback port is
+    correct. Only a non-well-known port WHILE a slot was free is a
+    real port-discovery regression."""
+    if _WELL_KNOWN_BASE <= port <= _WELL_KNOWN_BASE + _WELL_KNOWN_SPAN:
+        return
+    assert not _well_known_range_has_free_slot(), (
+        f"daemon bound {port} outside the well-known range "
+        f"[{_WELL_KNOWN_BASE}, {_WELL_KNOWN_BASE + _WELL_KNOWN_SPAN}] "
+        f"while a well-known port was free — port-discovery regression"
+    )
+    assert port > 0, "daemon failed to bind any port"
+
+
 def _control_request(port: int, cmd: str, timeout: float = 5.0) -> dict:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
@@ -102,7 +145,7 @@ def test_token_persists_across_daemon_restart():
             token1 = _read_text(home, "ui.token")
             port1 = _read_port(home, "server.port")
             assert len(token1) >= 32
-            assert 7117 <= port1 <= 7117 + 16  # well-known range
+            _assert_well_known_or_saturated_fallback(port1)
         finally:
             _stop(proc)
 
@@ -123,7 +166,9 @@ def test_token_persists_across_daemon_restart():
 
 @pytest.mark.timeout(60)
 def test_ui_port_is_in_well_known_range():
-    """First-port attempt must succeed when 7117 is free."""
+    """The daemon must prefer the well-known range when a slot is free.
+    When the range is saturated by other daemons, an OS-assigned
+    fallback port is correct (the daemon must still start)."""
     tmp = Path(tempfile.mkdtemp(prefix="ol_port_"))
     try:
         home = tmp / "H"
@@ -133,7 +178,7 @@ def test_ui_port_is_in_well_known_range():
         proc = _spawn_daemon(home, log)
         try:
             port = _read_port(home, "server.port")
-            assert 7117 <= port <= 7117 + 16
+            _assert_well_known_or_saturated_fallback(port)
         finally:
             _stop(proc)
     finally:
