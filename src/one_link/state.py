@@ -29,6 +29,30 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+
+# v0.21.x at-rest encryption: when the DB is opened via SQLCipher
+# (sqlcipher3), runtime errors are raised as ``sqlcipher3.dbapi2.*``
+# which are a SEPARATE exception hierarchy from stdlib ``sqlite3.*``.
+# Any ``except sqlite3.Error`` / ``suppress(sqlite3.OperationalError)``
+# in this module would silently STOP catching DB errors on an
+# encrypted connection, letting them propagate (e.g. a DELETE on a
+# non-existent table that was previously swallowed). Build tuples
+# that span BOTH hierarchies so the defensive catches keep working
+# regardless of which backend opened the connection.
+try:  # pragma: no cover - depends on install
+    import sqlcipher3.dbapi2 as _sqlcipher_dbapi2
+
+    DB_ERRORS: tuple = (sqlite3.Error, _sqlcipher_dbapi2.Error)
+    DB_OPERATIONAL_ERRORS: tuple = (
+        sqlite3.OperationalError, _sqlcipher_dbapi2.OperationalError,
+    )
+    DB_INTEGRITY_ERRORS: tuple = (
+        sqlite3.IntegrityError, _sqlcipher_dbapi2.IntegrityError,
+    )
+except Exception:  # sqlcipher3 not installed → stdlib only
+    DB_ERRORS = (sqlite3.Error,)
+    DB_OPERATIONAL_ERRORS = (sqlite3.OperationalError,)
+    DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -3124,7 +3148,7 @@ class State:
                         "UPDATE capability_audit   SET fingerprint = ? WHERE fingerprint = ?",
                         "UPDATE hostname_keys      SET fingerprint = ? WHERE fingerprint = ?",
                     ):
-                        with contextlib.suppress(sqlite3.OperationalError):
+                        with contextlib.suppress(*DB_OPERATIONAL_ERRORS):
                             c.execute(sql, (new_fp, old_fp))
 
                     # PK-collision tables: peer_capabilities,
@@ -3141,7 +3165,7 @@ class State:
                          "UPDATE peer_read_markers       SET peer_fp = ? WHERE peer_fp = ?"),
                     ):
                         del_sql, upd_sql = sql
-                        with contextlib.suppress(sqlite3.OperationalError):
+                        with contextlib.suppress(*DB_OPERATIONAL_ERRORS):
                             c.execute(del_sql, (new_fp,))
                             c.execute(upd_sql, (new_fp, old_fp))
 
@@ -4182,7 +4206,7 @@ class State:
         try:
             cur = self._conn.execute(sql, params)
             return int(cur.rowcount or 0)
-        except sqlite3.Error:
+        except DB_ERRORS:
             return 0
 
     def clear_chat_traces(self) -> dict[str, int]:

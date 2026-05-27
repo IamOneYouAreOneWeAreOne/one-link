@@ -157,6 +157,9 @@ def test_keychain_round_trip_isolated(monkeypatch):
 
     monkeypatch.setattr(kc, "_load_keyring", lambda: FakeKeyring)
     monkeypatch.delenv(kc.ENV_VAR, raising=False)
+    # conftest disables at-rest encryption suite-wide; this test
+    # exercises the real keychain logic, so opt back in.
+    monkeypatch.delenv("ONE_LINK_DISABLE_AT_REST_ENCRYPTION", raising=False)
     # Initially absent.
     assert kc.get_passphrase() is None
     # Ensure mints + stores.
@@ -182,6 +185,7 @@ def test_keychain_env_var_overrides(monkeypatch):
 
 def test_keychain_no_backend_no_env_returns_none(monkeypatch):
     monkeypatch.delenv(kc.ENV_VAR, raising=False)
+    monkeypatch.delenv("ONE_LINK_DISABLE_AT_REST_ENCRYPTION", raising=False)
     monkeypatch.setattr(kc, "_load_keyring", lambda: None)
     assert kc.ensure_passphrase() is None
 

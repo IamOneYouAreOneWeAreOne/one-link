@@ -61,12 +61,30 @@ def _load_keyring():
         return None
 
 
+DISABLE_ENV = "ONE_LINK_DISABLE_AT_REST_ENCRYPTION"
+
+
+def _disabled() -> bool:
+    """At-rest encryption is explicitly disabled. Used by the test
+    suite (conftest sets the flag) so thousands of throwaway State()
+    objects don't each hit the global OS keychain — which would both
+    pollute the user's real credential store AND exhaust keychain /
+    file handles at scale. An explicit ONE_LINK_PASSPHRASE always
+    wins over this flag (the dedicated at-rest-encryption test opts
+    back in that way)."""
+    return os.environ.get(DISABLE_ENV) == "1"
+
+
 def get_passphrase() -> str | None:
     """Returns the active passphrase, or None if neither env var nor
     keychain entry exists. Caller decides whether to auto-mint."""
     env = os.environ.get(ENV_VAR, "").strip()
     if env:
         return env
+    if _disabled():
+        # Don't even read the keychain — keep tests fully isolated
+        # from the user's real credential store.
+        return None
     kr = _load_keyring()
     if kr is None:
         return None
@@ -93,6 +111,10 @@ def ensure_passphrase() -> str | None:
     existing = get_passphrase()
     if existing:
         return existing
+    if _disabled():
+        # Explicitly disabled (tests / opt-out): stay plaintext, never
+        # mint a keychain entry.
+        return None
     kr = _load_keyring()
     if kr is None:
         log.warning(

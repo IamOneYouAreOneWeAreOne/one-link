@@ -27,6 +27,16 @@ os.environ.setdefault("ONE_LINK_DISABLE_REVEAL", "1")
 # osascript / zenity folder dialog on the developer's screen.
 os.environ.setdefault("ONE_LINK_DISABLE_NATIVE_PICKER", "1")
 
+# v0.21.x: disable at-rest SQLCipher encryption for the test suite by
+# default. Unit tests construct thousands of throwaway State() objects;
+# routing each through the OS keychain (keyring) would pollute the
+# developer's real credential store AND exhaust keychain / file handles
+# at scale (observed as a 500+ ERROR cascade in the full suite). The
+# at-rest encryption path has its OWN dedicated coverage in
+# test_at_rest_encryption_v021.py, which opts back IN by setting
+# ONE_LINK_PASSPHRASE explicitly (that always overrides this flag).
+os.environ.setdefault("ONE_LINK_DISABLE_AT_REST_ENCRYPTION", "1")
+
 
 @pytest.fixture
 def isolated_home(tmp_path: Path, monkeypatch) -> Path:
