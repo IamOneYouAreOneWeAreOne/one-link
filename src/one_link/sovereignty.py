@@ -150,7 +150,11 @@ QUIET = SovereigntyPreset(
     update_check_enabled=False,
     stun_servers=(),
     mdns_discovery_enabled=True,
-    rendezvous_enabled=True,
+    # quiet = LAN-only. Rendezvous (an outside relay) is OFF by
+    # default; a user can still opt in explicitly via the
+    # rendezvous_enabled SETTING, which the resolver honours over
+    # the preset. off_grid stays False too.
+    rendezvous_enabled=False,
     ui_session_persistence_enabled=True,
     ui_session_labels_enabled=False,
     turn_relay_enabled=False,
