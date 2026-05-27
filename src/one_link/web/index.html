@@ -1132,6 +1132,41 @@
     font-family: ui-monospace, SFMono-Regular, monospace;
     color: rgba(180,200,255,0.7);
   }
+  /* v0.21.x security audit findings inside Settings → Privacy.
+     Color-coded left border per severity so user can scan. */
+  .security-audit-row {
+    display: flex; align-items: flex-start;
+    gap: 10px; padding: 8px 12px;
+    margin-bottom: 6px;
+    background: rgba(255,255,255,0.03);
+    border-left: 3px solid var(--text-dimmer, #555);
+    border-radius: 0 6px 6px 0;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .security-audit-row.sev-info {
+    border-left-color: var(--good, #4cd175);
+  }
+  .security-audit-row.sev-warn {
+    border-left-color: var(--warn, #f5c451);
+    background: rgba(245,196,81,0.05);
+  }
+  .security-audit-row.sev-fail {
+    border-left-color: var(--bad, #ff6b6b);
+    background: rgba(255,107,107,0.06);
+  }
+  .security-audit-row .sa-icon {
+    flex-shrink: 0; width: 18px; text-align: center;
+    font-size: 13px;
+  }
+  .security-audit-row .sa-body { flex: 1; }
+  .security-audit-row .sa-category {
+    font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.6px;
+    color: var(--text-dim);
+    margin-bottom: 2px;
+  }
+  .security-audit-row .sa-message { color: var(--text); }
   .privacy-features { display: grid; gap: 8px; }
   .privacy-feature-row {
     display: flex; align-items: center; justify-content: space-between;
@@ -10074,6 +10109,39 @@
               are controlled here. Nothing leaves this device unless a trusted
               peer needs it to communicate.
             </p>
+            <!-- v0.21.x: sovereignty preset cards mirrored into the
+                 main Settings page so users find them in the natural
+                 place. The lock icon (🔒) in the header still opens
+                 the full Privacy panel with the live outbound audit
+                 + recent connections log. -->
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Privacy mode</span></div>
+              <p class="settings-help">
+                Pick one. Each mode governs update checks, helper
+                servers, LAN discovery, and persistent sign-in cookies.
+                Settings below override per-feature.
+              </p>
+              <div class="privacy-preset-grid"
+                   id="settings-privacy-preset-grid"
+                   role="radiogroup"
+                   aria-label="Sovereignty preset">
+                <p class="settings-help">Loading presets…</p>
+              </div>
+            </div>
+            <!-- v0.21.x: live security audit. Surfaces file
+                 permissions, cloud-sync co-location, network bind
+                 posture, and at-rest encryption status. Re-checks
+                 every time the Privacy pane is opened. -->
+            <div class="settings-section">
+              <div class="settings-section-h"><span>Security audit</span></div>
+              <p class="settings-help">
+                Live state of this device's at-rest + network
+                hardening. Anything yellow / red is worth attention.
+              </p>
+              <div id="settings-security-audit" class="settings-list-host">
+                <p class="settings-help">Running audit…</p>
+              </div>
+            </div>
             <div class="settings-control-grid">
               <div class="settings-control-card">
                 <div class="settings-card-kicker">Identity</div>
@@ -33647,6 +33715,115 @@
     }
   }
 
+  // v0.21.x: render the 3 sovereignty preset cards directly inside
+  // Settings → Privacy so users find them without needing to hunt
+  // for the 🔒 lock icon. Wires up click-to-switch — same backend
+  // endpoint (/api/sovereignty/preset) as the lock-icon panel.
+  async function refreshSettingsPrivacyPresets() {
+    const host = $("#settings-privacy-preset-grid");
+    if (!host) return;
+    let status, presets;
+    try {
+      [status, presets] = await Promise.all([
+        api.get("/api/sovereignty/status"),
+        api.get("/api/sovereignty/preset"),
+      ]);
+    } catch (e) {
+      host.innerHTML = "";
+      const p = el("p", "settings-help");
+      p.textContent = `Couldn't load privacy modes: ${e && e.message ? e.message : e}`;
+      host.appendChild(p);
+      return;
+    }
+    const active = (status && status.preset && status.preset.name) || "just_works";
+    host.innerHTML = "";
+    for (const preset of (presets.presets || [])) {
+      const isActive = preset.name === active;
+      const card = el(
+        "div",
+        "privacy-preset-card" + (isActive ? " active" : ""),
+      );
+      card.setAttribute("role", "radio");
+      card.setAttribute("aria-checked", isActive ? "true" : "false");
+      card.setAttribute("tabindex", "0");
+      card.dataset.preset = preset.name;
+      const name = el("div", "preset-name", preset.label);
+      const desc = el("div", "preset-desc", preset.description);
+      const out = el("div", "preset-out", "↗ " + (preset.outbound_summary || ""));
+      card.appendChild(name);
+      card.appendChild(desc);
+      card.appendChild(out);
+      const switchTo = async () => {
+        if (preset.name === active) return;
+        try {
+          await api.post("/api/sovereignty/preset", { name: preset.name });
+          toast(`Privacy mode → ${preset.label}`, "good", 3500);
+          // Refresh BOTH the preset cards (active state flip) AND
+          // the per-feature toggles (session persistence / labels
+          // may have flipped per the new preset's defaults).
+          refreshSettingsPrivacyPresets();
+          refreshSessionSettings();
+          refreshUiSessionsList();
+          refreshSettingsSecurityAudit();
+        } catch (e) {
+          toast(
+            `Couldn't switch mode: ${errorToastBody(e)}`,
+            "bad", 5000,
+          );
+        }
+      };
+      card.addEventListener("click", switchTo);
+      card.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          switchTo();
+        }
+      });
+      host.appendChild(card);
+    }
+  }
+
+  // v0.21.x: live security audit findings inside Settings → Privacy.
+  // Each finding shows category + severity + plain-English message;
+  // re-runs every time the pane refreshes so the user always sees
+  // current state.
+  async function refreshSettingsSecurityAudit() {
+    const host = $("#settings-security-audit");
+    if (!host) return;
+    let r;
+    try {
+      r = await api.get("/api/security/audit");
+    } catch (e) {
+      host.innerHTML = "";
+      const p = el("p", "settings-help");
+      p.textContent = `Couldn't run audit: ${e && e.message ? e.message : e}`;
+      host.appendChild(p);
+      return;
+    }
+    host.innerHTML = "";
+    const findings = (r && r.findings) || [];
+    if (findings.length === 0) {
+      host.appendChild(el(
+        "p", "settings-help",
+        "No findings — nothing to report.",
+      ));
+      return;
+    }
+    const _sev = (s) => (s === "fail" ? "✗" : s === "warn" ? "!" : "✓");
+    for (const f of findings) {
+      const row = el("div", `security-audit-row sev-${f.severity || "info"}`);
+      row.appendChild(el("div", "sa-icon", _sev(f.severity)));
+      const body = el("div", "sa-body");
+      body.appendChild(el(
+        "div", "sa-category",
+        String(f.category || "").replace(/_/g, " "),
+      ));
+      body.appendChild(el("div", "sa-message", f.message || ""));
+      row.appendChild(body);
+      host.appendChild(row);
+    }
+  }
+
   // Wire the "Sign out all browsers" button + auto-refresh when the
   // Privacy pane becomes visible. The button calls revoke-all then
   // reloads so the page resets to the unauth flow.
@@ -34839,6 +35016,8 @@
     refreshBlockedDevicesList();
     refreshUiSessionsList();
     refreshSessionSettings();
+    refreshSettingsPrivacyPresets();
+    refreshSettingsSecurityAudit();
     _settingsHydrating = false;
     markSettingsClean("No changes yet.");
     settingsBackdrop.classList.add("show");

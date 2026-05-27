@@ -154,33 +154,38 @@ def check_cloud_sync_colocation(data_dir: Path) -> list[Finding]:
 
 
 def check_network_bind(bind_host: str, lan_explicit: bool) -> list[Finding]:
-    """Warn if the daemon is bound to a non-loopback address WITHOUT
-    the operator explicitly requesting LAN mode. Default-loopback is
-    the right posture for a personal app; LAN binding has to be an
-    informed choice."""
+    """Report the current bind posture honestly. The daemon default is
+    0.0.0.0 (LAN-reachable so a phone can pair) — that's NOT a
+    misconfig because every mutating endpoint is bearer-token AND
+    CSRF gated, and Windows scopes the daemon's firewall rule to
+    Private networks. The check just tells the operator what the
+    daemon answers on so they can choose loopback-only if they want
+    truly air-gapped operation."""
     findings: list[Finding] = []
     loopback_hosts = {"127.0.0.1", "::1", "localhost"}
     if bind_host in loopback_hosts:
         findings.append(Finding(
             "info", "network_bind",
-            f"Bound to {bind_host} (loopback) — only this machine "
-            f"can talk to the daemon. OK.",
+            f"Bound to {bind_host} (loopback only). Phones / other "
+            f"devices on the same Wi-Fi will NOT reach this daemon — "
+            f"use ONE_LINK_BIND_HOST=0.0.0.0 to enable LAN pairing.",
         ))
         return findings
-    if bind_host == "0.0.0.0" and lan_explicit:
+    if bind_host == "0.0.0.0":
         findings.append(Finding(
             "info", "network_bind",
-            f"Bound to {bind_host} (all interfaces) per explicit "
-            f"--lan flag. Phones / other devices on the same Wi-Fi "
-            f"can pair via the connect-another-device URL.",
+            f"Bound to {bind_host} (default — LAN-reachable for phone "
+            f"pairing). Every mutating endpoint is bearer-token + "
+            f"CSRF gated. Set ONE_LINK_BIND_HOST=127.0.0.1 to "
+            f"restrict to this machine only.",
         ))
         return findings
+    # Anything OTHER than loopback or 0.0.0.0 is a custom value the
+    # operator set deliberately — surface it but don't warn.
     findings.append(Finding(
-        "warn", "network_bind",
-        f"Bound to {bind_host} but --lan flag was NOT set. The "
-        f"daemon is reachable from outside loopback; this is unusual "
-        f"and likely unintended. Restart with the default bind or "
-        f"pass --lan if exposure to your local network is intended.",
+        "info", "network_bind",
+        f"Bound to custom address {bind_host} via ONE_LINK_BIND_HOST. "
+        f"Verify this matches your intended exposure.",
     ))
     return findings
 

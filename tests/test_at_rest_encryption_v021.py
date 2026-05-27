@@ -281,19 +281,32 @@ def test_cloud_sync_check_passes_normal_path():
     assert all(f.severity == "info" for f in findings)
 
 
-def test_network_bind_loopback_is_ok():
+def test_network_bind_loopback_is_info_with_recovery_hint():
+    """Loopback-only is fine; the message should tell the user how
+    to enable LAN pairing if they want it."""
     findings = hc.check_network_bind("127.0.0.1", lan_explicit=False)
     assert all(f.severity == "info" for f in findings)
+    msg = " ".join(f.message for f in findings)
+    assert "ONE_LINK_BIND_HOST" in msg
 
 
-def test_network_bind_lan_explicit_is_ok():
+def test_network_bind_lan_default_is_info_with_recovery_hint():
+    """0.0.0.0 is the project default + correctly auth-gated; the
+    audit should report it WITHOUT warning + tell the user how to
+    restrict if they prefer loopback-only."""
     findings = hc.check_network_bind("0.0.0.0", lan_explicit=True)
     assert all(f.severity == "info" for f in findings)
+    msg = " ".join(f.message for f in findings)
+    assert "127.0.0.1" in msg
 
 
-def test_network_bind_lan_without_flag_warns():
-    findings = hc.check_network_bind("0.0.0.0", lan_explicit=False)
-    assert any(f.severity == "warn" for f in findings)
+def test_network_bind_custom_address_is_info():
+    """A non-default custom bind is informational — operator chose
+    it on purpose; surface but don't warn."""
+    findings = hc.check_network_bind("192.168.1.50", lan_explicit=False)
+    assert all(f.severity == "info" for f in findings)
+    msg = " ".join(f.message for f in findings)
+    assert "192.168.1.50" in msg
 
 
 def test_encryption_active_is_info():
@@ -368,3 +381,43 @@ async def test_security_audit_endpoint_returns_findings(audit_ctx):
     # encryption check must surface a warn.
     msgs = [f["message"] for f in body["findings"]]
     assert any("encryption" in m.lower() for m in msgs)
+
+
+# ── Settings → Privacy: preset cards + audit are present ─────────
+
+
+def test_settings_privacy_pane_renders_preset_grid():
+    """The 3 sovereignty preset cards must appear in Settings →
+    Privacy (not just behind the lock icon)."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "one_link" / "web" / "index.html"
+    ).read_text(encoding="utf-8")
+    assert 'id="settings-privacy-preset-grid"' in src, (
+        "Settings → Privacy pane must host the 3-card preset grid "
+        "so users find it without hunting for the lock icon"
+    )
+    assert 'function refreshSettingsPrivacyPresets(' in src
+    # Card click should POST to the sovereignty preset endpoint.
+    idx = src.find("function refreshSettingsPrivacyPresets(")
+    body = src[idx:idx + 4000]
+    assert "/api/sovereignty/preset" in body
+    assert "/api/sovereignty/status" in body
+
+
+def test_settings_privacy_pane_renders_security_audit():
+    """The live audit must show in Settings → Privacy so users see
+    file permissions / cloud sync / encryption status at a glance."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "one_link" / "web" / "index.html"
+    ).read_text(encoding="utf-8")
+    assert 'id="settings-security-audit"' in src
+    assert 'function refreshSettingsSecurityAudit(' in src
+    idx = src.find("function refreshSettingsSecurityAudit(")
+    body = src[idx:idx + 3000]
+    assert "/api/security/audit" in body
+    # Three severity classes need styling.
+    assert "sev-info" in src
+    assert "sev-warn" in src
+    assert "sev-fail" in src
