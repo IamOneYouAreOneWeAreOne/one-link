@@ -215,7 +215,7 @@ def test_accept_handler_requires_local_path():
     ).read_text(encoding="utf-8")
     idx = src.find("async def api_accept_folder_offer(")
     assert idx > 0
-    body = src[idx:idx + 7000]
+    body = src[idx:idx + 12000]
     # Must validate local_path is supplied.
     assert "local_path required" in body, (
         "accept handler must require a local_path; without one we "
@@ -250,7 +250,7 @@ def test_decline_handler_marks_offer_only(monkeypatch):
     ).read_text(encoding="utf-8")
     idx = src.find("async def api_decline_folder_offer(")
     assert idx > 0
-    body = src[idx:idx + 1200]
+    body = src[idx:idx + 2200]
     assert "mark_folder_offer_declined" in body
     # Decline does NOT add to shared_with / grant caps / dial back.
     assert "_ensure_folder_caps_for" not in body
@@ -312,7 +312,7 @@ def test_offer_card_uses_path_picker(index_html):
     folder via the same /api/fs/pick-folder endpoint the Add form
     uses — typing a path by hand is friction."""
     idx = index_html.find("function _renderFolderOffer(")
-    body = index_html[idx:idx + 4000]
+    body = index_html[idx:idx + 6000]
     assert "/api/fs/pick-folder" in body, (
         "offer card missing Browse... button that opens the native "
         "folder picker"

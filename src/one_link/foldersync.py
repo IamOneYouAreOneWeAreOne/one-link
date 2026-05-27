@@ -544,8 +544,22 @@ class FolderEngine:
         so even with a delayed initial scan, edits made post-Add are
         picked up immediately. The initial scan only seeds the
         manifest for files that already existed."""
-        local_path = Path(local_path).expanduser().resolve()
-        local_path.mkdir(parents=True, exist_ok=True)
+        local_path = Path(local_path).expanduser()
+        # v0.21.x: resolve(strict=False) on Windows can mangle paths
+        # containing junctions/reparse points that the process can't
+        # traverse. abspath() gives us the same normalization without
+        # touching the FS, so we still hit a single canonical string
+        # in state but mkdir gets a path it can actually create.
+        local_path = Path(os.path.abspath(str(local_path)))
+        try:
+            os.makedirs(str(local_path), exist_ok=True)
+        except OSError as e:
+            # Re-raise with the path embedded so the accept endpoint's
+            # error message shows the user what failed instead of a
+            # bare WinError 2.
+            raise OSError(
+                f"could not create folder at {local_path}: {e}"
+            ) from e
         existing = self.state.get_folder(name)
         if existing is not None:
             raise ValueError(f"folder named {name!r} already exists")

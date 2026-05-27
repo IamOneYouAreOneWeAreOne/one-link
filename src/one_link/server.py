@@ -1266,6 +1266,61 @@ def _detect_lan_ip() -> str:
         s.close()
 
 
+def _probe_writable(parent: Path) -> bool:
+    """Returns True iff a fresh subdirectory can actually be created
+    under ``parent``. Catches the Windows trap where a shell folder
+    (Documents, Desktop) is listable + reports exists()==True but
+    the effective process token can't mkdir into it (Read-Only
+    system attribute + cloud-provider integration + sandbox tokens
+    all hit this). We try to mkdir+rmdir a unique probe directory so
+    we don't trust the OS attribute lie."""
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    probe = parent / f".one_link_writable_probe_{secrets.token_hex(4)}"
+    try:
+        probe.mkdir()
+    except OSError:
+        return False
+    try:
+        probe.rmdir()
+    except OSError:
+        pass
+    return True
+
+
+def _pick_writable_share_root() -> Path:
+    """Returns the first writable candidate for the user's One Link
+    share root, walked in priority order. Documents is preferred
+    when it works (matches Windows convention + what most users
+    expect), but we fall back through Home → Desktop → ONE_LINK_HOME
+    → temp so the daemon ALWAYS hands the UI a path it can actually
+    write to."""
+    candidates: list[Path] = []
+    with contextlib.suppress(Exception):
+        candidates.append(Path.home() / "Documents" / "One Link")
+    with contextlib.suppress(Exception):
+        candidates.append(Path.home() / "One Link")
+    with contextlib.suppress(Exception):
+        candidates.append(Path.home() / "Desktop" / "One Link")
+    home_env = os.environ.get("ONE_LINK_HOME")
+    if home_env:
+        with contextlib.suppress(Exception):
+            candidates.append(Path(home_env) / "shared")
+    with contextlib.suppress(Exception):
+        candidates.append(data_dir() / "shared")
+    import tempfile as _tempfile
+    with contextlib.suppress(Exception):
+        candidates.append(Path(_tempfile.gettempdir()) / "One Link")
+    for c in candidates:
+        if _probe_writable(c):
+            return c
+    # Final hard fallback - cwd is always writable by the process
+    # that's already reading/writing the daemon DB.
+    return Path.cwd() / "One Link"
+
+
 def _render_install_landing(
     *, os_kind: str, os_label: str, code: str, valid: bool,
 ) -> str:
@@ -7283,8 +7338,15 @@ class UIServer:
         # v0.10.6: per-user suggested folder path. The folders pane
         # used to show a hardcoded example with my dev box's username
         # in it; this surfaces a real path under THIS user's home.
+        # v0.21.x: previously hardcoded to ~/Documents/One Link, which
+        # silently broke on Windows installs where Documents has the
+        # Read-Only system attribute and the process token can't
+        # mkdir into it (OneDrive-redirected setups, sandboxed
+        # launches). _pick_writable_share_root probes each candidate
+        # so the path we hand to the UI is always one the daemon can
+        # actually create folders inside.
         try:
-            suggested_folder = str(Path.home() / "Documents" / "One Link")
+            suggested_folder = str(_pick_writable_share_root())
         except Exception:
             suggested_folder = ""
         # v0.21.x: surface whether the experimental one-click
@@ -14369,6 +14431,28 @@ class UIServer:
         self._ensure_folder_caps_for(
             peer_fp, note=f"folder={name}/share/{mode}",
         )
+        # v0.21.x activity-feed coverage: record that we offered this
+        # folder to the peer. Pre-v26 the sender saw nothing on their
+        # own sidecar; the offer was only ever a row on the receiver.
+        with contextlib.suppress(Exception):
+            row = self.daemon.state.get_folder(name)
+            entries = (
+                self.daemon.folder_engine.manifest_for(name)
+                if self.daemon.folder_engine else []
+            )
+            entry_count = len(entries) if entries else None
+            total_bytes = sum(
+                int(getattr(e, "size", 0) or 0) for e in (entries or [])
+            ) or None
+            self.daemon.state.record_folder_lifecycle_event(
+                event="offer_sent",
+                direction="out",
+                folder_name=name,
+                peer_fp=peer_fp,
+                file_count=entry_count,
+                total_bytes=total_bytes,
+                metadata={"share_mode": mode},
+            )
         # v0.21.x: Share USED to only grant permission — the bytes
         # didn't actually move until the user also clicked Sync.
         # That meant clicking 'Share' looked like nothing happened
@@ -14571,39 +14655,37 @@ class UIServer:
                     "folder-archive send %s/%s failed: %s",
                     scope, ident, e,
                 )
-                self.broadcast({
-                    "type": "folder_send_complete",
-                    "name": folder_name,
-                    "peer_fp": peer_fp,
-                    "scope": scope,
-                    "mode": "archive",
-                    "sent": 0, "failed": 1,
-                    "dedup_files": 0, "dedup_bytes": 0,
-                    "error": str(e),
-                })
+                self._emit_folder_send_event(
+                    event="send_failed",
+                    folder_name=folder_name,
+                    peer_fp=peer_fp,
+                    mode="archive",
+                    failed=1,
+                    error=str(e),
+                    broadcast_extra={"scope": scope},
+                )
                 return
-            self.broadcast({
-                "type": "folder_send_complete",
-                "name": folder_name,
-                "peer_fp": peer_fp,
-                "scope": scope,
-                "mode": "archive",
-                "sent": 1, "failed": 0,
-                "dedup_files": 0, "dedup_bytes": 0,
-                "original_size": original_size,
-                "archive_size": archive_size,
-                "compression_ratio": (
-                    round(1 - archive_size / max(1, original_size), 3)
+            self._emit_folder_send_event(
+                event="send_complete",
+                folder_name=folder_name,
+                peer_fp=peer_fp,
+                mode="archive",
+                sent=1,
+                original_size=original_size,
+                archive_size=archive_size,
+                compression_ratio=round(
+                    1 - archive_size / max(1, original_size), 3,
                 ),
-            })
+                broadcast_extra={"scope": scope},
+            )
         except asyncio.CancelledError:
-            self.broadcast({
-                "type": "folder_send_cancelled",
-                "name": folder_name,
-                "peer_fp": peer_fp,
-                "scope": scope,
-                "mode": "archive",
-            })
+            self._emit_folder_send_event(
+                event="send_cancelled",
+                folder_name=folder_name,
+                peer_fp=peer_fp,
+                mode="archive",
+                broadcast_extra={"scope": scope},
+            )
             raise
         finally:
             if archive_path is not None:
@@ -14752,6 +14834,116 @@ class UIServer:
     _FOLDER_SEND_MAX_RETRIES = 3
     _FOLDER_SEND_BACKOFF_SECONDS = (1.0, 5.0, 15.0)
 
+    def _emit_folder_send_event(
+        self,
+        *,
+        event: str,
+        folder_name: str,
+        peer_fp: str | None,
+        mode: str,
+        sent: int = 0,
+        failed: int = 0,
+        dedup_files: int = 0,
+        dedup_bytes: int = 0,
+        original_size: int | None = None,
+        archive_size: int | None = None,
+        compression_ratio: float | None = None,
+        error: str | None = None,
+        folder_send_group: str | None = None,
+        broadcast_extra: dict | None = None,
+    ) -> None:
+        """v0.21.x activity-feed coverage: write a folder_lifecycle_audit
+        row AND broadcast the WS event in one call. Replaces the 8+
+        scattered broadcast({type: folder_send_complete...}) sites so
+        every terminal folder-send outcome (any mode) lands in the
+        sidecar instead of leaving manifest_push invisible.
+
+        ``event`` is one of: send_complete | send_failed | send_cancelled
+        | send_retry | send_started.
+        """
+        ws_type = (
+            "folder_send_cancelled" if event == "send_cancelled"
+            else "folder_send_retrying" if event == "send_retry"
+            else "folder_send_started" if event == "send_started"
+            else "folder_send_complete"
+        )
+        payload: dict[str, Any] = {
+            "type": ws_type,
+            "name": folder_name,
+            "peer_fp": peer_fp,
+            "mode": mode,
+            "sent": sent, "failed": failed,
+            "dedup_files": dedup_files, "dedup_bytes": dedup_bytes,
+        }
+        if original_size is not None:
+            payload["original_size"] = original_size
+        if archive_size is not None:
+            payload["archive_size"] = archive_size
+        if compression_ratio is not None:
+            payload["compression_ratio"] = compression_ratio
+        if error is not None:
+            payload["error"] = error
+        if folder_send_group is not None:
+            payload["folder_send_group"] = folder_send_group
+        if broadcast_extra:
+            payload.update(broadcast_extra)
+        self.broadcast(payload)
+        # Audit row. Severity tracks success/failure so the UI can
+        # render warn/bad chips correctly. Skip the audit if state
+        # isn't ready (test fixtures without a State sometimes do
+        # this); the broadcast still went out.
+        if self.daemon.state is None:
+            return
+        if event == "send_failed":
+            severity = "bad"
+        elif event == "send_cancelled":
+            severity = "warn"
+        elif event == "send_retry":
+            severity = "warn"
+        elif event == "send_complete":
+            severity = "good"
+        else:
+            severity = "info"
+        # Compose total_bytes from whichever of original_size /
+        # archive_size is more useful for the summary. Archive mode
+        # gets the original_size (pre-compression) since dedup_bytes
+        # already covers the savings.
+        total_bytes = (
+            original_size if original_size is not None else None
+        )
+        sent_bytes = (
+            archive_size if archive_size is not None else None
+        )
+        metadata: dict[str, Any] = {}
+        if folder_send_group:
+            metadata["folder_send_group"] = folder_send_group
+        if compression_ratio is not None:
+            metadata["compression_ratio"] = compression_ratio
+        if dedup_files:
+            metadata["dedup_files"] = dedup_files
+        # File count derives from sent + dedup_files for the
+        # per_file / manifest_push paths; archive mode is one file.
+        file_count: int | None = None
+        if mode == "archive":
+            file_count = 1
+        elif sent or dedup_files:
+            file_count = sent + dedup_files
+        with contextlib.suppress(Exception):
+            self.daemon.state.record_folder_lifecycle_event(
+                event=event,
+                direction="out",
+                folder_name=folder_name,
+                peer_fp=peer_fp,
+                mode=mode,
+                file_count=file_count,
+                total_bytes=total_bytes,
+                sent_bytes=sent_bytes,
+                dedup_bytes=dedup_bytes or None,
+                severity=severity,
+                error_msg=error,
+                metadata=metadata or None,
+            )
+
     def _is_transient_folder_send_error(self, result_or_exc) -> bool:
         """A folder-send result/exception is transient (worth retrying)
         if it's network-y: dropped connection, timeout, peer offline.
@@ -14823,18 +15015,22 @@ class UIServer:
                     last_result = result
                     if attempt >= self._FOLDER_SEND_MAX_RETRIES:
                         break
-                # Schedule the retry. Broadcast so UI surfaces it.
+                # Schedule the retry. Audit + broadcast so UI surfaces it.
                 backoff = self._FOLDER_SEND_BACKOFF_SECONDS[
                     min(attempt - 1, len(self._FOLDER_SEND_BACKOFF_SECONDS) - 1)
                 ]
-                self.broadcast({
-                    "type": "folder_send_retrying",
-                    "name": folder_name, "peer_fp": peer_fp,
-                    "scope": scope, "mode": "manifest_push",
-                    "attempt": attempt,
-                    "max_attempts": self._FOLDER_SEND_MAX_RETRIES,
-                    "backoff_seconds": backoff,
-                })
+                self._emit_folder_send_event(
+                    event="send_retry",
+                    folder_name=folder_name,
+                    peer_fp=peer_fp,
+                    mode="manifest_push",
+                    broadcast_extra={
+                        "scope": scope,
+                        "attempt": attempt,
+                        "max_attempts": self._FOLDER_SEND_MAX_RETRIES,
+                        "backoff_seconds": backoff,
+                    },
+                )
                 log.info(
                     "folder send %s/%s attempt %d/%d failed (transient); "
                     "retrying in %.1fs",
@@ -14850,41 +15046,40 @@ class UIServer:
                 ),
                 "blobs_sent": 0,
             }
-            self.broadcast({
-                "type": "folder_send_complete",
-                "name": folder_name,
-                "peer_fp": peer_fp,
-                "scope": scope,
-                "mode": "manifest_push",
-                "sent": int(result.get("blobs_sent") or 0),
-                "failed": 0 if result.get("ok") else 1,
-                "dedup_files": 0, "dedup_bytes": 0,
-                "ok": bool(result.get("ok")),
-                "error": result.get("error"),
-            })
+            ok = bool(result.get("ok"))
+            self._emit_folder_send_event(
+                event="send_complete" if ok else "send_failed",
+                folder_name=folder_name,
+                peer_fp=peer_fp,
+                mode="manifest_push",
+                sent=int(result.get("blobs_sent") or 0),
+                failed=0 if ok else 1,
+                error=result.get("error"),
+                broadcast_extra={"scope": scope, "ok": ok},
+            )
         except asyncio.CancelledError:
-            self.broadcast({
-                "type": "folder_send_cancelled",
-                "name": folder_name,
-                "peer_fp": peer_fp,
-                "scope": scope,
-                "mode": "manifest_push",
-            })
+            self._emit_folder_send_event(
+                event="send_cancelled",
+                folder_name=folder_name,
+                peer_fp=peer_fp,
+                mode="manifest_push",
+                broadcast_extra={"scope": scope},
+            )
             raise
         except Exception as e:
             log.warning(
                 "manifest-push folder send %s/%s failed: %s",
                 scope, ident, e,
             )
-            self.broadcast({
-                "type": "folder_send_complete",
-                "name": folder_name,
-                "peer_fp": peer_fp,
-                "scope": scope,
-                "mode": "manifest_push",
-                "sent": 0, "failed": 1,
-                "ok": False, "error": str(e),
-            })
+            self._emit_folder_send_event(
+                event="send_failed",
+                folder_name=folder_name,
+                peer_fp=peer_fp,
+                mode="manifest_push",
+                failed=1,
+                error=str(e),
+                broadcast_extra={"scope": scope, "ok": False},
+            )
         finally:
             registry.pop(key, None)
 
@@ -14926,14 +15121,19 @@ class UIServer:
                 backoff = self._FOLDER_SEND_BACKOFF_SECONDS[
                     min(attempt - 1, len(self._FOLDER_SEND_BACKOFF_SECONDS) - 1)
                 ]
-                self.broadcast({
-                    "type": "folder_send_retrying",
-                    "name": folder_name, "peer_fp": peer_fp,
-                    "scope": scope, "mode": "manifest_push",
-                    "attempt": attempt,
-                    "max_attempts": self._FOLDER_SEND_MAX_RETRIES,
-                    "backoff_seconds": backoff,
-                })
+                self._emit_folder_send_event(
+                    event="send_retry",
+                    folder_name=folder_name,
+                    peer_fp=peer_fp,
+                    mode="manifest_push",
+                    broadcast_extra={
+                        "scope": scope,
+                        "local_path": str(folder_path),
+                        "attempt": attempt,
+                        "max_attempts": self._FOLDER_SEND_MAX_RETRIES,
+                        "backoff_seconds": backoff,
+                    },
+                )
                 log.info(
                     "adhoc folder send %s/%s attempt %d/%d failed (transient); "
                     "retrying in %.1fs",
@@ -14949,45 +15149,52 @@ class UIServer:
                 ),
                 "blobs_sent": 0,
             }
-            self.broadcast({
-                "type": "folder_send_complete",
-                "name": folder_name,
-                "local_path": str(folder_path),
-                "peer_fp": peer_fp,
-                "scope": scope,
-                "mode": "manifest_push",
-                "sent": int(result.get("blobs_sent") or 0),
-                "failed": 0 if result.get("ok") else 1,
-                "dedup_files": 0, "dedup_bytes": 0,
-                "ok": bool(result.get("ok")),
-                "error": result.get("error"),
-                "temp_folder_name": result.get("temp_folder_name"),
-            })
+            ok = bool(result.get("ok"))
+            self._emit_folder_send_event(
+                event="send_complete" if ok else "send_failed",
+                folder_name=folder_name,
+                peer_fp=peer_fp,
+                mode="manifest_push",
+                sent=int(result.get("blobs_sent") or 0),
+                failed=0 if ok else 1,
+                error=result.get("error"),
+                broadcast_extra={
+                    "scope": scope,
+                    "local_path": str(folder_path),
+                    "ok": ok,
+                    "temp_folder_name": result.get("temp_folder_name"),
+                },
+            )
         except asyncio.CancelledError:
-            self.broadcast({
-                "type": "folder_send_cancelled",
-                "name": folder_name,
-                "local_path": str(folder_path),
-                "peer_fp": peer_fp,
-                "scope": scope,
-                "mode": "manifest_push",
-            })
+            self._emit_folder_send_event(
+                event="send_cancelled",
+                folder_name=folder_name,
+                peer_fp=peer_fp,
+                mode="manifest_push",
+                broadcast_extra={
+                    "scope": scope,
+                    "local_path": str(folder_path),
+                },
+            )
             raise
         except Exception as e:
             log.warning(
                 "adhoc manifest-push folder send %s/%s failed: %s",
                 scope, ident, e,
             )
-            self.broadcast({
-                "type": "folder_send_complete",
-                "name": folder_name,
-                "local_path": str(folder_path),
-                "peer_fp": peer_fp,
-                "scope": scope,
-                "mode": "manifest_push",
-                "sent": 0, "failed": 1,
-                "ok": False, "error": str(e),
-            })
+            self._emit_folder_send_event(
+                event="send_failed",
+                folder_name=folder_name,
+                peer_fp=peer_fp,
+                mode="manifest_push",
+                failed=1,
+                error=str(e),
+                broadcast_extra={
+                    "scope": scope,
+                    "local_path": str(folder_path),
+                    "ok": False,
+                },
+            )
         finally:
             registry.pop(key, None)
 
@@ -15288,24 +15495,46 @@ class UIServer:
                         "folder send %s/%s rel=%s (large) failed: %s",
                         scope, ident, rel, e,
                     )
-            payload = {
-                **on_complete_broadcast,
-                "sent": sent,
-                "failed": failed,
-                "dedup_files": dedup_files,
-                "dedup_bytes": dedup_bytes,
+            # v0.21.x activity-feed coverage: route through
+            # _emit_folder_send_event so per_file sends ALSO land in
+            # the sidecar (not just per-file transfer rows).
+            extra = {
+                k: v for k, v in on_complete_broadcast.items()
+                if k not in ("type", "name", "peer_fp", "mode")
             }
-            self.broadcast(payload)
-        except asyncio.CancelledError:
-            self.broadcast({
-                **on_complete_broadcast,
-                "type": on_complete_broadcast["type"].replace(
-                    "_complete", "_cancelled",
+            self._emit_folder_send_event(
+                event=(
+                    "send_failed" if failed > 0 and sent == 0
+                    else "send_complete"
                 ),
-                "sent": sent,
-                "failed": failed,
-                "remaining": max(0, len(files) - sent - failed - dedup_files),
-            })
+                folder_name=on_complete_broadcast.get("name", "?"),
+                peer_fp=on_complete_broadcast.get("peer_fp"),
+                mode=on_complete_broadcast.get("mode", "per_file"),
+                sent=sent,
+                failed=failed,
+                dedup_files=dedup_files,
+                dedup_bytes=dedup_bytes,
+                broadcast_extra=extra,
+            )
+        except asyncio.CancelledError:
+            extra = {
+                k: v for k, v in on_complete_broadcast.items()
+                if k not in ("type", "name", "peer_fp", "mode")
+            }
+            extra["remaining"] = max(
+                0, len(files) - sent - failed - dedup_files,
+            )
+            self._emit_folder_send_event(
+                event="send_cancelled",
+                folder_name=on_complete_broadcast.get("name", "?"),
+                peer_fp=on_complete_broadcast.get("peer_fp"),
+                mode=on_complete_broadcast.get("mode", "per_file"),
+                sent=sent,
+                failed=failed,
+                dedup_files=dedup_files,
+                dedup_bytes=dedup_bytes,
+                broadcast_extra=extra,
+            )
             raise
         finally:
             registry.pop(key, None)
@@ -15442,6 +15671,24 @@ class UIServer:
             # baseline + correct often-enough).
             mode, reasoning = await self._pick_folder_send_mode(
                 peer=resolved[0][1], files=files,
+            )
+        # v0.21.x activity-feed coverage: record the auto-router /
+        # explicit-override decision so users can audit WHY a folder
+        # was sent as archive vs manifest_push.
+        with contextlib.suppress(Exception):
+            self.daemon.state.record_folder_lifecycle_event(
+                event="mode_selected",
+                direction="out",
+                folder_name=name,
+                peer_fp=resolved[0][0] if resolved else None,
+                mode=mode,
+                file_count=len(files),
+                total_bytes=total_bytes,
+                metadata={
+                    "reasoning": reasoning,
+                    "fanout_count": len(resolved),
+                    "offline_count": len(offline),
+                },
             )
         # Fan out: one task per online peer.
         per_peer_results: list[dict] = []
@@ -16121,6 +16368,9 @@ class UIServer:
                 ),
                 "code": "folder_name_conflict",
             }, status=409)
+        effective_local_path = local_path
+        used_fallback = False
+        fallback_reason: str | None = None
         try:
             self.daemon.folder_engine.add_folder(
                 name=folder_name,
@@ -16145,15 +16395,63 @@ class UIServer:
                     "raced_with_auto_accept": True,
                 })
             return web.json_response({"error": str(e)}, status=409)
+        except (OSError, RuntimeError) as e:
+            # v0.21.x: mkdir on the user-chosen path failed (Windows
+            # shell-folder Read-Only attribute, sandbox token without
+            # write, OneDrive-managed location). Don't give up - pick
+            # a writable fallback and retry there. The user gets a
+            # clear toast saying "couldn't write to X; saved to Y
+            # instead" with one click to reveal.
+            log.warning(
+                "accept folder offer mkdir failed (%s/%s) at %s: %s",
+                peer_fp[:8], folder_name, local_path, e,
+            )
+            if self.daemon.state.get_folder(folder_name) is not None:
+                with contextlib.suppress(Exception):
+                    self.daemon.state.mark_folder_offer_accepted(
+                        offer_id, local_path=local_path,
+                    )
+                return web.json_response({
+                    "ok": True, "already_accepted": True,
+                    "folder_name": folder_name,
+                    "raced_with_auto_accept": True,
+                })
+            fallback_reason = str(e)
+            try:
+                fb_root = _pick_writable_share_root()
+                fb_path = fb_root / folder_name
+                self.daemon.folder_engine.add_folder(
+                    name=folder_name,
+                    local_path=fb_path,
+                    shared_with=[peer_fp],
+                    conflict_policy="latest-wins",
+                )
+                effective_local_path = str(fb_path)
+                used_fallback = True
+            except Exception as e2:
+                log.warning(
+                    "accept folder offer fallback also failed "
+                    "(%s/%s): %s",
+                    peer_fp[:8], folder_name, e2,
+                )
+                return web.json_response(
+                    {
+                        "error": "could not create folder",
+                        "error_detail": str(e),
+                        "fallback_error_detail": str(e2),
+                        "exception_type": type(e).__name__,
+                    },
+                    status=500,
+                )
         except Exception as e:
             # Catch-all 500. Could be: sqlite UNIQUE collision from a
             # racing auto-accept (Wave 1 self-mesh fast-path), watchdog
-            # Observer startup failure, mkdir failure on a path with
-            # weird permissions. Check the post-state: if a folder named
-            # `folder_name` now exists in state regardless, treat as
-            # success (idempotent recovery). Otherwise surface the
-            # actual exception via error_detail so the UI toast can
-            # show it instead of an opaque "could not create folder".
+            # Observer startup failure, etc. Check the post-state: if
+            # a folder named `folder_name` now exists in state
+            # regardless, treat as success (idempotent recovery).
+            # Otherwise surface the actual exception via error_detail
+            # so the UI toast can show it instead of an opaque
+            # "could not create folder".
             log.warning(
                 "accept folder offer failed (%s/%s): %s",
                 peer_fp[:8], folder_name, e,
@@ -16183,8 +16481,22 @@ class UIServer:
             peer_fp, note=f"folder={folder_name}/accept",
         )
         self.daemon.state.mark_folder_offer_accepted(
-            offer_id, local_path=local_path,
+            offer_id, local_path=effective_local_path,
         )
+        # v0.21.x activity-feed coverage: record the local accept so
+        # the receiver's sidecar shows the decision. The sender's
+        # sidecar gets its own offer_accepted row when FOLDER_OFFER_
+        # ACCEPTED arrives (or, today, when the first blob lands).
+        with contextlib.suppress(Exception):
+            self.daemon.state.record_folder_lifecycle_event(
+                event="offer_accepted",
+                direction="in",
+                folder_name=folder_name,
+                peer_fp=peer_fp,
+                file_count=offer.get("entry_count"),
+                total_bytes=offer.get("total_bytes"),
+                severity="good",
+            )
         # Kick the sender to push the actual data. We dial the sender
         # with an empty manifest + request_reverse=true; the sender's
         # bidi handler will then push its real manifest back over the
@@ -16224,12 +16536,17 @@ class UIServer:
                     })
             asyncio.get_running_loop().create_task(_bg_pull())
             triggered = True
-        return web.json_response({
+        resp = {
             "ok": True,
             "folder_name": folder_name,
-            "local_path": local_path,
+            "local_path": effective_local_path,
             "pull_status": "triggered" if triggered else "peer_offline",
-        })
+        }
+        if used_fallback:
+            resp["used_fallback_path"] = True
+            resp["requested_local_path"] = local_path
+            resp["fallback_reason"] = fallback_reason
+        return web.json_response(resp)
 
     async def api_decline_folder_offer(self, request: web.Request) -> web.Response:
         """v0.21.x: decline an incoming folder offer. Records the
@@ -16256,6 +16573,17 @@ class UIServer:
         peer_fp = offer.get("peer_fp")
         folder_name = offer.get("folder_name")
         self.daemon.state.mark_folder_offer_declined(offer_id)
+        # v0.21.x activity-feed coverage.
+        with contextlib.suppress(Exception):
+            self.daemon.state.record_folder_lifecycle_event(
+                event="offer_declined",
+                direction="in",
+                folder_name=folder_name or "?",
+                peer_fp=peer_fp,
+                file_count=offer.get("entry_count"),
+                total_bytes=offer.get("total_bytes"),
+                severity="info",
+            )
         # Best-effort notify the sender so they stop transmitting.
         notified = False
         if peer_fp and folder_name:

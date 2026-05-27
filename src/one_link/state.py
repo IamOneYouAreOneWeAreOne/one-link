@@ -631,6 +631,7 @@ class State:
                     (23, self._migrate_v23_rotation_announcements),
                     (24, self._migrate_v24_held_recovery_shares),
                     (25, self._migrate_v25_pending_folder_offers),
+                    (26, self._migrate_v26_folder_lifecycle_audit),
                 ]
                 for target_version, apply_fn in steps:
                     self._run_atomic_migration(
@@ -1006,6 +1007,82 @@ class State:
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_pending_folder_offers_state"
             " ON pending_folder_offers(state, offered_ms)"
+        )
+
+    def _migrate_v26_folder_lifecycle_audit(self, c: sqlite3.Cursor) -> None:
+        """v0.21.x activity-feed completeness: durable record of every
+        folder-level lifecycle transition so the activity sidecar can
+        show a sender's "Sent papers to kelly · 147 files · archive
+        (61% smaller)" row alongside the per-file transfer rows.
+
+        Pre-v26, manifest_push folder sends produced ZERO activity
+        rows (chunks aren't recorded as transfers) and archive sends
+        looked indistinguishable from a regular file send. This audit
+        table is the source of truth for:
+
+          - folder offers sent + received
+          - folder offers accepted + declined (both directions)
+          - folder sends complete + failed + cancelled (any mode)
+          - folder send retry attempts
+          - mode-selected by auto-router
+
+        Schema:
+          id             INTEGER PRIMARY KEY AUTOINCREMENT
+          ts_ms          INTEGER NOT NULL  -- when the event happened
+          direction      TEXT    NOT NULL  -- 'in' or 'out'
+          event          TEXT    NOT NULL  -- see kinds below
+          folder_name    TEXT    NOT NULL  -- which folder
+          peer_fp        TEXT              -- counterparty (NULL for local-only)
+          mode           TEXT              -- 'archive' | 'manifest_push' | 'per_file'
+          file_count     INTEGER           -- entries in the folder
+          total_bytes    INTEGER           -- pre-compression
+          sent_bytes     INTEGER           -- actually-on-the-wire
+          dedup_bytes    INTEGER           -- skipped due to peer-side dedup
+          duration_ms    INTEGER           -- end-to-end time
+          severity       TEXT    NOT NULL DEFAULT 'info'
+          error_msg      TEXT              -- on failure paths
+          metadata_json  TEXT              -- mode-specific extras
+
+        Events:
+          offer_sent | offer_received
+          offer_accepted | offer_declined     (BOTH directions; direction
+                                               column says who acted)
+          send_started | send_complete
+          send_failed | send_cancelled
+          send_retry
+          mode_selected (auto-router told us what it picked)
+
+        Indexed on (ts_ms DESC) for activity-feed reads and on
+        (folder_name, peer_fp) for per-folder drill-in.
+        """
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS folder_lifecycle_audit (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_ms         INTEGER NOT NULL,
+                direction     TEXT    NOT NULL,
+                event         TEXT    NOT NULL,
+                folder_name   TEXT    NOT NULL,
+                peer_fp       TEXT,
+                mode          TEXT,
+                file_count    INTEGER,
+                total_bytes   INTEGER,
+                sent_bytes    INTEGER,
+                dedup_bytes   INTEGER,
+                duration_ms   INTEGER,
+                severity      TEXT    NOT NULL DEFAULT 'info',
+                error_msg     TEXT,
+                metadata_json TEXT
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_folder_lifecycle_audit_ts"
+            " ON folder_lifecycle_audit(ts_ms DESC)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_folder_lifecycle_audit_fp"
+            " ON folder_lifecycle_audit(peer_fp, ts_ms DESC)"
         )
 
     def _migrate_v24_held_recovery_shares(self, c: sqlite3.Cursor) -> None:
@@ -1938,6 +2015,10 @@ class State:
 
         # 3. transfers → transfer kind. Only terminal states are
         # interesting in the feed (mid-flight is the chat bubble's job).
+        # v0.21.x: expose folder_send_group on every row so the UI can
+        # collapse per-file folder-send transfers under their parent
+        # folder_lifecycle_audit summary row. Backend stays simple
+        # (just surface the tag); UI controls expand/collapse.
         if kinds_set is None or "transfer" in kinds_set:
             sql = (
                 "SELECT id, direction, peer_fp, kind AS tkind, name,"
@@ -1973,7 +2054,18 @@ class State:
                         j += 1
                     fmt = f"{bsz:.1f} {units[j]}" if j > 0 and bsz < 10 else f"{int(bsz)} {units[j]}"
                     detail_parts.append(fmt)
-                events.append({
+                # Surface the folder_send_group tag so the UI can group
+                # per-file transfer rows under their parent folder
+                # summary. Stored inside metadata_json by daemon.py
+                # when the file is part of a folder send.
+                folder_send_group = None
+                try:
+                    md = json.loads(r["metadata_json"] or "null")
+                    if isinstance(md, dict):
+                        folder_send_group = md.get("folder_send_group")
+                except (TypeError, ValueError):
+                    pass
+                ev = {
                     "ts_ms": r["updated_ms"],
                     "kind": "transfer",
                     "subkind": "complete" if ok else "failed",
@@ -1983,7 +2075,10 @@ class State:
                     "peer_fp": r["peer_fp"],
                     "peer_display_name": _peer_label(r["peer_fp"]),
                     "source": "transfers",
-                })
+                }
+                if folder_send_group:
+                    ev["folder_send_group"] = folder_send_group
+                events.append(ev)
 
         # 4. manifest_conflicts → conflict kind
         if kinds_set is None or "self_mesh" in kinds_set:
@@ -2071,6 +2166,133 @@ class State:
                     "peer_display_name": _peer_label(r["fingerprint"]),
                     "source": "peers",
                 })
+
+        # 6. folder + offer kinds → folder_lifecycle_audit
+        # v0.21.x: folder-level operations were invisible to the feed
+        # (manifest_push wrote zero rows; archive looked like any
+        # regular file). One audit table feeds two activity kinds so
+        # offers + send-lifecycle can be filtered separately in the UI.
+        folder_want = kinds_set is None or "folder" in kinds_set
+        offer_want = kinds_set is None or "offer" in kinds_set
+        if folder_want or offer_want:
+            audit_events: list[str] = []
+            if folder_want:
+                audit_events.extend([
+                    "send_started", "send_complete",
+                    "send_failed", "send_cancelled",
+                    "send_retry", "mode_selected",
+                ])
+            if offer_want:
+                audit_events.extend([
+                    "offer_sent", "offer_received",
+                    "offer_accepted", "offer_declined",
+                ])
+            rows = self.list_folder_lifecycle_events(
+                since_ms=since_ms, peer_fp=peer_fp,
+                events=audit_events, limit=limit,
+            )
+            for r in rows:
+                kind = "offer" if r["event"].startswith("offer_") else "folder"
+                ev = r["event"]
+                direction = r["direction"]
+                folder_label = r["folder_name"]
+                mode = r["mode"] or ""
+                file_count = r["file_count"]
+                total_bytes = r["total_bytes"]
+
+                # Build a human label per event/direction.
+                if ev == "offer_sent":
+                    label = f"Offered folder {folder_label}"
+                elif ev == "offer_received":
+                    label = f"Folder offer received: {folder_label}"
+                elif ev == "offer_accepted":
+                    label = (
+                        f"Peer accepted offer: {folder_label}"
+                        if direction == "out"
+                        else f"Accepted offer: {folder_label}"
+                    )
+                elif ev == "offer_declined":
+                    label = (
+                        f"Peer declined offer: {folder_label}"
+                        if direction == "out"
+                        else f"Declined offer: {folder_label}"
+                    )
+                elif ev == "send_started":
+                    verb = "Sending" if direction == "out" else "Receiving"
+                    label = f"{verb} folder {folder_label}"
+                elif ev == "send_complete":
+                    verb = "Sent" if direction == "out" else "Received"
+                    label = f"{verb} folder {folder_label}"
+                elif ev == "send_failed":
+                    verb = "Send" if direction == "out" else "Receive"
+                    label = f"{verb} failed: {folder_label}"
+                elif ev == "send_cancelled":
+                    label = f"Send cancelled: {folder_label}"
+                elif ev == "send_retry":
+                    label = f"Retrying folder {folder_label}"
+                elif ev == "mode_selected":
+                    label = f"Auto-routed folder {folder_label}"
+                else:
+                    label = f"{folder_label}: {ev}"
+
+                # Build a detail line that's information-dense without
+                # being noisy. Skip empty parts.
+                detail_parts: list[str] = []
+                if mode:
+                    detail_parts.append(mode)
+                if file_count:
+                    detail_parts.append(
+                        f"{file_count} file{'s' if file_count != 1 else ''}"
+                    )
+                if total_bytes:
+                    bsz = total_bytes
+                    units = ["B", "KB", "MB", "GB", "TB"]
+                    j = 0
+                    while bsz >= 1024 and j < len(units) - 1:
+                        bsz /= 1024
+                        j += 1
+                    detail_parts.append(
+                        f"{bsz:.1f} {units[j]}" if j > 0 and bsz < 10
+                        else f"{int(bsz)} {units[j]}"
+                    )
+                if r["dedup_bytes"]:
+                    dsz = r["dedup_bytes"]
+                    units = ["B", "KB", "MB", "GB", "TB"]
+                    j = 0
+                    while dsz >= 1024 and j < len(units) - 1:
+                        dsz /= 1024
+                        j += 1
+                    detail_parts.append(
+                        f"dedup {dsz:.1f} {units[j]}" if j > 0 and dsz < 10
+                        else f"dedup {int(dsz)} {units[j]}"
+                    )
+                if r["error_msg"]:
+                    detail_parts.append(r["error_msg"])
+
+                meta = r.get("metadata") or {}
+                # folder_send_group lets the UI link this summary row
+                # to the per-file transfer children that carry the
+                # same tag.
+                fsg = meta.get("folder_send_group")
+                out_ev = {
+                    "ts_ms": r["ts_ms"],
+                    "kind": kind,
+                    "subkind": ev,
+                    "direction": direction,
+                    "severity": r["severity"],
+                    "label": label,
+                    "detail": " · ".join(detail_parts),
+                    "peer_fp": r["peer_fp"],
+                    "peer_display_name": _peer_label(r["peer_fp"]),
+                    "folder_name": folder_label,
+                    "mode": mode or None,
+                    "file_count": file_count,
+                    "total_bytes": total_bytes,
+                    "source": "folder_lifecycle_audit",
+                }
+                if fsg:
+                    out_ev["folder_send_group"] = fsg
+                events.append(out_ev)
 
         events.sort(key=lambda e: e["ts_ms"], reverse=True)
         return events[:limit]
@@ -6281,6 +6503,144 @@ class State:
             )
             self._conn.commit()
         return self.get_folder_offer(offer_id)
+
+    # ── folder lifecycle audit (v26) ─────────────────────────────
+    _FOLDER_LIFECYCLE_EVENTS = frozenset({
+        "offer_sent", "offer_received",
+        "offer_accepted", "offer_declined",
+        "send_started", "send_complete",
+        "send_failed", "send_cancelled",
+        "send_retry", "mode_selected",
+    })
+
+    def record_folder_lifecycle_event(
+        self,
+        *,
+        event: str,
+        direction: str,
+        folder_name: str,
+        peer_fp: Optional[str] = None,
+        mode: Optional[str] = None,
+        file_count: Optional[int] = None,
+        total_bytes: Optional[int] = None,
+        sent_bytes: Optional[int] = None,
+        dedup_bytes: Optional[int] = None,
+        duration_ms: Optional[int] = None,
+        severity: str = "info",
+        error_msg: Optional[str] = None,
+        metadata: Optional[dict] = None,
+        ts_ms: Optional[int] = None,
+    ) -> int:
+        """v0.21.x: append a row to folder_lifecycle_audit and return
+        its id. Used by daemon/server at every folder-level transition
+        so the activity sidecar can surface folder operations
+        end-to-end (sender + receiver, all modes, every outcome).
+
+        Validates event + direction so a typo can't silently land a
+        row the UI then has no labels for."""
+        if event not in self._FOLDER_LIFECYCLE_EVENTS:
+            raise ValueError(
+                f"unknown folder lifecycle event: {event!r}"
+            )
+        if direction not in ("in", "out"):
+            raise ValueError(
+                f"direction must be 'in' or 'out', got {direction!r}"
+            )
+        if severity not in ("info", "good", "warn", "bad"):
+            raise ValueError(
+                f"unknown severity: {severity!r}"
+            )
+        now = int(ts_ms) if ts_ms is not None else int(time.time() * 1000)
+        meta_blob = (
+            json.dumps(metadata, separators=(",", ":"), sort_keys=True)
+            if metadata else None
+        )
+        with self._write_lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO folder_lifecycle_audit(
+                    ts_ms, direction, event, folder_name, peer_fp,
+                    mode, file_count, total_bytes, sent_bytes,
+                    dedup_bytes, duration_ms, severity, error_msg,
+                    metadata_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now, direction, event, folder_name, peer_fp,
+                    mode,
+                    int(file_count) if file_count is not None else None,
+                    int(total_bytes) if total_bytes is not None else None,
+                    int(sent_bytes) if sent_bytes is not None else None,
+                    int(dedup_bytes) if dedup_bytes is not None else None,
+                    int(duration_ms) if duration_ms is not None else None,
+                    severity, error_msg, meta_blob,
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def list_folder_lifecycle_events(
+        self,
+        *,
+        since_ms: Optional[int] = None,
+        peer_fp: Optional[str] = None,
+        folder_name: Optional[str] = None,
+        events: Optional[Iterable[str]] = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        """Read helper for activity_feed + tests. Newest-first.
+        ``events`` filter is the set of event-name strings to keep."""
+        limit = max(1, min(int(limit), 2000))
+        wclauses: list[str] = []
+        params: list[Any] = []
+        if since_ms is not None:
+            wclauses.append("ts_ms >= ?"); params.append(int(since_ms))
+        if peer_fp is not None:
+            wclauses.append("peer_fp = ?"); params.append(peer_fp)
+        if folder_name is not None:
+            wclauses.append("folder_name = ?"); params.append(folder_name)
+        if events:
+            ev_list = [e for e in events if e in self._FOLDER_LIFECYCLE_EVENTS]
+            if ev_list:
+                placeholders = ",".join("?" * len(ev_list))
+                wclauses.append(f"event IN ({placeholders})")
+                params.extend(ev_list)
+        sql = (
+            "SELECT id, ts_ms, direction, event, folder_name, peer_fp,"
+            " mode, file_count, total_bytes, sent_bytes, dedup_bytes,"
+            " duration_ms, severity, error_msg, metadata_json"
+            " FROM folder_lifecycle_audit"
+        )
+        if wclauses:
+            sql += " WHERE " + " AND ".join(wclauses)
+        sql += " ORDER BY ts_ms DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        out: list[dict] = []
+        for r in rows:
+            md = r["metadata_json"]
+            try:
+                md_parsed = json.loads(md) if md else {}
+            except (TypeError, ValueError):
+                md_parsed = {}
+            out.append({
+                "id": r["id"],
+                "ts_ms": r["ts_ms"],
+                "direction": r["direction"],
+                "event": r["event"],
+                "folder_name": r["folder_name"],
+                "peer_fp": r["peer_fp"],
+                "mode": r["mode"],
+                "file_count": r["file_count"],
+                "total_bytes": r["total_bytes"],
+                "sent_bytes": r["sent_bytes"],
+                "dedup_bytes": r["dedup_bytes"],
+                "duration_ms": r["duration_ms"],
+                "severity": r["severity"],
+                "error_msg": r["error_msg"],
+                "metadata": md_parsed,
+            })
+        return out
 
     def find_folder_offer_for(
         self, peer_fp: str, folder_name: str,

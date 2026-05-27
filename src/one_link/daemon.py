@@ -10440,6 +10440,18 @@ class Daemon:
                 offer.get("entry_count"), offer.get("total_bytes"),
                 is_self_mesh,
             )
+            # v0.21.x activity-feed coverage: record offer-received so
+            # the sidecar shows it next to other peer events. Self-mesh
+            # auto-accept will also record offer_accepted shortly.
+            with contextlib.suppress(Exception):
+                self.state.record_folder_lifecycle_event(
+                    event="offer_received",
+                    direction="in",
+                    folder_name=folder_name,
+                    peer_fp=peer_fp,
+                    file_count=offer.get("entry_count"),
+                    total_bytes=offer.get("total_bytes"),
+                )
             if not is_self_mesh and getattr(self, "ui_server", None) is not None:
                 with contextlib.suppress(Exception):
                     self.ui_server.broadcast({
@@ -19094,6 +19106,19 @@ class Daemon:
                     "peer_fp": peer_fp,
                     "cancelled_in_flight": cancelled_any,
                 })
+        # v0.21.x activity-feed coverage: record the peer's decline
+        # on the SENDER side. direction='out' = this device initiated
+        # the offer; the peer responded.
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                self.state.record_folder_lifecycle_event(
+                    event="offer_declined",
+                    direction="out",
+                    folder_name=folder_name,
+                    peer_fp=peer_fp,
+                    severity="warn",
+                    metadata={"cancelled_in_flight": cancelled_any},
+                )
         log.info(
             "peer %s declined folder %r; cancelled_in_flight=%s",
             peer_fp[:8], folder_name, cancelled_any,
