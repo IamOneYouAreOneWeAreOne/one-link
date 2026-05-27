@@ -460,10 +460,40 @@ class State:
 
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or (data_dir() / DB_FILE)
-        self._conn: sqlite3.Connection = sqlite3.connect(
-            self.db_path, check_same_thread=False, isolation_level=None
-        )
-        self._conn.row_factory = sqlite3.Row
+        # v0.21.x at-rest encryption. Order:
+        #   1. Try to get a passphrase (env var → OS keychain →
+        #      auto-mint into the keychain on first run).
+        #   2. If we have a passphrase AND sqlcipher3 is installed:
+        #      open via SQLCipher. If the file is currently plaintext,
+        #      migrate in place first (backup is kept).
+        #   3. Otherwise fall back to stdlib sqlite3 (legacy mode).
+        #
+        # The encrypted boolean is exposed via .is_encrypted so
+        # callers / Privacy panel can show "Disk encryption: ON / OFF"
+        # honestly.
+        self.is_encrypted = False
+        self._encryption_backup_path: Optional[Path] = None
+        conn = self._open_connection_with_encryption_if_available()
+        self._conn = conn
+        # Row factory must come from the connection's OWN module —
+        # sqlite3.Row only accepts sqlite3.Cursor, sqlcipher3.Row only
+        # accepts sqlcipher3.dbapi2.Cursor. Crossing them raises
+        # TypeError at fetchone(). Pull the right class off the
+        # connection itself.
+        try:
+            conn_module = type(self._conn).__module__
+            if "sqlcipher3" in conn_module:
+                import sqlcipher3 as _sqc
+                self._conn.row_factory = _sqc.Row
+            else:
+                self._conn.row_factory = sqlite3.Row
+        except Exception:
+            # Defensive: if row_factory assignment fails, fall back
+            # to dict-via-description-name in the wrapper. The
+            # downstream code uses row["col"] subscripting which
+            # both Row classes support; we just need the assignment
+            # itself to land cleanly.
+            self._conn.row_factory = sqlite3.Row
         self._write_lock = threading.RLock()
         # 2026-05-21 audit T2-R: state.db holds DR chain keys, group
         # sender keys, message bodies, peer trust state. On POSIX
@@ -526,6 +556,105 @@ class State:
         # opaque marker so callers don't accidentally treat stale
         # ciphertext as a real filesystem path.
         return out if out is not None else value
+
+    def _open_connection_with_encryption_if_available(self):
+        """v0.21.x: open self.db_path with SQLCipher when possible,
+        falling back to stdlib sqlite3 (legacy plaintext) when:
+          - sqlcipher3 is not installed
+          - keyring + ONE_LINK_PASSPHRASE both unavailable
+          - any unexpected failure in the encrypted path
+
+        On first encrypted open of a previously-plaintext file, an
+        in-place migration runs. A timestamped backup is written
+        next to the db (never auto-deleted).
+
+        Returns the open connection; sets self.is_encrypted accordingly.
+        """
+        from one_link import keychain as _kc
+        from one_link import state_encryption as _se
+
+        passphrase = _kc.ensure_passphrase()
+        if not passphrase or not _se._have_sqlcipher():
+            # Legacy plaintext path. Log so the user sees it once
+            # at boot — operators can install `keyring` + `sqlcipher3`
+            # and restart to get encryption.
+            if not passphrase:
+                log.warning(
+                    "state.db: at-rest encryption DISABLED — no "
+                    "passphrase available (set ONE_LINK_PASSPHRASE "
+                    "env var or install `keyring` for OS-keychain "
+                    "auto-mint)"
+                )
+            elif not _se._have_sqlcipher():
+                log.warning(
+                    "state.db: at-rest encryption DISABLED — "
+                    "`sqlcipher3` not installed (pip install sqlcipher3)"
+                )
+            return sqlite3.connect(
+                self.db_path,
+                check_same_thread=False, isolation_level=None,
+            )
+
+        # Encrypted path. Possible states:
+        #   - missing  → fresh install; open encrypted from scratch
+        #   - plaintext → migrate in place, then open
+        #   - encrypted → open as-is
+        state = _se.detect_db_state(self.db_path)
+        if state == "plaintext":
+            try:
+                self._encryption_backup_path = (
+                    _se.migrate_plaintext_to_encrypted(
+                        self.db_path, passphrase,
+                    )
+                )
+            except Exception as e:
+                log.error(
+                    "state.db: plaintext→encrypted migration FAILED "
+                    "(%s). Falling back to plaintext mode this boot; "
+                    "your data is intact, but at-rest encryption is "
+                    "OFF until the underlying issue is fixed.", e,
+                )
+                return sqlite3.connect(
+                    self.db_path,
+                    check_same_thread=False, isolation_level=None,
+                )
+
+        try:
+            conn = _se.open_encrypted_connection(
+                self.db_path, passphrase,
+            )
+            self.is_encrypted = True
+            log.info(
+                "state.db: AES-256 at-rest encryption ACTIVE "
+                "(key from %s)", _kc.backend_label(),
+            )
+            return conn
+        except Exception as e:
+            # If the file on disk is actually encrypted, falling back
+            # to plaintext sqlite3.connect just produces a worse
+            # error ("file is not a database"). The honest action is
+            # to refuse to start so the operator can intervene —
+            # silently swapping the file for a plaintext one would
+            # corrupt the user's data.
+            if state == "encrypted":
+                raise RuntimeError(
+                    f"state.db is encrypted but the current passphrase "
+                    f"can't decrypt it. The most likely cause: the "
+                    f"OS keychain entry has changed (key rotated, "
+                    f"machine restored from backup) or the "
+                    f"ONE_LINK_PASSPHRASE env var is wrong. Restore "
+                    f"the previous passphrase to recover. (underlying "
+                    f"error: {type(e).__name__})"
+                ) from e
+            log.error(
+                "state.db: failed to open encrypted DB (%s) but the "
+                "file appears empty/missing — falling back to plaintext "
+                "mode so the daemon can boot.", e,
+            )
+            return sqlite3.connect(
+                self.db_path,
+                check_same_thread=False, isolation_level=None,
+            )
 
     def _init_pragmas(self) -> None:
         c = self._conn.cursor()

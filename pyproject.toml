@@ -24,6 +24,15 @@ dependencies = [
   # for any cross-vendor WebRTC + the only realistic path for the
   # phone-as-peer endgame without writing our own ICE stack.
   "aiortc>=1.14",
+  # v0.21.x at-rest encryption + OS keychain integration.
+  # sqlcipher3 wraps SQLCipher (sqlite3 + AES-256 page encryption);
+  # keyring abstracts Windows Credential Manager / macOS Keychain /
+  # Linux Secret Service so the encryption key is auto-generated +
+  # stored without prompting the user. Both are graceful-fallback:
+  # if either fails to import at runtime, state.db falls back to
+  # plaintext (legacy) mode + a WARNING log line.
+  "sqlcipher3>=0.6",
+  "keyring>=24",
 ]
 
 [project.optional-dependencies]

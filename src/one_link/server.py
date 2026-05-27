@@ -2293,6 +2293,10 @@ class UIServer:
             "/api/auth/sessions/settings",
             self._guarded(self.api_set_session_settings),
         )
+        r.add_get(
+            "/api/security/audit",
+            self._guarded(self.api_security_audit),
+        )
         r.add_get("/api/one-health", self._guarded(self.api_one_health))
         # Equation-of-ONE telemetry: per-event selector, cover-traffic,
         # dedupe-site index, FUSE mount capability + selector decision
@@ -7611,6 +7615,43 @@ class UIServer:
             resp.del_cookie(SESSION_COOKIE_NAME, path="/")
             resp.del_cookie(SESSION_PRESENT_MARKER_COOKIE, path="/")
         return resp
+
+    async def api_security_audit(
+        self, request: web.Request,
+    ) -> web.Response:
+        """v0.21.x: re-run the boot-time hardening checks on demand
+        + return the findings. Used by the Privacy panel to surface
+        a live audit (file permissions, cloud-sync co-location,
+        network bind posture, at-rest encryption status). Cheap
+        enough to call every time the panel opens."""
+        from one_link.hardening_checks import run_all_checks
+        from one_link.paths import data_dir as _dd
+        bind_host = getattr(self, "bind_host", "127.0.0.1") or "127.0.0.1"
+        lan_explicit = bind_host not in ("127.0.0.1", "::1", "localhost")
+        is_encrypted = bool(
+            getattr(self.daemon.state, "is_encrypted", False)
+        ) if self.daemon.state else False
+        findings = run_all_checks(
+            data_dir=_dd(),
+            bind_host=bind_host,
+            lan_explicit=lan_explicit,
+            is_encrypted=is_encrypted,
+        )
+        return web.json_response({
+            "findings": [
+                {
+                    "severity": f.severity,
+                    "category": f.category,
+                    "message": f.message,
+                }
+                for f in findings
+            ],
+            "summary": {
+                "fail": sum(1 for f in findings if f.severity == "fail"),
+                "warn": sum(1 for f in findings if f.severity == "warn"),
+                "info": sum(1 for f in findings if f.severity == "info"),
+            },
+        })
 
     async def api_get_session_settings(
         self, request: web.Request,

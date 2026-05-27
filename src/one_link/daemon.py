@@ -23397,6 +23397,36 @@ class Daemon:
             ui_port,
         )
 
+        # v0.21.x security hardening audit. Runs once at boot, logs
+        # each finding at the right severity. Never blocks startup.
+        # Operator sees a clear picture of file permissions, cloud-
+        # sync co-location, network bind posture, and at-rest
+        # encryption status in the daemon log.
+        with contextlib.suppress(Exception):
+            from one_link.hardening_checks import (
+                log_findings, run_all_checks,
+            )
+            from one_link.paths import data_dir as _dd
+            bind_host = "127.0.0.1"
+            lan_explicit = False
+            if self.ui_server is not None:
+                bind_host = getattr(self.ui_server, "bind_host", "127.0.0.1") or "127.0.0.1"
+                # Operator opted into LAN if the bind was set to
+                # 0.0.0.0 explicitly via --lan. We infer via the
+                # bind_host value rather than threading another flag.
+                lan_explicit = bind_host not in ("127.0.0.1", "::1", "localhost")
+            is_encrypted = bool(
+                getattr(self.state, "is_encrypted", False)
+            ) if self.state else False
+            findings = run_all_checks(
+                data_dir=_dd(),
+                bind_host=bind_host,
+                lan_explicit=lan_explicit,
+                is_encrypted=is_encrypted,
+            )
+            log_findings(findings)
+            self._hardening_findings = findings
+
     async def _on_local_folder_change(self, folder_name: str, entry) -> None:
         """Called by the FolderEngine when a watched file is added / changed
         / deleted. Notify the UI so the folder status indicator updates;
