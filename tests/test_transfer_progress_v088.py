@@ -119,7 +119,10 @@ def test_file_bubble_surfaces_autopilot_truth(index_html: str):
 def test_transfer_panel_surfaces_autopilot_truth(index_html: str):
     start = index_html.find("function renderTransfers()")
     assert start > 0
-    snippet = index_html[start:start + 1800]
+    # v0.21.x: renderTransfers grew with folder-send-group row
+    # grouping, pushing renderTransferFacts(...) ~2.3k chars past the
+    # function start. Widen the window to keep covering it.
+    snippet = index_html[start:start + 3500]
     assert "renderTransferFacts(t, statusKind(t))" in snippet
     assert "renderTransferCommandCenter(t)" in snippet
     assert ".file-row .transfer-facts" in index_html
