@@ -131,9 +131,13 @@ def _runtime_matches_control(control_status: dict, ui_status: dict) -> bool:
 
 
 def _resolve_running_daemon() -> Optional[RunningDaemon]:
-    """Return the reachable daemon plus its self-reported status."""
+    """Return the reachable daemon plus its self-reported status.
+
+    Side-effect-free: passes clear_stale=False so a poll during a
+    daemon's boot never deletes the daemon's freshly-written
+    control.port (which it writes once and never recreates)."""
     try:
-        ctrl = daemon_mod.read_control_port()
+        ctrl = daemon_mod.read_control_port(clear_stale=False)
     except RuntimeError:
         return None
     if not _alive(ctrl):
@@ -291,89 +295,58 @@ def _spawn_daemon() -> subprocess.Popen:
 def _spawn_daemon_windows_detached(
     daemon_cmd: list[str], log_path: Path,
 ) -> subprocess.Popen:
-    """Spawn the daemon truly detached on Windows by going through
-    the shell. The launcher cannot kill it; closing the launcher
-    window does not kill it; only an explicit `one-link daemon-stop`
-    (or the user via Task Manager) will end it.
+    """Spawn the daemon detached on Windows so it outlives the launcher.
 
-    Implementation: write the daemon's effective command line to a
-    tiny .cmd file and invoke `cmd /c start "" /B`. The `start /B`
-    keyword spawns the process WITHOUT inheriting the parent's job.
-    """
-    import tempfile
-    # Quote each arg with the Windows rules — surround with " and
-    # double internal "s.
-    def _q(s: str) -> str:
-        return '"' + s.replace('"', '""') + '"'
+    History: this used to write a .cmd file and invoke
+    ``cmd /c start "" /B``. That `start` form mis-parsed the quoted
+    interpreter path + ``-m`` args and returned "The system cannot find
+    the path specified" (rc 1) — the daemon never launched, the log
+    stayed empty, and a bare ``except: pass`` swallowed the failure, so
+    the launcher waited out its full timeout and reported a false
+    "daemon failed to start cleanly". This is the root cause of that bug.
 
-    exe_args = " ".join(_q(a) for a in daemon_cmd)
-    # Redirect stdout/stderr inside the .cmd so we capture logs.
-    redirect = f'>nul 2>"{log_path}"'
-    cmd_text = (
-        "@echo off\r\n"
-        f'start "one-link-daemon" /B {exe_args} {redirect}\r\n'
-    )
-    # Write to a per-spawn .cmd file in temp so we don't conflict.
-    fd, cmd_path = tempfile.mkstemp(prefix="one-link-spawn-", suffix=".cmd")
+    Now we spawn the interpreter DIRECTLY with detachment creation
+    flags (verified reliable; no shell, no quoting hazard) and send the
+    daemon's stdout+stderr to ``log_path`` so a real startup failure is
+    actually diagnosable. We prefer full Job-Object breakaway (so the
+    daemon survives a launcher in a kill-on-close job); if the parent
+    job forbids breakaway we retry without it (still detaches from the
+    console and survives a normal terminal/shortcut close)."""
+    NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    DETACHED = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+    NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    BREAKAWAY = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+
     try:
-        os.write(fd, cmd_text.encode("utf-8"))
-    finally:
-        os.close(fd)
+        log_fh = open(log_path, "wb")
+    except OSError:
+        log_fh = None
+    out = log_fh if log_fh is not None else subprocess.DEVNULL
 
-    # Run the .cmd. cmd.exe exits immediately after `start` returns.
-    # The daemon is now an unrelated process tree under conhost.
-    try:
-        helper = subprocess.Popen(
-            ["cmd.exe", "/c", cmd_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            creationflags=(
-                getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-                | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-                | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
-            ),
-            close_fds=True,
-        )
-        helper.wait(timeout=10)
-    except Exception:
-        # If the helper itself fails (rare), fall back to a normal
-        # Popen — at least we tried.
-        pass
-    finally:
+    base = NO_WINDOW | DETACHED | NEW_GROUP
+    last_err: Exception | None = None
+    for flags in (base | BREAKAWAY, base, 0):
         try:
-            os.unlink(cmd_path)
-        except OSError:
-            pass
-
-    # The helper has exited; the daemon is now its own untracked
-    # process. We return a stub Popen-like object so the caller's
-    # `.wait()` path waits on a no-op (the launcher's wait-loop now
-    # only exists to keep the console window open, not to track the
-    # daemon).
-    return _DetachedDaemonHandle()
-
-
-class _DetachedDaemonHandle:
-    """Popen-shaped stub for a fully detached daemon. .wait() blocks
-    forever (until the launcher itself is killed); .terminate() is
-    a no-op — explicit `one-link daemon-stop` is the supported way
-    to end the detached daemon."""
-
-    def wait(self, timeout=None):
-        import time as _time
-        if timeout is not None:
-            _time.sleep(timeout)
-            return None
-        # Block forever; KeyboardInterrupt is the user's exit signal.
-        while True:
-            _time.sleep(60)
-
-    def terminate(self):  # pragma: no cover — no-op
-        return
-
-    def kill(self):  # pragma: no cover — no-op
-        return
+            return subprocess.Popen(
+                daemon_cmd,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                creationflags=flags,
+                close_fds=True,
+            )
+        except (OSError, ValueError) as e:
+            # A restrictive Job Object can reject CREATE_BREAKAWAY_FROM_JOB
+            # with "access denied"; drop the flag and retry. flags=0 is
+            # the final, always-valid fallback (tracked child, but it
+            # starts — strictly better than silently spawning nothing).
+            last_err = e
+            continue
+    # Should be unreachable (flags=0 cannot raise these), but never
+    # return a no-op handle that hides a non-spawn.
+    raise RuntimeError(
+        f"could not spawn daemon subprocess: {last_err}"
+    )
 
 
 def _default_window_geometry() -> tuple[int, int, int, int]:

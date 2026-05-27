@@ -24817,7 +24817,18 @@ async def run() -> None:
         await daemon.stop()
 
 
-def read_control_port() -> int:
+def read_control_port(clear_stale: bool = True) -> int:
+    """Resolve the live daemon's control port.
+
+    ``clear_stale`` (default True) lets genuine CLI "is the daemon
+    running?" checks garbage-collect stale runtime files. It MUST be
+    False when used as a polling primitive while a daemon is actively
+    booting (e.g. the launcher's post-spawn wait): clearing there
+    deletes the just-spawned daemon's control.port mid-boot — and the
+    daemon writes control.port only once at startup, so it is never
+    recreated, leaving the daemon undetectable forever (the launcher
+    then reports a false "failed to start cleanly" and kills it). A
+    detection poll must be side-effect-free."""
     p = _control_port_path()
     if not p.exists():
         recovered = _recover_control_port_from_live_pid()
@@ -24827,12 +24838,13 @@ def read_control_port() -> int:
     try:
         port = int(p.read_text().strip())
     except Exception as e:
-        _clear_stale_runtime_files()
+        if clear_stale:
+            _clear_stale_runtime_files()
         raise RuntimeError("daemon not running (bad control.port file)") from e
     if is_daemon_alive(port):
         return port
     lock_pid = _read_lock_pid()
-    if lock_pid is None or not _pid_is_alive(lock_pid):
+    if clear_stale and (lock_pid is None or not _pid_is_alive(lock_pid)):
         _clear_stale_runtime_files()
     raise RuntimeError(f"daemon not running (stale control.port {port})")
 
