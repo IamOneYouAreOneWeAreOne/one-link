@@ -84,6 +84,22 @@ def test_peers_clean_error_when_daemon_not_running(tmp_path: Path):
     assert "traceback" not in combined
 
 
+def test_missing_control_port_does_not_scan_global_ports(monkeypatch, tmp_path: Path):
+    """No control.port and no live lock means daemon-not-running. Do not
+    enumerate every localhost listener; in big suites that recovery scan can
+    hang behind unrelated processes and make a clean error take 30s."""
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    monkeypatch.setattr(cli_mod.daemon_mod, "_read_lock_pid", lambda: None)
+    monkeypatch.setattr(
+        cli_mod.daemon_mod,
+        "_candidate_local_listen_ports",
+        lambda: (_ for _ in ()).throw(AssertionError("global scan used")),
+    )
+
+    with pytest.raises(RuntimeError, match="no control.port"):
+        cli_mod.daemon_mod.read_control_port()
+
+
 def test_send_clean_error_when_daemon_not_running(tmp_path: Path):
     env = dict(os.environ)
     env["ONE_LINK_HOME"] = str(tmp_path)

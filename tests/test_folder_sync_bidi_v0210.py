@@ -18,6 +18,7 @@ state and assert on the message bytes that would have been emitted.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -28,7 +29,8 @@ from one_link.capabilities import (
     FOLDER_SYNC_BIDI_V1,
     LOCAL_CAPABILITIES,
 )
-from one_link.wire import decode_msg
+from one_link.discovery import Peer
+from one_link.wire import decode_msg, encode_msg, make_msg
 
 
 def _bare_daemon():
@@ -222,3 +224,104 @@ async def test_handle_manifest_push_no_reverse_when_cap_missing() -> None:
     }
     await d._handle_manifest_push(channel, msg, "peer_fp_abc")
     d._send_local_manifest_in_channel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_push_folder_bidi_streams_without_blocking_reverse_receive(monkeypatch) -> None:
+    """The initiator must keep receiving while its outbound blob stream is
+    active. Otherwise two large opposite-direction syncs can both fill their
+    send buffers and deadlock."""
+    d = _bare_daemon()
+    d.blob_store = object()
+    d._check_outbound_trust = MagicMock(return_value=None)
+    d._peer_fp_from_peer = MagicMock(return_value="peer_fp_abc")
+    d._capability_allowed = MagicMock(return_value=True)
+    d._dial_peer = AsyncMock(return_value=(object(), object()))
+    d._upsert_transfer = MagicMock()
+    d._update_transfer = MagicMock()
+    d._throttle_chunk = AsyncMock()
+    d.state.set_peer_capabilities = MagicMock()
+
+    reverse_seen = asyncio.Event()
+
+    async def fake_stream(**_kwargs):
+        await reverse_seen.wait()
+        return (1, 10)
+
+    async def fake_handle_manifest_push(_channel, msg, peer_fp):
+        assert msg["t"] == "MANIFEST_PUSH"
+        assert peer_fp == "peer_fp_abc"
+        reverse_seen.set()
+
+    d._stream_blobs_for_wants = fake_stream
+    d._handle_manifest_push = fake_handle_manifest_push
+    d._handle_blob_offer = AsyncMock()
+    d._handle_blob_chunk = AsyncMock()
+
+    class FakeChannel:
+        def __init__(self) -> None:
+            self.peer_short_id = "peer1"
+            self.peer_caps = {"features": [FOLDER_SYNC, FOLDER_SYNC_BIDI_V1]}
+            self.sent = []
+
+        async def send(self, payload: bytes) -> None:
+            self.sent.append(decode_msg(payload))
+
+        async def recv(self) -> bytes:
+            if not hasattr(self, "_frames"):
+                self._frames = [
+                    make_msg(
+                        "MANIFEST_WANTS",
+                        "peer1",
+                        folder="myfolder",
+                        wants=["a" * 64],
+                    ),
+                    make_msg(
+                        "MANIFEST_PUSH",
+                        "peer1",
+                        folder="myfolder",
+                        entries=[],
+                        merkle_root="remote",
+                        entry_count=0,
+                    ),
+                ]
+            if self._frames:
+                await asyncio.sleep(0)
+                return encode_msg(self._frames.pop(0))
+            await asyncio.sleep(0)
+            raise asyncio.TimeoutError
+
+        async def close(self) -> None:
+            pass
+
+        def note_caps_sent(self) -> None:
+            pass
+
+        def maybe_activate_ratchet(self) -> None:
+            pass
+
+    channel = FakeChannel()
+
+    async def fake_initiate(*_args, **_kwargs):
+        return channel
+
+    monkeypatch.setattr(daemon_module.ch, "initiate", fake_initiate)
+    peer = Peer(
+        short_id="peer1",
+        hostname="peer-host",
+        address="127.0.0.1",
+        port=9,
+        ed_pub_hex="00" * 32,
+    )
+
+    result = await asyncio.wait_for(
+        d.push_folder_to_peer(peer, "myfolder", bidirectional=True),
+        timeout=1.0,
+    )
+    assert result["ok"] is True
+    assert reverse_seen.is_set()
+    assert result["blobs_sent"] == 1
+    assert any(
+        frame["t"] == "MANIFEST_PUSH" and frame.get("request_reverse") is True
+        for frame in channel.sent
+    )

@@ -1107,10 +1107,12 @@ def _candidate_local_listen_ports() -> list[int]:
 
 def _recover_control_port_from_live_pid() -> int | None:
     pid = _read_lock_pid()
+    if pid is None or not _pid_is_alive(pid):
+        return None
     candidates: list[int] = []
-    if pid is not None and _pid_is_alive(pid):
-        candidates.extend(_candidate_control_ports_for_pid(pid))
-    candidates.extend(p for p in _candidate_local_listen_ports() if p not in candidates)
+    candidates.extend(_candidate_control_ports_for_pid(pid))
+    if not candidates:
+        candidates.extend(_candidate_local_listen_ports())
     home = str(data_dir())
     for port in candidates:
         try:
@@ -4627,22 +4629,41 @@ class Daemon:
             meta = t.metadata or {}
             inbound = (t.direction == "in")
             try:
-                self._mark_transfer_waiting(
-                    t.id,
-                    path=Path(meta.get("path") or t.name),
-                    error=(
-                        "the app restarted while this transfer was in "
-                        "flight; resuming automatically"
-                    ),
-                    error_class="DaemonRestarted",
-                    base_metadata={
-                        **meta,
-                        "reaped": True,
-                        "reaped_reason": "orphaned_by_restart",
-                        "reaped_at_ms": now_ms,
-                        "orphaned_direction": "in" if inbound else "out",
-                    },
-                )
+                base = {
+                    **meta,
+                    "transient": True,
+                    "paused_at_ms": now_ms,
+                    "reaped": True,
+                    "reaped_reason": "orphaned_by_restart",
+                    "reaped_at_ms": now_ms,
+                    "orphaned_direction": "in" if inbound else "out",
+                    "error_class": "DaemonRestarted",
+                }
+                if inbound:
+                    self._update_transfer(
+                        t.id,
+                        status="paused",
+                        metadata={
+                            **base,
+                            "delivery_state": "waiting_for_sender",
+                            "error": (
+                                "the app restarted while this transfer was in "
+                                "flight; receiving will resume when the sender "
+                                "reconnects"
+                            ),
+                        },
+                    )
+                else:
+                    self._mark_transfer_waiting(
+                        t.id,
+                        path=Path(meta.get("path") or t.name),
+                        error=(
+                            "the app restarted while this transfer was in "
+                            "flight; resuming automatically"
+                        ),
+                        error_class="DaemonRestarted",
+                        base_metadata=base,
+                    )
                 reconciled += 1
             except Exception as e:
                 log.warning(
@@ -19829,19 +19850,35 @@ class Daemon:
             # their blobs (interleaved with serving ours) until idle.
             wants: list[str] = []
             served_forward = False
+            stream_tasks: set[asyncio.Task] = set()
             # First-frame patience is generous (peer has to merge our
             # manifest + reply). Once frames are flowing, a shorter
             # idle window detects "both directions drained".
             first_timeout = 15.0
             idle_timeout = 8.0 if bidirectional else 15.0
             cur_timeout = first_timeout
+
+            def _harvest_stream_tasks() -> None:
+                nonlocal blobs_sent, bytes_sent
+                done = {task for task in stream_tasks if task.done()}
+                for task in done:
+                    stream_tasks.discard(task)
+                    bs, by = task.result()
+                    blobs_sent += bs
+                    bytes_sent += by
+
             while True:
                 try:
                     reply = await asyncio.wait_for(
                         channel.recv(), timeout=cur_timeout,
                     )
                 except asyncio.TimeoutError:
+                    _harvest_stream_tasks()
+                    if stream_tasks:
+                        cur_timeout = min(1.0, idle_timeout)
+                        continue
                     break
+                _harvest_stream_tasks()
                 m = decode_msg(reply)
                 t = m.get("t")
                 if t == "CAPS":
@@ -19863,7 +19900,7 @@ class Daemon:
                     continue
                 if t == "MANIFEST_WANTS" and m.get("folder") == folder_name:
                     wants = list(m.get("wants", []) or [])
-                    bs, by = await self._stream_blobs_for_wants(
+                    stream_coro = self._stream_blobs_for_wants(
                         channel=channel,
                         folder_name=folder_name,
                         wants=wants,
@@ -19875,8 +19912,12 @@ class Daemon:
                         merkle_root=merkle_root,
                         bytes_already_sent=bytes_sent,
                     )
-                    blobs_sent += bs
-                    bytes_sent += by
+                    if bidirectional:
+                        stream_tasks.add(asyncio.create_task(stream_coro))
+                    else:
+                        bs, by = await stream_coro
+                        blobs_sent += bs
+                        bytes_sent += by
                     served_forward = True
                     if not bidirectional:
                         break
@@ -19903,6 +19944,17 @@ class Daemon:
                     cur_timeout = idle_timeout
                     continue
                 # Unknown / unexpected frame: ignore, keep listening.
+
+            while stream_tasks:
+                done, _pending = await asyncio.wait(
+                    stream_tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    stream_tasks.discard(task)
+                    bs, by = task.result()
+                    blobs_sent += bs
+                    bytes_sent += by
 
             await channel.close()
             self._update_transfer(

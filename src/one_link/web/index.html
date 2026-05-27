@@ -15888,7 +15888,8 @@
     if (!t) return fallback;
     if (t.display_state) return t.display_state;
     const meta = t.metadata || {};
-    if (meta.doctor?.label) return meta.doctor.label;
+    const inbound = t.direction === "in";
+    if (meta.doctor?.label && !(inbound && ["queued", "offered", "active", "paused"].includes(t.status))) return meta.doctor.label;
     const stateName = meta.delivery_state || "";
     // 2026-05-22 audit Batch AA: short-circuit the empty-file edge.
     // Without this, total_bytes === 0 makes progress_pct = NaN ->
@@ -15902,7 +15903,6 @@
     // the terminal "complete" state was direction-aware before, so a
     // file the receiver was pulling showed "Sending… 42%" — confusing
     // and wrong. ``inbound`` drives every non-terminal label too.
-    const inbound = t.direction === "in";
     const actVerb = inbound ? "Receiving" : "Sending";
     if (t.status === "queued") {
       if (stateName === "resuming") return "Resuming";

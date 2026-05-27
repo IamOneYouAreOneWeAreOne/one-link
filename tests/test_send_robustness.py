@@ -527,7 +527,11 @@ def test_boot_reconcile_marks_prior_active_transfers_waiting(tmp_path: Path):
         assert rows[tid].metadata.get("transient") is True
         assert rows[tid].metadata.get("reaped_reason") == "orphaned_by_restart"
         assert rows[tid].metadata.get("error_class") == "DaemonRestarted"
-        assert rows[tid].metadata.get("next_retry_ms")
+    assert rows["out:orphan"].metadata.get("next_retry_ms")
+    assert rows["out:orphan"].metadata.get("delivery_state") == "waiting_for_device"
+    assert "next_retry_ms" not in rows["in:orphan"].metadata
+    assert rows["in:orphan"].metadata.get("delivery_state") == "waiting_for_sender"
+    assert "doctor" not in rows["in:orphan"].metadata
     # Direction is preserved on the row (the receiver still reads
     # "Receiving"/"Paused", the sender still retries).
     assert rows["out:orphan"].direction == "out"
