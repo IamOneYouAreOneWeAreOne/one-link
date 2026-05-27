@@ -15897,17 +15897,37 @@
     // empty files; the active-status label needs to handle the
     // pre-complete pulse cleanly.
     const isEmpty = (t.total_bytes === 0 || t.size === 0);
-    if (t.status === "queued")   return stateName === "resuming" ? "Resuming" : "Will send when they're back online";
-    if (t.status === "offered")  return isEmpty ? "Sending empty file" : "Sending…";
+    // v0.21.x: direction-aware copy. An INBOUND transfer (the peer is
+    // sending TO us) must read "Receiving…", never "Sending…". Only
+    // the terminal "complete" state was direction-aware before, so a
+    // file the receiver was pulling showed "Sending… 42%" — confusing
+    // and wrong. ``inbound`` drives every non-terminal label too.
+    const inbound = t.direction === "in";
+    const actVerb = inbound ? "Receiving" : "Sending";
+    if (t.status === "queued") {
+      if (stateName === "resuming") return "Resuming";
+      return inbound
+        ? "Waiting for them to come back online"
+        : "Will send when they're back online";
+    }
+    if (t.status === "offered") {
+      if (isEmpty) return inbound ? "Receiving empty file" : "Sending empty file";
+      return inbound ? "Receiving…" : "Sending…";
+    }
     if (t.status === "active") {
-      if (isEmpty) return "Sending empty file";
-      return `Sending… ${Math.round(t.progress_pct || 0)}%`;
+      if (isEmpty) return inbound ? "Receiving empty file" : "Sending empty file";
+      return `${actVerb}… ${Math.round(t.progress_pct || 0)}%`;
     }
     if (t.status === "complete") {
-      if (isEmpty) return t.direction === "in" ? "Empty file received" : "Empty file sent";
-      return t.direction === "in" ? "Received" : "Done";
+      if (isEmpty) return inbound ? "Empty file received" : "Empty file sent";
+      return inbound ? "Received" : "Done";
     }
-    if (t.status === "paused")   return stateName === "resuming" ? "Resuming" : "Paused. Will retry when they're back.";
+    if (t.status === "paused") {
+      if (stateName === "resuming") return "Resuming";
+      return inbound
+        ? "Paused. Will resume when they're back."
+        : "Paused. Will retry when they're back.";
+    }
     if (t.status === "failed")   return meta.transient ? "Will retry when they're back online" : "Needs attention";
     return t.status || fallback;
   }
@@ -16002,7 +16022,12 @@
       : 0;
     const displayBps = liveBps > 0 ? liveBps : doneBps;
     if (displayBps > 0) {
-      facts.push(`${kind === "sent" ? "Finished at" : "Sending at"} ${fmtMbps(displayBps)}`);
+      // v0.21.x: direction-aware rate verb. Inbound mid-flight reads
+      // "Receiving at", not "Sending at".
+      const rateVerb = kind === "sent"
+        ? "Finished at"
+        : (t.direction === "in" ? "Receiving at" : "Sending at");
+      facts.push(`${rateVerb} ${fmtMbps(displayBps)}`);
     }
 
     const progressBytes = Number(t.progress_bytes || 0);
@@ -17704,16 +17729,32 @@
     } catch (_e) {}
   }
   function aggregateActiveTransferStats() {
-    let count = 0, bps = 0, sent = 0, total = 0;
+    // v0.21.x: split by direction so the header pill can say
+    // "Receiving" for inbound transfers instead of always "Sending".
+    let count = 0, sendCount = 0, recvCount = 0;
+    let bps = 0, sent = 0, total = 0;
     for (const t of state.transfers) {
       if (t.status === "active" || t.status === "offered") {
         count += 1;
+        if (t.direction === "in") recvCount += 1;
+        else sendCount += 1;
         bps += rateForTransfer(t);
         sent += t.progress_bytes || 0;
         total += t.total_bytes || 0;
       }
     }
-    return { count, bps, sent, total };
+    return { count, sendCount, recvCount, bps, sent, total };
+  }
+
+  function _activeTransferVerbLabel(sendCount, recvCount) {
+    const parts = [];
+    if (sendCount > 0) {
+      parts.push(`Sending ${sendCount} file${sendCount === 1 ? "" : "s"}`);
+    }
+    if (recvCount > 0) {
+      parts.push(`Receiving ${recvCount} file${recvCount === 1 ? "" : "s"}`);
+    }
+    return parts.join(" · ") || "Transferring";
   }
 
   // v0.8.8: aggregate header pill renderer. Hidden when zero
@@ -17722,7 +17763,7 @@
   function renderTransferHeaderPill() {
     const pill = $("#transfer-pill");
     if (!pill) return;
-    const { count, bps, sent, total } = aggregateActiveTransferStats();
+    const { count, sendCount, recvCount, bps, sent, total } = aggregateActiveTransferStats();
     if (count === 0) {
       pill.style.display = "none";
       pill.innerHTML = "";
@@ -17731,13 +17772,12 @@
     pill.style.display = "inline-flex";
     pill.innerHTML = "";
     pill.appendChild(el("span", "pill-spinner"));
-    const label = count === 1
-      ? `Sending 1 file`
-      : `Sending ${count} files`;
+    const label = _activeTransferVerbLabel(sendCount, recvCount);
     const rate = bps > 0 ? ` · ${fmtMbps(bps)}` : "";
     const pct = total > 0 ? ` · ${Math.round((sent / total) * 100)}%` : "";
     pill.appendChild(document.createTextNode(label + rate + pct));
-    pill.title = `${fmtBytes(sent)} of ${fmtBytes(total)} sent${bps > 0 ? ` at ${fmtMbps(bps)}` : ""}. Click to open Files.`;
+    const moveVerb = recvCount > 0 && sendCount === 0 ? "received" : "moved";
+    pill.title = `${fmtBytes(sent)} of ${fmtBytes(total)} ${moveVerb}${bps > 0 ? ` at ${fmtMbps(bps)}` : ""}. Click to open Files.`;
     pill.onclick = () => {
       // Switch to the Files pane → Sent tab.
       const filesBtn = document.querySelector('[data-pane="files"]');
