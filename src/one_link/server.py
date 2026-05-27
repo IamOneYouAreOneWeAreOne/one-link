@@ -3279,17 +3279,38 @@ class UIServer:
                 )
 
     def _is_session_persistence_enabled(self) -> bool:
+        """v0.21.x: resolved through the sovereignty preset layer.
+        Explicit user setting (Privacy panel feature row) overrides
+        the preset; otherwise the active preset's default applies.
+        just_works + quiet → ON; off_grid → OFF."""
         if self.daemon is None or self.daemon.state is None:
             return True  # in-memory daemons (tests) default-on
-        v = self.daemon.state.get_setting(SESSION_PERSISTENCE_SETTING)
-        # Default ON when unset, OFF when explicitly disabled.
-        return v != "false"
+        from one_link.sovereignty import (
+            current_preset_name,
+            resolve_ui_session_persistence_enabled,
+        )
+        return resolve_ui_session_persistence_enabled(
+            state_setting=self.daemon.state.get_setting(
+                SESSION_PERSISTENCE_SETTING,
+            ),
+            preset_name=current_preset_name(self.daemon.state),
+        )
 
     def _is_session_labels_enabled(self) -> bool:
+        """v0.21.x: same resolver pattern. just_works → ON;
+        quiet + off_grid → OFF (no UA fingerprint stored)."""
         if self.daemon is None or self.daemon.state is None:
             return True
-        v = self.daemon.state.get_setting(SESSION_LABELS_SETTING)
-        return v != "false"
+        from one_link.sovereignty import (
+            current_preset_name,
+            resolve_ui_session_labels_enabled,
+        )
+        return resolve_ui_session_labels_enabled(
+            state_setting=self.daemon.state.get_setting(
+                SESSION_LABELS_SETTING,
+            ),
+            preset_name=current_preset_name(self.daemon.state),
+        )
 
     @staticmethod
     def _auth_failed_help_page(*, reason: str = "stale_token") -> str:
@@ -4118,6 +4139,18 @@ class UIServer:
                     "enabled": preset.rendezvous_enabled,
                     "source": "preset",
                 },
+                # v0.21.x persistent UI sessions. Resolver consults
+                # explicit setting > preset default; the source
+                # field surfaces which one won so the user sees
+                # WHY a thing is on or off.
+                "ui_session_persistence": {
+                    "enabled": self._is_session_persistence_enabled(),
+                    "source": _source(SESSION_PERSISTENCE_SETTING),
+                },
+                "ui_session_labels": {
+                    "enabled": self._is_session_labels_enabled(),
+                    "source": _source(SESSION_LABELS_SETTING),
+                },
             },
             "outbound": {
                 "session_started_ms": outbound_started_ms,
@@ -4151,6 +4184,10 @@ class UIServer:
                     "stun_servers": list(p.stun_servers),
                     "mdns_discovery_enabled": p.mdns_discovery_enabled,
                     "rendezvous_enabled": p.rendezvous_enabled,
+                    "ui_session_persistence_enabled":
+                        p.ui_session_persistence_enabled,
+                    "ui_session_labels_enabled":
+                        p.ui_session_labels_enabled,
                 }
                 for p in _sov.ALL_PRESETS.values()
             ],

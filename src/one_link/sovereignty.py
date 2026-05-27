@@ -79,6 +79,15 @@ class SovereigntyPreset:
     stun_servers: tuple[str, ...]
     mdns_discovery_enabled: bool
     rendezvous_enabled: bool
+    # v0.21.x persistent UI sessions (local-only, never sent over
+    # the internet). Each preset picks a sensible default; user can
+    # still override per-feature in the Privacy panel.
+    #   just_works → both ON  (best UX)
+    #   quiet      → persist ON, labels OFF (cookie survives but
+    #                no browser fingerprint stored)
+    #   off_grid   → both OFF (no cookies, no session table at all)
+    ui_session_persistence_enabled: bool
+    ui_session_labels_enabled: bool
     # UI hint — the chooser surfaces this as a one-line "what flows
     # outbound" summary so the user understands the trade.
     outbound_summary: str
@@ -100,6 +109,8 @@ JUST_WORKS = SovereigntyPreset(
     stun_servers=COMMUNITY_STUN_SERVERS,
     mdns_discovery_enabled=True,
     rendezvous_enabled=False,
+    ui_session_persistence_enabled=True,
+    ui_session_labels_enabled=True,
     outbound_summary=(
         "Uses small community servers (Nextcloud, Sipgate) only to "
         "help devices find each other. Checks for updates once every "
@@ -114,13 +125,17 @@ QUIET = SovereigntyPreset(
         "Only talks to other devices on your local Wi-Fi. Connecting "
         "across different networks (for example, your phone at a "
         "coffee shop to your laptop at home) will not work unless you "
-        "set it up yourself. Update notifications are off. Pick this "
-        "for the strictest privacy without going completely offline."
+        "set it up yourself. Update notifications are off. Browser "
+        "labels in the sessions list are stripped (you'll see uuids "
+        "only). Pick this for the strictest privacy without going "
+        "completely offline."
     ),
     update_check_enabled=False,
     stun_servers=(),
     mdns_discovery_enabled=True,
     rendezvous_enabled=False,
+    ui_session_persistence_enabled=True,
+    ui_session_labels_enabled=False,
     outbound_summary=(
         "Local Wi-Fi only. No other outside connections."
     ),
@@ -132,13 +147,16 @@ OFF_GRID = SovereigntyPreset(
     description=(
         "Your device makes no announcements and no outside "
         "connections at all. Pairing is manual only (you copy a code "
-        "from one device to the other, in person). For people who "
-        "need maximum privacy."
+        "from one device to the other, in person). No persistent "
+        "sign-in cookies — every daemon restart sends you back to "
+        "opening from the tray. For people who need maximum privacy."
     ),
     update_check_enabled=False,
     stun_servers=(),
     mdns_discovery_enabled=False,
     rendezvous_enabled=False,
+    ui_session_persistence_enabled=False,
+    ui_session_labels_enabled=False,
     outbound_summary="Nothing. No connections, no broadcast.",
 )
 
@@ -225,6 +243,51 @@ def resolve_stun_servers(
     if env_var is not None:
         return _parse(env_var)
     return get_preset(preset_name).stun_servers
+
+
+def _resolve_bool_setting(
+    *,
+    state_setting: Optional[str],
+    preset_value: bool,
+) -> bool:
+    """Shared explicit-setting-wins resolver for boolean flags. The
+    user's explicit setting (true/false/etc.) overrides the preset;
+    anything else falls back to the preset default."""
+    s = (state_setting or "").strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    return preset_value
+
+
+def resolve_ui_session_persistence_enabled(
+    *,
+    state_setting: Optional[str],
+    preset_name: Optional[str],
+) -> bool:
+    """Should we mint persistent ol_session cookies? Explicit user
+    setting (from the Privacy panel feature row) wins; otherwise
+    falls back to the active preset's default. off_grid defaults
+    OFF; just_works / quiet default ON."""
+    return _resolve_bool_setting(
+        state_setting=state_setting,
+        preset_value=get_preset(preset_name).ui_session_persistence_enabled,
+    )
+
+
+def resolve_ui_session_labels_enabled(
+    *,
+    state_setting: Optional[str],
+    preset_name: Optional[str],
+) -> bool:
+    """Should we store browser User-Agent labels on session rows?
+    quiet + off_grid default OFF (no fingerprint); just_works
+    defaults ON (readable Settings list)."""
+    return _resolve_bool_setting(
+        state_setting=state_setting,
+        preset_value=get_preset(preset_name).ui_session_labels_enabled,
+    )
 
 
 def current_preset_name(state) -> str:

@@ -38213,6 +38213,16 @@
         "Outside helper server (relay)",
         !!(feat.rendezvous && feat.rendezvous.enabled),
         feat.rendezvous && feat.rendezvous.source,
+      )}
+      ${featRowSimple(
+        "Stay signed in across daemon restarts (local cookie only)",
+        !!(feat.ui_session_persistence && feat.ui_session_persistence.enabled),
+        feat.ui_session_persistence && feat.ui_session_persistence.source,
+      )}
+      ${featRowSimple(
+        "Remember which browser is which (local label only)",
+        !!(feat.ui_session_labels && feat.ui_session_labels.enabled),
+        feat.ui_session_labels && feat.ui_session_labels.source,
       )}`;
 
     // Plain-English labels for the connection types so the user can

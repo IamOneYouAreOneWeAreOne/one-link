@@ -555,3 +555,179 @@ def test_create_ui_session_never_logs_uuid(tmp_path: Path, caplog):
             f"{rec.getMessage()!r}"
         )
     s.close()
+
+
+# ── sovereignty preset wiring ────────────────────────────────────
+
+
+def test_preset_definitions_have_session_flags():
+    """All three presets must declare both ui_session_* flags so the
+    resolver always has a defined preset_value to fall back on."""
+    from one_link.sovereignty import ALL_PRESETS
+    for name, p in ALL_PRESETS.items():
+        assert isinstance(p.ui_session_persistence_enabled, bool), (
+            f"preset {name!r} missing ui_session_persistence_enabled"
+        )
+        assert isinstance(p.ui_session_labels_enabled, bool), (
+            f"preset {name!r} missing ui_session_labels_enabled"
+        )
+
+
+def test_just_works_preset_keeps_sessions_on():
+    from one_link.sovereignty import get_preset
+    p = get_preset("just_works")
+    assert p.ui_session_persistence_enabled is True
+    assert p.ui_session_labels_enabled is True
+
+
+def test_quiet_preset_keeps_persistence_drops_labels():
+    """quiet mode keeps the UX win (cookie survives restarts) but
+    strips browser fingerprints."""
+    from one_link.sovereignty import get_preset
+    p = get_preset("quiet")
+    assert p.ui_session_persistence_enabled is True
+    assert p.ui_session_labels_enabled is False
+
+
+def test_off_grid_preset_kills_all_session_state():
+    """off_grid mode is true paranoia — no cookies at all, every
+    restart sends the user back to the tray-open flow."""
+    from one_link.sovereignty import get_preset
+    p = get_preset("off_grid")
+    assert p.ui_session_persistence_enabled is False
+    assert p.ui_session_labels_enabled is False
+
+
+def test_resolver_explicit_setting_overrides_preset():
+    """Per-feature override in Privacy panel must win over the
+    preset's default."""
+    from one_link.sovereignty import (
+        resolve_ui_session_persistence_enabled,
+        resolve_ui_session_labels_enabled,
+    )
+    # off_grid defaults to OFF for both. Explicit 'true' must win.
+    assert resolve_ui_session_persistence_enabled(
+        state_setting="true", preset_name="off_grid",
+    ) is True
+    assert resolve_ui_session_labels_enabled(
+        state_setting="on", preset_name="off_grid",
+    ) is True
+    # just_works defaults to ON. Explicit 'false' must win.
+    assert resolve_ui_session_persistence_enabled(
+        state_setting="false", preset_name="just_works",
+    ) is False
+
+
+def test_resolver_empty_setting_falls_back_to_preset():
+    from one_link.sovereignty import (
+        resolve_ui_session_persistence_enabled,
+    )
+    for empty in (None, "", "   "):
+        assert resolve_ui_session_persistence_enabled(
+            state_setting=empty, preset_name="just_works",
+        ) is True
+        assert resolve_ui_session_persistence_enabled(
+            state_setting=empty, preset_name="off_grid",
+        ) is False
+
+
+@pytest.mark.asyncio
+async def test_off_grid_preset_blocks_cookie_issuance(ctx):
+    """End-to-end: setting the off_grid preset stops the daemon
+    from issuing any persistent-session cookies on bootstrap."""
+    ctx["state"].set_setting("sovereignty_preset", "off_grid")
+    fresh_client = TestClient(TestServer(ctx["server"].app))
+    await fresh_client.start_server()
+    try:
+        r = await fresh_client.get(f"/?t={ctx['token']}")
+        assert r.status == 200
+        cookie_hdrs = " ".join(r.headers.getall("Set-Cookie", []))
+        assert SESSION_COOKIE_NAME not in cookie_hdrs, (
+            "off_grid preset must prevent ol_session minting"
+        )
+        assert SESSION_PRESENT_MARKER_COOKIE not in cookie_hdrs
+    finally:
+        await fresh_client.close()
+
+
+@pytest.mark.asyncio
+async def test_quiet_preset_skips_ua_label(ctx):
+    """End-to-end: quiet preset still mints cookies but doesn't
+    store the User-Agent fingerprint."""
+    ctx["state"].set_setting("sovereignty_preset", "quiet")
+    fresh_client = TestClient(TestServer(ctx["server"].app))
+    await fresh_client.start_server()
+    try:
+        r = await fresh_client.get(
+            f"/?t={ctx['token']}",
+            headers={"User-Agent": "Mozilla/5.0 (Windows) Edg/120"},
+        )
+        assert r.status == 200
+        cookie_hdrs = " ".join(r.headers.getall("Set-Cookie", []))
+        assert SESSION_COOKIE_NAME in cookie_hdrs, (
+            "quiet preset still mints session cookies — only labels off"
+        )
+    finally:
+        await fresh_client.close()
+    rows = ctx["state"].list_ui_sessions()
+    assert len(rows) == 1
+    assert rows[0]["label"] is None, (
+        "quiet preset must skip UA label storage"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sovereignty_status_surfaces_session_flags(ctx):
+    """The Privacy panel reads /api/sovereignty/status to render the
+    'What's turned on right now' list. Both new session flags must
+    appear there so users see them alongside update_check / mdns /
+    rendezvous."""
+    r = await ctx["client"].get(
+        "/api/sovereignty/status",
+        headers=_auth_headers(ctx),
+    )
+    assert r.status == 200
+    body = await r.json()
+    feat = body.get("features", {})
+    assert "ui_session_persistence" in feat
+    assert "ui_session_labels" in feat
+    assert "enabled" in feat["ui_session_persistence"]
+    assert "source" in feat["ui_session_persistence"]
+
+
+@pytest.mark.asyncio
+async def test_sovereignty_preset_list_includes_session_flags(ctx):
+    """The preset list (used to render the 3 cards) must include the
+    new session flags so the UI can describe what each preset does
+    to sessions if it wants to surface that detail later."""
+    r = await ctx["client"].get(
+        "/api/sovereignty/preset",
+        headers=_auth_headers(ctx),
+    )
+    assert r.status == 200
+    body = await r.json()
+    by_name = {p["name"]: p for p in body["presets"]}
+    assert by_name["just_works"]["ui_session_persistence_enabled"] is True
+    assert by_name["just_works"]["ui_session_labels_enabled"] is True
+    assert by_name["quiet"]["ui_session_persistence_enabled"] is True
+    assert by_name["quiet"]["ui_session_labels_enabled"] is False
+    assert by_name["off_grid"]["ui_session_persistence_enabled"] is False
+    assert by_name["off_grid"]["ui_session_labels_enabled"] is False
+
+
+def test_privacy_panel_renders_session_rows():
+    """Index.html must render the two session-flag rows in the
+    Privacy panel's 'What's turned on right now' section so the
+    user can see + audit session state from the same panel that
+    holds update_check / mdns / etc."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "one_link" / "web" / "index.html"
+    ).read_text(encoding="utf-8")
+    assert "ui_session_persistence" in src, (
+        "Privacy panel must read feat.ui_session_persistence so "
+        "the row renders with the resolved enabled state"
+    )
+    assert "ui_session_labels" in src
+    assert "Stay signed in across daemon restarts" in src
+    assert "Remember which browser is which" in src
