@@ -10595,53 +10595,26 @@ class Daemon:
         )))
         log.info("MANIFEST_PUSH from %s: %d entries, %d wants",
                  peer_fp[:8], len(entries), len(wants))
-        # D18 — Bidirectional folder sync. When the peer requested a
-        # reverse push (e.g. a receiver just accepted a folder offer
-        # and wants our blobs), kick a FRESH FORWARD push back to
-        # them rather than trying to push our manifest on THIS
-        # channel.
-        #
-        # 2026-05-27 fix: the old in-channel reverse push was broken.
-        # The requester's push_folder_to_peer drain loop only watches
-        # for MANIFEST_WANTS — it breaks out of the loop on the empty
-        # WANTS for ITS OWN (empty) manifest and closes the channel
-        # BEFORE it ever processes our reverse MANIFEST_PUSH. The
-        # reverse manifest was silently dropped, so the receiver
-        # never sent WANTS for our blobs and the files never arrived.
-        #
-        # The forward push is the proven path (test_folder_sync_e2e):
-        # we dial them, send our manifest, they receive it on their
-        # inbound _handle_peer loop, compute wants, send WANTS, we
-        # stream blobs. Spawned as a TRACKED task so it can't be
-        # garbage-collected mid-transfer.
+        # D18 — Bidirectional folder sync (full-duplex, 2026-05-27).
+        # When the peer set request_reverse=True they're running the
+        # full-duplex push_folder_to_peer loop, which CAN receive our
+        # reverse manifest + blobs on THIS same channel. So push our
+        # manifest back in-channel: they'll compute their wants, send
+        # WANTS, and we'll stream our blobs to them — all without a
+        # second connection. This is the efficient single-dial mutual
+        # sync. (The earlier "kick a separate forward push" approach
+        # was a workaround for the OLD half-duplex loop that couldn't
+        # receive the reverse; the loop is now full-duplex, so the
+        # clean in-channel reverse is correct + faster.)
         if msg.get("request_reverse"):
             peer_caps_frame = getattr(channel, "peer_caps", None) or {}
             peer_features = list(peer_caps_frame.get("features") or [])
             if FOLDER_SYNC_BIDI_V1 in peer_features:
-                reverse_peer = self._peer_from_fp(peer_fp)
-                if reverse_peer is not None:
-                    async def _reverse_forward_push(
-                        _peer=reverse_peer, _folder=folder_name,
-                    ) -> None:
-                        try:
-                            await self.push_folder_to_peer(_peer, _folder)
-                        except Exception as e:  # pragma: no cover - bg
-                            log.warning(
-                                "reverse forward-push to %s for %s failed: %s",
-                                peer_fp[:8], _folder, e,
-                            )
-                    # _track registers the task on self._background_tasks
-                    # so it isn't GC'd mid-transfer + stop() can drain it.
-                    self._track(_reverse_forward_push())
-                else:
-                    # Peer not resolvable for a fresh dial — fall back
-                    # to the legacy in-channel reverse (best effort;
-                    # works when the requester stays on the channel).
-                    await self._send_local_manifest_in_channel(
-                        channel=channel,
-                        folder_name=folder_name,
-                        peer_fp=peer_fp,
-                    )
+                await self._send_local_manifest_in_channel(
+                    channel=channel,
+                    folder_name=folder_name,
+                    peer_fp=peer_fp,
+                )
 
     async def _handle_manifest_wants(self, channel, msg, peer_fp):
         if self.folder_engine is None or self.state is None:
@@ -19537,6 +19510,126 @@ class Daemon:
                 with contextlib.suppress(Exception):
                     self.state.unshare_folder_with(folder_name, peer_fp)
 
+    async def _stream_blobs_for_wants(
+        self,
+        *,
+        channel,
+        folder_name: str,
+        wants: list[str],
+        peer_fp: str,
+        peer_short_id: str,
+        transfer_id: str,
+        total_bytes: int,
+        entries_count: int,
+        merkle_root: str,
+        bytes_already_sent: int = 0,
+    ) -> tuple[int, int]:
+        """Stream BLOB_OFFER + BLOB_CHUNK frames for every wanted blob
+        we actually hold, over an already-open channel.
+
+        Extracted from ``push_folder_to_peer`` so BOTH the half-duplex
+        forward path AND the full-duplex bidirectional loop share one
+        optimized sender (pipelined disk reads, optional zlib
+        compression honouring the peer's FILE_COMPRESSION cap,
+        bandwidth-cap throttle, per-blob progress broadcast + transfer
+        ledger updates).
+
+        Returns ``(blobs_sent, bytes_sent_this_call)``.
+        """
+        if self.blob_store is None:
+            return 0, 0
+        blobs_sent = 0
+        bytes_sent = bytes_already_sent
+        sent_this_call = 0
+        throttle_started_at = time.monotonic()
+        peer_caps_frame_chunks = getattr(channel, "peer_caps", None) or {}
+        peer_feature_set = set(normalize_caps(
+            peer_caps_frame_chunks.get("features") or [],
+        ))
+        peer_supports_compression = FILE_COMPRESSION in peer_feature_set
+        for blob_hex in wants:
+            if not self._valid_blob_hex(blob_hex):
+                continue
+            if not self.blob_store.has(blob_hex):
+                continue
+            size = self.blob_store.size(blob_hex)
+            bytes_sent += int(size)
+            sent_this_call += int(size)
+            await channel.send(encode_msg(make_msg(
+                "BLOB_OFFER", self.me.short_id,
+                blob=blob_hex, size=size,
+            )))
+            n_chunks = (
+                max(1, (int(size) + CHUNK_SIZE - 1) // CHUNK_SIZE)
+                if size > 0 else 1
+            )
+            with self.blob_store.open_read(blob_hex) as fh:
+                if size == 0:
+                    await channel.send(encode_msg(make_msg(
+                        "BLOB_CHUNK", self.me.short_id,
+                        blob=blob_hex, seq=0,
+                        data="", eof=True, enc="raw",
+                    )))
+                else:
+                    read_task = asyncio.create_task(
+                        asyncio.to_thread(fh.read, CHUNK_SIZE),
+                    )
+                    for seq in range(n_chunks):
+                        try:
+                            data = await read_task
+                        except Exception:
+                            data = b""
+                        is_last = (seq == n_chunks - 1)
+                        if not is_last:
+                            read_task = asyncio.create_task(
+                                asyncio.to_thread(fh.read, CHUNK_SIZE),
+                            )
+                        enc, payload = self._encode_payload(
+                            data, allow_compress=peer_supports_compression,
+                        )
+                        await channel.send(encode_msg(make_msg(
+                            "BLOB_CHUNK", self.me.short_id,
+                            blob=blob_hex, seq=seq,
+                            data=base64.b64encode(payload).decode("ascii"),
+                            eof=is_last,
+                            enc=enc,
+                        )))
+                        await self._throttle_chunk(
+                            bytes_sent, throttle_started_at,
+                        )
+            blobs_sent += 1
+            self._update_transfer(
+                transfer_id,
+                status="active",
+                progress_bytes=bytes_sent,
+                total_bytes=max(total_bytes, bytes_sent),
+                chunks_done=blobs_sent,
+                chunks_total=max(len(wants), blobs_sent),
+                raw_bytes=bytes_sent,
+                wire_bytes=bytes_sent,
+                metadata={
+                    "folder": folder_name,
+                    "entries": entries_count,
+                    "wanted_blobs": len(wants),
+                    "merkle_root": merkle_root,
+                    "peer": peer_short_id,
+                },
+            )
+            if self.ui_server is not None:
+                with contextlib.suppress(Exception):
+                    self.ui_server.broadcast({
+                        "type": "folder_send_blob_done",
+                        "folder_name": folder_name,
+                        "peer_fp": peer_fp,
+                        "blob": blob_hex,
+                        "size": int(size),
+                        "blobs_done": blobs_sent,
+                        "blobs_total": len(wants),
+                        "bytes_done": bytes_sent,
+                        "bytes_total": total_bytes,
+                    })
+        return blobs_sent, sent_this_call
+
     async def push_folder_to_peer(
         self,
         peer: Peer,
@@ -19544,20 +19637,31 @@ class Daemon:
         *,
         bidirectional: bool = False,
     ) -> dict:
-        """One-way folder push to peer. Single connection cycle:
+        """Folder sync to a peer over a single connection.
+
+        Half-duplex (bidirectional=False, default):
             1. Open + handshake + caps
             2. Send our manifest for this folder
             3. Receive MANIFEST_WANTS
             4. Stream BLOB_OFFER + BLOB_CHUNKs for each wanted blob
             5. Close
 
-        D18 — when ``bidirectional=True`` AND both peers advertise
-        ``FOLDER_SYNC_BIDI_V1``, the MANIFEST_PUSH frame carries
-        ``request_reverse=True``. The peer responds by pushing their
-        own manifest back over the same channel, so both sides exchange
-        manifests + wants + blobs in one connection cycle. The
-        ``request_reverse`` field is unknown to legacy peers and is
-        silently ignored — graceful interop with v0.20.x daemons.
+        Full-duplex (bidirectional=True, both peers advertise
+        FOLDER_SYNC_BIDI_V1) — the premium path, 2026-05-27:
+            After sending our manifest with request_reverse=True, we
+            run a UNIFIED dispatch loop that handles, fully interleaved
+            on the ONE connection:
+              - MANIFEST_WANTS  → stream OUR blobs to them
+              - MANIFEST_PUSH   → their reverse manifest; process it
+                                  (send WANTS for blobs WE need)
+              - BLOB_OFFER /    → receive + materialize THEIR blobs
+                BLOB_CHUNK
+            The loop terminates on idle (no frames for a short window),
+            by which point both directions have drained. This is one
+            dial, one handshake, one ratchet — strictly faster than two
+            forward pushes for mutual sync. ``request_reverse`` is
+            unknown to legacy peers (graceful interop: they just don't
+            push back, degrading to half-duplex).
         """
         block = self._check_outbound_trust(peer)
         if block:
@@ -19654,159 +19758,86 @@ class Daemon:
                 "MANIFEST_PUSH", self.me.short_id, **push_payload,
             )))
 
-            # Drain replies until MANIFEST_WANTS arrives (skipping CAPS).
+            # ── Unified dispatch loop ────────────────────────────────
+            # Half-duplex: serve the first MANIFEST_WANTS, then close.
+            # Full-duplex: keep handling the peer's reverse manifest +
+            # their blobs (interleaved with serving ours) until idle.
             wants: list[str] = []
-            try:
-                while True:
-                    reply = await asyncio.wait_for(channel.recv(), timeout=15.0)
-                    m = decode_msg(reply)
-                    if m.get("t") == "CAPS":
-                        feats = list(normalize_caps(m.get("features", [])))
-                        channel.peer_caps = {
-                            "protocol": m.get("protocol", "?"),
-                            "features": feats,
-                            "from": m.get("from"),
-                            "app_version": m.get("app_version"),
-                        }
-                        # v0.8.2: ratchet half-step.
-                        with contextlib.suppress(Exception):
-                            channel.note_caps_received(feats)
-                            channel.maybe_activate_ratchet()
-                        if self.state is not None:
-                            with contextlib.suppress(Exception):
-                                fp = self._peer_fp_from_peer(peer)
-                                if fp:
-                                    self.state.set_peer_capabilities(fp, feats)
-                        continue
-                    if m.get("t") == "MANIFEST_WANTS" and m.get("folder") == folder_name:
-                        wants = list(m.get("wants", []) or [])
-                        break
-                    # Anything else: ignore and keep listening briefly.
-            except asyncio.TimeoutError:
-                wants = []
-
-            # v0.21.x Ship 6: bandwidth throttle. Track when we
-            # started sending blobs so the per-chunk sleep can pace
-            # us correctly against the user-set kbps cap.
-            throttle_started_at = time.monotonic()
-            # v0.21.x compression: peer's caps determine if we should
-            # zlib-compress chunks. Computed once outside the blob loop.
-            peer_caps_frame_chunks = getattr(channel, "peer_caps", None) or {}
-            peer_feature_set = set(normalize_caps(
-                peer_caps_frame_chunks.get("features") or [],
-            ))
-            for blob_hex in wants:
-                if not self._valid_blob_hex(blob_hex):
-                    continue
-                if not self.blob_store.has(blob_hex):
-                    continue
-                size = self.blob_store.size(blob_hex)
-                bytes_sent += int(size)
-                await channel.send(encode_msg(make_msg(
-                    "BLOB_OFFER", self.me.short_id,
-                    blob=blob_hex, size=size,
-                )))
-                seq = 0
-                # v0.21.x: pipeline disk reads + wire sends. Compute
-                # chunk count from declared size so we know in advance
-                # which chunk is last (no need to read AHEAD just to
-                # detect EOF). Schedule the NEXT read as a Task BEFORE
-                # the current chunk's wire send begins, so the disk
-                # read happens concurrently with the encode + send.
-                # On spinning disks this halves the per-chunk latency
-                # penalty; on SSDs the overhead of asyncio.to_thread
-                # is small compared to the base64 + AEAD work that
-                # would otherwise be serialized.
-                #
-                # v0.21.x compression: when the peer advertises
-                # FILE_COMPRESSION, each chunk is run through
-                # _encode_payload (zlib level 1) which skips
-                # compression for already-compressed content (no win)
-                # and otherwise wins ~50-70% on text/code. Peer
-                # decodes via _decode_payload using the ``enc`` field.
-                # No new wire surface — ``enc`` already exists for
-                # other paths.
-                peer_supports_compression = (
-                    FILE_COMPRESSION in peer_feature_set
-                )
-                n_chunks = (
-                    max(1, (int(size) + CHUNK_SIZE - 1) // CHUNK_SIZE)
-                    if size > 0 else 1
-                )
-                with self.blob_store.open_read(blob_hex) as fh:
-                    if size == 0:
-                        await channel.send(encode_msg(make_msg(
-                            "BLOB_CHUNK", self.me.short_id,
-                            blob=blob_hex, seq=0,
-                            data="", eof=True, enc="raw",
-                        )))
-                    else:
-                        read_task = asyncio.create_task(
-                            asyncio.to_thread(fh.read, CHUNK_SIZE),
-                        )
-                        for seq in range(n_chunks):
-                            try:
-                                data = await read_task
-                            except Exception:
-                                data = b""
-                            is_last = (seq == n_chunks - 1)
-                            # Kick next read NOW so disk I/O overlaps
-                            # with the encode + send below.
-                            if not is_last:
-                                read_task = asyncio.create_task(
-                                    asyncio.to_thread(fh.read, CHUNK_SIZE),
-                                )
-                            enc, payload = self._encode_payload(
-                                data,
-                                allow_compress=peer_supports_compression,
-                            )
-                            await channel.send(encode_msg(make_msg(
-                                "BLOB_CHUNK", self.me.short_id,
-                                blob=blob_hex, seq=seq,
-                                data=base64.b64encode(payload).decode("ascii"),
-                                eof=is_last,
-                                enc=enc,
-                            )))
-                            # v0.21.x Ship 6: bandwidth-cap throttle.
-                            await self._throttle_chunk(
-                                bytes_sent, throttle_started_at,
-                            )
-                blobs_sent += 1
-                self._update_transfer(
-                    transfer_id,
-                    status="active",
-                    progress_bytes=bytes_sent,
-                    total_bytes=max(total_bytes, bytes_sent),
-                    chunks_done=blobs_sent,
-                    chunks_total=max(len(wants), blobs_sent),
-                    raw_bytes=bytes_sent,
-                    wire_bytes=bytes_sent,
-                    metadata={
-                        "folder": folder_name,
-                        "entries": len(entries),
-                        "wanted_blobs": len(wants),
-                        "merkle_root": merkle_root,
-                        "peer": peer.short_id,
-                    },
-                )
-                # v0.21.x: per-blob progress on the SENDER side. UI
-                # uses these to update the in-flight overlay from
-                # generic "Sending paper" to specific "Sending paper
-                # · 23 of 147 blobs · 12 MB sent". Mirrors the
-                # folder_recv_blob_done emitted on the RECEIVER side.
-                if self.ui_server is not None:
+            served_forward = False
+            # First-frame patience is generous (peer has to merge our
+            # manifest + reply). Once frames are flowing, a shorter
+            # idle window detects "both directions drained".
+            first_timeout = 15.0
+            idle_timeout = 8.0 if bidirectional else 15.0
+            cur_timeout = first_timeout
+            while True:
+                try:
+                    reply = await asyncio.wait_for(
+                        channel.recv(), timeout=cur_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    break
+                m = decode_msg(reply)
+                t = m.get("t")
+                if t == "CAPS":
+                    feats = list(normalize_caps(m.get("features", [])))
+                    channel.peer_caps = {
+                        "protocol": m.get("protocol", "?"),
+                        "features": feats,
+                        "from": m.get("from"),
+                        "app_version": m.get("app_version"),
+                    }
                     with contextlib.suppress(Exception):
-                        self.ui_server.broadcast({
-                            "type": "folder_send_blob_done",
-                            "folder_name": folder_name,
-                            "peer_fp": peer_fp,
-                            "blob": blob_hex,
-                            "size": int(size),
-                            "blobs_done": blobs_sent,
-                            "blobs_total": len(wants),
-                            "bytes_done": bytes_sent,
-                            "bytes_total": total_bytes,
-                        })
+                        channel.note_caps_received(feats)
+                        channel.maybe_activate_ratchet()
+                    if self.state is not None:
+                        with contextlib.suppress(Exception):
+                            fp = self._peer_fp_from_peer(peer)
+                            if fp:
+                                self.state.set_peer_capabilities(fp, feats)
+                    continue
+                if t == "MANIFEST_WANTS" and m.get("folder") == folder_name:
+                    wants = list(m.get("wants", []) or [])
+                    bs, by = await self._stream_blobs_for_wants(
+                        channel=channel,
+                        folder_name=folder_name,
+                        wants=wants,
+                        peer_fp=peer_fp,
+                        peer_short_id=peer.short_id,
+                        transfer_id=transfer_id,
+                        total_bytes=total_bytes,
+                        entries_count=len(entries),
+                        merkle_root=merkle_root,
+                        bytes_already_sent=bytes_sent,
+                    )
+                    blobs_sent += bs
+                    bytes_sent += by
+                    served_forward = True
+                    if not bidirectional:
+                        break
+                    cur_timeout = idle_timeout
+                    continue
+                if bidirectional and t == "MANIFEST_PUSH":
+                    # Peer's REVERSE manifest. Route through the same
+                    # handler the inbound side uses: it computes what
+                    # WE want, sends our MANIFEST_WANTS, registers the
+                    # expected-pull set. The peer then streams those
+                    # blobs back on this channel (handled below).
+                    with contextlib.suppress(Exception):
+                        await self._handle_manifest_push(channel, m, peer_fp)
+                    cur_timeout = idle_timeout
+                    continue
+                if bidirectional and t == "BLOB_OFFER":
+                    with contextlib.suppress(Exception):
+                        await self._handle_blob_offer(channel, m, peer_fp)
+                    cur_timeout = idle_timeout
+                    continue
+                if bidirectional and t == "BLOB_CHUNK":
+                    with contextlib.suppress(Exception):
+                        await self._handle_blob_chunk(channel, m, peer_fp)
+                    cur_timeout = idle_timeout
+                    continue
+                # Unknown / unexpected frame: ignore, keep listening.
 
             await channel.close()
             self._update_transfer(
@@ -23717,7 +23748,13 @@ class Daemon:
                 if peer is None:
                     continue
                 try:
-                    await self.push_folder_to_peer(peer, folder["name"])
+                    # Full-duplex: one connection syncs BOTH directions
+                    # (we push our changes + pull theirs). Falls back to
+                    # half-duplex automatically against legacy peers that
+                    # don't advertise FOLDER_SYNC_BIDI_V1.
+                    await self.push_folder_to_peer(
+                        peer, folder["name"], bidirectional=True,
+                    )
                 except Exception as e:
                     log.info("folder sync to %s failed: %s", peer.short_id, e)
 

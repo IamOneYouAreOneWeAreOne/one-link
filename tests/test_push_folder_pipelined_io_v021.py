@@ -23,7 +23,14 @@ from one_link.daemon import Daemon
 
 
 def _push_folder_body() -> str:
+    # 2026-05-27: the optimized blob-streaming loop was extracted from
+    # push_folder_to_peer into the shared _stream_blobs_for_wants
+    # helper (so the half-duplex forward path AND the full-duplex
+    # bidirectional loop reuse one sender). The pipelining behavior
+    # these tests pin now lives there; inspect both so the guard
+    # survives the refactor + any future re-merge.
     src = inspect.getsource(Daemon.push_folder_to_peer)
+    src += "\n" + inspect.getsource(Daemon._stream_blobs_for_wants)
     return inspect.cleandoc(src)
 
 
