@@ -341,6 +341,13 @@ def _normalize_user_query_to_fts5_prefix(raw: str) -> str:
         inner = s[1:-1].strip()
         if not inner:
             return ""
+        # A phrase with no word characters (only symbols, e.g. "@#$")
+        # has nothing FTS5 can tokenize and would error / no-op against
+        # MATCH; return empty so the caller short-circuits without a DB
+        # hit. (Hypothesis property test caught this quote-wrapped
+        # special-chars-only edge.)
+        if not _FTS5_TOKEN_RE.search(inner):
+            return ""
         return s
     tokens = _FTS5_TOKEN_RE.findall(s)
     if not tokens:
