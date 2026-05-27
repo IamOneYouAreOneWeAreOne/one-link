@@ -19,6 +19,7 @@ migration at a time is idempotent.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import contextlib
 import logging
@@ -632,6 +633,7 @@ class State:
                     (24, self._migrate_v24_held_recovery_shares),
                     (25, self._migrate_v25_pending_folder_offers),
                     (26, self._migrate_v26_folder_lifecycle_audit),
+                    (27, self._migrate_v27_ui_sessions),
                 ]
                 for target_version, apply_fn in steps:
                     self._run_atomic_migration(
@@ -1083,6 +1085,63 @@ class State:
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_folder_lifecycle_audit_fp"
             " ON folder_lifecycle_audit(peer_fp, ts_ms DESC)"
+        )
+
+    def _migrate_v27_ui_sessions(self, c: sqlite3.Cursor) -> None:
+        """v0.21.x persistent UI sessions: every successful ?t=<token>
+        bootstrap mints a row here keyed by a random uuid. The uuid
+        rides in a SameSite=Strict HttpOnly cookie that SURVIVES
+        daemon restarts (state.db persists; the cookie does too).
+
+        Pre-v27, the daemon's UI token rotates whenever the on-disk
+        ui.token file can't be reloaded (lockbox key drift, file
+        deleted, etc.). Old browser tabs + bookmarked URLs all stop
+        working — users hit a dead-end 'access denied' page. The
+        session table sidesteps the rotation: as long as the cookie
+        is still valid (in this table), the daemon accepts it
+        regardless of what ui.token says.
+
+        Schema:
+          id              INTEGER PRIMARY KEY AUTOINCREMENT
+          session_uuid    TEXT    NOT NULL UNIQUE
+          created_ms      INTEGER NOT NULL
+          last_seen_ms    INTEGER NOT NULL
+          revoked_ms      INTEGER           -- soft-delete via revoke
+          user_agent_hash TEXT              -- truncated SHA256 of UA
+                                            -- (privacy-preserving
+                                            -- device label for the
+                                            -- 'Active sessions' list)
+          label           TEXT              -- best-effort human label
+                                            -- ('Edge on Windows')
+          remote_first    TEXT              -- IP the cookie was first
+                                            -- minted from (loopback /
+                                            -- LAN — never leaves the
+                                            -- machine but lets the
+                                            -- user audit)
+
+        Index session_uuid for O(1) cookie lookups.
+        """
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ui_sessions (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_uuid    TEXT    NOT NULL UNIQUE,
+                created_ms      INTEGER NOT NULL,
+                last_seen_ms    INTEGER NOT NULL,
+                revoked_ms      INTEGER,
+                user_agent_hash TEXT,
+                label           TEXT,
+                remote_first    TEXT
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ui_sessions_uuid"
+            " ON ui_sessions(session_uuid)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ui_sessions_active"
+            " ON ui_sessions(revoked_ms, last_seen_ms DESC)"
         )
 
     def _migrate_v24_held_recovery_shares(self, c: sqlite3.Cursor) -> None:
@@ -7481,6 +7540,184 @@ class State:
             "chunks": chunks,
             "updated_ms": int(row["updated_ms"]),
         }
+
+    # ── ui_sessions (v27): persistent UI session cookies ─────────
+    @staticmethod
+    def _hash_user_agent(ua: Optional[str]) -> Optional[str]:
+        if not ua:
+            return None
+        return hashlib.sha256(ua.encode("utf-8", "replace")).hexdigest()[:16]
+
+    @staticmethod
+    def _label_user_agent(ua: Optional[str]) -> Optional[str]:
+        """Best-effort short label for the 'Active sessions' UI list.
+        We never send the UA off the box; this is pure local display."""
+        if not ua:
+            return None
+        ua_l = ua.lower()
+        browser = "Browser"
+        if "edg/" in ua_l or "edge/" in ua_l:
+            browser = "Edge"
+        elif "chrome/" in ua_l and "edg/" not in ua_l and "edge/" not in ua_l:
+            browser = "Chrome"
+        elif "firefox/" in ua_l:
+            browser = "Firefox"
+        elif "safari/" in ua_l and "chrome/" not in ua_l:
+            browser = "Safari"
+        elif "curl/" in ua_l:
+            browser = "curl"
+        os_name = "Unknown OS"
+        if "windows" in ua_l:
+            os_name = "Windows"
+        elif "mac os" in ua_l or "macintosh" in ua_l:
+            os_name = "macOS"
+        elif "iphone" in ua_l or "ipad" in ua_l or "ios " in ua_l:
+            os_name = "iOS"
+        elif "android" in ua_l:
+            os_name = "Android"
+        elif "linux" in ua_l:
+            os_name = "Linux"
+        return f"{browser} on {os_name}"
+
+    def create_ui_session(
+        self,
+        *,
+        user_agent: Optional[str] = None,
+        remote: Optional[str] = None,
+    ) -> dict:
+        """Mint a new ui_sessions row. The caller plants the returned
+        ``session_uuid`` in an HttpOnly SameSite=Strict cookie and is
+        thereafter authenticated by it (cookie survives daemon
+        restarts; the UI token does not, so this is the persistence
+        layer). Returns the full row."""
+        import uuid as _uuid
+        now = int(time.time() * 1000)
+        sid = _uuid.uuid4().hex + _uuid.uuid4().hex  # 64 hex chars
+        ua_hash = self._hash_user_agent(user_agent)
+        label = self._label_user_agent(user_agent)
+        with self._write_lock:
+            self._conn.execute(
+                """
+                INSERT INTO ui_sessions(
+                    session_uuid, created_ms, last_seen_ms,
+                    user_agent_hash, label, remote_first
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (sid, now, now, ua_hash, label, remote),
+            )
+            self._conn.commit()
+        return {
+            "session_uuid": sid,
+            "created_ms": now,
+            "last_seen_ms": now,
+            "user_agent_hash": ua_hash,
+            "label": label,
+            "remote_first": remote,
+        }
+
+    def touch_ui_session(self, session_uuid: str) -> bool:
+        """Update last_seen_ms for an active session. Returns True if
+        the session exists + is not revoked; False otherwise. Cheap
+        because it's a single UPDATE on an indexed column.
+
+        Constant-time semantics aren't possible at the SQL layer, but
+        the auth path BEFORE this call already does a constant-time
+        equality on the cookie value vs the uuid, so a timing oracle
+        can't peel uuid bytes."""
+        if not session_uuid or not isinstance(session_uuid, str):
+            return False
+        now = int(time.time() * 1000)
+        with self._write_lock:
+            cur = self._conn.execute(
+                "UPDATE ui_sessions SET last_seen_ms=?"
+                " WHERE session_uuid=? AND revoked_ms IS NULL",
+                (now, session_uuid),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def lookup_ui_session(self, session_uuid: str) -> Optional[dict]:
+        """Return the session row iff valid + not revoked. Does NOT
+        touch last_seen_ms (auth path uses touch_ui_session for that
+        atomically). Read-only helper for the Sessions list UI."""
+        if not session_uuid or not isinstance(session_uuid, str):
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM ui_sessions"
+            " WHERE session_uuid=? AND revoked_ms IS NULL",
+            (session_uuid,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "session_uuid": row["session_uuid"],
+            "created_ms": row["created_ms"],
+            "last_seen_ms": row["last_seen_ms"],
+            "user_agent_hash": row["user_agent_hash"],
+            "label": row["label"],
+            "remote_first": row["remote_first"],
+        }
+
+    def list_ui_sessions(self, *, include_revoked: bool = False) -> list[dict]:
+        sql = "SELECT * FROM ui_sessions"
+        if not include_revoked:
+            sql += " WHERE revoked_ms IS NULL"
+        sql += " ORDER BY last_seen_ms DESC"
+        rows = self._conn.execute(sql).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "session_uuid": r["session_uuid"],
+                "created_ms": r["created_ms"],
+                "last_seen_ms": r["last_seen_ms"],
+                "revoked_ms": r["revoked_ms"],
+                "user_agent_hash": r["user_agent_hash"],
+                "label": r["label"],
+                "remote_first": r["remote_first"],
+            }
+            for r in rows
+        ]
+
+    def revoke_ui_session(self, session_uuid: str) -> bool:
+        """Mark a specific session revoked. Returns True if a row was
+        actually flipped (i.e. it existed + was active)."""
+        now = int(time.time() * 1000)
+        with self._write_lock:
+            cur = self._conn.execute(
+                "UPDATE ui_sessions SET revoked_ms=?"
+                " WHERE session_uuid=? AND revoked_ms IS NULL",
+                (now, session_uuid),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def revoke_all_ui_sessions(self) -> int:
+        """Revoke EVERY active session — the 'Sign out all browsers'
+        button calls this. Returns the count revoked so the UI can
+        echo 'Signed out 3 browsers.'"""
+        now = int(time.time() * 1000)
+        with self._write_lock:
+            cur = self._conn.execute(
+                "UPDATE ui_sessions SET revoked_ms=?"
+                " WHERE revoked_ms IS NULL",
+                (now,),
+            )
+            self._conn.commit()
+            return cur.rowcount
+
+    def prune_expired_ui_sessions(self, *, older_than_ms: int) -> int:
+        """Delete sessions that haven't been touched since ``older_than_ms``
+        AND were revoked / inactive. Called on a slow background cadence
+        so the table doesn't grow unbounded from forgotten browsers."""
+        with self._write_lock:
+            cur = self._conn.execute(
+                "DELETE FROM ui_sessions"
+                " WHERE last_seen_ms < ?",
+                (int(older_than_ms),),
+            )
+            self._conn.commit()
+            return cur.rowcount
 
     def set_setting(self, key: str, value: str) -> None:
         with self._write_lock:

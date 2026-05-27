@@ -251,6 +251,18 @@ def _enumerate_sovereign_primitives() -> list[dict]:
         })
     return out
 COOKIE_NAME = "ol_ui"
+# v0.21.x persistent UI session. The legacy ol_ui cookie carries the
+# CURRENT daemon's UI token, which rotates whenever the on-disk token
+# file can't be loaded (lockbox key drift, manual file delete, etc.).
+# ol_session is keyed off a uuid recorded in the ui_sessions table —
+# state.db survives daemon restarts, so old browser tabs keep
+# working without bouncing the user to the "access denied" page.
+# ol_session_present is a parallel JS-visible marker (NO secret in
+# it; just "yes a session cookie exists") so the access-denied page
+# can decide to auto-reload silently instead of dead-ending.
+SESSION_COOKIE_NAME = "ol_session"
+SESSION_PRESENT_MARKER_COOKIE = "ol_session_present"
+SESSION_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30  # 30 days
 MAX_JSON_REQUEST_BYTES = 256 * 1024
 MAX_REQUEST_TARGET_BYTES = 8 * 1024
 RATE_LIMIT_WINDOW_SECONDS = 60.0
@@ -2249,6 +2261,19 @@ class UIServer:
         r.add_get("/api/connect-info", self._guarded(self.api_connect_info))
         r.add_get("/api/connect-info/qr.svg", self._guarded(self.api_connect_info_qr))
         r.add_get("/api/me", self._guarded(self.api_me))
+        # v0.21.x persistent UI sessions — list/revoke for Settings.
+        r.add_get(
+            "/api/auth/sessions",
+            self._guarded(self.api_list_ui_sessions),
+        )
+        r.add_post(
+            "/api/auth/sessions/revoke-all",
+            self._guarded(self.api_revoke_all_ui_sessions),
+        )
+        r.add_post(
+            r"/api/auth/sessions/{session_uuid}/revoke",
+            self._guarded(self.api_revoke_ui_session),
+        )
         r.add_get("/api/one-health", self._guarded(self.api_one_health))
         # Equation-of-ONE telemetry: per-event selector, cover-traffic,
         # dedupe-site index, FUSE mount capability + selector decision
@@ -2718,7 +2743,34 @@ class UIServer:
             presented = auth[7:]
             if presented and hmac.compare_digest(presented, self.token):
                 return True
-        return False
+        # v0.21.x persistent session cookie. ol_session carries a uuid
+        # that's stored in the ui_sessions table (state.db, survives
+        # daemon restarts). When the legacy ol_ui cookie / URL token
+        # rotates, the session cookie keeps the user signed in. The
+        # daemon validates the uuid against the table + touches the
+        # last_seen_ms in the same call. SameSite=Strict on the
+        # cookie blocks CSRF; the table lookup is O(1) (indexed).
+        return self._check_session_cookie(request)
+
+    def _check_session_cookie(self, request: web.Request) -> bool:
+        """Validate the ol_session cookie. Returns True iff the cookie
+        carries a uuid that's currently active in ui_sessions. Touches
+        last_seen_ms as a side effect so we can prune forgotten
+        sessions later + show 'last used 3m ago' in the UI."""
+        if self.daemon is None or self.daemon.state is None:
+            return False
+        sid = request.cookies.get(SESSION_COOKIE_NAME, "")
+        if not sid or len(sid) < 32:
+            return False
+        # Length-bounded plus alphanumeric — defense in depth against
+        # a corrupted cookie value with weird bytes hitting the SQL.
+        if not all(c in "0123456789abcdefABCDEF" for c in sid):
+            return False
+        try:
+            return self.daemon.state.touch_ui_session(sid)
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("session touch failed: %s", e)
+            return False
 
     def _client_rate_key(self, request: web.Request) -> str:
         peer = request.transport.get_extra_info("peername") if request.transport else None
@@ -2987,8 +3039,15 @@ class UIServer:
                     resp = web.Response(text=page, status=401, content_type="text/html", charset="utf-8")
                     resp.headers["Cache-Control"] = "no-store"
                     resp.headers["Referrer-Policy"] = "no-referrer"
+                    # v0.21.x: inline script needed for the
+                    # cookie-detect self-heal — strict default-src
+                    # 'none' still blocks every external fetch +
+                    # frame. The script reads only the marker cookie
+                    # (no secret) + does a same-origin location
+                    # replace; no DOM XSS surface.
                     resp.headers["Content-Security-Policy"] = (
                         "default-src 'none'; "
+                        "script-src 'unsafe-inline'; "
                         "style-src 'unsafe-inline'; "
                         "base-uri 'none'; "
                         "frame-ancestors 'none'; "
@@ -3128,24 +3187,83 @@ class UIServer:
         # response makes the browser drop the cookie. Tying it to
         # request.scheme keeps loopback working while making LAN-HTTPS
         # leak-proof.
+        secure = (request.scheme == "https")
         resp.set_cookie(
             COOKIE_NAME,
             self.token,
             httponly=True,
             samesite="Strict",
-            secure=(request.scheme == "https"),
+            secure=secure,
             max_age=86400,
             path="/",
         )
+        # v0.21.x: persistent session cookie that outlives daemon
+        # token rotation. If the user already has a valid one (sent
+        # us a touchable session uuid), don't mint a new row — just
+        # roll the same cookie value forward. Otherwise mint fresh.
+        if self.daemon is not None and self.daemon.state is not None:
+            existing = request.cookies.get(SESSION_COOKIE_NAME, "")
+            session_uuid: Optional[str] = None
+            if existing and len(existing) >= 32:
+                try:
+                    if self.daemon.state.touch_ui_session(existing):
+                        session_uuid = existing
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            if session_uuid is None:
+                try:
+                    sess = self.daemon.state.create_ui_session(
+                        user_agent=request.headers.get("User-Agent"),
+                        remote=self._client_rate_key(request),
+                    )
+                    session_uuid = sess["session_uuid"]
+                except Exception as e:  # pragma: no cover - defensive
+                    log.warning("create_ui_session failed: %s", e)
+                    session_uuid = None
+            if session_uuid:
+                resp.set_cookie(
+                    SESSION_COOKIE_NAME,
+                    session_uuid,
+                    httponly=True,
+                    samesite="Strict",
+                    secure=secure,
+                    max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
+                    path="/",
+                )
+                # Parallel JS-readable marker cookie — carries NO
+                # secret; only "yes a session cookie exists" so the
+                # self-heal page can decide to reload silently
+                # instead of dead-ending the user. HttpOnly=False
+                # is the entire point of this cookie.
+                resp.set_cookie(
+                    SESSION_PRESENT_MARKER_COOKIE,
+                    "1",
+                    httponly=False,
+                    samesite="Strict",
+                    secure=secure,
+                    max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
+                    path="/",
+                )
 
     @staticmethod
     def _auth_failed_help_page(*, reason: str = "stale_token") -> str:
         """v0.21.x: friendly HTML for the auth-failed fallback path.
         Plain 'unauthorized' text leaves users staring at a useless
         white page. This page explains what happened + names the
-        recovery actions in plain language. No script, no fetches,
-        no cookies set (this path is for cases where we DON'T trust
-        the request enough to mint a session); just instructions."""
+        recovery actions in plain language.
+
+        v0.21.x self-heal: if the browser has the ol_session_present
+        marker cookie, the user has a valid persistent session — the
+        URL token is stale but the cookie isn't. The inline script
+        strips the stale ``?t=...`` from the URL and reloads, which
+        re-enters _index without the bad query param and lets the
+        cookie auth path take over. Zero clicks. Users never see the
+        access-denied UI in the common case (own machine, same
+        browser as when they first opened).
+
+        If the marker isn't present (first-time-this-browser, private
+        window, cookie cleared), the static help text still shows so
+        the user knows what to do — but they're a small minority."""
         reason_copy = {
             "stale_token": (
                 "The link you used has an old or invalid access token. "
@@ -3154,6 +3272,12 @@ class UIServer:
                 "not work."
             ),
         }.get(reason, "Access to this One Link daemon was refused.")
+        # The inline script runs from the access-denied origin so it
+        # CAN read non-HttpOnly cookies on the same origin. It looks
+        # for the marker cookie; if present, strips ?t and reloads.
+        # CSP for this page allows 'unsafe-inline' specifically for
+        # this one heal-script. The script does NOT touch the actual
+        # session uuid (HttpOnly hides it) — only the marker.
         return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -3170,6 +3294,8 @@ class UIServer:
     li{{margin-bottom:6px}}
     code{{background:#1a1d2a;padding:1px 6px;border-radius:4px;font-size:13px}}
     .pill{{display:inline-block;padding:3px 10px;border-radius:999px;background:rgba(229,150,55,.18);color:#e59637;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:14px}}
+    .heal{{display:none;margin-top:18px;padding:12px 14px;border-radius:10px;background:rgba(118,87,244,.16);color:#cfc4ff;font-size:13px;line-height:1.5}}
+    .heal.show{{display:block}}
   </style>
 </head>
 <body>
@@ -3183,12 +3309,35 @@ class UIServer:
       <li>Otherwise close this tab and re-launch One Link from your launcher / app icon.</li>
       <li>If you started the daemon from a terminal, the launch log printed an <code>open:</code> line with the right URL &mdash; copy that.</li>
     </ol>
+    <div class="heal" id="heal">Reconnecting with your saved session&hellip;</div>
     <p style="margin-top:18px;color:#7d8194;font-size:12px">
       One Link uses per-session tokens so a leaked URL goes stale
       automatically the next time the daemon restarts. That is why
       this happens.
     </p>
   </main>
+  <script>
+    (function(){{
+      // Self-heal path: if this browser already has a persistent
+      // session cookie (marker is JS-visible; the real session uuid
+      // is HttpOnly + invisible), strip the stale ?t= and reload.
+      // Server auth will accept the cookie + re-issue.
+      try {{
+        var has = document.cookie.split(';').some(function(c){{
+          return c.trim().indexOf('{SESSION_PRESENT_MARKER_COOKIE}=') === 0;
+        }});
+        if (has && location.search) {{
+          var heal = document.getElementById('heal');
+          if (heal) heal.classList.add('show');
+          // Tiny delay so the user perceives "did something" not
+          // a hard refresh of the same URL.
+          setTimeout(function(){{
+            location.replace(location.pathname + location.hash);
+          }}, 200);
+        }}
+      }} catch(e) {{}}
+    }})();
+  </script>
 </body>
 </html>"""
 
@@ -7298,6 +7447,87 @@ class UIServer:
             "is_resumable": bool(mgr.is_resumable),
             "is_complete": bool(mgr.is_complete),
         }
+
+    async def api_list_ui_sessions(
+        self, request: web.Request,
+    ) -> web.Response:
+        """v0.21.x: return the active persistent UI sessions so the
+        Settings panel can show 'You're signed in on 3 browsers' +
+        let the user revoke individual ones. The session_uuid is
+        truncated in the response so a copy of the panel HTML can't
+        be used to forge the cookie value — the FULL uuid is only
+        ever in the HttpOnly cookie itself."""
+        if self.daemon.state is None:
+            return web.json_response(
+                {"error": "state not available"}, status=503,
+            )
+        rows = self.daemon.state.list_ui_sessions()
+        # Mark which row is the CALLER's own session (so the UI can
+        # render 'this browser' and refuse to let them revoke the
+        # session they're currently using without confirming).
+        my_sid = request.cookies.get(SESSION_COOKIE_NAME, "")
+        out = []
+        for r in rows:
+            sid = r["session_uuid"]
+            out.append({
+                "id": r["id"],
+                "session_uuid_prefix": sid[:8] if sid else "",
+                "created_ms": r["created_ms"],
+                "last_seen_ms": r["last_seen_ms"],
+                "label": r["label"] or "Unknown browser",
+                "remote_first": r["remote_first"],
+                "is_this_browser": bool(
+                    my_sid and hmac.compare_digest(my_sid, sid)
+                ),
+            })
+        return web.json_response({"sessions": out, "count": len(out)})
+
+    async def api_revoke_all_ui_sessions(
+        self, request: web.Request,
+    ) -> web.Response:
+        """v0.21.x: 'Sign out all browsers' button. Revokes EVERY
+        active session including the caller's own — the response
+        clears the caller's cookies so the next request hits the
+        unauth path cleanly. The user has to open from the tray
+        again to mint a fresh session."""
+        if self.daemon.state is None:
+            return web.json_response(
+                {"error": "state not available"}, status=503,
+            )
+        count = self.daemon.state.revoke_all_ui_sessions()
+        resp = web.json_response({"ok": True, "revoked": count})
+        # Wipe BOTH the session cookie AND the marker so the next
+        # page load doesn't try to self-heal off a stale marker
+        # against a revoked uuid.
+        resp.del_cookie(SESSION_COOKIE_NAME, path="/")
+        resp.del_cookie(SESSION_PRESENT_MARKER_COOKIE, path="/")
+        return resp
+
+    async def api_revoke_ui_session(
+        self, request: web.Request,
+    ) -> web.Response:
+        """Revoke a single named session by its uuid. Use case:
+        user notices a browser they don't recognize in the Active
+        Sessions list, clicks Revoke on that one row, keeps every
+        other browser signed in."""
+        if self.daemon.state is None:
+            return web.json_response(
+                {"error": "state not available"}, status=503,
+            )
+        sid = request.match_info.get("session_uuid", "")
+        if not sid or len(sid) < 32:
+            return web.json_response(
+                {"error": "bad session_uuid"}, status=400,
+            )
+        ok = self.daemon.state.revoke_ui_session(sid)
+        resp = web.json_response({"ok": ok, "revoked": 1 if ok else 0})
+        # If the user revoked their OWN session, clear cookies too
+        # so the next request reaches the unauth path cleanly.
+        my_sid = request.cookies.get(SESSION_COOKIE_NAME, "")
+        if my_sid and hmac.compare_digest(my_sid, sid):
+            resp.del_cookie(SESSION_COOKIE_NAME, path="/")
+            resp.del_cookie(SESSION_PRESENT_MARKER_COOKIE, path="/")
+        return resp
 
     async def api_me(self, request: web.Request) -> web.Response:
         me = self.daemon.me

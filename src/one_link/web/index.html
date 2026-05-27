@@ -10188,6 +10188,28 @@
                 <p class="settings-help blocked-empty">Nobody on the list. Yet.</p>
               </div>
             </div>
+            <!-- v0.21.x Active browser sessions. Persistent UI
+                 sessions outlive daemon restarts; this is where the
+                 user can audit them + sign out browsers they no
+                 longer use. -->
+            <div class="settings-section">
+              <div class="settings-section-h">
+                <span>Active browser sessions</span>
+                <button type="button" id="btn-sign-out-all"
+                        class="btn-ghost"
+                        title="Revoke every persistent session — every browser will need to re-open from the tray to sign back in.">
+                  Sign out all browsers
+                </button>
+              </div>
+              <p class="settings-help">
+                Browsers that opened this device's One Link stay signed
+                in across daemon restarts. Each row below is one
+                browser. Click Revoke on any one you don't recognize.
+              </p>
+              <div id="ui-sessions-list" class="settings-list-host">
+                <p class="settings-help">Loading sessions…</p>
+              </div>
+            </div>
           </section>
 
           <!-- ── Notifications ──────────────────────────────────── -->
@@ -33483,6 +33505,110 @@
     }
   }
 
+  // v0.21.x - Active browser sessions in Privacy pane.
+  // Persistent UI sessions outlive daemon restarts via ol_session
+  // cookie; the user audits them here + revokes one or all.
+  async function refreshUiSessionsList() {
+    const host = $("#ui-sessions-list");
+    if (!host) return;
+    let sessions = [];
+    try {
+      const r = await api.get("/api/auth/sessions");
+      sessions = r.sessions || [];
+    } catch (e) {
+      host.innerHTML = "";
+      const p = el("p", "settings-help");
+      p.textContent = `Couldn't load sessions: ${e && e.message ? e.message : e}`;
+      host.appendChild(p);
+      return;
+    }
+    host.innerHTML = "";
+    if (sessions.length === 0) {
+      host.appendChild(el(
+        "p", "settings-help",
+        "No persistent sessions yet — open from the tray icon to mint one.",
+      ));
+      return;
+    }
+    for (const s of sessions) {
+      const row = el("div", "blocked-row");
+      const labelPrefix = s.is_this_browser ? "★ " : "";
+      const meta = el(
+        "div", "name",
+        labelPrefix + (s.label || "Unknown browser"),
+      );
+      const sub = el(
+        "div", "sub",
+        `id ${s.session_uuid_prefix || "?"} · last used ${_humanRelMs(s.last_seen_ms)}`,
+      );
+      const wrap = el("div");
+      wrap.style.flex = "1";
+      wrap.appendChild(meta);
+      wrap.appendChild(sub);
+      const btn = el("button", "btn-ghost", "Revoke");
+      btn.title = (
+        s.is_this_browser
+          ? "This is the browser you're using right now. Revoking will sign YOU out."
+          : "Sign this browser out. It will need a fresh URL from the tray to come back."
+      );
+      btn.onclick = async () => {
+        if (s.is_this_browser) {
+          if (!confirm("Revoke THIS browser? You'll be signed out.")) return;
+        }
+        try {
+          await api.post(
+            `/api/auth/sessions/${encodeURIComponent(s.session_uuid_prefix)}/revoke`,
+            {},
+          );
+          toast("Session revoked.", "good");
+          if (s.is_this_browser) {
+            // Give the toast a beat then reload — the cookie's gone.
+            setTimeout(() => location.reload(), 600);
+          } else {
+            refreshUiSessionsList();
+          }
+        } catch (e) {
+          toast(
+            `Revoke didn't work: ${errorToastBody(e)}`,
+            "bad", 5000,
+          );
+        }
+      };
+      row.appendChild(wrap);
+      row.appendChild(btn);
+      host.appendChild(row);
+    }
+  }
+  // Wire the "Sign out all browsers" button + auto-refresh when the
+  // Privacy pane becomes visible. The button calls revoke-all then
+  // reloads so the page resets to the unauth flow.
+  document.addEventListener("DOMContentLoaded", () => {
+    const btnAll = $("#btn-sign-out-all");
+    if (btnAll) {
+      btnAll.addEventListener("click", async () => {
+        if (!confirm(
+          "Sign out EVERY browser, including this one? Each browser "
+          + "will need to be re-opened from the tray icon to sign back in."
+        )) return;
+        try {
+          const r = await api.post(
+            "/api/auth/sessions/revoke-all", {},
+          );
+          toast(
+            `Signed out ${r.revoked || 0} browser${r.revoked === 1 ? "" : "s"}.`,
+            "good", 4000,
+          );
+          setTimeout(() => location.reload(), 600);
+        } catch (e) {
+          toast(
+            `Sign-out didn't work: ${errorToastBody(e)}`,
+            "bad", 5000,
+          );
+        }
+      });
+    }
+  });
+
   // v0.15.4 - connect-another-device flow. Calls /api/connect-info,
   // renders either the QR + URL + Copy button (LAN mode) or a hint
   // telling the user to pass --lan (loopback mode). The QR SVG is
@@ -34620,6 +34746,7 @@
     renderSettingsOverview();
     refreshSettingsNetwork().catch((e) => console.warn("settings network refresh:", e));
     refreshBlockedDevicesList();
+    refreshUiSessionsList();
     _settingsHydrating = false;
     markSettingsClean("No changes yet.");
     settingsBackdrop.classList.add("show");
