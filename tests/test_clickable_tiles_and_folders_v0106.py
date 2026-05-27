@@ -705,10 +705,11 @@ def test_folder_row_action_buttons_have_tooltips(index_html: str):
     # JS sets these via element.title = "..."
     idx = index_html.find("for (const f of state.folders)")
     assert idx > 0
-    # v0.21.x added an Open button + click-to-open name/path before
-    # the Share/Sync/Remove block, so the slice has to be wider to
-    # cover all four tooltips.
-    body = index_html[idx:idx + 6000]
+    # v0.21.x added an Open button + Send button + folder-send-group
+    # progress rendering before the Share/Sync/Remove block, so the
+    # slice has to be wider to cover all the tooltips (sync.title now
+    # sits ~7.6k chars past the loop anchor).
+    body = index_html[idx:idx + 10000]
     # Share tooltip must mention the selected-peer requirement.
     assert "share.title" in body, (
         "Share button missing hover tooltip"

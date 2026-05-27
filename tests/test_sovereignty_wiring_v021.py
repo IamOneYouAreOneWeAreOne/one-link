@@ -57,15 +57,17 @@ def test_mdns_resolver_defaults_by_preset(preset_name, expected):
 
 
 @pytest.mark.parametrize("preset_name,expected", [
-    ("just_works", False),
-    ("quiet", False),
+    ("just_works", True),
+    ("quiet", True),
     ("off_grid", False),
 ])
 def test_rendezvous_resolver_defaults_by_preset(preset_name, expected):
-    """All current presets default rendezvous OFF — meaningful gate
-    when the user has manually set rendezvous URLs (state.db) but
-    then flipped to a stricter preset; the daemon must refuse to
-    contact those URLs."""
+    """rendezvous_enabled is a PERMIT gate, not an auto-on switch:
+    just_works + quiet PERMIT rendezvous (it still only runs if the
+    user configured rendezvous URLs — _start_rendezvous checks that);
+    off_grid HARD-BLOCKS it even when URLs are configured. So a user
+    who set up rendezvous, then flips to off_grid, stops contacting
+    those URLs."""
     assert sov.resolve_rendezvous_enabled(
         state_setting=None, preset_name=preset_name,
     ) is expected

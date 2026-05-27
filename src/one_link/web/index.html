@@ -33757,7 +33757,7 @@
         if (preset.name === active) return;
         try {
           await api.post("/api/sovereignty/preset", { name: preset.name });
-          toast(`Privacy mode → ${preset.label}`, "good", 3500);
+          toast(`Switched to ${preset.label}`, "good", 3500);
           // Refresh BOTH the preset cards (active state flip) AND
           // the per-feature toggles (session persistence / labels
           // may have flipped per the new preset's defaults).

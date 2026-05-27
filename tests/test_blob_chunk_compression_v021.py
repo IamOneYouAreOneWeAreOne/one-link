@@ -191,7 +191,12 @@ async def test_handle_blob_chunk_rejects_zlib_bomb(receiver_ctx):
 
 
 def _push_body() -> str:
+    # 2026-05-27: the BLOB_CHUNK send loop (with _encode_payload +
+    # enc= field) was extracted from push_folder_to_peer into the
+    # shared _stream_blobs_for_wants helper so the half-duplex AND
+    # full-duplex paths reuse one sender. Inspect both.
     src = inspect.getsource(Daemon.push_folder_to_peer)
+    src += "\n" + inspect.getsource(Daemon._stream_blobs_for_wants)
     return inspect.cleandoc(src)
 
 
