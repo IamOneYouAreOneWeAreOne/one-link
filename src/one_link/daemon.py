@@ -4590,6 +4590,71 @@ class Daemon:
                 log.warning("could not reap transfer %s: %s", t.id, e)
         return reaped
 
+    def _reconcile_orphaned_transfers_on_boot(self) -> int:
+        """One-shot, run once at startup before any peer connection is
+        served. A freshly-booted daemon has ZERO live transfers — every
+        in-flight transfer is driven by an in-memory channel that died
+        with the previous process. So any row still marked 'active' or
+        'offered' whose updated_ms predates this process's boot instant
+        (self._boot_wall_ms) is an orphan from a killed run, NOT a live
+        transfer, and must be flipped to the retryable 'waiting' state
+        immediately — otherwise the UI shows a frozen 'Sending…' /
+        'Receiving…' for up to STUCK_TRANSFER_DEADLINE_MS (5 min) until
+        the steady-state reaper's no-progress deadline finally elapses.
+
+        Anchoring on updated_ms < boot guarantees we never touch a
+        transfer THIS process just started (its updated_ms is >= boot),
+        so there's no race with transfers that begin during startup.
+        Returns the count reconciled."""
+        if self.state is None:
+            return 0
+        boot_ms = int(getattr(self, "_boot_wall_ms", 0) or 0)
+        if boot_ms <= 0:
+            return 0
+        now_ms = int(time.time() * 1000)
+        try:
+            transfers = self.state.list_transfers(limit=1000)
+        except Exception:
+            return 0
+        reconciled = 0
+        for t in transfers:
+            if t.status not in ("offered", "active"):
+                continue
+            # Only rows last touched by a PRIOR process. A transfer this
+            # run started already has updated_ms >= boot_ms.
+            if t.updated_ms >= boot_ms:
+                continue
+            meta = t.metadata or {}
+            inbound = (t.direction == "in")
+            try:
+                self._mark_transfer_waiting(
+                    t.id,
+                    path=Path(meta.get("path") or t.name),
+                    error=(
+                        "the app restarted while this transfer was in "
+                        "flight; resuming automatically"
+                    ),
+                    error_class="DaemonRestarted",
+                    base_metadata={
+                        **meta,
+                        "reaped": True,
+                        "reaped_reason": "orphaned_by_restart",
+                        "reaped_at_ms": now_ms,
+                        "orphaned_direction": "in" if inbound else "out",
+                    },
+                )
+                reconciled += 1
+            except Exception as e:
+                log.warning(
+                    "could not reconcile orphaned transfer %s: %s", t.id, e,
+                )
+        if reconciled:
+            log.info(
+                "startup reconcile: %d orphaned transfer(s) from a prior "
+                "run moved to waiting/retryable", reconciled,
+            )
+        return reconciled
+
     # ─── peer (encrypted) side ──────────────────────────────────────────
     def _handshake_admit(self, ip: str) -> bool:
         """H3: per-IP rate + concurrency gate. Returns True if accepted.
@@ -22777,6 +22842,14 @@ class Daemon:
 
     # ─── lifecycle ──────────────────────────────────────────────────────
     async def start(self) -> None:
+        # Wall-clock instant this process began serving. Captured before
+        # the peer listener accepts a single connection, so any transfer
+        # row whose updated_ms predates it was last touched by a PRIOR
+        # daemon process and is, by definition, orphaned (the live
+        # channel that drove it died with that process). The boot
+        # reconciler below uses this to tell "stalled mid-flight on this
+        # run" apart from "left active when the last run was killed".
+        self._boot_wall_ms = int(time.time() * 1000)
         self._acquire_instance_lock()
         # External audit 2026-05-18 ES-12: disable coredumps + crash
         # dumps so identity-key bytes from the cryptography library's
@@ -23411,6 +23484,14 @@ class Daemon:
         # a periodic TCP-probe is the only reliable way to keep the peer
         # list honest.
         async def _prune_loop():
+            # Before anything else: reconcile transfers orphaned by a
+            # previous run. A just-booted daemon has no live transfers,
+            # so any row still 'active'/'offered' from before boot is a
+            # ghost that would otherwise show a frozen "Sending…" /
+            # "Receiving…" until the 5-min no-progress reaper fires.
+            # Flip them to waiting/retryable now (within ms of boot).
+            with contextlib.suppress(Exception):
+                self._reconcile_orphaned_transfers_on_boot()
             # Initial settle: wait a bit for mDNS to fully populate, then
             # an aggressive first prune to clear ghosts.
             try:

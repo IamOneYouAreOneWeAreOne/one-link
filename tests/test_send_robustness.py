@@ -476,6 +476,136 @@ def test_reap_stuck_transfers_ignores_complete_and_failed(tmp_path: Path):
     state.close()
 
 
+# ─── startup reconciliation of transfers orphaned by a restart ─────
+
+
+def test_boot_reconcile_marks_prior_active_transfers_waiting(tmp_path: Path):
+    """A daemon that boots with 'active'/'offered' rows left over from
+    a killed run must flip them to retryable immediately — not wait out
+    the 5-min no-progress reaper. This is the root-cause fix for the
+    "said Sending for 2 minutes and nothing moved" report after a
+    'kill all daemons / open new tab'."""
+    me = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+
+    # Two orphans from the PRIOR run: one outbound, one inbound. Both
+    # were last touched before this process booted.
+    prior = int(time.time() * 1000) - (90 * 1000)  # 90s ago (< 5min!)
+    for tid, direction, name in (
+        ("out:orphan", "out", "explainer.coherence"),
+        ("in:orphan", "in", "diagnostics.json"),
+    ):
+        state.upsert_transfer(
+            id=tid,
+            direction=direction,
+            peer_fp="aa" * 32,
+            kind="file",
+            name=name,
+            size=960,
+            status="active",
+            progress_bytes=0,
+            total_bytes=960,
+            chunks_done=0,
+            chunks_total=1,
+        )
+        with state._write_lock:
+            state._conn.execute(
+                "UPDATE transfers SET updated_ms = ? WHERE id = ?",
+                (prior, tid),
+            )
+
+    # Boot instant is AFTER those rows were last touched.
+    daemon._boot_wall_ms = int(time.time() * 1000)
+    reconciled = daemon._reconcile_orphaned_transfers_on_boot()
+    assert reconciled == 2
+
+    rows = {r.id: r for r in state.list_transfers(limit=10)}
+    for tid in ("out:orphan", "in:orphan"):
+        assert rows[tid].status == "paused"
+        assert rows[tid].metadata.get("transient") is True
+        assert rows[tid].metadata.get("reaped_reason") == "orphaned_by_restart"
+        assert rows[tid].metadata.get("error_class") == "DaemonRestarted"
+        assert rows[tid].metadata.get("next_retry_ms")
+    # Direction is preserved on the row (the receiver still reads
+    # "Receiving"/"Paused", the sender still retries).
+    assert rows["out:orphan"].direction == "out"
+    assert rows["in:orphan"].direction == "in"
+    assert rows["out:orphan"].metadata.get("orphaned_direction") == "out"
+    assert rows["in:orphan"].metadata.get("orphaned_direction") == "in"
+    state.close()
+
+
+def test_boot_reconcile_never_touches_transfers_from_this_run(tmp_path: Path):
+    """The boot instant anchors the reconciliation: a transfer this
+    process started (updated_ms >= boot) must be left alone, so there's
+    no race where a just-started send gets wrongly paused."""
+    me = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+
+    # Boot FIRST, then start a transfer (updated_ms stamped to now,
+    # which is after boot).
+    daemon._boot_wall_ms = int(time.time() * 1000) - 5
+    state.upsert_transfer(
+        id="this-run",
+        direction="out",
+        peer_fp="aa" * 32,
+        kind="file",
+        name="live.bin",
+        size=1000,
+        status="active",
+        progress_bytes=128,
+        total_bytes=1000,
+        chunks_done=1,
+        chunks_total=8,
+    )
+
+    reconciled = daemon._reconcile_orphaned_transfers_on_boot()
+    assert reconciled == 0
+    assert state.get_transfer("this-run").status == "active"
+    state.close()
+
+
+def test_boot_reconcile_ignores_terminal_rows(tmp_path: Path):
+    """complete/failed rows from a prior run stay terminal."""
+    me = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+
+    prior = int(time.time() * 1000) - (90 * 1000)
+    for status in ("complete", "failed"):
+        state.upsert_transfer(
+            id=f"old-{status}",
+            direction="in",
+            peer_fp="aa" * 32,
+            kind="file",
+            name="x.bin",
+            size=1,
+            status=status,
+            progress_bytes=1,
+            total_bytes=1,
+            chunks_done=1,
+            chunks_total=1,
+        )
+        with state._write_lock:
+            state._conn.execute(
+                "UPDATE transfers SET updated_ms = ? WHERE id = ?",
+                (prior, f"old-{status}"),
+            )
+
+    daemon._boot_wall_ms = int(time.time() * 1000)
+    reconciled = daemon._reconcile_orphaned_transfers_on_boot()
+    assert reconciled == 0
+    rows = {r.id: r for r in state.list_transfers(limit=10)}
+    assert rows["old-complete"].status == "complete"
+    assert rows["old-failed"].status == "failed"
+    state.close()
+
+
 # ─── UI markup contract for paste-image ────────────────────────────
 
 def test_paste_image_handler_is_bound(tmp_path):
