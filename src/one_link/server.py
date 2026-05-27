@@ -3650,7 +3650,38 @@ class UIServer:
         when NAT, AP isolation, firewall policy, or bad Wi-Fi blocks
         the direct path. We support both settings and env vars so a
         lab relay can be added without rebuilding the app.
+
+        v0.21.x sovereignty audit gap fix: hard-gate on the active
+        preset. quiet + off_grid both refuse TURN (no third-party
+        relay traffic); just_works keeps it. Configured URLs are
+        preserved in state but ignored at WebRTC config time.
         """
+        from one_link import sovereignty as _sov
+        _turn_setting = None
+        if self.daemon and self.daemon.state is not None:
+            with contextlib.suppress(Exception):
+                _turn_setting = self.daemon.state.get_setting(
+                    "turn_relay_enabled",
+                )
+        _turn_allowed = _sov.resolve_turn_relay_enabled(
+            state_setting=_turn_setting,
+            preset_name=_sov.current_preset_name(
+                self.daemon.state if self.daemon else None,
+            ),
+        )
+        if not _turn_allowed:
+            # Return the empty shape — same structure as a config
+            # with no TURN URLs, so downstream callers don't crash.
+            return {
+                "urls": [],
+                "candidates": [],
+                "username": "",
+                "credential": "",
+                "credential_type": "",
+                "issued_at_s": int(time.time()),
+                "expires_at_s": None,
+                "disabled_by_preset": True,
+            }
         raw_urls = self._setting_value("turn_servers")
         if raw_urls is None:
             raw_urls = os.environ.get("ONE_LINK_TURN_SERVERS")
@@ -4135,13 +4166,55 @@ class UIServer:
                         self._resolved_turn_config().get("credential")
                     ),
                 },
+                # v0.21.x: these were previously read directly off
+                # the preset dataclass (no resolver, no setting
+                # override). Now they go through the resolvers so
+                # the user's per-feature override wins + the source
+                # field tells the user WHY a thing is on/off.
                 "mdns_discovery": {
-                    "enabled": preset.mdns_discovery_enabled,
-                    "source": "preset",
+                    "enabled": _sov.resolve_mdns_discovery_enabled(
+                        state_setting=(
+                            self.daemon.state.get_setting(
+                                "mdns_discovery_enabled",
+                            ) if self.daemon and self.daemon.state else None
+                        ),
+                        preset_name=preset_name,
+                    ),
+                    "source": _source("mdns_discovery_enabled"),
                 },
                 "rendezvous": {
-                    "enabled": preset.rendezvous_enabled,
-                    "source": "preset",
+                    "enabled": _sov.resolve_rendezvous_enabled(
+                        state_setting=(
+                            self.daemon.state.get_setting(
+                                "rendezvous_enabled",
+                            ) if self.daemon and self.daemon.state else None
+                        ),
+                        preset_name=preset_name,
+                    ),
+                    "source": _source("rendezvous_enabled"),
+                },
+                "turn_relay_preset": {
+                    "enabled": _sov.resolve_turn_relay_enabled(
+                        state_setting=(
+                            self.daemon.state.get_setting(
+                                "turn_relay_enabled",
+                            ) if self.daemon and self.daemon.state else None
+                        ),
+                        preset_name=preset_name,
+                    ),
+                    "source": _source("turn_relay_enabled"),
+                },
+                "inherit_rendezvous_from_mdns": {
+                    "enabled":
+                        _sov.resolve_inherit_rendezvous_from_mdns_enabled(
+                            state_setting=(
+                                self.daemon.state.get_setting(
+                                    "inherit_rendezvous_from_mdns_preset",
+                                ) if self.daemon and self.daemon.state else None
+                            ),
+                            preset_name=preset_name,
+                        ),
+                    "source": _source("inherit_rendezvous_from_mdns_preset"),
                 },
                 # v0.21.x persistent UI sessions. Resolver consults
                 # explicit setting > preset default; the source
@@ -4192,6 +4265,9 @@ class UIServer:
                         p.ui_session_persistence_enabled,
                     "ui_session_labels_enabled":
                         p.ui_session_labels_enabled,
+                    "turn_relay_enabled": p.turn_relay_enabled,
+                    "inherit_rendezvous_from_mdns_enabled":
+                        p.inherit_rendezvous_from_mdns_enabled,
                 }
                 for p in _sov.ALL_PRESETS.values()
             ],

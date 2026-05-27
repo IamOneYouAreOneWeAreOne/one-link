@@ -38402,6 +38402,16 @@
         "Remember which browser is which (local label only)",
         !!(feat.ui_session_labels && feat.ui_session_labels.enabled),
         feat.ui_session_labels && feat.ui_session_labels.source,
+      )}
+      ${featRowSimple(
+        "Use TURN relay for calls behind hostile NATs",
+        !!(feat.turn_relay_preset && feat.turn_relay_preset.enabled),
+        feat.turn_relay_preset && feat.turn_relay_preset.source,
+      )}
+      ${featRowSimple(
+        "Adopt rendezvous URLs from devices on your Wi-Fi",
+        !!(feat.inherit_rendezvous_from_mdns && feat.inherit_rendezvous_from_mdns.enabled),
+        feat.inherit_rendezvous_from_mdns && feat.inherit_rendezvous_from_mdns.source,
       )}`;
 
     // Plain-English labels for the connection types so the user can

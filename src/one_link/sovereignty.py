@@ -88,6 +88,21 @@ class SovereigntyPreset:
     #   off_grid   → both OFF (no cookies, no session table at all)
     ui_session_persistence_enabled: bool
     ui_session_labels_enabled: bool
+    # v0.21.x sovereignty audit gaps. Pre-2026-05-27 these were
+    # either silently always-on or governed only by env vars,
+    # which meant off_grid mode silently broadcast over mDNS,
+    # used TURN relays, and inherited rendezvous URLs from any
+    # LAN peer. Each preset now gates them honestly.
+    #
+    # turn_relay_enabled — when False, the daemon refuses to load
+    #   any TURN servers (state setting + env var both ignored).
+    #   off_grid+quiet OFF; just_works ON (cross-NAT call rescue).
+    # inherit_rendezvous_from_mdns_enabled — when False, the daemon
+    #   ignores rendezvous URLs harvested from ambient LAN peers
+    #   even if the inherit setting is on. off_grid OFF; everywhere
+    #   else ON (this is how phones bootstrap onto your mesh).
+    turn_relay_enabled: bool
+    inherit_rendezvous_from_mdns_enabled: bool
     # UI hint — the chooser surfaces this as a one-line "what flows
     # outbound" summary so the user understands the trade.
     outbound_summary: str
@@ -111,6 +126,8 @@ JUST_WORKS = SovereigntyPreset(
     rendezvous_enabled=False,
     ui_session_persistence_enabled=True,
     ui_session_labels_enabled=True,
+    turn_relay_enabled=True,
+    inherit_rendezvous_from_mdns_enabled=True,
     outbound_summary=(
         "Uses small community servers (Nextcloud, Sipgate) only to "
         "help devices find each other. Checks for updates once every "
@@ -136,6 +153,8 @@ QUIET = SovereigntyPreset(
     rendezvous_enabled=False,
     ui_session_persistence_enabled=True,
     ui_session_labels_enabled=False,
+    turn_relay_enabled=False,
+    inherit_rendezvous_from_mdns_enabled=False,
     outbound_summary=(
         "Local Wi-Fi only. No other outside connections."
     ),
@@ -157,6 +176,8 @@ OFF_GRID = SovereigntyPreset(
     rendezvous_enabled=False,
     ui_session_persistence_enabled=False,
     ui_session_labels_enabled=False,
+    turn_relay_enabled=False,
+    inherit_rendezvous_from_mdns_enabled=False,
     outbound_summary="Nothing. No connections, no broadcast.",
 )
 
@@ -287,6 +308,67 @@ def resolve_ui_session_labels_enabled(
     return _resolve_bool_setting(
         state_setting=state_setting,
         preset_value=get_preset(preset_name).ui_session_labels_enabled,
+    )
+
+
+def resolve_mdns_discovery_enabled(
+    *,
+    state_setting: Optional[str],
+    preset_name: Optional[str],
+) -> bool:
+    """Should the daemon broadcast on mDNS (zeroconf) so other
+    devices on the LAN can find it? off_grid OFF (the whole point);
+    just_works + quiet ON. Explicit user setting wins."""
+    return _resolve_bool_setting(
+        state_setting=state_setting,
+        preset_value=get_preset(preset_name).mdns_discovery_enabled,
+    )
+
+
+def resolve_rendezvous_enabled(
+    *,
+    state_setting: Optional[str],
+    preset_name: Optional[str],
+) -> bool:
+    """Hard gate on rendezvous client startup. When False, even if
+    rendezvous URLs are configured in state.db, the daemon will NOT
+    contact them. All three current presets default OFF — rendezvous
+    requires explicit user opt-in via a setting override anyway."""
+    return _resolve_bool_setting(
+        state_setting=state_setting,
+        preset_value=get_preset(preset_name).rendezvous_enabled,
+    )
+
+
+def resolve_turn_relay_enabled(
+    *,
+    state_setting: Optional[str],
+    preset_name: Optional[str],
+) -> bool:
+    """Should the daemon use TURN relays for cross-NAT call rescue?
+    just_works ON (calls work even on hostile NATs); quiet OFF (no
+    third-party relay traffic); off_grid OFF (no outbound at all).
+    Explicit user setting wins."""
+    return _resolve_bool_setting(
+        state_setting=state_setting,
+        preset_value=get_preset(preset_name).turn_relay_enabled,
+    )
+
+
+def resolve_inherit_rendezvous_from_mdns_enabled(
+    *,
+    state_setting: Optional[str],
+    preset_name: Optional[str],
+) -> bool:
+    """Should the daemon adopt rendezvous URLs broadcast by other
+    LAN peers via mDNS TXT records? This is how phones bootstrap
+    onto an existing mesh, but it accepts URLs from any device on
+    the same Wi-Fi — quiet + off_grid refuse to do this."""
+    return _resolve_bool_setting(
+        state_setting=state_setting,
+        preset_value=get_preset(
+            preset_name,
+        ).inherit_rendezvous_from_mdns_enabled,
     )
 
 

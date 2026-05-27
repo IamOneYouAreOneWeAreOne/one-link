@@ -11075,6 +11075,25 @@ class Daemon:
         if self.state is None:
             return
         self._rendezvous_peer_port = int(peer_port)
+        # v0.21.x sovereignty audit gap fix: hard-gate on the active
+        # preset. quiet + off_grid both default rendezvous OFF and
+        # the daemon must respect that even if URLs are configured
+        # (e.g. user paired through rendezvous before flipping to
+        # off_grid; the URLs persist in state.db but must NOT be
+        # contacted anymore).
+        from one_link import sovereignty as _sov
+        _rdz_setting = self.state.get_setting("rendezvous_enabled")
+        if not _sov.resolve_rendezvous_enabled(
+            state_setting=_rdz_setting,
+            preset_name=_sov.current_preset_name(self.state),
+        ):
+            log.info(
+                "rendezvous DISABLED by sovereignty preset; no "
+                "outside-relay client will start (configured URLs "
+                "are preserved in state.db but will not be used "
+                "until the preset allows it)",
+            )
+            return
         try:
             urls = self.state.get_rendezvous_urls()
         except Exception as e:
@@ -11118,6 +11137,21 @@ class Daemon:
           - Skipped entirely if `inherit_rendezvous` is set False.
         """
         if self.state is None or self.discovery is None:
+            return
+        # v0.21.x sovereignty audit gap fix: hard-gate on the active
+        # preset BEFORE checking the per-feature setting. quiet +
+        # off_grid both refuse to inherit rendezvous URLs from
+        # ambient LAN peers because mDNS is unauthenticated; only
+        # just_works defaults to allowing it. Explicit user setting
+        # still wins (resolver pattern).
+        from one_link import sovereignty as _sov
+        _inherit_setting = self.state.get_setting(
+            "inherit_rendezvous_from_mdns_preset",
+        )
+        if not _sov.resolve_inherit_rendezvous_from_mdns_enabled(
+            state_setting=_inherit_setting,
+            preset_name=_sov.current_preset_name(self.state),
+        ):
             return
         try:
             mdns_v = self.state.get_setting("inherit_rendezvous_from_mdns")
@@ -23086,6 +23120,26 @@ class Daemon:
         with contextlib.suppress(Exception):
             self._update_local_self_mesh_presence(route="daemon_start")
 
+        # v0.21.x sovereignty audit gap fix: gate mDNS startup on the
+        # active preset. off_grid mode promises "no broadcast"; pre-
+        # v0.21.x this was silently violated because Discovery.start
+        # always ran. Now: when mdns_discovery_enabled resolves False
+        # (off_grid preset OR explicit setting override), we still
+        # construct the Discovery object (peer/api code may probe
+        # it for the registry) but DON'T call .start() — no zeroconf
+        # advertisement, no LAN browse. The empty registry is the
+        # honest answer: nobody's reachable via LAN broadcast.
+        from one_link import sovereignty as _sov
+        _mdns_setting = None
+        if self.state is not None:
+            with contextlib.suppress(Exception):
+                _mdns_setting = self.state.get_setting(
+                    "mdns_discovery_enabled",
+                )
+        _mdns_active = _sov.resolve_mdns_discovery_enabled(
+            state_setting=_mdns_setting,
+            preset_name=_sov.current_preset_name(self.state),
+        )
         self.discovery = Discovery(
             short_id=self.me.short_id,
             hostname=advertised_name,
@@ -23094,7 +23148,14 @@ class Daemon:
             rendezvous_urls=rdz_to_advertise,
             device_kind=kind_tag,
         )
-        await self.discovery.start()
+        if _mdns_active:
+            await self.discovery.start()
+        else:
+            log.info(
+                "mDNS discovery DISABLED by sovereignty preset; this "
+                "device will not broadcast on LAN and will not browse "
+                "for peers via zeroconf",
+            )
 
         # v0.4: notify UI to re-query /api/peers rather than pushing
         # raw discovery state. The /api/peers handler is the single
