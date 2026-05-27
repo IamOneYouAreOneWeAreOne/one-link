@@ -7706,6 +7706,32 @@ class State:
             self._conn.commit()
             return cur.rowcount
 
+    def strip_ui_session_labels(self) -> int:
+        """Clear the label + UA hash columns on every ui_sessions row.
+        Called when the user flips the 'Show browser labels' toggle
+        OFF — privacy-first mode forgets the historical UA strings
+        immediately instead of waiting for revoke/prune. Returns
+        the count of rows updated."""
+        with self._write_lock:
+            cur = self._conn.execute(
+                "UPDATE ui_sessions SET label=NULL, user_agent_hash=NULL"
+                " WHERE label IS NOT NULL OR user_agent_hash IS NOT NULL"
+            )
+            self._conn.commit()
+            return cur.rowcount
+
+    def wipe_ui_sessions(self) -> int:
+        """Hard-delete every row in ui_sessions. Used when the user
+        flips persistence OFF or hits 'Forget all session data'.
+        Returns the count of rows removed. Note: this does NOT
+        clear the browser-side cookies — the auth handler does that
+        on the response. After wipe, even a legitimate cookie from
+        a still-open tab will fail to auth (the uuid is gone)."""
+        with self._write_lock:
+            cur = self._conn.execute("DELETE FROM ui_sessions")
+            self._conn.commit()
+            return cur.rowcount
+
     def prune_expired_ui_sessions(self, *, older_than_ms: int) -> int:
         """Delete sessions that haven't been touched since ``older_than_ms``
         AND were revoked / inactive. Called on a slow background cadence

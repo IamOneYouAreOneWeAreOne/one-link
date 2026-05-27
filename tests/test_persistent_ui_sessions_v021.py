@@ -275,6 +275,14 @@ def _csrf_origin_for(client) -> dict:
     return {"Origin": f"http://127.0.0.1:{client.port}"}
 
 
+def _auth_headers(ctx, *, csrf_client=None) -> dict:
+    """Bearer for auth + Origin for CSRF on POSTs."""
+    h = {"Authorization": f"Bearer {ctx['token']}"}
+    if csrf_client is not None:
+        h["Origin"] = f"http://127.0.0.1:{csrf_client.port}"
+    return h
+
+
 @pytest.mark.asyncio
 async def test_revoke_all_returns_count_and_clears_cookies(ctx):
     ctx["state"].create_ui_session(user_agent="A")
@@ -360,3 +368,190 @@ def test_help_page_references_marker_cookie():
     page = UIServer._auth_failed_help_page(reason="stale_token")
     assert SESSION_PRESENT_MARKER_COOKIE in page
     assert "location.replace" in page
+
+
+# ── privacy toggles + auto-prune ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_persistence_toggle_off_stops_cookie_issuance(ctx):
+    """Flipping persistence OFF must stop minting new ol_session
+    cookies — every subsequent bootstrap should be cookie-free."""
+    # Flip OFF.
+    r = await ctx["client"].post(
+        "/api/auth/sessions/settings",
+        json={"persistence_enabled": False},
+        headers=_auth_headers(ctx, csrf_client=ctx["client"]),
+    )
+    assert r.status == 200, await r.text()
+    body = await r.json()
+    assert body["persistence_enabled"] is False
+    # Fresh client (no inherited cookies) hits the bootstrap.
+    fresh_client = TestClient(TestServer(ctx["server"].app))
+    await fresh_client.start_server()
+    try:
+        r2 = await fresh_client.get(f"/?t={ctx['token']}")
+        assert r2.status == 200
+        cookie_hdrs = " ".join(r2.headers.getall("Set-Cookie", []))
+        assert SESSION_COOKIE_NAME not in cookie_hdrs, (
+            "persistence OFF must not issue ol_session"
+        )
+        assert SESSION_PRESENT_MARKER_COOKIE not in cookie_hdrs, (
+            "persistence OFF must not issue the marker"
+        )
+        # Legacy ol_ui cookie still issued for in-process auth.
+        assert COOKIE_NAME in cookie_hdrs
+    finally:
+        await fresh_client.close()
+
+
+@pytest.mark.asyncio
+async def test_persistence_toggle_off_wipes_table(ctx):
+    """Flipping persistence OFF must hard-delete the ui_sessions
+    table so historical session rows don't survive the choice."""
+    ctx["state"].create_ui_session(user_agent="A")
+    ctx["state"].create_ui_session(user_agent="B")
+    assert len(ctx["state"].list_ui_sessions()) == 2
+    r = await ctx["client"].post(
+        "/api/auth/sessions/settings",
+        json={"persistence_enabled": False},
+        headers=_auth_headers(ctx, csrf_client=ctx["client"]),
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert body["wiped_sessions"] == 2
+    assert len(ctx["state"].list_ui_sessions()) == 0
+    # Response also clears the caller's cookies.
+    cookie_hdrs = " ".join(r.headers.getall("Set-Cookie", []))
+    assert SESSION_COOKIE_NAME in cookie_hdrs
+    assert "Max-Age=0" in cookie_hdrs
+
+
+@pytest.mark.asyncio
+async def test_labels_toggle_off_strips_existing_fingerprints(ctx):
+    """Flipping labels OFF must strip the label + UA hash columns
+    from EVERY existing row so the historical fingerprints don't
+    linger after the user changed their mind."""
+    a = ctx["state"].create_ui_session(
+        user_agent="Mozilla/5.0 (Windows) Edg/120.0",
+    )
+    b = ctx["state"].create_ui_session(user_agent="Firefox/120")
+    assert ctx["state"].lookup_ui_session(a["session_uuid"])["label"]
+    r = await ctx["client"].post(
+        "/api/auth/sessions/settings",
+        json={"labels_enabled": False},
+        headers=_auth_headers(ctx, csrf_client=ctx["client"]),
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert body["stripped_labels"] == 2
+    a_after = ctx["state"].lookup_ui_session(a["session_uuid"])
+    b_after = ctx["state"].lookup_ui_session(b["session_uuid"])
+    assert a_after["label"] is None
+    assert a_after["user_agent_hash"] is None
+    assert b_after["label"] is None
+    assert b_after["user_agent_hash"] is None
+
+
+@pytest.mark.asyncio
+async def test_labels_toggle_off_skips_ua_on_future_sessions(ctx):
+    """After flipping labels OFF, _set_ui_cookie must not pass
+    User-Agent into create_ui_session for NEW sessions either."""
+    await ctx["client"].post(
+        "/api/auth/sessions/settings",
+        json={"labels_enabled": False},
+        headers=_auth_headers(ctx, csrf_client=ctx["client"]),
+    )
+    # Fresh bootstrap.
+    fresh_client = TestClient(TestServer(ctx["server"].app))
+    await fresh_client.start_server()
+    try:
+        r = await fresh_client.get(
+            f"/?t={ctx['token']}",
+            headers={"User-Agent": "Mozilla/5.0 (Windows) Edg/120.0"},
+        )
+        assert r.status == 200
+    finally:
+        await fresh_client.close()
+    # The newest row should have no label / UA hash.
+    rows = ctx["state"].list_ui_sessions()
+    assert len(rows) == 1
+    assert rows[0]["label"] is None
+    assert rows[0]["user_agent_hash"] is None
+
+
+@pytest.mark.asyncio
+async def test_settings_get_returns_defaults_when_unset(ctx):
+    """Out-of-the-box (no setting written), both toggles default ON
+    so the just-works UX kicks in for first-time installs."""
+    r = await ctx["client"].get(
+        "/api/auth/sessions/settings",
+        headers=_auth_headers(ctx),
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert body["persistence_enabled"] is True
+    assert body["labels_enabled"] is True
+
+
+def test_wipe_ui_sessions_hard_deletes(tmp_path: Path):
+    s = State(db_path=tmp_path / "s.db")
+    s.create_ui_session()
+    s.create_ui_session()
+    assert s.wipe_ui_sessions() == 2
+    assert s.list_ui_sessions(include_revoked=True) == []
+    s.close()
+
+
+def test_strip_labels_clears_columns_in_place(tmp_path: Path):
+    s = State(db_path=tmp_path / "s.db")
+    a = s.create_ui_session(user_agent="Mozilla/5.0 Edg/120")
+    b = s.create_ui_session(user_agent="Firefox/120")
+    affected = s.strip_ui_session_labels()
+    assert affected == 2
+    ra = s.lookup_ui_session(a["session_uuid"])
+    rb = s.lookup_ui_session(b["session_uuid"])
+    assert ra["label"] is None and ra["user_agent_hash"] is None
+    assert rb["label"] is None and rb["user_agent_hash"] is None
+    # Sessions themselves stay valid — the uuid still authenticates.
+    assert s.touch_ui_session(a["session_uuid"]) is True
+    s.close()
+
+
+def test_prune_only_drops_old_rows(tmp_path: Path):
+    s = State(db_path=tmp_path / "s.db")
+    fresh = s.create_ui_session()
+    # Backdate the second session's last_seen_ms past the cutoff.
+    stale = s.create_ui_session()
+    with s._write_lock:
+        s._conn.execute(
+            "UPDATE ui_sessions SET last_seen_ms=? WHERE session_uuid=?",
+            (1, stale["session_uuid"]),
+        )
+        s._conn.commit()
+    pruned = s.prune_expired_ui_sessions(older_than_ms=1000)
+    assert pruned == 1
+    assert s.lookup_ui_session(fresh["session_uuid"]) is not None
+    assert s.lookup_ui_session(stale["session_uuid"]) is None
+    s.close()
+
+
+# ── log audit: session uuid never appears in daemon logs ─────────
+
+
+def test_create_ui_session_never_logs_uuid(tmp_path: Path, caplog):
+    """Defense-in-depth: a session uuid is a bearer secret. It must
+    NEVER show up in a daemon log line, or a stolen log file could
+    be replayed against the live daemon."""
+    import logging
+    s = State(db_path=tmp_path / "s.db")
+    with caplog.at_level(logging.DEBUG):
+        sess = s.create_ui_session(user_agent="Mozilla/5.0")
+        s.touch_ui_session(sess["session_uuid"])
+        s.revoke_ui_session(sess["session_uuid"])
+    for rec in caplog.records:
+        assert sess["session_uuid"] not in rec.getMessage(), (
+            f"session uuid leaked into log at {rec.levelname}: "
+            f"{rec.getMessage()!r}"
+        )
+    s.close()

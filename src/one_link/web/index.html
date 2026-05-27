@@ -10202,13 +10202,43 @@
                 </button>
               </div>
               <p class="settings-help">
-                Browsers that opened this device's One Link stay signed
-                in across daemon restarts. Each row below is one
-                browser. Click Revoke on any one you don't recognize.
+                Local-only sign-in receipts. Stored in state.db on
+                this device, never sent over the internet. Each row
+                below is one browser. Click Revoke on any one you
+                don't recognize.
               </p>
               <div id="ui-sessions-list" class="settings-list-host">
                 <p class="settings-help">Loading sessions…</p>
               </div>
+              <div class="settings-row">
+                <label for="set-session-persistence">Stay signed in across daemon restarts</label>
+                <span class="toggle">
+                  <input type="checkbox" id="set-session-persistence" checked />
+                  <span class="slider"></span>
+                </span>
+              </div>
+              <p class="settings-help">
+                On: a local-only cookie keeps your browser signed in
+                even after the daemon restarts. Off: every restart
+                sends you back to opening from the tray icon (no
+                cookies, no session table — strictest privacy).
+                Turning this off wipes the whole sessions table
+                immediately.
+              </p>
+              <div class="settings-row">
+                <label for="set-session-labels">Show browser labels in this list</label>
+                <span class="toggle">
+                  <input type="checkbox" id="set-session-labels" checked />
+                  <span class="slider"></span>
+                </span>
+              </div>
+              <p class="settings-help">
+                On: rows above say "Edge on Windows" so you can tell
+                browsers apart. Off: rows show only the session id +
+                last-used time. Turning this off strips browser
+                fingerprints from every existing row in the same
+                write.
+              </p>
             </div>
           </section>
 
@@ -33579,10 +33609,71 @@
       host.appendChild(row);
     }
   }
+  // v0.21.x - load + apply the two Privacy toggles (persistence,
+  // labels) so the user is in control of the trade-offs the
+  // sessions feature makes for them. Toggles default ON; flipping
+  // OFF triggers immediate side-effects (table wipe / label strip).
+  async function refreshSessionSettings() {
+    const persistEl = $("#set-session-persistence");
+    const labelsEl = $("#set-session-labels");
+    if (!persistEl || !labelsEl) return;
+    try {
+      const r = await api.get("/api/auth/sessions/settings");
+      persistEl.checked = !!r.persistence_enabled;
+      labelsEl.checked = !!r.labels_enabled;
+    } catch (e) {
+      console.warn("session settings load:", e);
+    }
+  }
+  async function updateSessionSettings(patch) {
+    try {
+      const r = await api.post("/api/auth/sessions/settings", patch);
+      if (r.wiped_sessions) {
+        toast(
+          `Wiped ${r.wiped_sessions} session${r.wiped_sessions === 1 ? "" : "s"}. `
+          + `Reload to re-open from the tray.`,
+          "info", 5000,
+        );
+      } else if (r.stripped_labels) {
+        toast(
+          `Cleared browser labels from ${r.stripped_labels} session${r.stripped_labels === 1 ? "" : "s"}.`,
+          "info", 4000,
+        );
+      }
+      refreshUiSessionsList();
+    } catch (e) {
+      toast(`Couldn't save: ${errorToastBody(e)}`, "bad", 5000);
+      refreshSessionSettings();  // revert UI to actual state
+    }
+  }
+
   // Wire the "Sign out all browsers" button + auto-refresh when the
   // Privacy pane becomes visible. The button calls revoke-all then
   // reloads so the page resets to the unauth flow.
   document.addEventListener("DOMContentLoaded", () => {
+    const persistEl = $("#set-session-persistence");
+    if (persistEl) {
+      persistEl.addEventListener("change", () => {
+        if (!persistEl.checked) {
+          if (!confirm(
+            "Turn off Stay signed in?\n\n"
+            + "This will wipe the sessions table NOW + every browser "
+            + "will need to be re-opened from the tray on the next "
+            + "daemon restart."
+          )) {
+            persistEl.checked = true;
+            return;
+          }
+        }
+        updateSessionSettings({ persistence_enabled: persistEl.checked });
+      });
+    }
+    const labelsEl = $("#set-session-labels");
+    if (labelsEl) {
+      labelsEl.addEventListener("change", () => {
+        updateSessionSettings({ labels_enabled: labelsEl.checked });
+      });
+    }
     const btnAll = $("#btn-sign-out-all");
     if (btnAll) {
       btnAll.addEventListener("click", async () => {
@@ -34747,6 +34838,7 @@
     refreshSettingsNetwork().catch((e) => console.warn("settings network refresh:", e));
     refreshBlockedDevicesList();
     refreshUiSessionsList();
+    refreshSessionSettings();
     _settingsHydrating = false;
     markSettingsClean("No changes yet.");
     settingsBackdrop.classList.add("show");

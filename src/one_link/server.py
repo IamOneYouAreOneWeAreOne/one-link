@@ -263,6 +263,17 @@ COOKIE_NAME = "ol_ui"
 SESSION_COOKIE_NAME = "ol_session"
 SESSION_PRESENT_MARKER_COOKIE = "ol_session_present"
 SESSION_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30  # 30 days
+# v0.21.x user-controllable toggles. Defaults match shipped behavior
+# (persistence ON for "just works" UX; labels ON for readable
+# Settings list). User can flip either via Privacy pane — turning
+# persistence OFF wipes the table + stops issuing cookies; turning
+# labels OFF stops storing UA fingerprint on new + future sessions
+# (and clears existing labels in the same write).
+SESSION_PERSISTENCE_SETTING = "ui_session_persistence_enabled"
+SESSION_LABELS_SETTING = "ui_session_labels_enabled"
+# Revoked rows are auto-pruned after this many days so the audit
+# history doesn't grow without bound on an active device.
+SESSION_AUTOPRUNE_REVOKED_AFTER_DAYS = 7
 MAX_JSON_REQUEST_BYTES = 256 * 1024
 MAX_REQUEST_TARGET_BYTES = 8 * 1024
 RATE_LIMIT_WINDOW_SECONDS = 60.0
@@ -2274,6 +2285,14 @@ class UIServer:
             r"/api/auth/sessions/{session_uuid}/revoke",
             self._guarded(self.api_revoke_ui_session),
         )
+        r.add_get(
+            "/api/auth/sessions/settings",
+            self._guarded(self.api_get_session_settings),
+        )
+        r.add_post(
+            "/api/auth/sessions/settings",
+            self._guarded(self.api_set_session_settings),
+        )
         r.add_get("/api/one-health", self._guarded(self.api_one_health))
         # Equation-of-ONE telemetry: per-event selector, cover-traffic,
         # dedupe-site index, FUSE mount capability + selector decision
@@ -3201,7 +3220,16 @@ class UIServer:
         # token rotation. If the user already has a valid one (sent
         # us a touchable session uuid), don't mint a new row — just
         # roll the same cookie value forward. Otherwise mint fresh.
-        if self.daemon is not None and self.daemon.state is not None:
+        # Gated by the Privacy setting "Stay signed in across
+        # restarts": when OFF, no row is written + no cookie set
+        # (the legacy ol_ui cookie still works for the current
+        # daemon lifetime, but every restart sends the user back
+        # through the tray-open flow).
+        if (
+            self.daemon is not None
+            and self.daemon.state is not None
+            and self._is_session_persistence_enabled()
+        ):
             existing = request.cookies.get(SESSION_COOKIE_NAME, "")
             session_uuid: Optional[str] = None
             if existing and len(existing) >= 32:
@@ -3211,9 +3239,14 @@ class UIServer:
                 except Exception:  # pragma: no cover - defensive
                     pass
             if session_uuid is None:
+                # Pass UA only when the labels toggle is on.
+                ua = (
+                    request.headers.get("User-Agent")
+                    if self._is_session_labels_enabled() else None
+                )
                 try:
                     sess = self.daemon.state.create_ui_session(
-                        user_agent=request.headers.get("User-Agent"),
+                        user_agent=ua,
                         remote=self._client_rate_key(request),
                     )
                     session_uuid = sess["session_uuid"]
@@ -3244,6 +3277,19 @@ class UIServer:
                     max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
                     path="/",
                 )
+
+    def _is_session_persistence_enabled(self) -> bool:
+        if self.daemon is None or self.daemon.state is None:
+            return True  # in-memory daemons (tests) default-on
+        v = self.daemon.state.get_setting(SESSION_PERSISTENCE_SETTING)
+        # Default ON when unset, OFF when explicitly disabled.
+        return v != "false"
+
+    def _is_session_labels_enabled(self) -> bool:
+        if self.daemon is None or self.daemon.state is None:
+            return True
+        v = self.daemon.state.get_setting(SESSION_LABELS_SETTING)
+        return v != "false"
 
     @staticmethod
     def _auth_failed_help_page(*, reason: str = "stale_token") -> str:
@@ -7525,6 +7571,74 @@ class UIServer:
         # so the next request reaches the unauth path cleanly.
         my_sid = request.cookies.get(SESSION_COOKIE_NAME, "")
         if my_sid and hmac.compare_digest(my_sid, sid):
+            resp.del_cookie(SESSION_COOKIE_NAME, path="/")
+            resp.del_cookie(SESSION_PRESENT_MARKER_COOKIE, path="/")
+        return resp
+
+    async def api_get_session_settings(
+        self, request: web.Request,
+    ) -> web.Response:
+        """Return the current Privacy toggles for persistent UI
+        sessions so the Settings UI can render the correct on/off
+        states without a separate fetch."""
+        if self.daemon.state is None:
+            return web.json_response(
+                {"error": "state not available"}, status=503,
+            )
+        return web.json_response({
+            "persistence_enabled": self._is_session_persistence_enabled(),
+            "labels_enabled": self._is_session_labels_enabled(),
+        })
+
+    async def api_set_session_settings(
+        self, request: web.Request,
+    ) -> web.Response:
+        """Flip the Privacy toggles. Side effects to keep the toggle
+        meaningful immediately (not just for future sessions):
+          - persistence OFF → wipe ui_sessions table + clear caller's
+            cookies in the response. Future bootstraps won't mint.
+          - labels OFF → strip label + UA hash from EVERY existing
+            row so the historical fingerprints don't linger.
+
+        Default-on values come back from the GET endpoint when unset.
+        """
+        if self.daemon.state is None:
+            return web.json_response(
+                {"error": "state not available"}, status=503,
+            )
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": "bad json body"}, status=400,
+            )
+        wiped = 0
+        stripped = 0
+        if "persistence_enabled" in data:
+            on = bool(data["persistence_enabled"])
+            self.daemon.state.set_setting(
+                SESSION_PERSISTENCE_SETTING, "true" if on else "false",
+            )
+            if not on:
+                wiped = self.daemon.state.wipe_ui_sessions()
+        if "labels_enabled" in data:
+            on = bool(data["labels_enabled"])
+            self.daemon.state.set_setting(
+                SESSION_LABELS_SETTING, "true" if on else "false",
+            )
+            if not on:
+                stripped = self.daemon.state.strip_ui_session_labels()
+        resp = web.json_response({
+            "ok": True,
+            "persistence_enabled": self._is_session_persistence_enabled(),
+            "labels_enabled": self._is_session_labels_enabled(),
+            "wiped_sessions": wiped,
+            "stripped_labels": stripped,
+        })
+        # If persistence was just turned OFF, wipe the caller's
+        # cookies in the response so the next request doesn't auth
+        # off a now-orphaned uuid.
+        if wiped > 0:
             resp.del_cookie(SESSION_COOKIE_NAME, path="/")
             resp.del_cookie(SESSION_PRESENT_MARKER_COOKIE, path="/")
         return resp
@@ -21327,6 +21441,29 @@ class UIServer:
         # POSIX permission tighten so a multi-user box doesn't read it.
         with contextlib.suppress(OSError, NotImplementedError):
             os.chmod(_token_path(), 0o600)
+        # v0.21.x: prune revoked + stale ui_sessions rows on every
+        # daemon startup so a long-running install doesn't accumulate
+        # forensic history of every browser that ever signed in.
+        # Cost is one indexed DELETE; the gain is the audit table
+        # being bounded by recent activity, not lifetime.
+        if self.daemon is not None and self.daemon.state is not None:
+            try:
+                cutoff_ms = int(
+                    (time.time()
+                     - SESSION_AUTOPRUNE_REVOKED_AFTER_DAYS * 86400)
+                    * 1000
+                )
+                pruned = self.daemon.state.prune_expired_ui_sessions(
+                    older_than_ms=cutoff_ms,
+                )
+                if pruned > 0:
+                    log.info(
+                        "ui_sessions: auto-pruned %d row(s) older than "
+                        "%d days", pruned,
+                        SESSION_AUTOPRUNE_REVOKED_AFTER_DAYS,
+                    )
+            except Exception as e:  # pragma: no cover - defensive
+                log.warning("ui_sessions auto-prune failed: %s", e)
         log.info("UI server up — http://%s:%d/", bind_host, self.port)
 
         # v0.20.4 — start a parallel HTTPS listener on port+1 so
