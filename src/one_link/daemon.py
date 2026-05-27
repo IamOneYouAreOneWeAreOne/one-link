@@ -6243,6 +6243,16 @@ class Daemon:
             await self._handle_folder_offer_declined(
                 channel, msg, peer_fp,
             )
+        elif t == "FOLDER_OFFER_ACCEPTED":
+            # v0.21.x: receiver accepted our folder offer. Re-grant
+            # push access + kick a forward push so our blobs flow to
+            # them. The reliable replacement for the fragile
+            # request_reverse in-channel reverse push.
+            if not self._capability_allowed(peer_fp, FOLDER_SYNC):
+                return
+            await self._handle_folder_offer_accepted(
+                channel, msg, peer_fp,
+            )
         elif t == "BLOB_INVENTORY_QUERY":
             # v0.21.x: pre-flight dedup check. Sender asks "of these
             # whole-file BLAKE3 hashes, which do you already have
@@ -10477,6 +10487,49 @@ class Daemon:
                     pending_offer=True,
                 )))
             return
+        # 2026-05-27: folder-offer accept pull-back. When a pinned peer
+        # dials us with request_reverse=True for a folder we HAVE but
+        # don't currently share with them, that's the receiver
+        # accepting an offer we originally sent. Re-establish the
+        # share grant (the one-shot send temp-granted then cleaned up)
+        # + kick a fresh FORWARD push so our blobs flow to them. The
+        # forward push is the proven path; the in-channel reverse was
+        # broken (their drain loop closes before processing it).
+        if (
+            peer_fp not in f["shared_with"]
+            and msg.get("request_reverse")
+            and self._is_pinned(peer_fp)
+        ):
+            peer_caps_frame = getattr(channel, "peer_caps", None) or {}
+            if FOLDER_SYNC_BIDI_V1 in list(peer_caps_frame.get("features") or []):
+                with contextlib.suppress(Exception):
+                    self.folder_engine.share_with(folder_name, peer_fp, mode="push")
+                log.info(
+                    "folder-offer pull-back: granted %s push access to %s "
+                    "+ kicking forward push",
+                    peer_fp[:8], folder_name,
+                )
+                reverse_peer = self._peer_from_fp(peer_fp)
+                if reverse_peer is not None:
+                    async def _accept_pullback_push(
+                        _peer=reverse_peer, _folder=folder_name,
+                    ) -> None:
+                        try:
+                            await self.push_folder_to_peer(_peer, _folder)
+                        except Exception as e:  # pragma: no cover - bg
+                            log.warning(
+                                "accept pull-back push to %s for %s failed: %s",
+                                peer_fp[:8], _folder, e,
+                            )
+                    self._track(_accept_pullback_push())
+                # Ack with empty WANTS so their drain loop returns
+                # cleanly instead of waiting the full 15s timeout.
+                with contextlib.suppress(Exception):
+                    await channel.send(encode_msg(make_msg(
+                        "MANIFEST_WANTS", self.me.short_id,
+                        folder=folder_name, wants=[],
+                    )))
+                return
         if peer_fp not in f["shared_with"]:
             log.info(
                 "MANIFEST_PUSH for folder we don't share with this peer",
@@ -10543,20 +10596,52 @@ class Daemon:
         log.info("MANIFEST_PUSH from %s: %d entries, %d wants",
                  peer_fp[:8], len(entries), len(wants))
         # D18 — Bidirectional folder sync. When the peer requested a
-        # reverse push AND both sides advertise FOLDER_SYNC_BIDI_V1,
-        # send our local manifest back over the same channel. The
-        # peer's _handle_manifest_push handler on their side will
-        # process the merge + reply with their own MANIFEST_WANTS, so
-        # blobs flow in both directions from one initiating cycle.
+        # reverse push (e.g. a receiver just accepted a folder offer
+        # and wants our blobs), kick a FRESH FORWARD push back to
+        # them rather than trying to push our manifest on THIS
+        # channel.
+        #
+        # 2026-05-27 fix: the old in-channel reverse push was broken.
+        # The requester's push_folder_to_peer drain loop only watches
+        # for MANIFEST_WANTS — it breaks out of the loop on the empty
+        # WANTS for ITS OWN (empty) manifest and closes the channel
+        # BEFORE it ever processes our reverse MANIFEST_PUSH. The
+        # reverse manifest was silently dropped, so the receiver
+        # never sent WANTS for our blobs and the files never arrived.
+        #
+        # The forward push is the proven path (test_folder_sync_e2e):
+        # we dial them, send our manifest, they receive it on their
+        # inbound _handle_peer loop, compute wants, send WANTS, we
+        # stream blobs. Spawned as a TRACKED task so it can't be
+        # garbage-collected mid-transfer.
         if msg.get("request_reverse"):
             peer_caps_frame = getattr(channel, "peer_caps", None) or {}
             peer_features = list(peer_caps_frame.get("features") or [])
             if FOLDER_SYNC_BIDI_V1 in peer_features:
-                await self._send_local_manifest_in_channel(
-                    channel=channel,
-                    folder_name=folder_name,
-                    peer_fp=peer_fp,
-                )
+                reverse_peer = self._peer_from_fp(peer_fp)
+                if reverse_peer is not None:
+                    async def _reverse_forward_push(
+                        _peer=reverse_peer, _folder=folder_name,
+                    ) -> None:
+                        try:
+                            await self.push_folder_to_peer(_peer, _folder)
+                        except Exception as e:  # pragma: no cover - bg
+                            log.warning(
+                                "reverse forward-push to %s for %s failed: %s",
+                                peer_fp[:8], _folder, e,
+                            )
+                    # _track registers the task on self._background_tasks
+                    # so it isn't GC'd mid-transfer + stop() can drain it.
+                    self._track(_reverse_forward_push())
+                else:
+                    # Peer not resolvable for a fresh dial — fall back
+                    # to the legacy in-channel reverse (best effort;
+                    # works when the requester stays on the channel).
+                    await self._send_local_manifest_in_channel(
+                        channel=channel,
+                        folder_name=folder_name,
+                        peer_fp=peer_fp,
+                    )
 
     async def _handle_manifest_wants(self, channel, msg, peer_fp):
         if self.folder_engine is None or self.state is None:
@@ -19045,6 +19130,96 @@ class Daemon:
         return len(peers)
 
     # ─── folder sync orchestration ─────────────────────────────────────
+    async def notify_peer_folder_accepted(
+        self, peer: Peer, folder_name: str,
+    ) -> bool:
+        """v0.21.x: receiver-side hook. When the user ACCEPTS a folder
+        offer, tell the original sender so they can:
+          1. (Re)grant us push access for the folder (the one-shot
+             send temp-granted then cleaned up; acceptance is fresh
+             consent to actually receive)
+          2. Kick a FORWARD push of the folder's blobs to us — the
+             proven path (test_folder_sync_e2e), not the fragile
+             in-channel reverse that depended on caps timing.
+
+        This is a dedicated, reliable signal — it does NOT depend on
+        FOLDER_SYNC_BIDI_V1 being present in the channel's caps at a
+        specific instant (the bug that broke the request_reverse
+        approach). Returns True on best-effort send success."""
+        block = self._check_outbound_trust(peer)
+        if block:
+            return False
+        peer_fp = self._peer_fp_from_peer(peer)
+        if not peer_fp or not self._capability_allowed(peer_fp, FOLDER_SYNC):
+            return False
+        try:
+            sess = await self._get_outbound_session(peer)
+        except Exception:
+            return False
+        try:
+            async with sess.lock:
+                msg = make_msg(
+                    "FOLDER_OFFER_ACCEPTED", self.me.short_id,
+                    folder=folder_name,
+                )
+                await sess.channel.send(encode_msg(msg))
+            return True
+        except Exception as e:
+            log.debug(
+                "notify_peer_folder_accepted to %s for %r failed: %s",
+                peer_fp[:8], folder_name, e,
+            )
+            return False
+
+    async def _handle_folder_offer_accepted(
+        self, channel, msg, peer_fp: str,
+    ) -> None:
+        """v0.21.x: the peer ACCEPTED a folder we offered them. Grant
+        them push access (re-establishing the share the one-shot send
+        cleaned up) + kick a fresh forward push so our blobs flow to
+        them. Gated: we must KNOW the folder locally + the peer must
+        be pinned. The peer originally received our offer, so this is
+        legitimate consent on both ends."""
+        folder_name = str(msg.get("folder") or "")
+        if not folder_name or self.folder_engine is None or self.state is None:
+            return
+        if not self._is_pinned(peer_fp):
+            log.info(
+                "FOLDER_OFFER_ACCEPTED from non-pinned peer %s ignored",
+                peer_fp[:8],
+            )
+            return
+        f = self.state.get_folder(folder_name)
+        if not f:
+            log.info(
+                "FOLDER_OFFER_ACCEPTED for unknown folder %r from %s",
+                folder_name, peer_fp[:8],
+            )
+            return
+        with contextlib.suppress(Exception):
+            self.folder_engine.share_with(folder_name, peer_fp, mode="push")
+        log.info(
+            "FOLDER_OFFER_ACCEPTED: granted %s push access to %r + "
+            "kicking forward push", peer_fp[:8], folder_name,
+        )
+        peer = self._peer_from_fp(peer_fp)
+        if peer is None:
+            log.info(
+                "FOLDER_OFFER_ACCEPTED: peer %s not resolvable for push",
+                peer_fp[:8],
+            )
+            return
+
+        async def _accept_forward_push() -> None:
+            try:
+                await self.push_folder_to_peer(peer, folder_name)
+            except Exception as e:  # pragma: no cover - bg
+                log.warning(
+                    "accept forward-push to %s for %r failed: %s",
+                    peer_fp[:8], folder_name, e,
+                )
+        self._track(_accept_forward_push())
+
     async def notify_peer_folder_declined(
         self, peer: Peer, folder_name: str,
     ) -> bool:
@@ -19228,10 +19403,11 @@ class Daemon:
                 folder_name,
             )
             return
+        # 2026-05-27: use the reliable accept-notify signal instead of
+        # the broken bidirectional in-channel reverse. The sender
+        # re-grants + forward-pushes the blobs to us.
         try:
-            await self.push_folder_to_peer(
-                peer, folder_name, bidirectional=True,
-            )
+            await self.notify_peer_folder_accepted(peer, folder_name)
         except Exception as e:
             log.warning(
                 "self-mesh auto-accept pull-back failed (%s/%s): %s",

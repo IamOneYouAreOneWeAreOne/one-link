@@ -17008,21 +17008,28 @@ class UIServer:
                     break
         triggered = False
         if peer is not None:
+            # 2026-05-27: send an explicit FOLDER_OFFER_ACCEPTED signal
+            # to the sender. They re-grant us push access + kick a
+            # FORWARD push of the blobs (the proven path). This
+            # replaces the old bidirectional=True in-channel reverse
+            # pull, which was broken: the sender's reverse MANIFEST_PUSH
+            # arrived after our drain loop had already closed the
+            # channel on the empty WANTS, so blobs never flowed.
             async def _bg_pull() -> None:
                 try:
-                    r = await self.daemon.push_folder_to_peer(
-                        peer, folder_name, bidirectional=True,
+                    notified = await self.daemon.notify_peer_folder_accepted(
+                        peer, folder_name,
                     )
                     self.broadcast({
                         "type": "folder_offer_pull_complete",
                         "offer_id": offer_id,
                         "folder_name": folder_name,
                         "peer_fp": peer_fp,
-                        "result": r,
+                        "result": {"ok": bool(notified), "notified": notified},
                     })
                 except Exception as e:  # pragma: no cover - bg
                     log.warning(
-                        "accept-pull failed (%s/%s): %s",
+                        "accept-notify failed (%s/%s): %s",
                         peer_fp[:8], folder_name, e,
                     )
                     self.broadcast({

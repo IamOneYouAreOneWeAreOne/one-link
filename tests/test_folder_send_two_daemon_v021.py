@@ -110,16 +110,6 @@ async def _pair(p) -> tuple[str, str]:
         pytest.fail("pair did not settle to mutual pinned within 8s")
 
 
-@pytest.mark.skip(
-    reason=(
-        "Real two-daemon E2E folder send. Spawns two daemons + relies on "
-        "loopback mDNS + LAN dial. Pass on Windows requires daemon spawn "
-        "+ mDNS resolution within ~15s. Gated as opt-in: unskip when "
-        "running the full integration suite (CI / pre-release smoke). "
-        "Architecture verified — wire frames + reconciliation tested "
-        "individually by FakeChannel unit tests."
-    ),
-)
 @pytest.mark.asyncio
 @pytest.mark.timeout(180)
 async def test_folder_send_via_manifest_real_wire():
