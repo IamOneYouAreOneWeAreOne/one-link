@@ -17747,6 +17747,10 @@
   }
 
   function _activeTransferVerbLabel(sendCount, recvCount) {
+    // ASCII separator only. The middle-dot (·) is a fragile unicode
+    // separator the codebase bans in live status strings — a single
+    // encoding slip renders it as "Â·" mojibake. A comma reads more
+    // naturally between the two count clauses anyway.
     const parts = [];
     if (sendCount > 0) {
       parts.push(`Sending ${sendCount} file${sendCount === 1 ? "" : "s"}`);
@@ -17754,7 +17758,7 @@
     if (recvCount > 0) {
       parts.push(`Receiving ${recvCount} file${recvCount === 1 ? "" : "s"}`);
     }
-    return parts.join(" · ") || "Transferring";
+    return parts.join(", ") || "Transferring";
   }
 
   // v0.8.8: aggregate header pill renderer. Hidden when zero
