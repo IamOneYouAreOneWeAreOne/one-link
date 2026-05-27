@@ -20497,6 +20497,39 @@ class UIServer:
         self._last_reveal_ms = now
         return False
 
+    @staticmethod
+    def _open_folder_foreground(path: str) -> None:
+        """Open a folder in the OS file manager, brought to the FRONT
+        over all other windows.
+
+        From a background daemon, os.startfile / ShellExecute can't take
+        focus on Windows (the foreground-lock prevents a background
+        process from stealing focus), so the Explorer window opened
+        behind the browser. We (1) relax the foreground-lock timeout to
+        0 and (2) grant any process the right to set foreground, then
+        launch via explorer.exe — the shell then brings the folder
+        window to the front (and reuses an existing window for the same
+        path). On macOS/Linux `open`/`xdg-open` already activate the
+        file manager to the foreground."""
+        import sys
+        import subprocess
+        if sys.platform == "win32":
+            import ctypes
+            with contextlib.suppress(Exception):
+                # SPI_SETFOREGROUNDLOCKTIMEOUT=0x2001, value 0 => a
+                # freshly-launched window may take focus immediately.
+                ctypes.windll.user32.SystemParametersInfoW(
+                    0x2001, 0, 0, 0x02,  # SPIF_SENDCHANGE
+                )
+            with contextlib.suppress(Exception):
+                # ASFW_ANY (-1): let explorer.exe call SetForegroundWindow.
+                ctypes.windll.user32.AllowSetForegroundWindow(-1)
+            subprocess.Popen(["explorer.exe", path])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+
     async def api_file_reveal(self, request: web.Request) -> web.Response:
         # Open the OS file manager with the inbox file selected.
         # Same path-traversal defense as download.
@@ -21097,16 +21130,11 @@ class UIServer:
             return web.json_response(
                 {"ok": True, "path": str(path), "disabled": True},
             )
-        import sys
         try:
-            if sys.platform == "win32":
-                os.startfile(str(path))
-            elif sys.platform == "darwin":
-                import subprocess
-                subprocess.Popen(["open", str(path)])
-            else:
-                import subprocess
-                subprocess.Popen(["xdg-open", str(path)])
+            # Bring the file-manager window to the FRONT over all other
+            # windows (the daemon is a background process, so a plain
+            # ShellExecute would open it behind the browser).
+            self._open_folder_foreground(str(path))
         except OSError as e:
             return web.json_response({"error": f"reveal failed: {e}"}, status=500)
         return web.json_response({"ok": True, "path": str(path)})
