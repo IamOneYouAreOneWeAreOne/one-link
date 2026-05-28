@@ -80,7 +80,10 @@ def test_file_bubble_shows_rate_and_eta(index_html: str):
     the rate is known."""
     start = index_html.find("function renderFileBubble(msg)")
     assert start > 0
-    snippet = index_html[start:start + 4000]
+    # 2026-05-28: window widened from 4000 to 4500 after the bubble
+    # gained a direction-aware in-flight fallback that pushed the
+    # in-flight rate/ETA block down by ~10 lines.
+    snippet = index_html[start:start + 4500]
     assert "rateForTransfer(" in snippet
     assert "fmtRate(" in snippet
     assert "fmtMbps(" in snippet

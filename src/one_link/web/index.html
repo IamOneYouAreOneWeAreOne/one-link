@@ -15970,10 +15970,16 @@
 
   function statusLabel(t, fallback) {
     if (!t) return fallback;
-    if (t.display_state) return t.display_state;
     const meta = t.metadata || {};
     const inbound = t.direction === "in";
-    if (meta.doctor?.label && !(inbound && ["queued", "offered", "active", "paused"].includes(t.status))) return meta.doctor.label;
+    // Skip display_state / doctor.label short-circuits for inbound
+    // non-terminal transfers — otherwise the transfer doctor's
+    // sender-oriented copy ("Sending…") would override the
+    // direction-aware "Receiving…" labels below. Outbound + terminal
+    // states keep using the doctor's enriched label as before.
+    const nonTerminalInbound = inbound && ["queued", "offered", "active", "paused"].includes(t.status);
+    if (t.display_state && !nonTerminalInbound) return t.display_state;
+    if (meta.doctor?.label && !nonTerminalInbound) return meta.doctor.label;
     const stateName = meta.delivery_state || "";
     // 2026-05-22 audit Batch AA: short-circuit the empty-file edge.
     // Without this, total_bytes === 0 makes progress_pct = NaN ->
@@ -19192,15 +19198,19 @@
     // (e.g. legacy history before transfers were tracked) fall back to
     // msg.ok / msg.dir for display.
     let kind, label;
+    // The fallback label must be direction-aware too: an INBOUND file
+    // bubble with no matching transfer record must NOT read "Sending…".
+    const inboundMsg = msg.dir === "in";
+    const fallbackInflight = inboundMsg ? "Receiving…" : "Sending…";
     if (t) {
       kind = statusKind(t);
-      label = statusLabel(t, "Sending…");
+      label = statusLabel(t, fallbackInflight);
     } else if (msg.t === "FILE_DONE") {
       kind = msg.ok ? "sent" : "failed";
-      label = msg.ok ? (msg.dir === "in" ? "Received" : "Sent") : "Failed";
+      label = msg.ok ? (inboundMsg ? "Received" : "Sent") : "Failed";
     } else {
       kind = "sending";
-      label = "Sending…";
+      label = fallbackInflight;
     }
 
     const b = el("div", `msg ${msg.dir} file`);

@@ -5465,6 +5465,33 @@ class Daemon:
                     user_message="One Link blocked a file offer with an invalid resumable chunk map.",
                 )
                 return
+            # Accept-first dedup: if this exact blob from this peer is
+            # ALREADY held pending the user's accept (an earlier
+            # FILE_OFFER landed and the sender's send timed out + is
+            # retrying), refresh the FILE_OFFER_HELD signal so the
+            # sender's session resets its wait — but don't persist a new
+            # chat message, don't re-broadcast a fresh prompt, and don't
+            # repeat the resume setup. Stops the "5 bubbles for the same
+            # held file" spam.
+            _retry_tid = f"in:{blob}"
+            if _retry_tid in self._pending_file_offers:
+                _ctx = self._pending_file_offers[_retry_tid]
+                if _ctx.get("peer_fp") == peer_fp:
+                    # Use THIS retry's channel — the prior session is
+                    # gone (the sender timed out + reconnected). The
+                    # cached msg_id stays so accept maps to the user's
+                    # original prompt.
+                    _ctx["channel"] = channel
+                    with contextlib.suppress(Exception):
+                        await channel.send(encode_msg(make_msg(
+                            "FILE_OFFER_HELD", self.me.short_id,
+                            of=msg["id"], blob=blob,
+                        )))
+                    log.info(
+                        "file offer dedup (held retry): %s from %s",
+                        name, peer_sid,
+                    )
+                    return
             missing = None
             swarm_assist: dict = {"pulled": 0, "sources": {}}
             known_hashes: set[str] = set()
