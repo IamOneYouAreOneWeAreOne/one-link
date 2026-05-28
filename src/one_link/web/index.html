@@ -17905,33 +17905,70 @@
   function aggregateActiveTransferStats() {
     // v0.21.x: split by direction so the header pill can say
     // "Receiving" for inbound transfers instead of always "Sending".
+    // v0.21.x audit: also collect peer fingerprints per direction (so
+    // the pill can name the device) AND skip stuck-at-0% rows that
+    // haven't moved in >30s — they were dominating the pill as a
+    // misleading "Sending 1 file 0%" with no actual progress.
+    const STALE_NO_PROGRESS_MS = 30_000;
+    const nowMs = Date.now();
     let count = 0, sendCount = 0, recvCount = 0;
     let bps = 0, sent = 0, total = 0;
+    const sendPeerFps = new Set();
+    const recvPeerFps = new Set();
     for (const t of state.transfers) {
-      if (t.status === "active" || t.status === "offered") {
-        count += 1;
-        if (t.direction === "in") recvCount += 1;
-        else sendCount += 1;
-        bps += rateForTransfer(t);
-        sent += t.progress_bytes || 0;
-        total += t.total_bytes || 0;
-      }
+      if (t.status !== "active" && t.status !== "offered") continue;
+      const progressed = (t.progress_bytes || 0) > 0;
+      const rate = rateForTransfer(t);
+      const ageMs = nowMs - (t.updated_ms || nowMs);
+      // Skip stuck rows: no bytes, no live rate, and the daemon
+      // hasn't updated the row in the stale window.
+      if (!progressed && rate <= 0 && ageMs > STALE_NO_PROGRESS_MS) continue;
+      count += 1;
+      if (t.direction === "in") { recvCount += 1; if (t.peer_fp) recvPeerFps.add(t.peer_fp); }
+      else { sendCount += 1; if (t.peer_fp) sendPeerFps.add(t.peer_fp); }
+      bps += rate;
+      sent += t.progress_bytes || 0;
+      total += t.total_bytes || 0;
     }
-    return { count, sendCount, recvCount, bps, sent, total };
+    return { count, sendCount, recvCount, bps, sent, total, sendPeerFps, recvPeerFps };
   }
 
-  function _activeTransferVerbLabel(sendCount, recvCount) {
+  // Resolve a peer fingerprint to a display name (Computer 2 etc.).
+  // Returns null when state.peers hasn't loaded yet so the caller can
+  // gracefully drop the "to/from <name>" clause.
+  function _peerLabelByFp(fp) {
+    if (!fp || !state.peers) return null;
+    const p = [...state.peers.values()].find(x => x.fingerprint === fp);
+    if (!p) return null;
+    return p.display_name || p.hostname || p.short_id || null;
+  }
+  function _activeTransferVerbLabel(sendCount, recvCount, sendPeerFps, recvPeerFps) {
     // ASCII separator only. The middle-dot (·) is a fragile unicode
     // separator the codebase bans in live status strings — a single
     // encoding slip renders it as "Â·" mojibake. A comma reads more
     // naturally between the two count clauses anyway.
+    // Include the peer name when only ONE peer is on each side so the
+    // pill answers "to/from whom?" at a glance ("Sending 1 file to
+    // Computer 2"). Falls back to a bare count when multiple peers
+    // are involved or the peer record hasn't loaded yet.
+    const phrase = (verb, count, peerFps) => {
+      const word = `${verb} ${count} file${count === 1 ? "" : "s"}`;
+      const fps = peerFps ? [...peerFps] : [];
+      if (fps.length === 1) {
+        const who = _peerLabelByFp(fps[0]);
+        if (who) {
+          const prep = verb === "Sending" ? "to" : "from";
+          return `${word} ${prep} ${who}`;
+        }
+      } else if (fps.length > 1) {
+        const prep = verb === "Sending" ? "to" : "from";
+        return `${word} ${prep} ${fps.length} devices`;
+      }
+      return word;
+    };
     const parts = [];
-    if (sendCount > 0) {
-      parts.push(`Sending ${sendCount} file${sendCount === 1 ? "" : "s"}`);
-    }
-    if (recvCount > 0) {
-      parts.push(`Receiving ${recvCount} file${recvCount === 1 ? "" : "s"}`);
-    }
+    if (sendCount > 0) parts.push(phrase("Sending", sendCount, sendPeerFps));
+    if (recvCount > 0) parts.push(phrase("Receiving", recvCount, recvPeerFps));
     return parts.join(", ") || "Transferring";
   }
 
@@ -17941,7 +17978,8 @@
   function renderTransferHeaderPill() {
     const pill = $("#transfer-pill");
     if (!pill) return;
-    const { count, sendCount, recvCount, bps, sent, total } = aggregateActiveTransferStats();
+    const stats = aggregateActiveTransferStats();
+    const { count, sendCount, recvCount, bps, sent, total } = stats;
     if (count === 0) {
       pill.style.display = "none";
       pill.innerHTML = "";
@@ -17950,7 +17988,9 @@
     pill.style.display = "inline-flex";
     pill.innerHTML = "";
     pill.appendChild(el("span", "pill-spinner"));
-    const label = _activeTransferVerbLabel(sendCount, recvCount);
+    const label = _activeTransferVerbLabel(
+      sendCount, recvCount, stats.sendPeerFps, stats.recvPeerFps,
+    );
     const rate = bps > 0 ? ` · ${fmtMbps(bps)}` : "";
     const pct = total > 0 ? ` · ${Math.round((sent / total) * 100)}%` : "";
     pill.appendChild(document.createTextNode(label + rate + pct));
@@ -19561,6 +19601,29 @@
         open.href = `/api/files/${encodeURIComponent(fname)}`;
         open.target = "_blank";
         actions.appendChild(open);
+        // One-click download to the browser's Downloads folder
+        // (the chrome/gmail "↓" UX). <a download> hands the URL to
+        // the browser as a save instead of an open; the download
+        // attribute carries the suggested filename so the prefix-
+        // stripped display name is what the user sees on disk.
+        const download = el("a", "btn-download-arrow");
+        download.href = `/api/files/${encodeURIComponent(fname)}`;
+        download.setAttribute("download", displayFileName(msg.name || fname));
+        download.title = "Download to your Downloads folder";
+        download.setAttribute("aria-label", "Download to Downloads folder");
+        download.style.display = "inline-flex";
+        download.style.alignItems = "center";
+        download.style.justifyContent = "center";
+        download.style.padding = "4px 8px";
+        download.style.textDecoration = "none";
+        download.style.lineHeight = "1";
+        download.innerHTML = (
+          '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" '
+          + 'stroke="currentColor" stroke-width="2.4" stroke-linecap="round" '
+          + 'stroke-linejoin="round" aria-hidden="true">'
+          + '<path d="M12 5v14M5 12l7 7 7-7"/></svg>'
+        );
+        actions.appendChild(download);
         // v0.9.7: "Reveal" → "Show in folder". The button used to
         // pop an Explorer window silently; now we surface immediate
         // feedback so the user knows the click registered even if
