@@ -80,10 +80,13 @@ def test_file_bubble_shows_rate_and_eta(index_html: str):
     the rate is known."""
     start = index_html.find("function renderFileBubble(msg)")
     assert start > 0
-    # 2026-05-28: window widened from 4000 to 4500 after the bubble
-    # gained a direction-aware in-flight fallback that pushed the
-    # in-flight rate/ETA block down by ~10 lines.
-    snippet = index_html[start:start + 4500]
+    # Anchor on the in-flight progress block itself rather than a fixed
+    # char window from the function start — the bubble's preamble grows
+    # (direction-aware + old-message fallbacks) and kept shifting a
+    # magic-number window. Bound the slice at the next function def so a
+    # match can't bleed into unrelated code.
+    nextfn = index_html.find("\n  function ", start + 1)
+    snippet = index_html[start:(nextfn if nextfn > start else start + 6000)]
     assert "rateForTransfer(" in snippet
     assert "fmtRate(" in snippet
     assert "fmtMbps(" in snippet

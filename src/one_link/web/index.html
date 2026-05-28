@@ -19618,19 +19618,32 @@
     // (e.g. legacy history before transfers were tracked) fall back to
     // msg.ok / msg.dir for display.
     let kind, label;
-    // The fallback label must be direction-aware too: an INBOUND file
-    // bubble with no matching transfer record must NOT read "Sending…".
     const inboundMsg = msg.dir === "in";
+    // No-transfer-record fallback. The transfer ledger is pruned /
+    // capped over time, so a chat file message from a PAST session has
+    // no live transfer row. Such a message is NOT in-flight — assume it
+    // finished (it's history). Only a RECENT message with no row yet is
+    // plausibly still transferring, so it keeps the in-flight label
+    // until its transfer event arrives. This stops old bubbles being
+    // stuck on a perpetual "Receiving…" / "Sending…" across restarts.
+    const RECENT_INFLIGHT_MS = 5 * 60 * 1000;
+    const msgAgeMs = Date.now() - (msg.ts || Date.now());
+    const isRecent = msgAgeMs <= RECENT_INFLIGHT_MS;
     const fallbackInflight = inboundMsg ? "Receiving…" : "Sending…";
+    const fallbackDone = inboundMsg ? "Received" : "Sent";
     if (t) {
       kind = statusKind(t);
-      label = statusLabel(t, fallbackInflight);
+      label = statusLabel(t, isRecent ? fallbackInflight : fallbackDone);
     } else if (msg.t === "FILE_DONE") {
       kind = msg.ok ? "sent" : "failed";
-      label = msg.ok ? (inboundMsg ? "Received" : "Sent") : "Failed";
-    } else {
+      label = msg.ok ? fallbackDone : "Failed";
+    } else if (isRecent) {
       kind = "sending";
       label = fallbackInflight;
+    } else {
+      // Older message, no live transfer row → treat as completed.
+      kind = "sent";
+      label = fallbackDone;
     }
 
     const b = el("div", `msg ${msg.dir} file`);
