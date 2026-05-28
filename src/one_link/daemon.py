@@ -13616,6 +13616,143 @@ class Daemon:
             for tid, c in self._pending_file_offers.items()
         ]
 
+    # ─── attention center ────────────────────────────────────────────
+    #
+    # "Things the user should look at." The UI pings this to drive a
+    # small notification badge — only appears when len(items) > 0 so
+    # the chrome stays quiet when nothing's wrong. Item kinds:
+    #
+    #   pending_accept       — incoming file held waiting for your OK
+    #   stuck_outbound       — you started a send and bytes aren't
+    #                           flowing (peer offline, on old code, or
+    #                           waiting to accept). Cancel / wait.
+    #   awaiting_remote_ok   — your send is HELD by the recipient
+    #                           (accept-first); they haven't decided.
+    #   failed_needs_action  — a non-transient send failure the user
+    #                           should acknowledge or retry.
+
+    # Thresholds. Generous so a slow-link first-byte isn't flagged.
+    ATTENTION_STUCK_OUTBOUND_NO_PROGRESS_MS = 60_000
+    ATTENTION_HELD_OUTBOUND_AGE_MS = 30_000
+
+    def _peer_label_for_fp(self, peer_fp: str | None) -> str | None:
+        if not peer_fp or self.state is None:
+            return None
+        try:
+            rec = self.state.get_peer(peer_fp)
+        except Exception:
+            return None
+        if rec is None:
+            return None
+        return (
+            getattr(rec, "display_name", None)
+            or getattr(rec, "hostname", None)
+            or getattr(rec, "short_id", None)
+            or None
+        )
+
+    def list_attention_items(self) -> list[dict]:
+        """Classified list of transfers the user should look at. Drives
+        the attention badge + popover in the UI."""
+        items: list[dict] = []
+        now_ms = int(time.time() * 1000)
+        # 1. Held incoming offers (accept-first).
+        for tid, ctx in self._pending_file_offers.items():
+            since = max(0, now_ms - int(ctx.get("created_ms") or now_ms))
+            items.append({
+                "transfer_id": tid,
+                "kind": "pending_accept",
+                "direction": "in",
+                "name": ctx.get("name") or "a file",
+                "size": int(ctx.get("size") or 0),
+                "peer_fp": ctx.get("peer_fp"),
+                "peer_label": self._peer_label_for_fp(ctx.get("peer_fp")),
+                "summary": "Waiting for you to accept",
+                "actions": ["accept", "decline"],
+                "since_ms": since,
+            })
+        # 2-4. Walk the transfer ledger for outbound issues.
+        if self.state is not None:
+            try:
+                rows = self.state.list_transfers(limit=500)
+            except Exception:
+                rows = []
+            for t in rows:
+                if t.direction != "out":
+                    continue
+                meta = t.metadata or {}
+                age = max(0, now_ms - int(t.updated_ms or now_ms))
+                if t.status == "active" and (t.progress_bytes or 0) == 0 and age > self.ATTENTION_STUCK_OUTBOUND_NO_PROGRESS_MS:
+                    items.append({
+                        "transfer_id": t.id,
+                        "kind": "stuck_outbound",
+                        "direction": "out",
+                        "name": t.name or "a file",
+                        "size": int(t.size or 0),
+                        "peer_fp": t.peer_fp,
+                        "peer_label": self._peer_label_for_fp(t.peer_fp),
+                        "summary": "Not responding — nothing's flowing yet.",
+                        "actions": ["cancel"],
+                        "since_ms": age,
+                    })
+                elif (
+                    t.status == "offered"
+                    and meta.get("delivery_state") == "awaiting_remote_acceptance"
+                    and age > self.ATTENTION_HELD_OUTBOUND_AGE_MS
+                ):
+                    items.append({
+                        "transfer_id": t.id,
+                        "kind": "awaiting_remote_ok",
+                        "direction": "out",
+                        "name": t.name or "a file",
+                        "size": int(t.size or 0),
+                        "peer_fp": t.peer_fp,
+                        "peer_label": self._peer_label_for_fp(t.peer_fp),
+                        "summary": "Waiting for them to accept.",
+                        "actions": ["cancel"],
+                        "since_ms": age,
+                    })
+                elif (
+                    t.status == "failed"
+                    and not meta.get("transient")
+                    and not meta.get("attention_dismissed")
+                ):
+                    items.append({
+                        "transfer_id": t.id,
+                        "kind": "failed_needs_action",
+                        "direction": "out",
+                        "name": t.name or "a file",
+                        "size": int(t.size or 0),
+                        "peer_fp": t.peer_fp,
+                        "peer_label": self._peer_label_for_fp(t.peer_fp),
+                        "summary": (
+                            meta.get("user_message")
+                            or meta.get("error")
+                            or "Send failed."
+                        )[:160],
+                        "actions": ["dismiss", "retry"],
+                        "since_ms": age,
+                    })
+        # Newest-first so a fresh "needs accept" sits on top.
+        items.sort(key=lambda x: x.get("since_ms", 0))
+        return items
+
+    def dismiss_attention(self, transfer_id: str) -> dict:
+        """User saw the failure and wants it off the badge. Tags the
+        transfer row metadata so list_attention_items skips it next
+        time; the row itself stays in the ledger for the activity feed.
+        Use cancel/retry for the actual action — this is just the
+        acknowledge."""
+        if self.state is None:
+            return {"ok": False, "error": "state not available"}
+        rec = self.state.get_transfer(transfer_id)
+        if rec is None:
+            return {"ok": False, "error": "no such transfer"}
+        merged = dict(rec.metadata or {})
+        merged["attention_dismissed"] = True
+        self._update_transfer(transfer_id, metadata=merged)
+        return {"ok": True}
+
     def _ack_batch_size_from_chunk(self, msg: dict) -> int:
         try:
             requested = int(msg.get("ack_batch") or 1)

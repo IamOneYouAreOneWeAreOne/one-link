@@ -2734,6 +2734,9 @@ class UIServer:
         r.add_get("/api/transfers/pending", self._guarded(self.api_pending_file_offers))
         r.add_post(r"/api/transfers/{transfer_id:.+}/accept", self._guarded(self.api_accept_file_offer))
         r.add_post(r"/api/transfers/{transfer_id:.+}/decline", self._guarded(self.api_decline_file_offer))
+        # Attention center: classified list of things the user should look at.
+        r.add_get("/api/transfers/attention", self._guarded(self.api_attention_items))
+        r.add_post(r"/api/transfers/{transfer_id:.+}/dismiss", self._guarded(self.api_dismiss_attention))
         r.add_post(r"/api/peers/{fp}/resume", self._guarded(self.api_resume_peer_transfers))
         r.add_get("/api/outbox", self._guarded(self.api_list_outbox))
         r.add_post(r"/api/outbox/{id:\d+}/cancel", self._guarded(self.api_cancel_outbox))
@@ -20126,6 +20129,21 @@ class UIServer:
             transfer_id, decline_all=decline_all,
         )
         return web.json_response(result)
+
+    async def api_attention_items(self, request: web.Request) -> web.Response:
+        """Drive the UI's attention badge: classified things the user
+        should look at (stuck outbounds, awaiting accepts, failed
+        sends). Empty list = badge hidden."""
+        return web.json_response({
+            "ok": True,
+            "items": self.daemon.list_attention_items(),
+        })
+
+    async def api_dismiss_attention(self, request: web.Request) -> web.Response:
+        """User saw the failure and wants it off the badge. Tags the
+        transfer; use /cancel or /retry for the actual action."""
+        transfer_id = request.match_info["transfer_id"]
+        return web.json_response(self.daemon.dismiss_attention(transfer_id))
 
     async def api_resume_peer_transfers(self, request: web.Request) -> web.Response:
         """v0.7.4: manually trigger the resume orchestrator for a

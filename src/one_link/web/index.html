@@ -6652,6 +6652,58 @@
     0%, 100% { opacity: .5; transform: scale(.85); }
     50%      { opacity: 1;  transform: scale(1.1); }
   }
+  /* Attention center — small bell + count, only shows when there's
+     something for the user to look at. Quiet header otherwise. */
+  .attention-bell {
+    position: relative;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px;
+    margin-left: 6px;
+    padding: 0; border: 1px solid rgba(255, 184, 76, .45);
+    border-radius: 999px;
+    background: linear-gradient(135deg, rgba(255, 184, 76, .22), rgba(255, 122, 47, .22));
+    color: var(--text);
+    cursor: pointer;
+    transition: filter .12s, transform .12s;
+  }
+  .attention-bell:hover { filter: brightness(1.15); transform: translateY(-1px); }
+  .attention-bell .bell-glyph { font-size: 14px; line-height: 1; }
+  .attention-bell .bell-count {
+    position: absolute; top: -4px; right: -4px;
+    min-width: 16px; height: 16px; padding: 0 4px;
+    border-radius: 999px;
+    background: #ff6b3b; color: #fff;
+    font-size: 10px; font-weight: 700; line-height: 16px;
+    text-align: center;
+    box-shadow: 0 0 0 2px var(--bg, #0f1116);
+  }
+  .attention-popover {
+    position: absolute; right: 12px; top: 56px; z-index: 9000;
+    width: min(420px, 92vw); max-height: 60vh; overflow: auto;
+    background: rgba(20, 22, 30, .98);
+    border: 1px solid rgba(255, 255, 255, .12);
+    border-radius: 12px;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, .45);
+    padding: 8px;
+    backdrop-filter: blur(8px);
+  }
+  .attention-item {
+    display: flex; flex-direction: column; gap: 4px;
+    padding: 10px 12px; border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, .06);
+    margin-bottom: 6px;
+  }
+  .attention-item:last-child { margin-bottom: 0; }
+  .attention-item .ai-head { font-weight: 600; font-size: 13px; }
+  .attention-item .ai-sub  { font-size: 11px; opacity: .75; }
+  .attention-item .ai-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .attention-item .ai-actions button {
+    padding: 4px 10px; border-radius: 6px;
+    font-size: 11px; cursor: pointer;
+  }
+  .attention-empty {
+    padding: 16px; text-align: center; opacity: .7; font-size: 12px;
+  }
   .msg.file .status-icon {
     display: inline-flex; align-items: center; gap: 4px;
     font-size: 11px;
@@ -9213,6 +9265,20 @@
                  1+ transfers are active. Click -> opens Files pane.
                  Empty by default; populated by renderTransferHeaderPill. -->
             <div class="transfer-pill" id="transfer-pill" style="display:none;"></div>
+            <!-- Attention center: a small bell-with-count that lights
+                 up when there's something the user should look at
+                 (incoming offers waiting accept, sends stuck or held by
+                 the recipient, real failures). Hidden when there's
+                 nothing to act on so the header stays quiet. -->
+            <button
+              type="button"
+              id="attention-bell"
+              class="attention-bell"
+              style="display:none;"
+              aria-label="Things needing your attention"
+              title="Things needing your attention"
+            ></button>
+            <div id="attention-popover" class="attention-popover" style="display:none;"></div>
             <div class="search" id="search-wrap">
               <span class="icon-trigger" aria-hidden="true">🔍</span>
               <input id="search-input" type="text" placeholder="Search this conversation…" aria-label="Search this conversation" />
@@ -14050,6 +14116,166 @@
       const r = await api.get("/api/transfers/pending");
       for (const o of (r.offers || [])) _addPendingFileOffer(o);
     } catch (_e) { /* offline / not ready */ }
+  }
+
+  // ── Attention center ───────────────────────────────────────────────
+  // Small bell in the header that lights up when there's anything the
+  // user should look at: an incoming file waiting accept, a send stuck
+  // or held by the recipient, a real send failure. Hidden when the
+  // list is empty so the header stays quiet — surfacing only what
+  // needs attention is the whole point.
+  function _fmtAge(ms) {
+    const s = Math.max(1, Math.round((ms || 0) / 1000));
+    if (s < 60) return `${s}s`;
+    const m = Math.round(s / 60);
+    if (m < 60) return `${m}m`;
+    return `${Math.round(m / 60)}h`;
+  }
+  function _attentionKindIcon(kind) {
+    if (kind === "pending_accept") return "↓";
+    if (kind === "stuck_outbound") return "↑";
+    if (kind === "awaiting_remote_ok") return "↑";
+    if (kind === "failed_needs_action") return "!";
+    return "•";
+  }
+  function _attentionKindHead(item) {
+    const who = item.peer_label
+      || (item.peer_fp ? item.peer_fp.slice(0, 8) : "Someone");
+    const file = displayFileName(item.name || "a file");
+    if (item.kind === "pending_accept") return `${who} → ${file}`;
+    if (item.kind === "stuck_outbound") return `${file} → ${who} (stuck)`;
+    if (item.kind === "awaiting_remote_ok") return `${file} → ${who} (waiting)`;
+    if (item.kind === "failed_needs_action") return `${file} → ${who} (failed)`;
+    return `${file} → ${who}`;
+  }
+  function _renderAttentionItem(item) {
+    const row = el("div", "attention-item");
+    const head = el("div", "ai-head", _attentionKindHead(item));
+    head.title = `${item.name || ""}`;
+    row.appendChild(head);
+    const sub = el(
+      "div", "ai-sub",
+      `${item.summary || ""}${item.since_ms ? ` · ${_fmtAge(item.since_ms)} ago` : ""}`,
+    );
+    row.appendChild(sub);
+    const actions = el("div", "ai-actions");
+    const tid = item.transfer_id;
+    const refresh = async () => {
+      await refreshAttention();
+    };
+    for (const a of (item.actions || [])) {
+      if (a === "accept") {
+        const b = el("button", "btn-accept", "Accept");
+        b.onclick = async () => { await acceptFileOffer(tid, false); await refresh(); };
+        actions.appendChild(b);
+      } else if (a === "decline") {
+        const b = el("button", null, "Decline");
+        b.onclick = async () => { await declineFileOffer(tid, false); await refresh(); };
+        actions.appendChild(b);
+      } else if (a === "cancel") {
+        const b = el("button", null, "Cancel send");
+        b.onclick = async () => {
+          try { await api.post(`/api/transfers/${encodeURIComponent(tid)}/cancel`, {}); }
+          catch (e) { toast(`Cancel failed: ${e}`, "error"); }
+          await refresh();
+        };
+        actions.appendChild(b);
+      } else if (a === "retry") {
+        const b = el("button", null, "Retry");
+        b.onclick = async () => {
+          try {
+            if (item.peer_fp) {
+              await api.post(`/api/peers/${encodeURIComponent(item.peer_fp)}/resume`, {});
+            } else {
+              await api.post(`/api/transfers/${encodeURIComponent(tid)}/retry`, {});
+            }
+          } catch (e) { toast(`Retry failed: ${e}`, "error"); }
+          await refresh();
+        };
+        actions.appendChild(b);
+      } else if (a === "dismiss") {
+        const b = el("button", null, "Dismiss");
+        b.onclick = async () => {
+          try { await api.post(`/api/transfers/${encodeURIComponent(tid)}/dismiss`, {}); }
+          catch (e) { toast(`Dismiss failed: ${e}`, "error"); }
+          await refresh();
+        };
+        actions.appendChild(b);
+      }
+    }
+    row.appendChild(actions);
+    return row;
+  }
+  function _renderAttentionBell() {
+    const bell = $("#attention-bell");
+    if (!bell) return;
+    const items = state.attentionItems || [];
+    if (items.length === 0) {
+      bell.style.display = "none";
+      const pop = $("#attention-popover");
+      if (pop) pop.style.display = "none";
+      return;
+    }
+    bell.style.display = "inline-flex";
+    bell.innerHTML = (
+      '<span class="bell-glyph" aria-hidden="true">⚠</span>'
+      + `<span class="bell-count">${items.length}</span>`
+    );
+  }
+  function _renderAttentionPopover() {
+    const pop = $("#attention-popover");
+    if (!pop) return;
+    const items = state.attentionItems || [];
+    pop.innerHTML = "";
+    if (items.length === 0) {
+      pop.appendChild(el("div", "attention-empty", "Nothing needs attention."));
+      return;
+    }
+    for (const item of items) pop.appendChild(_renderAttentionItem(item));
+  }
+  function _toggleAttentionPopover() {
+    const pop = $("#attention-popover");
+    if (!pop) return;
+    const open = pop.style.display !== "none";
+    if (open) { pop.style.display = "none"; return; }
+    _renderAttentionPopover();
+    pop.style.display = "block";
+  }
+  async function refreshAttention() {
+    try {
+      const r = await api.get("/api/transfers/attention");
+      state.attentionItems = r.items || [];
+    } catch (_e) {
+      state.attentionItems = [];
+    }
+    _renderAttentionBell();
+    const pop = $("#attention-popover");
+    if (pop && pop.style.display !== "none") _renderAttentionPopover();
+  }
+  // Wire the bell click once at boot.
+  document.addEventListener("DOMContentLoaded", () => {
+    const bell = $("#attention-bell");
+    if (bell) bell.onclick = _toggleAttentionPopover;
+    // Close popover on outside click.
+    document.addEventListener("click", (ev) => {
+      const pop = $("#attention-popover");
+      if (!pop || pop.style.display === "none") return;
+      if (pop.contains(ev.target)) return;
+      if (bell && bell.contains(ev.target)) return;
+      pop.style.display = "none";
+    });
+  });
+  // Periodic refresh in case a WS event is missed.
+  setInterval(() => { refreshAttention().catch(()=>{}); }, 15_000);
+  // Coalesce burst transfer events into a single refresh per tick.
+  let _attentionRefreshScheduled = false;
+  function scheduleAttentionRefresh() {
+    if (_attentionRefreshScheduled) return;
+    _attentionRefreshScheduled = true;
+    setTimeout(() => {
+      _attentionRefreshScheduled = false;
+      refreshAttention().catch(()=>{});
+    }, 300);
   }
 
   // ── Render: peer list ──────────────────────────────────────────────
@@ -25308,6 +25534,7 @@
     await refreshFolderOffers();
       await refreshTransfers();
       try { await refreshPendingFileOffers(); } catch (_e) {}
+      try { await refreshAttention(); } catch (_e) {}
       await refreshStatus();
       await refreshFabricTruth();
       await refreshOneHealth();
@@ -26479,9 +26706,15 @@
         // Accept-first: someone is sending a standalone file and it's
         // waiting for our OK. Show the Accept/Decline prompt.
         showFileOfferPrompt(m);
+        refreshAttention().catch(()=>{});
       } else if (m.type === "file_offer_resolved") {
         _removeFileOfferPrompt(m.transfer_id);
+        refreshAttention().catch(()=>{});
       } else if (m.type === "transfer") {
+        // Any transfer state change can flip an item into / out of
+        // the attention list (stuck → unstuck, failed → dismissed,
+        // held → accepted). Coalesce via the scheduler.
+        scheduleAttentionRefresh();
         const idx = state.transfers.findIndex(t => t.id === m.transfer.id);
         if (idx >= 0) state.transfers.splice(idx, 1, m.transfer);
         else state.transfers.unshift(m.transfer);
