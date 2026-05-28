@@ -284,6 +284,30 @@ FILE_ACK_DEADLINE_S = 30.0
 # they don't decide in this window the send times out and retries
 # later (the receiver re-shows the pending prompt on the retry).
 FILE_OFFER_ACCEPT_WAIT_S = 300.0
+
+# Accept-first: incoming files that LOOK like conversational chat
+# content (a pasted screenshot, a small photo, a GIF) auto-accept
+# rather than block on a prompt. The user's mental model: "a
+# screenshot in chat shouldn't need to be accepted." The gate still
+# fires for larger files, non-image types (PDFs, ZIPs, executables,
+# documents, videos), and anything a sender explicitly marked as a
+# private delivery.
+_INLINE_AUTO_ACCEPT_IMAGE_EXTS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+    ".heic", ".heif", ".avif", ".svg",
+})
+INLINE_AUTO_ACCEPT_MAX_BYTES = 25 * 1024 * 1024
+
+
+def _looks_like_inline_chat_image(name: str, size: int) -> bool:
+    """Heuristic: small image file = conversational content (pasted
+    screenshot / inline photo). The receiver-side accept-first gate
+    skips the hold for these so chat stays frictionless. Files of any
+    other type, or images above the size cap, still prompt."""
+    if size <= 0 or size > INLINE_AUTO_ACCEPT_MAX_BYTES:
+        return False
+    suffix = Path(name or "").suffix.lower()
+    return suffix in _INLINE_AUTO_ACCEPT_IMAGE_EXTS
 FILE_SEND_TOTAL_DEADLINE_S = 600.0
 FILE_FINAL_ACK_MIN_GRACE_S = 120.0
 FILE_FINAL_ACK_BYTES_PER_S = 2 * 1024 * 1024
@@ -5829,9 +5853,17 @@ class Daemon:
             # this session. The IncomingFile + open handle stay live so an
             # accept resumes instantly; FILE_OFFER_HELD tells the sender to
             # keep its session open while the user decides.
+            # Bypass the hold for content that's conversationally
+            # obvious: explicit chat_inline flag from a new-code sender,
+            # OR the heuristic (small image, classic screenshot/paste).
+            # Folder syncs flow on the BLOB path and never reach here.
+            _chat_inline_msg = bool(msg.get("chat_inline"))
+            _looks_inline = _looks_like_inline_chat_image(name, size)
             if (
                 self._incoming_files_require_accept
                 and peer_fp not in self._file_accept_allow
+                and not _chat_inline_msg
+                and not _looks_inline
             ):
                 self._pending_file_offers[transfer_id] = {
                     "channel": channel,
@@ -20316,8 +20348,22 @@ class Daemon:
         transfer_id: str | None = None,
         rel_path: str | None = None,
         extra_metadata: dict | None = None,
+        display_name: str | None = None,
+        chat_inline: bool = False,
     ) -> dict:
         """Send a single file to a paired peer.
+
+        ``display_name``: override the on-wire file name (FILE_OFFER's
+        ``name`` field). When the caller staged the file under an
+        internal collision-safe name like ``<ts>_<hex>_<orig>``, the
+        receiver should NOT see that prefix — pass the original
+        ``orig`` here. Defaults to ``path.name`` for back-compat.
+
+        ``chat_inline``: tag the FILE_OFFER so the receiver knows this
+        is conversational chat content (a paste, a drag-drop, a
+        screenshot attached to a message) and should NOT block on the
+        accept-first prompt. Standalone "send file" flows leave it
+        False so accept-first still applies for private deliveries.
 
         ``extra_metadata``: optional dict merged into the transfer
         ledger row's metadata. Used by the per-file folder-send loop
@@ -20347,6 +20393,11 @@ class Daemon:
         intentionally inherits the unthrottled behavior — if you
         clicked Send on a 10 GB folder, you want it to go.
         """
+        # The clean on-wire / ledger name. Strip the internal staging
+        # prefix the upload pipeline adds (<ts>_<hex>_<orig>) — that
+        # was leaking through to the recipient AND to the sender's own
+        # transfer ledger as the public file name.
+        _wire_name = (display_name or path.name)
         block = self._check_outbound_trust(peer)
         if block:
             raise RuntimeError(block)
@@ -20449,7 +20500,7 @@ class Daemon:
             direction="out",
             peer_fp=provisional_fp,
             kind="file",
-            name=path.name,
+            name=_wire_name,
             size=size,
             blob_hash=blob_hex,
             status="queued",
@@ -20848,7 +20899,7 @@ class Daemon:
             ],
         }
         offer_fields = {
-            "name": path.name,
+            "name": _wire_name,
             "size": size,
             "blob": blob_hex,
             "mode": planned_wire_mode,
@@ -20858,6 +20909,10 @@ class Daemon:
                 "transfer_mode": intent.compatibility.transfer_mode,
             },
         }
+        # Mark conversational chat content so the receiver's accept-
+        # first gate auto-accepts (no prompt for screenshots / pastes).
+        if chat_inline:
+            offer_fields["chat_inline"] = True
         # v0.21.x folder-send: include a sanitized rel_path so the
         # receiver mirrors the sender-side directory tree under
         # their inbox. Receiver re-sanitizes (defense in depth).
@@ -20877,7 +20932,7 @@ class Daemon:
                 direction="out",
                 peer_fp=peer_fp,
                 kind="file",
-                name=path.name,
+                name=_wire_name,
                 size=size,
                 blob_hash=blob_hex,
                 status="offered",

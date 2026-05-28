@@ -211,3 +211,54 @@ def test_file_offer_handler_holds_when_require_accept():
     assert "_incoming_files_require_accept" in full
     assert "FILE_OFFER_HELD" in full
     assert "_file_accept_allow" in full
+
+
+# ── conversational-content bypass (heuristic + explicit flag) ────
+
+
+def test_inline_image_heuristic_recognises_small_images():
+    """Small image files (screenshots / paste-images) bypass the
+    accept-first prompt — they read as 'conversational content'."""
+    from one_link.daemon import _looks_like_inline_chat_image
+
+    # Image extensions under the size cap → yes.
+    for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".svg"):
+        assert _looks_like_inline_chat_image(f"shot{ext}", 1_500_000), ext
+        assert _looks_like_inline_chat_image(f"shot{ext.upper()}", 200), ext
+    # Other types → no.
+    for ext in (".pdf", ".zip", ".exe", ".docx", ".mp4", ".mov", ".bin"):
+        assert not _looks_like_inline_chat_image(f"x{ext}", 1_500_000), ext
+    # Image over the cap → no.
+    assert not _looks_like_inline_chat_image(
+        "huge.png", 100 * 1024 * 1024,
+    )
+    # Empty / zero size → no.
+    assert not _looks_like_inline_chat_image("x.png", 0)
+    assert not _looks_like_inline_chat_image("", 1000)
+
+
+def test_file_offer_gate_bypasses_chat_inline_flag():
+    """The receiver source must check msg.get('chat_inline') AND the
+    heuristic, both gating the accept-first hold so screenshots / pastes
+    don't trigger the prompt."""
+    import inspect
+    from one_link import daemon as _dm
+
+    full = inspect.getsource(_dm)
+    assert "msg.get(\"chat_inline\")" in full
+    assert "_looks_like_inline_chat_image" in full
+    # The gate must AND together with require_accept (not OR), so an
+    # inline image bypasses even when the user has accept-first on.
+    assert "and not _chat_inline_msg" in full
+    assert "and not _looks_inline" in full
+
+
+def test_send_file_signature_supports_display_name_and_chat_inline():
+    """The sender must accept the clean-name + chat-inline overrides
+    so api_send_file can strip the staging prefix and tag chat content."""
+    import inspect
+    from one_link.daemon import Daemon
+
+    sig = str(inspect.signature(Daemon.send_file))
+    assert "display_name" in sig
+    assert "chat_inline" in sig

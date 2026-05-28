@@ -19688,6 +19688,12 @@ class UIServer:
         # unsafe value gets rejected with a 400 instead of silently
         # dropped on the wire.
         rel_path_raw: Optional[str] = None
+        # v0.21.x accept-first: the chat UI sets chat_inline=1 when the
+        # user pasted / dropped / attached this file in a conversation
+        # so the receiver auto-accepts (no prompt for conversational
+        # content like screenshots). Standalone "send file" flows leave
+        # it absent so accept-first still applies.
+        chat_inline: bool = False
 
         from aiohttp.multipart import MultipartReader as _MultipartReader
 
@@ -19712,6 +19718,10 @@ class UIServer:
                     # collision risk). Pre-stripping would mask it.
                     rel_path_text = await part.text()
                     rel_path_raw = rel_path_text if rel_path_text else None
+                elif part.name == "chat_inline":
+                    chat_inline = (await part.text()).strip().lower() in (
+                        "1", "true", "yes", "on",
+                    )
                 elif part.name == "file":
                     upload_name = Path(part.filename or "upload.bin").name
                     if not upload_name or upload_name in (".", ".."):
@@ -19828,6 +19838,8 @@ class UIServer:
                     upload_path,
                     transfer_id=durable_transfer_id,
                     rel_path=clean_rel_path,
+                    display_name=upload_name,
+                    chat_inline=chat_inline,
                 )
             except Exception as first_err:
                 transfer_id_attr = getattr(first_err, "transfer_id", None)
@@ -19865,6 +19877,8 @@ class UIServer:
                     upload_path,
                     transfer_id=durable_transfer_id,
                     rel_path=clean_rel_path,
+                    display_name=upload_name,
+                    chat_inline=chat_inline,
                 )
             # Keep browser-upload bytes when they were attached to a
             # durable transfer row. The outbound preview/open endpoint
