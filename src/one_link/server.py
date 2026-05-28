@@ -2748,6 +2748,16 @@ class UIServer:
         # generic download route so /preview doesn't get swallowed by
         # the {name:.+} regex.
         r.add_get(r"/api/files/{name:.+}/preview", self._guarded(self.api_file_preview))
+        # v0.21.x: content-addressed file serving. The chat's display
+        # name and the on-disk inbox name diverge (collision suffix,
+        # staging prefix, folder-share subdir), so name-based serving
+        # 404s and the UI shows "Image preview unavailable" on a file
+        # that is plainly on disk. The content hash is the one id both
+        # ends always agree on — resolve it via the ledger's exact
+        # metadata.path, then the blob store. Hex-only + bounded length
+        # = traversal-safe. MUST register before the {name:.+} catch-all
+        # below, which would otherwise swallow `by-blob/<hash>`.
+        r.add_get(r"/api/files/by-blob/{blob}", self._guarded(self.api_file_by_blob))
         r.add_get(r"/api/files/{name:.+}", self._guarded(self.api_file_download))
         r.add_get("/api/audit", self._guarded(self.api_audit))
         r.add_get("/api/update/check", self._guarded(self.api_update_check))
@@ -20373,6 +20383,79 @@ class UIServer:
             "X-Frame-Options": "SAMEORIGIN",
             "Content-Security-Policy": "frame-ancestors 'self'",
         })
+
+    @staticmethod
+    def _mime_for_blob(ext_hint: str | None, name_hint: str | None) -> str:
+        """Pick a Content-Type for a content-addressed blob.
+
+        Blob-store files are stored under their hash with no extension,
+        and inbox files may have a mangled name, so ``guess_type`` on the
+        on-disk path is useless. Prefer an explicit ``?as=<ext>`` hint
+        from the caller, then the ledger row's display name. Falls back
+        to octet-stream, which the browser still renders for <img> via
+        sniffing but is correct for downloads."""
+        ext = (ext_hint or "").lstrip(".").lower()
+        if ext and ext.isalnum() and len(ext) <= 8:
+            guess = mimetypes.guess_type(f"x.{ext}")[0]
+            if guess:
+                return guess
+        if name_hint:
+            guess = mimetypes.guess_type(name_hint)[0]
+            if guess:
+                return guess
+        return "application/octet-stream"
+
+    async def api_file_by_blob(self, request: web.Request) -> web.StreamResponse:
+        """v0.21.x: serve a file by its content hash.
+
+        Resolves via the transfer ledger's recorded ``metadata.path``
+        (the exact on-disk file for received transfers, or the staged /
+        original source for sent ones), then falls back to the
+        content-addressed blob store (folder-sync + pinned-peer files).
+        Backs stable image previews that survive name mangling, duplicate
+        display names, and folder-share subdirectories where name-based
+        serving 404s. The hash is validated to lower hex of bounded
+        length, so it can never carry a path separator; ``metadata.path``
+        comes from our own ledger and is re-checked to be a real file."""
+        blob = (request.match_info.get("blob") or "").lower()
+        if not blob or len(blob) > 64 or any(
+            c not in "0123456789abcdef" for c in blob
+        ):
+            return web.json_response({"error": "bad blob hash"}, status=400)
+        ext_hint = request.query.get("as")
+        # Frame-ancestors widening matches api_file_download so the
+        # lightbox / inline <img> can load this on the same origin.
+        frame_headers = {
+            "X-Frame-Options": "SAMEORIGIN",
+            "Content-Security-Policy": "frame-ancestors 'self'",
+        }
+        # 1) Ledger path — covers ordinary peer-to-peer received files
+        #    (they land in the inbox, not the blob store).
+        rec = None
+        if self.daemon.state is not None:
+            rec = self.daemon.state.get_transfer_by_blob(blob)
+        if rec is not None:
+            path_str = (rec.metadata or {}).get("path")
+            if isinstance(path_str, str) and path_str:
+                path = Path(path_str)
+                if path.is_file():
+                    mime = self._mime_for_blob(ext_hint, rec.name)
+                    return web.FileResponse(
+                        path, headers={"Content-Type": mime, **frame_headers},
+                    )
+        # 2) Blob store — folder-sync + pinned-peer content.
+        blob_store = getattr(self.daemon, "blob_store", None)
+        if (
+            blob_store is not None
+            and len(blob) == 64
+            and blob_store.has(blob)
+        ):
+            mime = self._mime_for_blob(ext_hint, rec.name if rec else None)
+            return web.FileResponse(
+                blob_store.path(blob),
+                headers={"Content-Type": mime, **frame_headers},
+            )
+        return web.json_response({"error": "not found"}, status=404)
 
     async def api_outbound_file_download(
         self, request: web.Request,

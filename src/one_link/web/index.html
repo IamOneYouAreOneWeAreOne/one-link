@@ -15629,14 +15629,35 @@
     }
     return null;
   }
+  // v0.21.x: content-addressed file URL. The chat's display name and
+  // the on-disk inbox name diverge (collision suffix, staging prefix,
+  // folder-share subdir, or the same name received twice), so name-based
+  // serving 404s and the preview falls back to "unavailable" on a file
+  // that is plainly on disk. The blob hash is the one id both ends agree
+  // on; /api/files/by-blob resolves it via the ledger's exact path. The
+  // ?as=<ext> hint lets the server pick a Content-Type for extension-less
+  // blob-store files.
+  function _fileExtHint(name) {
+    const m = /\.([A-Za-z0-9]{1,8})$/.exec(name || "");
+    return m ? m[1].toLowerCase() : "";
+  }
+  function blobFileUrl(blob, name) {
+    if (!blob) return "";
+    const hex = String(blob).toLowerCase();
+    if (!/^[0-9a-f]{1,64}$/.test(hex)) return "";
+    const base = `/api/files/by-blob/${encodeURIComponent(hex)}`;
+    const ext = _fileExtHint(name);
+    return ext ? `${base}?as=${encodeURIComponent(ext)}` : base;
+  }
   function fileAccessInfoForMessage(msg, t) {
     const name = msg?.name || t?.name || "";
     const fname = name || "file";
     const size = msg?.size || t?.total_bytes || t?.size || 0;
     if (msg?.dir === "in") {
+      const blobUrl = blobFileUrl(msg?.blob || t?.blob_hash, fname);
       return {
-        url: `/api/files/${encodeURIComponent(fname)}`,
-        route: "Receiver inbox endpoint",
+        url: blobUrl || `/api/files/${encodeURIComponent(fname)}`,
+        route: blobUrl ? "Receiver content-hash endpoint" : "Receiver inbox endpoint",
         source: "This computer's received-file store",
         problem: "",
       };
@@ -15849,10 +15870,9 @@
       let downloadName = m.name || "";
       if (m.dir === "in") {
         const fname = (m.path || m.name || "").toString().split(/[\\\/]/).pop();
-        if (fname) {
-          url = `/api/files/${encodeURIComponent(fname)}`;
-          downloadName = fname;
-        }
+        const blobUrl = blobFileUrl(m.blob, m.name || fname);
+        url = blobUrl || (fname ? `/api/files/${encodeURIComponent(fname)}` : null);
+        downloadName = fname || m.name || "image";
       } else {
         const t = transferForMessage(m);
         url = objectUrlForOutboundFile(m.name, m.size || 0, t?.id);
@@ -15889,12 +15909,13 @@
     let downloadName = name;
     if (msg.dir === "in") {
       const fname = (msg.path || name || "").toString().split(/[\\\/]/).pop();
-      if (!fname) {
+      const blobUrl = blobFileUrl(msg.blob, name || fname);
+      url = blobUrl || (fname ? `/api/files/${encodeURIComponent(fname)}` : null);
+      if (!url) {
         toast("Couldn't find the file on disk.", "info", 4000);
         return;
       }
-      url = `/api/files/${encodeURIComponent(fname)}`;
-      downloadName = fname;
+      downloadName = fname || name;
     } else if (msg.dir === "out") {
       const t = transferForMessage(msg);
       url = objectUrlForOutboundFile(name, size, t?.id);
@@ -16671,17 +16692,25 @@
     if (actions.childNodes.length) wrap.appendChild(actions);
     return wrap;
   }
-  function attachImagePreviewFallback(img, meta, msg, url, reason) {
+  function attachImagePreviewFallback(img, meta, msg, url, reason, altUrl) {
     img.onerror = () => {
+      // Try the alternate route once (e.g. by-name after by-blob, or
+      // vice-versa) before declaring the preview unavailable.
+      if (altUrl && altUrl !== url && img.dataset.triedAlt !== "1") {
+        img.dataset.triedAlt = "1";
+        img.src = altUrl;
+        return;
+      }
       if (img.dataset.failedPreview === "1") return;
       img.dataset.failedPreview = "1";
+      const finalUrl = img.dataset.triedAlt === "1" ? altUrl : url;
       const retry = () => {
         fallback.remove();
         img.dataset.failedPreview = "0";
-        img.src = `${url}${url.includes("?") ? "&" : "?"}retry=${Date.now()}`;
+        img.src = `${finalUrl}${finalUrl.includes("?") ? "&" : "?"}retry=${Date.now()}`;
         meta.appendChild(img);
       };
-      const fallback = renderImagePreviewFallback(msg, url, reason, retry);
+      const fallback = renderImagePreviewFallback(msg, finalUrl, reason, retry);
       img.remove();
       meta.appendChild(fallback);
       _forceMessagesBottomNowAndAfter(800);
@@ -19734,13 +19763,18 @@
     const incomingPath = msg.path || (t?.metadata?.path);
     if (msg.dir === "in" && kind === "sent" && isImageName(msg.name)) {
       const fname = (incomingPath || msg.name || "").toString().split(/[\\\/]/).pop();
-      if (fname) {
-        const previewUrl = `/api/files/${encodeURIComponent(fname)}`;
+      // Prefer the content-hash route (stable across name mangling and
+      // duplicate names); fall back to the on-disk basename route.
+      const blobUrl = blobFileUrl(msg.blob || t?.blob_hash, msg.name || fname);
+      const nameUrl = fname ? `/api/files/${encodeURIComponent(fname)}` : "";
+      const previewUrl = blobUrl || nameUrl;
+      if (previewUrl) {
         const img = document.createElement("img");
         img.className = "img-preview";
         img.alt = msg.name || "image";
         attachImagePreviewFallback(img, meta, msg, previewUrl,
-          "The file arrived, but the local inbox route could not serve an image preview.");
+          "The file arrived, but the local inbox route could not serve an image preview.",
+          blobUrl && nameUrl && blobUrl !== nameUrl ? nameUrl : "");
         _keepMessagesBottomAfterMediaLoad(img);
         img.onclick = (ev) => {
           ev.stopPropagation();
@@ -19803,13 +19837,17 @@
     // to source from.
     if (msg.dir === "in" && kind === "sent" && isAudioName(msg.name)) {
       const fname = (incomingPath || msg.name || "").toString().split(/[\\\/]/).pop();
-      if (fname) {
+      // Same content-hash-first resolution as images: the on-disk name
+      // diverges from the display name, so prefer the stable by-blob route.
+      const audioUrl = blobFileUrl(msg.blob || t?.blob_hash, msg.name || fname)
+        || (fname ? `/api/files/${encodeURIComponent(fname)}` : "");
+      if (audioUrl) {
         b.classList.add("audio");
         const wrap = el("div", "audio-player");
         const audio = document.createElement("audio");
         audio.controls = true;
         audio.preload = "metadata";
-        audio.src = `/api/files/${encodeURIComponent(fname)}`;
+        audio.src = audioUrl;
         wrap.appendChild(audio);
         // v0.21.x: playback-speed cycle button + waveform overlay.
         wrap.appendChild(_renderAudioSpeedButton(audio));

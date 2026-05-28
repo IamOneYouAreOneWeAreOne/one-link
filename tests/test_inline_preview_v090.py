@@ -147,12 +147,13 @@ def test_file_bubble_wires_preview_toggle(index_html: str):
     + creates the host div + fetches via /api/files/.../preview.
 
     Window is generous because the v0.21.x file-bubble click-to-open
-    feature added an outbound-thumbnail block + click handler before
-    the preview-toggle wiring — the pin still has to be in the same
-    function, not anywhere in the file.
+    feature added an outbound-thumbnail block + click handler, then the
+    content-hash (by-blob) preview wiring, before the preview-toggle
+    wiring — the pin still has to be in the same function, not anywhere
+    in the file.
     """
     idx = index_html.find("function renderFileBubble(msg)")
-    snippet = index_html[idx:idx + 12000]
+    snippet = index_html[idx:idx + 15000]
     assert "previewKindForName(" in snippet
     assert "preview-toggle-link" in snippet
     assert "/preview" in snippet

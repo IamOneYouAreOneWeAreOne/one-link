@@ -4713,6 +4713,45 @@ class State:
         ).fetchone()
         return self._row_to_transfer(row) if row else None
 
+    def get_transfer_by_blob(self, blob_hash: str) -> Optional[TransferRecord]:
+        """Resolve the best transfer row for a content hash.
+
+        Backs content-addressed file serving (``/api/files/by-blob/{hash}``).
+        A single blob can have several ledger rows — the same image received
+        twice, an offer row plus its completed row, both an inbound and an
+        outbound copy. For preview/open we want the row that points at a
+        file actually on disk, so prefer a completed row whose
+        ``metadata.path`` exists, then any row with a ``metadata.path``,
+        then simply the newest. Returns None when no row carries the blob.
+        """
+        if not blob_hash:
+            return None
+        rows = self._conn.execute(
+            "SELECT * FROM transfers WHERE blob_hash = ? ORDER BY updated_ms DESC",
+            (blob_hash,),
+        ).fetchall()
+        if not rows:
+            return None
+        recs = [self._row_to_transfer(r) for r in rows]
+
+        def _path_on_disk(rec: TransferRecord) -> bool:
+            p = (rec.metadata or {}).get("path")
+            if not isinstance(p, str) or not p:
+                return False
+            try:
+                return Path(p).is_file()
+            except OSError:
+                return False
+
+        # rows are already newest-first; the first hit in each tier wins.
+        for rec in recs:
+            if rec.status == "complete" and _path_on_disk(rec):
+                return rec
+        for rec in recs:
+            if _path_on_disk(rec):
+                return rec
+        return recs[0]
+
     def list_transfers(
         self,
         *,

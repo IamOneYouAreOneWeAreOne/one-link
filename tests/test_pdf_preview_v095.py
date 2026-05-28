@@ -111,7 +111,7 @@ def test_file_bubble_passes_stream_url(index_html: str):
     """The file-bubble caller must thread stream_url + name through
     so the iframe gets a valid src."""
     idx = index_html.find("function renderFileBubble(msg)")
-    snippet = index_html[idx:idx + 12000]
+    snippet = index_html[idx:idx + 15000]
     assert "stream_url" in snippet
 
 
