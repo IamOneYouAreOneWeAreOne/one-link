@@ -13634,6 +13634,19 @@ class Daemon:
     # Thresholds. Generous so a slow-link first-byte isn't flagged.
     ATTENTION_STUCK_OUTBOUND_NO_PROGRESS_MS = 60_000
     ATTENTION_HELD_OUTBOUND_AGE_MS = 30_000
+    # Hard cap so a runaway never explodes the badge / popover. The UI
+    # adds a "+N more — open Activity" footer when truncated.
+    ATTENTION_MAX_ITEMS = 25
+    # Priority order for the sort — the most user-actionable kind on
+    # top, the most passively-watchable at the bottom. Within a kind we
+    # sort newest-first so a fresh accept-prompt sits above a 5-minute-
+    # old one.
+    _ATTENTION_KIND_PRIORITY = {
+        "pending_accept": 0,        # someone is waiting on YOU
+        "failed_needs_action": 1,   # something broke; needs your call
+        "awaiting_remote_ok": 2,    # YOU are waiting on them, may cancel
+        "stuck_outbound": 3,        # passive; may resolve when peer back
+    }
 
     def _peer_label_for_fp(self, peer_fp: str | None) -> str | None:
         if not peer_fp or self.state is None:
@@ -13667,7 +13680,7 @@ class Daemon:
                 "size": int(ctx.get("size") or 0),
                 "peer_fp": ctx.get("peer_fp"),
                 "peer_label": self._peer_label_for_fp(ctx.get("peer_fp")),
-                "summary": "Waiting for you to accept",
+                "summary": "wants to send this to you",
                 "actions": ["accept", "decline"],
                 "since_ms": since,
             })
@@ -13691,7 +13704,7 @@ class Daemon:
                         "size": int(t.size or 0),
                         "peer_fp": t.peer_fp,
                         "peer_label": self._peer_label_for_fp(t.peer_fp),
-                        "summary": "Not responding — nothing's flowing yet.",
+                        "summary": "not responding — they may be offline",
                         "actions": ["cancel"],
                         "since_ms": age,
                     })
@@ -13708,7 +13721,7 @@ class Daemon:
                         "size": int(t.size or 0),
                         "peer_fp": t.peer_fp,
                         "peer_label": self._peer_label_for_fp(t.peer_fp),
-                        "summary": "Waiting for them to accept.",
+                        "summary": "waiting for them to accept on their end",
                         "actions": ["cancel"],
                         "since_ms": age,
                     })
@@ -13728,13 +13741,26 @@ class Daemon:
                         "summary": (
                             meta.get("user_message")
                             or meta.get("error")
-                            or "Send failed."
+                            or "couldn't send — try again or check you're both online"
                         )[:160],
                         "actions": ["dismiss", "retry"],
                         "since_ms": age,
                     })
-        # Newest-first so a fresh "needs accept" sits on top.
-        items.sort(key=lambda x: x.get("since_ms", 0))
+        # Sort: priority kind first (pending_accept > failed >
+        # awaiting_remote_ok > stuck_outbound); within a kind, newest
+        # first (smaller since_ms = more recent = top). Then cap.
+        items.sort(key=lambda x: (
+            self._ATTENTION_KIND_PRIORITY.get(x.get("kind"), 99),
+            int(x.get("since_ms", 0)),
+        ))
+        if len(items) > self.ATTENTION_MAX_ITEMS:
+            kept = items[: self.ATTENTION_MAX_ITEMS]
+            kept.append({
+                "kind": "overflow",
+                "summary": f"{len(items) - self.ATTENTION_MAX_ITEMS} more — open Activity to see all",
+                "actions": [],
+            })
+            items = kept
         return items
 
     def dismiss_attention(self, transfer_id: str) -> dict:

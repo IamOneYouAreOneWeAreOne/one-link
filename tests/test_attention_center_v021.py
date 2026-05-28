@@ -178,6 +178,62 @@ def test_transient_failure_NOT_surfaced(tmp_path):
         d.state.close()
 
 
+def test_priority_sort_puts_pending_accept_first(tmp_path):
+    """The most-actionable kind sorts to the top: pending_accept
+    (someone is waiting on YOU) above failed_needs_action above
+    awaiting_remote_ok above stuck_outbound."""
+    d = _daemon(tmp_path)
+    try:
+        _make_outbound(
+            d.state, tid="out:dead", status="failed", age_ms=5_000,
+            metadata={"transient": False, "error": "x"},
+        )
+        _make_outbound(
+            d.state, tid="out:held", status="offered", age_ms=45_000,
+            metadata={"delivery_state": "awaiting_remote_acceptance"},
+        )
+        _make_outbound(
+            d.state, tid="out:stuck", status="active", age_ms=120_000, progress=0,
+        )
+        d._pending_file_offers["in:new"] = {
+            "channel": object(), "peer_fp": "aa" * 32,
+            "peer_sid": "aaaa", "blob": "ab" * 32, "msg_id": "m",
+            "msg": {}, "mode": "stream", "missing": None,
+            "name": "photo.png", "size": 1,
+            "created_ms": int(time.time() * 1000),
+        }
+        kinds = [i["kind"] for i in d.list_attention_items()]
+        assert kinds == [
+            "pending_accept",
+            "failed_needs_action",
+            "awaiting_remote_ok",
+            "stuck_outbound",
+        ]
+    finally:
+        d.state.close()
+
+
+def test_overflow_row_when_more_than_max(tmp_path):
+    """A runaway can't explode the badge — items beyond the cap are
+    summarised in one "+N more" overflow row."""
+    d = _daemon(tmp_path)
+    try:
+        # Seed cap + 5 failed items (each its own pending row).
+        n = Daemon.ATTENTION_MAX_ITEMS + 5
+        for i in range(n):
+            _make_outbound(
+                d.state, tid=f"out:f{i:03d}", status="failed", age_ms=1000 + i,
+                metadata={"transient": False, "error": "x"},
+            )
+        items = d.list_attention_items()
+        # Capped at MAX + 1 overflow row.
+        assert len(items) == Daemon.ATTENTION_MAX_ITEMS + 1
+        assert items[-1]["kind"] == "overflow"
+        assert "more" in items[-1]["summary"]
+    finally:
+        d.state.close()
+
+
 def test_inbound_failures_not_in_attention(tmp_path):
     """Only outbound issues + the inbound accept-prompt belong here.
     A historical inbound failure isn't actionable — don't nag."""
