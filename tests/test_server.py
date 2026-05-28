@@ -808,7 +808,7 @@ async def test_api_send_file_paused_keeps_staged_upload(tmp_path: Path, monkeypa
         async def resolve_for_send(self, needle):
             return SimpleNamespace(short_id=str(needle))
 
-        async def send_file(self, peer, path, *, transfer_id=None, rel_path=None, extra_metadata=None):
+        async def send_file(self, peer, path, *, transfer_id=None, rel_path=None, extra_metadata=None, **_kwargs):
             seen_paths.append(Path(path))
             raise TransferPausedError(
                 "network dropped", transfer_id="t-paused", path=Path(path),
@@ -896,7 +896,7 @@ async def test_api_send_file_online_creates_durable_intent_before_send(
                 },
             )
 
-        async def send_file(self, peer, path, *, transfer_id=None, rel_path=None, extra_metadata=None):
+        async def send_file(self, peer, path, *, transfer_id=None, rel_path=None, extra_metadata=None, **_kwargs):
             sends.append({
                 "peer": peer.short_id,
                 "path": Path(path),
@@ -955,7 +955,7 @@ async def test_api_send_file_retries_wire_version_mismatch_once(tmp_path: Path, 
             resolves.append(str(needle))
             return SimpleNamespace(short_id=str(needle))
 
-        async def send_file(self, peer, path, *, transfer_id=None, rel_path=None, extra_metadata=None):
+        async def send_file(self, peer, path, *, transfer_id=None, rel_path=None, extra_metadata=None, **_kwargs):
             sends.append(peer.short_id)
             if len(sends) == 1:
                 raise InvalidTag()
