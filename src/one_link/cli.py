@@ -1319,14 +1319,15 @@ def send_file(peer, path):
 )
 @click.option(
     "--supervise/--no-supervise",
-    default=False,
+    default=True,
     help=(
         "Run the daemon under a watchdog that auto-restarts it on "
         "crash. The supervisor has exponential backoff + a "
         "circuit-breaker (5 crashes in 60s stops trying). The UI's "
-        "client-side reconnect handles the restart gap. Default off "
-        "during the rollout — flip on once your environment is "
-        "verified."
+        "client-side reconnect handles the restart gap. Default on; "
+        "pass --no-supervise to launch the daemon bare (e.g. for "
+        "interactive debugging where you want the crash to take down "
+        "the process visibly)."
     ),
 )
 def app(no_browser, browser_tab, lan, supervise):

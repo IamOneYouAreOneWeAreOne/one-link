@@ -363,10 +363,12 @@ def test_app_cli_threads_supervise_flag_to_run_app(monkeypatch):
     assert captured.get("supervise") is True
 
 
-def test_app_cli_default_supervise_is_false(monkeypatch):
-    """During the rollout the flag is OFF by default — opting in is
-    explicit so we don't change behavior unexpectedly on existing
-    users."""
+def test_app_cli_default_supervise_is_true(monkeypatch):
+    """``one-link app`` with no flags runs the daemon supervised by
+    default — auto-restart on crash is the right thing for a
+    production-feeling app. ``--no-supervise`` is the opt-out for
+    interactive debugging or other "I want crashes to be visible"
+    contexts."""
     from click.testing import CliRunner
     from one_link import cli as cli_mod
     captured = {}
@@ -376,6 +378,21 @@ def test_app_cli_default_supervise_is_false(monkeypatch):
     monkeypatch.setattr("one_link.app.run_app", fake_run_app)
     runner = CliRunner()
     res = runner.invoke(cli_mod.cli, ["app", "--no-browser"])
+    assert res.exit_code == 0, res.output
+    assert captured.get("supervise") is True
+
+
+def test_app_cli_no_supervise_flag_opts_out(monkeypatch):
+    """``--no-supervise`` must reach run_app as supervise=False."""
+    from click.testing import CliRunner
+    from one_link import cli as cli_mod
+    captured = {}
+    def fake_run_app(**kwargs):
+        captured.update(kwargs)
+        return 0
+    monkeypatch.setattr("one_link.app.run_app", fake_run_app)
+    runner = CliRunner()
+    res = runner.invoke(cli_mod.cli, ["app", "--no-supervise", "--no-browser"])
     assert res.exit_code == 0, res.output
     assert captured.get("supervise") is False
 
