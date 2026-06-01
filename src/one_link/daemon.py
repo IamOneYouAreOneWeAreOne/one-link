@@ -87,6 +87,7 @@ from one_link import (
     blobstore,
     channel as ch,
     cover_traffic as cover_traffic_module,
+    crash_log,
     dedupe_sites as dedupe_sites_module,
     field_observations_native,
     foldersync,
@@ -25343,16 +25344,92 @@ class Daemon:
         self._release_instance_lock()
 
 
+HEARTBEAT_FILE = "daemon.heartbeat"
+HEARTBEAT_INTERVAL_S = 5.0
+HEARTBEAT_DEAD_WINDOW_S = 30.0  # previous heartbeat within this window → silent-death
+
+
+def _heartbeat_path() -> Path:
+    return data_dir() / HEARTBEAT_FILE
+
+
+def _check_previous_heartbeat() -> None:
+    """Detect silent death of a previous daemon run.
+
+    The daemon updates ``data_dir()/daemon.heartbeat`` every
+    ``HEARTBEAT_INTERVAL_S`` while it is alive. On a clean shutdown we
+    leave the file alone; on the NEXT startup we read it and compare
+    against wall-clock now.
+
+    If the previous heartbeat is within ``HEARTBEAT_DEAD_WINDOW_S``, the
+    previous daemon was very recently alive and we are starting too
+    soon for a normal restart — the previous run died abruptly with
+    nothing in its log to show it. Log it loudly so the operator (and
+    crash-triage tooling) get a positive "silent death" signal even
+    when no traceback survived.
+    """
+    p = _heartbeat_path()
+    if not p.exists():
+        return
+    try:
+        last_ts = float(p.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return
+    age = time.time() - last_ts
+    if 0 <= age <= HEARTBEAT_DEAD_WINDOW_S:
+        log.critical(
+            "previous daemon died abruptly — last heartbeat %.1fs ago (no "
+            "shutdown line in daemon-launch.err.log). Check "
+            "%s for a forensic crash report.",
+            age, data_dir() / "crashes",
+        )
+
+
+async def _heartbeat_writer() -> None:
+    """Stamp ``data_dir()/daemon.heartbeat`` with wall-clock every
+    ``HEARTBEAT_INTERVAL_S``. The next startup's
+    ``_check_previous_heartbeat`` reads this to detect silent death.
+
+    Cancellation is the normal exit path (the daemon's serve_forever
+    loop got KeyboardInterrupt / CancelledError); we swallow it
+    silently. Any other exception goes through the asyncio
+    exception-handler chain (which already includes our crash-dump
+    layer)."""
+    p = _heartbeat_path()
+    while True:
+        try:
+            p.write_text(f"{time.time():.3f}\n", encoding="utf-8")
+        except OSError as e:
+            log.debug("heartbeat write failed: %s", e)
+        try:
+            await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+        except asyncio.CancelledError:
+            return
+
+
 async def run() -> None:
-    _install_asyncio_exception_handler(asyncio.get_running_loop())
+    loop = asyncio.get_running_loop()
+    _install_asyncio_exception_handler(loop)
+    # Layer the forensic crash-dump hook over the benign-suppress
+    # handler installed above. Anything not suppressed gets mirrored
+    # to data_dir()/crashes/<utc>-asyncio-task.txt so an unawaited
+    # task exception cannot be lost to stderr-buffer truncation.
+    crash_log.install_loop_hook(loop)
+    _check_previous_heartbeat()
     me = load_or_create()
     daemon = Daemon(me)
     await daemon.start()
+    heartbeat_task = asyncio.create_task(
+        _heartbeat_writer(), name="one-link-heartbeat",
+    )
     try:
         await daemon.serve_forever()
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await heartbeat_task
         await daemon.stop()
 
 

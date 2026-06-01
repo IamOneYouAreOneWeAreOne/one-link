@@ -17,9 +17,32 @@ from typing import Any, Optional
 import click
 
 from one_link import __version__
+from one_link import crash_log
 from one_link import daemon as daemon_mod
 from one_link.identity import load_or_create
 from one_link.safe_http import validated_urlopen
+
+
+def _flush_stdio() -> None:
+    """Best-effort flush of every logging handler + stderr + stdout.
+
+    The launcher redirects the spawned daemon's stdout/stderr to a file
+    (block-buffered) and merges stderr into stdout via
+    ``stderr=subprocess.STDOUT``. PYTHONUNBUFFERED=1 makes the child
+    line-flush on every write, but a final paranoid flush here closes
+    the residual window between the last log call and process exit on
+    abrupt termination paths.
+    """
+    try:
+        for h in logging.getLogger().handlers:
+            try: h.flush()
+            except Exception: pass
+    except Exception:
+        pass
+    try: sys.stderr.flush()
+    except Exception: pass
+    try: sys.stdout.flush()
+    except Exception: pass
 
 
 def _connect_control(timeout: float = 5.0) -> tuple[socket.socket, int]:
@@ -135,6 +158,15 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Plant crash visibility BEFORE any of our threads spin up. An
+    # uncaught exception in the tray loader, URL pusher, or auto-open
+    # helper would otherwise be eaten by Python's default
+    # threading.excepthook (prints to stderr — but stderr is redirected
+    # by the launcher and may be block-buffered, so we have lost real
+    # crashes here before). crash_log mirrors every uncaught exception
+    # to data_dir()/crashes/<utc>-<reason>.txt with a synchronous fsync,
+    # so a forensic record survives even an abrupt process exit.
+    crash_log.install_excepthooks()
     # Auto-open is on either via --open OR ONE_LINK_AUTO_OPEN=1 in env
     # (PyInstaller-built GUI binary sets the env var so end users get
     # the browser the moment the daemon binds the local port).
@@ -270,12 +302,35 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
     except RuntimeError as e:
         if "already running" in str(e):
             raise click.ClickException(str(e))
+        # Anything else fell out of run() — fall through to the broad
+        # crash-dump branch below so the operator gets a traceback file.
+        logging.getLogger("one_link.daemon").critical(
+            "daemon exited with uncaught RuntimeError", exc_info=True,
+        )
+        crash_log.dump_crash("daemon-uncaught", e)
+        _flush_stdio()
+        raise
+    except (KeyboardInterrupt, SystemExit):
+        # Clean operator-initiated exit — do not dump a crash report.
+        raise
+    except BaseException as e:  # noqa: BLE001 — last-chance catcher
+        # Every uncaught exception that reaches here is, by definition,
+        # the daemon dying. Log the full traceback via the logging
+        # system (reaches daemon-launch.err.log) AND mirror to a
+        # forensic crash file (survives stderr-buffer loss). Then flush
+        # everything we can before re-raising.
+        logging.getLogger("one_link.daemon").critical(
+            "daemon exited with uncaught exception", exc_info=True,
+        )
+        crash_log.dump_crash("daemon-uncaught", e)
+        _flush_stdio()
         raise
     finally:
         tray_icon = tray_icon_holder.get("icon")
         if tray_icon is not None:
             try: tray_icon.stop()
             except Exception: pass
+        _flush_stdio()
 
 
 @cli.command()

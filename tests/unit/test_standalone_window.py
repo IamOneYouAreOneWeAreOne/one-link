@@ -289,9 +289,10 @@ def test_spawn_daemon_uses_python_module_in_source_mode(tmp_path):
 
         return _FakeProc()
 
-    def fake_detached(args, log_path):
+    def fake_detached(args, log_path, **kwargs):
         captured["args"] = list(args)
         captured["log_path"] = log_path
+        captured["kwargs"] = kwargs
 
         class _FakeProc:
             pass
@@ -330,9 +331,10 @@ def test_spawn_daemon_uses_cli_args_inside_frozen_binary(tmp_path):
 
         return _FakeProc()
 
-    def fake_detached(args, log_path):
+    def fake_detached(args, log_path, **kwargs):
         captured["args"] = list(args)
         captured["log_path"] = log_path
+        captured["kwargs"] = kwargs
 
         class _FakeProc:
             pass

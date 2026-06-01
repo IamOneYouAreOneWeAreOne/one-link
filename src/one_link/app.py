@@ -274,8 +274,17 @@ def _spawn_daemon() -> subprocess.Popen:
     # discover the resulting daemon PID by polling for the listen
     # socket / port file. This is the same technique GUI installers
     # use to start "fire and forget" background services.
+    # PYTHONUNBUFFERED=1 — never lose the last 4 KiB of daemon stderr on
+    # a crash. Without this, the child's stdout fd to daemon-launch.err.log
+    # is block-buffered (~4 KiB); a final uncaught exception's traceback
+    # gets queued in that buffer and dropped when the process exits
+    # abruptly. We have lived through that exact symptom (silent
+    # mid-conversation death, log ends with normal traffic, no
+    # traceback) — line-flush mode for the child eliminates the entire
+    # buffering-trap failure class.
+    child_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     if os.name == "nt":
-        return _spawn_daemon_windows_detached(daemon_cmd, log_path)
+        return _spawn_daemon_windows_detached(daemon_cmd, log_path, env=child_env)
     # POSIX: setsid() detaches from the controlling terminal and the
     # daemon survives the launcher exiting. No Job Object on Linux/mac.
     try:
@@ -289,11 +298,13 @@ def _spawn_daemon() -> subprocess.Popen:
         stdin=subprocess.DEVNULL,
         close_fds=True,
         start_new_session=True,
+        env=child_env,
     )
 
 
 def _spawn_daemon_windows_detached(
     daemon_cmd: list[str], log_path: Path,
+    *, env: dict[str, str] | None = None,
 ) -> subprocess.Popen:
     """Spawn the daemon detached on Windows so it outlives the launcher.
 
@@ -334,6 +345,7 @@ def _spawn_daemon_windows_detached(
                 stdin=subprocess.DEVNULL,
                 creationflags=flags,
                 close_fds=True,
+                env=env,
             )
         except (OSError, ValueError) as e:
             # A restrictive Job Object can reject CREATE_BREAKAWAY_FROM_JOB
