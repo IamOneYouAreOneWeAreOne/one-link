@@ -7,7 +7,14 @@ authors = [{ name = "One Link contributors", email = "weareone@oneunity.earth" }
 license = { text = "AGPL-3.0-or-later" }
 
 dependencies = [
-  "cryptography>=42",
+  # cryptography >= 44 is the first release that ships pre-built
+  # win_arm64 wheels (and parallel wheels for linux_aarch64 /
+  # macosx_arm64). The older >=42 floor would resolve to a version
+  # without a Windows ARM64 wheel, fall through to a source build,
+  # and fail on the GitHub-hosted win_arm64 runner because there is
+  # no OpenSSL dev install on it. Bumping the floor removes the
+  # entire failure class without changing behavior anywhere else.
+  "cryptography>=44",
   "zeroconf>=0.130",
   "click>=8.1",
   "blake3>=0.4",
@@ -23,7 +30,17 @@ dependencies = [
   # libsrtp + libav + libopenssl wheels — heavyweight but standard
   # for any cross-vendor WebRTC + the only realistic path for the
   # phone-as-peer endgame without writing our own ICE stack.
-  "aiortc>=1.14",
+  #
+  # Environment-marker SKIP on Windows ARM64: aiortc transitively
+  # pulls in PyAV (the ``av`` package), which has no
+  # cp3*-win_arm64 wheels in any release as of 2026-05. Source-
+  # building it would need a full FFmpeg-dev install on the runner.
+  # Excluding it on win_arm64 lets the daemon install cleanly there;
+  # the browser-as-peer datachannel path degrades to "unsupported on
+  # this binary" (LAN-only desktop↔desktop transfers still work
+  # because they use our own QUIC + peer_rtc stack, not aiortc).
+  # Re-enable automatically once PyAV ships win_arm64 wheels.
+  "aiortc>=1.14; sys_platform != 'win32' or platform_machine != 'ARM64'",
   # v0.21.x at-rest encryption + OS keychain integration.
   # sqlcipher3 wraps SQLCipher (sqlite3 + AES-256 page encryption);
   # keyring abstracts Windows Credential Manager / macOS Keychain /

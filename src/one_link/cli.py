@@ -167,6 +167,19 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
     # to data_dir()/crashes/<utc>-<reason>.txt with a synchronous fsync,
     # so a forensic record survives even an abrupt process exit.
     crash_log.install_excepthooks()
+    # Visibility banner — every daemon launch announces whether it is
+    # under the supervisor. The supervisor sets
+    # ONE_LINK_SUPERVISED=1 on the child env so we can tell
+    # post-hoc, from the log alone, which spawn path this run came
+    # from. Without this banner a "daemon died silently" log gives no
+    # answer to "was it supposed to auto-restart?".
+    _supervised = os.environ.get("ONE_LINK_SUPERVISED") == "1"
+    logging.getLogger("one_link.daemon").info(
+        "daemon launch: pid=%d supervised=%s python=%s",
+        os.getpid(),
+        "yes" if _supervised else "NO (bare; no auto-restart on crash)",
+        sys.version.split()[0],
+    )
     # Auto-open is on either via --open OR ONE_LINK_AUTO_OPEN=1 in env
     # (PyInstaller-built GUI binary sets the env var so end users get
     # the browser the moment the daemon binds the local port).
@@ -369,6 +382,53 @@ def supervisor(max_crashes: int, window_s: float) -> None:
     rc = supervisor_mod.run(max_crashes=max_crashes, window_s=window_s)
     _flush_stdio()
     raise SystemExit(rc)
+
+
+@cli.group()
+def autostart():
+    """Register / unregister One Link to start at user login.
+
+    User-mode integration (no admin/root needed). Survives reboots,
+    log-off, sleep + hibernate that the in-process supervisor cannot.
+    Windows uses the HKCU Run key; macOS uses a LaunchAgent plist;
+    Linux uses an XDG autostart .desktop entry.
+    """
+
+
+@autostart.command("status")
+def autostart_status() -> None:
+    """Print whether One Link is registered to start at login."""
+    from one_link import autostart as autostart_mod
+    enabled = autostart_mod.is_enabled()
+    path = autostart_mod.artifact_path()
+    click.echo("autostart: " + ("ENABLED" if enabled else "disabled"))
+    if path is not None:
+        click.echo(f"artifact:  {path}")
+    click.echo("command:   " + " ".join(autostart_mod._launch_command()))
+
+
+@autostart.command("enable")
+def autostart_enable() -> None:
+    """Register One Link to start at the next user login.
+
+    Idempotent — calling again rewrites the artifact with the current
+    launcher path (so upgrading the binary picks up the new path
+    automatically when you re-enable)."""
+    from one_link import autostart as autostart_mod
+    path = autostart_mod.enable()
+    click.echo(f"autostart enabled. Wrote: {path}")
+    click.echo("One Link will start at your next login under the supervisor.")
+
+
+@autostart.command("disable")
+def autostart_disable() -> None:
+    """Remove the auto-start registration."""
+    from one_link import autostart as autostart_mod
+    removed = autostart_mod.disable()
+    if removed:
+        click.echo("autostart disabled.")
+    else:
+        click.echo("autostart was not enabled — nothing to remove.")
 
 
 @cli.command()

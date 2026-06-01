@@ -121,7 +121,14 @@ def _spawn_daemon_child(log_path: Path) -> subprocess.Popen:
     except OSError:
         log_fh = None
     out = log_fh if log_fh is not None else subprocess.DEVNULL
-    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    # ONE_LINK_SUPERVISED=1 — the daemon's startup banner reads this
+    # to log "supervised=yes" so a future "was that run supposed to
+    # auto-restart?" question is answerable from the log alone.
+    env = {
+        **os.environ,
+        "PYTHONUNBUFFERED": "1",
+        "ONE_LINK_SUPERVISED": "1",
+    }
     creationflags = 0
     if os.name == "nt":
         creationflags = (

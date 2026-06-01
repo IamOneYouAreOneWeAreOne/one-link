@@ -236,6 +236,47 @@ def _stop_incompatible_daemon(info: RunningDaemon) -> bool:
     return False
 
 
+DAEMON_LAUNCH_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB before rotation
+DAEMON_LAUNCH_LOG_KEEP = 3                       # keep .log.1 .. .log.3
+
+
+def _rotate_daemon_launch_log(log_path: Path) -> None:
+    """Size-based rotation for ``daemon-launch.err.log``.
+
+    The file is now opened in append mode (not truncate) so the
+    forensic trail survives the launcher → supervisor → daemon
+    restart chain. Without rotation that file would grow forever; a
+    flapping daemon could produce gigabytes. We rotate to .log.1, .2,
+    .3 (oldest dropped) when the active file crosses
+    DAEMON_LAUNCH_LOG_MAX_BYTES. Best-effort; failures are non-fatal
+    because we are on a startup path where producing a fresh log is
+    only the second priority — getting the daemon up is the first.
+    """
+    try:
+        if not log_path.exists():
+            return
+        if log_path.stat().st_size < DAEMON_LAUNCH_LOG_MAX_BYTES:
+            return
+    except OSError:
+        return
+    # Shift .N → .N+1, drop the oldest.
+    for i in range(DAEMON_LAUNCH_LOG_KEEP, 0, -1):
+        src = log_path.with_suffix(log_path.suffix + f".{i}")
+        dst = log_path.with_suffix(log_path.suffix + f".{i + 1}")
+        if src.exists():
+            try:
+                if i == DAEMON_LAUNCH_LOG_KEEP:
+                    src.unlink()
+                else:
+                    src.replace(dst)
+            except OSError:
+                pass
+    try:
+        log_path.replace(log_path.with_suffix(log_path.suffix + ".1"))
+    except OSError:
+        pass
+
+
 def _spawn_daemon() -> subprocess.Popen:
     """Spawn the daemon child. Redirects stderr to a known log file
     instead of DEVNULL so the desktop-shortcut launch path (pythonw
@@ -245,15 +286,18 @@ def _spawn_daemon() -> subprocess.Popen:
     needing the daemon re-launched with `-v` from a terminal just to
     capture the error.
 
-    The log rotates per process (overwritten each launch) so it never
-    grows unbounded; the daemon's own logging already handles
-    long-term retention via its in-app log files.
+    The log is APPENDED to across launches (was previously truncated
+    on every spawn, which silently deleted the supervisor's startup
+    record + every prior restart's traceback). Size-based rotation at
+    DAEMON_LAUNCH_LOG_MAX_BYTES keeps disk usage bounded; older
+    rotations live next to it as ``daemon-launch.err.log.1`` ... .3.
     """
     log_path = data_dir() / "daemon-launch.err.log"
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
+    _rotate_daemon_launch_log(log_path)
 
     if getattr(sys, "frozen", False):
         daemon_cmd = [sys.executable, "daemon", "-v"]
@@ -287,8 +331,11 @@ def _spawn_daemon() -> subprocess.Popen:
         return _spawn_daemon_windows_detached(daemon_cmd, log_path, env=child_env)
     # POSIX: setsid() detaches from the controlling terminal and the
     # daemon survives the launcher exiting. No Job Object on Linux/mac.
+    # Append (not truncate) so the supervisor's startup record + any
+    # previous run's tail survive this spawn — rotation above keeps
+    # disk usage bounded.
     try:
-        log_fh = open(log_path, "wb")
+        log_fh = open(log_path, "ab")
     except OSError:
         log_fh = None
     return subprocess.Popen(
@@ -324,6 +371,7 @@ def _spawn_supervisor() -> subprocess.Popen:
         log_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
+    _rotate_daemon_launch_log(log_path)
     if getattr(sys, "frozen", False):
         cmd = [sys.executable, "supervisor"]
     else:
@@ -331,8 +379,9 @@ def _spawn_supervisor() -> subprocess.Popen:
     child_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     if os.name == "nt":
         return _spawn_daemon_windows_detached(cmd, log_path, env=child_env)
+    # Append (not truncate) — see _spawn_daemon for the rationale.
     try:
-        log_fh = open(log_path, "wb")
+        log_fh = open(log_path, "ab")
     except OSError:
         log_fh = None
     return subprocess.Popen(
@@ -372,8 +421,12 @@ def _spawn_daemon_windows_detached(
     NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
     BREAKAWAY = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
 
+    # Append, never truncate — preserves the launcher's full forensic
+    # chain (supervisor lines + every prior daemon run) across this
+    # spawn. _rotate_daemon_launch_log() caps size from the calling
+    # _spawn_daemon / _spawn_supervisor.
     try:
-        log_fh = open(log_path, "wb")
+        log_fh = open(log_path, "ab")
     except OSError:
         log_fh = None
     out = log_fh if log_fh is not None else subprocess.DEVNULL
