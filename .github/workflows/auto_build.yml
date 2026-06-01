@@ -41,18 +41,44 @@ jobs:
     name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      # fail-fast=false so a single platform's hiccup (rare wheel
+      # missing, a transient runner outage) does not torpedo the
+      # other five legs.
       fail-fast: false
       matrix:
         include:
+          # ── x86_64 — the historical baseline ──────────────────
           - os: windows-latest
             artifact-name: one-link-windows-x86_64
             exe-name: one-link.exe
-          - os: macos-latest
-            artifact-name: one-link-macos-arm64
-            exe-name: one-link
           - os: ubuntu-latest
             artifact-name: one-link-linux-x86_64
             exe-name: one-link
+          # macOS Intel. ``macos-13`` is the last Intel-capable
+          # GitHub-hosted macOS image; macos-14+ are Apple Silicon.
+          # Apple's runner deprecation timeline keeps macos-13
+          # available through at least 2026; revisit if/when GitHub
+          # announces sunset. Covers Intel Macs (pre-M1) that the
+          # arm64 build does not run on natively.
+          - os: macos-13
+            artifact-name: one-link-macos-x86_64
+            exe-name: one-link
+          # ── arm64 — added to close the coverage gap ───────────
+          - os: macos-latest
+            artifact-name: one-link-macos-arm64
+            exe-name: one-link
+          # GitHub-hosted Linux ARM64 runner — GA Jan 2025, free
+          # for public repos. Covers Raspberry Pi 4/5 (64-bit OS),
+          # Apple Silicon under Asahi/UTM, and ARM cloud servers.
+          - os: ubuntu-24.04-arm
+            artifact-name: one-link-linux-arm64
+            exe-name: one-link
+          # GitHub-hosted Windows ARM64 runner — GA April 2025,
+          # free for public repos. Covers Surface Pro X / Copilot+
+          # ARM laptops (Snapdragon X / SQ3).
+          - os: windows-11-arm
+            artifact-name: one-link-windows-arm64
+            exe-name: one-link.exe
 
     steps:
       - uses: actions/checkout@v4

@@ -141,12 +141,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # x86_64 — historical baseline.
           - os: ubuntu-latest
-            artifact: native-wheel-linux
-          - os: macos-latest
-            artifact: native-wheel-macos
+            artifact: native-wheel-linux-x86_64
+          - os: macos-13         # last Intel macOS runner
+            artifact: native-wheel-macos-x86_64
           - os: windows-latest
-            artifact: native-wheel-windows
+            artifact: native-wheel-windows-x86_64
+          # arm64 — coverage parity.
+          - os: macos-latest     # Apple Silicon (M-series)
+            artifact: native-wheel-macos-arm64
+          - os: ubuntu-24.04-arm # Raspberry Pi 4/5 64-bit, ARM Linux
+            artifact: native-wheel-linux-arm64
+          - os: windows-11-arm   # Snapdragon X / Surface Pro X
+            artifact: native-wheel-windows-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -192,18 +200,36 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # x86_64 — original lineup. ``asset_name`` stays as-is for
+          # the macos / windows rows so existing bookmarks of
+          # ``one-link-macos.zip`` and ``one-link-windows.exe.zip``
+          # keep resolving; arch-suffixed names get added for the
+          # new platforms below.
           - os: ubuntu-latest
-            artifact: binary-linux
+            artifact: binary-linux-x86_64
             asset_name: one-link-linux-x86_64
-            native_artifact: native-wheel-linux
+            native_artifact: native-wheel-linux-x86_64
           - os: macos-latest
-            artifact: binary-macos
+            artifact: binary-macos-arm64
             asset_name: one-link-macos
-            native_artifact: native-wheel-macos
+            native_artifact: native-wheel-macos-arm64
           - os: windows-latest
-            artifact: binary-windows
+            artifact: binary-windows-x86_64
             asset_name: one-link-windows.exe
-            native_artifact: native-wheel-windows
+            native_artifact: native-wheel-windows-x86_64
+          # ── new architecture coverage ────────────────────────
+          - os: macos-13
+            artifact: binary-macos-x86_64
+            asset_name: one-link-macos-x86_64
+            native_artifact: native-wheel-macos-x86_64
+          - os: ubuntu-24.04-arm
+            artifact: binary-linux-arm64
+            asset_name: one-link-linux-arm64
+            native_artifact: native-wheel-linux-arm64
+          - os: windows-11-arm
+            artifact: binary-windows-arm64
+            asset_name: one-link-windows-arm64.exe
+            native_artifact: native-wheel-windows-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

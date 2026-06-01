@@ -38,11 +38,14 @@ Two channels:
 
 Per-platform install notes:
 
-| Platform | File | What you do |
-|---|---|---|
-| Windows | `one-link-windows-x86_64.zip` | Unzip, double-click `one-link.exe`. The first run may need "More info → Run anyway" until code-signing lands. |
-| macOS | `one-link-macos-arm64.zip` | Unzip, double-click `one-link`. The first run may need a right-click → Open to bypass Gatekeeper. |
-| Linux | `one-link-linux-x86_64.zip` | `unzip one-link-linux-x86_64.zip && cd one-link && chmod +x one-link && ./one-link` |
+| Platform | Architecture | File | What you do |
+|---|---|---|---|
+| Windows | x86_64 (Intel/AMD) | `one-link-windows-x86_64.zip` | Unzip, double-click `one-link.exe`. The first run may need "More info → Run anyway" until code-signing lands. |
+| Windows | arm64 (Snapdragon X / Surface Pro X) | `one-link-windows-arm64.zip` | Same flow as x86_64. Native ARM build — no x86 emulation cost. |
+| macOS | arm64 (Apple Silicon — M1/M2/M3/M4) | `one-link-macos-arm64.zip` | Unzip, double-click `one-link`. The first run may need a right-click → Open to bypass Gatekeeper. |
+| macOS | x86_64 (Intel Macs) | `one-link-macos-x86_64.zip` | Same flow as arm64. For pre-Apple-Silicon Macs. |
+| Linux | x86_64 | `one-link-linux-x86_64.zip` | `unzip one-link-linux-x86_64.zip && cd one-link && chmod +x one-link && ./one-link` |
+| Linux | arm64 (Raspberry Pi 4/5 64-bit, ARM cloud) | `one-link-linux-arm64.zip` | Same flow as x86_64. Pi OS 64-bit + Ubuntu/Debian on ARM. |
 
 Each download has a matching `.sha256` next to it; `manifest.txt` collates every artifact's hash. Verify before extracting:
 
