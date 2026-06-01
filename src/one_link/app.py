@@ -302,6 +302,50 @@ def _spawn_daemon() -> subprocess.Popen:
     )
 
 
+def _spawn_supervisor() -> subprocess.Popen:
+    """Spawn ``one-link supervisor`` instead of the daemon directly.
+
+    The supervisor stays alive watching its child daemon, auto-
+    restarting on crash with backoff + circuit breaker. From the
+    launcher's perspective the two are interchangeable: both detach,
+    both write to ``daemon-launch.err.log``, both surface on the
+    same UI port. The difference is what happens on crash:
+
+      * ``_spawn_daemon``     → crash = process gone, user reloads.
+      * ``_spawn_supervisor`` → crash = automatic respawn, user's
+        browser-side reconnect already covers the gap.
+
+    Mirrors ``_spawn_daemon``'s frozen/source split and env exactly
+    so the resulting process tree only differs by one CLI command
+    name.
+    """
+    log_path = data_dir() / "daemon-launch.err.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable, "supervisor"]
+    else:
+        cmd = [sys.executable, "-m", "one_link.cli", "supervisor"]
+    child_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    if os.name == "nt":
+        return _spawn_daemon_windows_detached(cmd, log_path, env=child_env)
+    try:
+        log_fh = open(log_path, "wb")
+    except OSError:
+        log_fh = None
+    return subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=(log_fh if log_fh is not None else subprocess.DEVNULL),
+        stdin=subprocess.DEVNULL,
+        close_fds=True,
+        start_new_session=True,
+        env=child_env,
+    )
+
+
 def _spawn_daemon_windows_detached(
     daemon_cmd: list[str], log_path: Path,
     *, env: dict[str, str] | None = None,
@@ -643,6 +687,7 @@ def run_app(
     no_browser: bool = False,
     standalone: bool = True,
     lan: bool = False,
+    supervise: bool = False,
 ) -> int:
     _safe_echo("One Link")
     # v0.15.2: --lan opt-in. Set BEFORE we try to reuse a running
@@ -689,8 +734,12 @@ def run_app(
             info = None
 
     if info is None:
-        _safe_echo("  starting daemon...")
-        spawned = _spawn_daemon()
+        if supervise:
+            _safe_echo("  starting daemon under supervisor...")
+            spawned = _spawn_supervisor()
+        else:
+            _safe_echo("  starting daemon...")
+            spawned = _spawn_daemon()
         info = _wait_for_daemon()
         if info is None or not info.compatible:
             _safe_echo("  ! daemon failed to start cleanly")

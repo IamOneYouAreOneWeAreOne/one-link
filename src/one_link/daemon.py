@@ -55,6 +55,7 @@ import logging
 import os
 import secrets
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -25415,6 +25416,15 @@ async def run() -> None:
     # to data_dir()/crashes/<utc>-asyncio-task.txt so an unawaited
     # task exception cannot be lost to stderr-buffer truncation.
     crash_log.install_loop_hook(loop)
+    # Windows: when the supervisor (or any parent process group) sends
+    # CTRL_BREAK_EVENT, Python's default action is to terminate
+    # abruptly. Route SIGBREAK through default_int_handler so it
+    # raises KeyboardInterrupt instead — the existing
+    # ``serve_forever`` try/except already treats KeyboardInterrupt as
+    # clean shutdown, which is what graceful supervised stop wants.
+    if os.name == "nt":
+        with contextlib.suppress(ValueError, AttributeError, OSError):
+            signal.signal(signal.SIGBREAK, signal.default_int_handler)
     _check_previous_heartbeat()
     me = load_or_create()
     daemon = Daemon(me)

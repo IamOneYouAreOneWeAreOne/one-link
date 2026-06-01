@@ -20,6 +20,7 @@ debuggable.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import platform
@@ -180,6 +181,61 @@ def install_excepthooks() -> None:
         try: prev_thread(args)
         except Exception: pass
     threading.excepthook = _thread_hook
+
+
+async def _contained_coro(coro, name: str, on_error) -> None:
+    """Run ``coro`` inside a contained guard: any non-cancellation
+    exception is logged + crash-dumped, then SWALLOWED so it cannot
+    propagate up to the loop's main coroutine and take the whole
+    daemon down.
+
+    Cancellation MUST re-raise — it is the asyncio shutdown signal,
+    not a failure.
+    """
+    try:
+        await coro
+    except asyncio.CancelledError:
+        raise
+    except BaseException as e:  # noqa: BLE001 — last-chance task wall
+        _LOG.critical(
+            "background task %r failed (contained)", name, exc_info=True,
+        )
+        try:
+            dump_crash(
+                f"task-{name}", e,
+                extra={"task": name, "contained": True},
+            )
+        except Exception:
+            pass
+        if on_error is not None:
+            try:
+                on_error(e)
+            except Exception:
+                _LOG.exception(
+                    "task %r on_error handler itself raised", name,
+                )
+
+
+def safe_task(coro, *, name: str, on_error=None):
+    """Spawn an asyncio task whose unhandled exception cannot crash
+    the daemon.
+
+    Use for any fire-and-forget background task — peer handler loops,
+    periodic refreshers, transport probes — where a single misbehaving
+    coroutine should not bring the whole event loop down. The
+    exception is captured AT THE TASK BODY, logged via
+    ``log.critical(exc_info=True)``, mirrored to a forensic crash
+    file, then swallowed. ``on_error`` is invoked with the exception
+    when the task fails (useful for "mark this peer as failed" cleanup).
+
+    ``CancelledError`` always re-raises so asyncio's normal shutdown
+    semantics keep working.
+
+    Returns the created ``asyncio.Task`` so the caller can still
+    cancel it or hold a reference for later cleanup.
+    """
+    import asyncio as _asyncio
+    return _asyncio.create_task(_contained_coro(coro, name, on_error), name=name)
 
 
 def install_loop_hook(loop) -> None:

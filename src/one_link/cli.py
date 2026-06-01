@@ -334,6 +334,44 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
 
 
 @cli.command()
+@click.option(
+    "--max-crashes",
+    default=5,
+    show_default=True,
+    type=click.IntRange(1, 100),
+    help="Trip the supervisor's circuit breaker after this many "
+         "crashes in --window-s seconds. A deterministic crash loop "
+         "needs human attention, not infinite respawn.",
+)
+@click.option(
+    "--window-s",
+    default=60.0,
+    show_default=True,
+    type=click.FloatRange(1.0, 3600.0),
+    help="Circuit-breaker rolling window in seconds.",
+)
+def supervisor(max_crashes: int, window_s: float) -> None:
+    """Run the daemon under a watchdog that auto-restarts on crash.
+
+    Spawns ``one-link daemon`` as a child, waits for exit, and on
+    non-zero exit restarts with exponential backoff. Trips on too many
+    crashes in the configured window so a broken build cannot
+    spin-restart indefinitely. SIGINT/SIGTERM cleanly shuts the child
+    down and exits without restart.
+    """
+    from one_link import supervisor as supervisor_mod
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    crash_log.install_excepthooks()
+    rc = supervisor_mod.run(max_crashes=max_crashes, window_s=window_s)
+    _flush_stdio()
+    raise SystemExit(rc)
+
+
+@cli.command()
 def whoami():
     """Show this device's identity."""
     me = load_or_create()
@@ -1279,18 +1317,32 @@ def send_file(peer, path):
         "local-computer-only mode."
     ),
 )
-def app(no_browser, browser_tab, lan):
+@click.option(
+    "--supervise/--no-supervise",
+    default=False,
+    help=(
+        "Run the daemon under a watchdog that auto-restarts it on "
+        "crash. The supervisor has exponential backoff + a "
+        "circuit-breaker (5 crashes in 60s stops trying). The UI's "
+        "client-side reconnect handles the restart gap. Default off "
+        "during the rollout — flip on once your environment is "
+        "verified."
+    ),
+)
+def app(no_browser, browser_tab, lan, supervise):
     """Open the One Link desktop app (auto-starts daemon, opens UI).
 
     Default opens a standalone Chromium-style app-mode window (no
     browser chrome — looks/feels like a native app). Pass
     ``--browser-tab`` to fall back to a regular browser tab, or
-    ``--no-browser`` to start the daemon headless."""
+    ``--no-browser`` to start the daemon headless. ``--supervise``
+    wraps the daemon in an auto-restart watchdog."""
     from one_link.app import run_app
     raise SystemExit(run_app(
         no_browser=no_browser,
         standalone=not browser_tab,
         lan=lan,
+        supervise=supervise,
     ))
 
 
