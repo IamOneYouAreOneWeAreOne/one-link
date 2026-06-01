@@ -239,6 +239,42 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: install Rust toolchain
+        # Needed BEFORE ``pip install -e .`` on win_arm64 because
+        # cryptography has no win_arm64 wheel and falls through to a
+        # Rust source build. On every other leg this step costs ~3 s
+        # and is otherwise unused at the binaries-job layer (native
+        # code lands as a prebuilt wheel from ``native_wheels``).
+        # Mirrors auto_build.yml exactly.
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: install OpenSSL on Windows ARM64 (cryptography build dep)
+        # See auto_build.yml for the full rationale — same setup, same
+        # cache key, so the binaries job can reuse what auto_build
+        # populated (when run on the same runner image).
+        if: matrix.os == 'windows-11-arm'
+        shell: pwsh
+        run: |
+          $vcpkg = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkg) { throw "VCPKG_INSTALLATION_ROOT not set on this runner" }
+          & "$vcpkg\vcpkg.exe" install openssl:arm64-windows --recurse
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install openssl failed (exit $LASTEXITCODE)" }
+          $prefix = "$vcpkg\installed\arm64-windows"
+          "OPENSSL_DIR=$prefix"                 | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "OPENSSL_LIB_DIR=$prefix\lib"         | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "OPENSSL_INCLUDE_DIR=$prefix\include" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "OPENSSL_NO_VENDOR=1"                 | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "$prefix\bin"                         | Out-File -Append $env:GITHUB_PATH -Encoding utf8
+
+      - name: cache vcpkg ARM64 OpenSSL build
+        if: matrix.os == 'windows-11-arm'
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:/vcpkg/installed/arm64-windows
+            C:/vcpkg/packages/openssl_arm64-windows
+          key: vcpkg-openssl-arm64-windows-v1
+
       - name: install build deps
         run: |
           python -m pip install --upgrade pip

@@ -99,20 +99,74 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-auto-build-
 
+      - name: install Rust toolchain
+        # Moved BEFORE pip install: cryptography has no win_arm64 wheel
+        # in any release as of 2026-05, so on that leg ``pip install -e .``
+        # falls through to a source build that invokes maturin which
+        # invokes cargo. Without Rust available, the cryptography build
+        # fails at "Failed to build a native library through cargo" and
+        # we lose Windows ARM64 from the matrix. Installing Rust first
+        # fixes that without affecting the other legs (where a binary
+        # wheel resolves cleanly and Rust is just sitting there unused
+        # until the ``build native crate from source`` step below).
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: install OpenSSL on Windows ARM64 (cryptography build dep)
+        # cryptography's Rust core links against openssl-sys, which needs
+        # OpenSSL headers + libs at build time. The GitHub-hosted
+        # windows-11-arm runner image does NOT ship OpenSSL by default,
+        # and there is no published cp312-win_arm64 wheel for
+        # cryptography that would avoid the source build. We install
+        # OpenSSL via vcpkg and export OPENSSL_DIR / OPENSSL_LIB_DIR /
+        # OPENSSL_INCLUDE_DIR so the subsequent pip install finds it.
+        #
+        # First run on a cold runner takes ~5-10 min while vcpkg
+        # compiles OpenSSL ARM64 from source; the cache step below
+        # turns subsequent runs into a ~30 s install. Cost is paid
+        # once per cache-key-invalidating change.
+        if: matrix.os == 'windows-11-arm'
+        shell: pwsh
+        run: |
+          $vcpkg = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkg) { throw "VCPKG_INSTALLATION_ROOT not set on this runner" }
+          Write-Host "vcpkg at $vcpkg"
+          & "$vcpkg\vcpkg.exe" install openssl:arm64-windows --recurse
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install openssl failed (exit $LASTEXITCODE)" }
+          $prefix = "$vcpkg\installed\arm64-windows"
+          "OPENSSL_DIR=$prefix"               | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "OPENSSL_LIB_DIR=$prefix\lib"       | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "OPENSSL_INCLUDE_DIR=$prefix\include" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "OPENSSL_NO_VENDOR=1"               | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          # Make OpenSSL DLLs visible to subsequent steps so
+          # PyInstaller's dep-walker picks them up.
+          "$prefix\bin" | Out-File -Append $env:GITHUB_PATH -Encoding utf8
+
+      - name: cache vcpkg ARM64 OpenSSL build
+        if: matrix.os == 'windows-11-arm'
+        uses: actions/cache@v4
+        with:
+          # Hardcoded to ``C:\vcpkg`` — that is the canonical
+          # vcpkg location on every GitHub-hosted Windows runner image
+          # (matches the VCPKG_INSTALLATION_ROOT env var the previous
+          # step reads). ``env.VCPKG_INSTALLATION_ROOT`` itself isn't a
+          # workflow-declared env, so the IDE linter rejects it here
+          # even though it works at runtime; hardcoding is also more
+          # robust against transient image-config drift.
+          path: |
+            C:/vcpkg/installed/arm64-windows
+            C:/vcpkg/packages/openssl_arm64-windows
+          key: vcpkg-openssl-arm64-windows-v1
+
       - name: install build tooling
         shell: bash
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
           # Install the project itself in editable mode so PyInstaller
-          # can resolve every import path.
+          # can resolve every import path. On win_arm64 this triggers
+          # the cryptography source build (Rust + OpenSSL must be
+          # already in place — done in the two steps above).
           pip install -e .
-
-      - name: install Rust toolchain
-        # Needed by `maturin develop --release` below. The action
-        # caches the toolchain across runs so this only pays the
-        # download cost on first invocation.
-        uses: dtolnay/rust-toolchain@stable
 
       - name: cache cargo registry + target
         uses: actions/cache@v4
