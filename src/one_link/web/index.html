@@ -174,7 +174,14 @@
   [hidden] { display: none !important; }
 
   /* ── App layout ─────────────────────────────────────────────────────── */
-  .app { display: grid; grid-template-rows: 56px 1fr; height: 100vh; }
+  /* Three rows: top header (56px), optional banner (auto = its own height
+     when shown via .offline-banner.show, 0 when display:none), and the
+     main pane (1fr fills the rest). The banner was previously claiming
+     the 1fr middle row of a 2-row grid — its dot+text were
+     vertically-centered in a viewport-tall strip, so "Restoring One
+     Link…" floated in the middle of a huge empty area while main
+     collapsed into an auto-created third row. */
+  .app { display: grid; grid-template-rows: 56px auto 1fr; height: 100vh; }
   .top {
     display: flex; align-items: center; justify-content: space-between;
     padding: 0 18px;
