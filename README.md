@@ -44,8 +44,8 @@ Per-platform install notes:
 | Windows | arm64 (Snapdragon X / Surface Pro X) | **`one-link-setup-arm64.exe`** (installer) OR `one-link-windows-arm64.zip` | Same flow as x86_64. Native ARM build — no x86 emulation cost. |
 | macOS | arm64 (Apple Silicon — M1/M2/M3/M4) | **`one-link-macos-arm64.dmg`** OR `one-link-macos-arm64.zip` | Double-click the .dmg, drag One Link into Applications — the canonical Mac install gesture. The first run may need a right-click → Open to bypass Gatekeeper until Apple notarization lands. The .zip path is for users who prefer portable installs. |
 | macOS | x86_64 (Intel Macs) | **`one-link-macos-x86_64.dmg`** OR `one-link-macos-x86_64.zip` | Same flow as arm64. For pre-Apple-Silicon Macs. |
-| Linux | x86_64 | `one-link-linux-x86_64.zip` | `unzip one-link-linux-x86_64.zip && cd one-link && chmod +x one-link && ./one-link` |
-| Linux | arm64 (Raspberry Pi 4/5 64-bit, ARM cloud) | `one-link-linux-arm64.zip` | Same flow as x86_64. Pi OS 64-bit + Ubuntu/Debian on ARM. |
+| Linux | x86_64 | **`one-link-linux-x86_64.AppImage`** OR `one-link-linux-x86_64.zip` | AppImage runs across every modern distro (Ubuntu, Debian, Fedora, Arch, etc.) with no root + no package-manager integration — `chmod +x one-link-linux-x86_64.AppImage && ./one-link-linux-x86_64.AppImage`. The .zip path is for users who prefer extracting a folder. |
+| Linux | arm64 (Raspberry Pi 4/5 64-bit, ARM cloud) | **`one-link-linux-arm64.AppImage`** OR `one-link-linux-arm64.zip` | Same flow as x86_64. AppImage runtime supports aarch64 — Raspberry Pi OS 64-bit + Ubuntu/Debian on ARM all work. |
 
 **The Windows installer is opinionated about being lightweight + honest:** no admin prompt, no EULA, no telemetry opt-in, no third-party offers, no newsletter checkboxes, no recommended-software garbage. One screen, install button, done. The "Run at Windows boot" toggle is in the in-app settings — never enabled by the installer.
 

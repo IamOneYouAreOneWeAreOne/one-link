@@ -42,6 +42,14 @@
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0-dev"
 #endif
+; VersionInfoVersion must be a strict 4-part numeric (Windows
+; VS_VERSIONINFO contract). MyAppVersion may carry pre-release +
+; build-metadata suffixes (``0.21.0-alpha+sha.749cd40``) that fail
+; that contract. CI derives both: full for human display, numeric
+; for the Windows resource header.
+#ifndef MyAppNumericVersion
+  #define MyAppNumericVersion "0.0.0.0"
+#endif
 #ifndef PayloadDir
   #define PayloadDir "..\..\dist\one-link"
 #endif
@@ -89,8 +97,10 @@ UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupIconFile=..\..\src\one_link\web\assets\one-glyph.ico
 
-; Honest version stamp visible in Add/Remove Programs.
-VersionInfoVersion={#MyAppVersion}
+; Honest version stamp visible in Add/Remove Programs. The
+; resource-header VersionInfoVersion needs strict 1.2.3.4 numerics;
+; AppVersion above carries the full pre-release-aware string.
+VersionInfoVersion={#MyAppNumericVersion}
 VersionInfoProductName={#MyAppName}
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=Peer-to-peer chat, file sync, and live voice/video. No accounts, no servers.

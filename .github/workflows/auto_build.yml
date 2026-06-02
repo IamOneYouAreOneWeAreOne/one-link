@@ -112,34 +112,46 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: install OpenSSL on Windows ARM64 (cryptography build dep)
-        # cryptography's Rust core links against openssl-sys, which needs
-        # OpenSSL headers + libs at build time. The GitHub-hosted
-        # windows-11-arm runner image does NOT ship OpenSSL by default,
-        # and there is no published cp312-win_arm64 wheel for
-        # cryptography that would avoid the source build. We install
-        # OpenSSL via vcpkg and export OPENSSL_DIR / OPENSSL_LIB_DIR /
-        # OPENSSL_INCLUDE_DIR so the subsequent pip install finds it.
+        # cryptography's Rust core links against openssl-sys, which
+        # needs OpenSSL headers + libs at build time. The GitHub-
+        # hosted windows-11-arm runner image does NOT ship OpenSSL by
+        # default, and there is no published cp312-win_arm64 wheel
+        # for cryptography that would avoid the source build. We
+        # install OpenSSL STATICALLY via vcpkg's
+        # ``arm64-windows-static`` triplet and set OPENSSL_STATIC=1
+        # so the OpenSSL code is linked directly into
+        # ``cryptography._rust.pyd``.
         #
-        # First run on a cold runner takes ~5-10 min while vcpkg
-        # compiles OpenSSL ARM64 from source; the cache step below
-        # turns subsequent runs into a ~30 s install. Cost is paid
-        # once per cache-key-invalidating change.
+        # Why static and not dynamic: a previous attempt with the
+        # default dynamic triplet shipped libcrypto-3-arm64.dll +
+        # libssl-3-arm64.dll alongside _rust.pyd, but at PyInstaller's
+        # hook-import stage Windows resolved a different OpenSSL DLL
+        # off PATH first, leading to "DLL load failed while importing
+        # _rust: The specified procedure could not be found" — an ABI
+        # mismatch between cryptography's expected OpenSSL
+        # entrypoints and whatever was on PATH. Static linking
+        # eliminates the DLL-resolution race entirely; PyInstaller
+        # doesn't have to find or bundle OpenSSL DLLs because there
+        # aren't any.
+        #
+        # First run on a cold runner: ~5-10 min while vcpkg compiles
+        # static OpenSSL from source. Cache step below makes repeat
+        # runs ~30 s.
         if: matrix.os == 'windows-11-arm'
         shell: pwsh
         run: |
           $vcpkg = $env:VCPKG_INSTALLATION_ROOT
           if (-not $vcpkg) { throw "VCPKG_INSTALLATION_ROOT not set on this runner" }
           Write-Host "vcpkg at $vcpkg"
-          & "$vcpkg\vcpkg.exe" install openssl:arm64-windows --recurse
-          if ($LASTEXITCODE -ne 0) { throw "vcpkg install openssl failed (exit $LASTEXITCODE)" }
-          $prefix = "$vcpkg\installed\arm64-windows"
-          "OPENSSL_DIR=$prefix"               | Out-File -Append $env:GITHUB_ENV -Encoding utf8
-          "OPENSSL_LIB_DIR=$prefix\lib"       | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          & "$vcpkg\vcpkg.exe" install openssl:arm64-windows-static --recurse
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install openssl (static) failed (exit $LASTEXITCODE)" }
+          $prefix = "$vcpkg\installed\arm64-windows-static"
+          "OPENSSL_DIR=$prefix"                 | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "OPENSSL_LIB_DIR=$prefix\lib"         | Out-File -Append $env:GITHUB_ENV -Encoding utf8
           "OPENSSL_INCLUDE_DIR=$prefix\include" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
-          "OPENSSL_NO_VENDOR=1"               | Out-File -Append $env:GITHUB_ENV -Encoding utf8
-          # Make OpenSSL DLLs visible to subsequent steps so
-          # PyInstaller's dep-walker picks them up.
-          "$prefix\bin" | Out-File -Append $env:GITHUB_PATH -Encoding utf8
+          "OPENSSL_STATIC=1"                    | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "OPENSSL_NO_VENDOR=1"                 | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "VCPKG_DEFAULT_TRIPLET=arm64-windows-static" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
 
       - name: cache vcpkg ARM64 OpenSSL build
         if: matrix.os == 'windows-11-arm'
@@ -151,11 +163,13 @@ jobs:
           # step reads). ``env.VCPKG_INSTALLATION_ROOT`` itself isn't a
           # workflow-declared env, so the IDE linter rejects it here
           # even though it works at runtime; hardcoding is also more
-          # robust against transient image-config drift.
+          # robust against transient image-config drift. Cache key
+          # bumped to v2 because the triplet changed
+          # (dynamic → static).
           path: |
-            C:/vcpkg/installed/arm64-windows
-            C:/vcpkg/packages/openssl_arm64-windows
-          key: vcpkg-openssl-arm64-windows-v1
+            C:/vcpkg/installed/arm64-windows-static
+            C:/vcpkg/packages/openssl_arm64-windows-static
+          key: vcpkg-openssl-arm64-windows-static-v2
 
       - name: generate macOS .icns icon
         # PyInstaller's BUNDLE() block expects a .icns for the Dock
@@ -275,6 +289,31 @@ jobs:
             powershell -Command "Compress-Archive -Path one-link -DestinationPath ${{ matrix.artifact-name }}.zip"
           fi
 
+      - name: package Linux .AppImage
+        # AppImage is the most universal Linux install format — a
+        # single self-contained executable that runs across Ubuntu,
+        # Debian, Fedora, Arch, etc. without dependency-hell or
+        # root install. We produce one per arch (x86_64 + aarch64);
+        # the user downloads, chmod +x, double-click. No package
+        # manager, no telemetry, no system mutation.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # AppImage convention: aarch64, not arm64.
+          if [ "${{ runner.arch }}" = "ARM64" ]; then
+            APPIMAGE_ARCH="aarch64"
+          else
+            APPIMAGE_ARCH="x86_64"
+          fi
+          OUT="dist/${{ matrix.artifact-name }}.AppImage"
+          chmod +x packaging/linux/make_appimage.sh
+          packaging/linux/make_appimage.sh \
+            "dist/one-link" \
+            "$OUT" \
+            "$APPIMAGE_ARCH"
+          sha256sum "$OUT" > "$OUT.sha256"
+
       - name: package macOS .dmg
         # The PyInstaller spec now emits a BUNDLE() block on macOS so
         # dist/one-link.app/ exists as a proper .app bundle. Wrap it
@@ -378,6 +417,8 @@ jobs:
             dist/${{ matrix.artifact-name }}.zip
             dist/${{ matrix.artifact-name }}.dmg
             dist/${{ matrix.artifact-name }}.dmg.sha256
+            dist/${{ matrix.artifact-name }}.AppImage
+            dist/${{ matrix.artifact-name }}.AppImage.sha256
             dist/one-link.sha256
           if-no-files-found: warn
           retention-days: 30
@@ -438,15 +479,33 @@ jobs:
         id: ver
         shell: pwsh
         run: |
-          # Use the short SHA + a 0.0.0-style prefix from pyproject so the
-          # installer's Add/Remove-Programs entry shows something useful
-          # even on auto-latest (untagged) builds.
+          # Two version strings serve two different purposes:
+          #
+          #  * ``full`` is shown to humans in Add/Remove Programs and
+          #    in the AppVersion field. Carries pre-release suffix +
+          #    short SHA so untagged auto-latest builds say what
+          #    commit they came from.
+          #  * ``numeric`` is the strict 4-part W.X.Y.Z that the
+          #    Windows VS_VERSIONINFO resource header demands. The
+          #    Inno Setup compiler rejects anything else for
+          #    VersionInfoVersion. Strip pre-release tags + pad to 4
+          #    parts, never letting through a hyphen / plus / letter.
           $sha = "${{ github.sha }}".Substring(0,7)
           $base = (Select-String -Path pyproject.toml -Pattern 'version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
           if (-not $base) { $base = "0.21.0-alpha" }
-          $ver = "$base+sha.$sha"
-          Write-Host "version stamp: $ver"
-          "version=$ver" | Out-File -Append $env:GITHUB_OUTPUT -Encoding utf8
+          $full = "$base+sha.$sha"
+          # Extract leading numeric ``X.Y.Z`` from the pyproject version
+          # (drops -alpha / -rc1 / +build-meta), then right-pad to
+          # exactly four dotted components.
+          $numericMatch = [regex]::Match($base, '^(\d+(?:\.\d+){0,3})')
+          $numeric = if ($numericMatch.Success) { $numericMatch.Groups[1].Value } else { "0.0.0" }
+          $parts = $numeric.Split('.')
+          while ($parts.Length -lt 4) { $parts += '0' }
+          $numeric = $parts[0..3] -join '.'
+          Write-Host "version full   : $full"
+          Write-Host "version numeric: $numeric"
+          "version=$full"          | Out-File -Append $env:GITHUB_OUTPUT -Encoding utf8
+          "numeric=$numeric"       | Out-File -Append $env:GITHUB_OUTPUT -Encoding utf8
 
       - name: compile installer with Inno Setup
         if: steps.gate.outputs.go == 'ok'
@@ -462,6 +521,7 @@ jobs:
           if (-not $iscc) { throw "ISCC.exe (Inno Setup compiler) not found on runner" }
           & $iscc `
             "/DMyAppVersion=${{ steps.ver.outputs.version }}" `
+            "/DMyAppNumericVersion=${{ steps.ver.outputs.numeric }}" `
             "/DPayloadDir=$(Resolve-Path payload/one-link)" `
             "/DOutputBaseName=${{ matrix.installer-name }}" `
             "/DOutputDir=$(Resolve-Path .)/installer-out" `
@@ -561,10 +621,12 @@ jobs:
         run: |
           mkdir -p out
           # Collect every distributable into out/: .zip portable
-          # bundles, .dmg macOS disk images, .exe Windows installers,
-          # plus the side-car .sha256 hashes for each.
+          # bundles, .dmg macOS disk images, .AppImage Linux single-
+          # file executables, .exe Windows installers, plus the
+          # side-car .sha256 hashes for each.
           find artifacts -name '*.zip' -exec cp {} out/ \;
           find artifacts -name '*.dmg' -exec cp {} out/ \;
+          find artifacts -name '*.AppImage' -exec cp {} out/ \;
           find artifacts -name '*.sha256' -exec cp {} out/ \;
           find artifacts -name 'one-link-setup-*.exe' -exec cp {} out/ \;
           # Guard: if no zips landed (every leg failed/was queued out),
@@ -584,7 +646,7 @@ jobs:
           # Hash everything a user might download — zips, dmgs,
           # installer .exes. The side-car .sha256 files are per-file
           # convenience; manifest.txt is the consolidated one.
-          for f in *.zip *.dmg one-link-setup-*.exe; do
+          for f in *.zip *.dmg *.AppImage one-link-setup-*.exe; do
             [ -f "$f" ] || continue
             if command -v sha256sum >/dev/null 2>&1; then
               sha256sum "$f" >> manifest.txt
@@ -643,7 +705,14 @@ jobs:
             launch may need right-click → Open to bypass Gatekeeper
             until Apple-notarization secrets are configured upstream.
 
-            **Linux + portable Windows / Mac:** download the matching
+            **Linux (recommended):** download
+            `one-link-linux-x86_64.AppImage` (Intel/AMD) or
+            `one-link-linux-arm64.AppImage` (Raspberry Pi /
+            ARM cloud), then `chmod +x` and double-click. Single
+            file, runs across every distro, no root, no package
+            manager.
+
+            **Portable Windows / Mac / Linux:** download the matching
             `.zip`. Unzip, then `chmod +x one-link && ./one-link` on
             POSIX, or double-click `one-link.exe` on Windows.
 
