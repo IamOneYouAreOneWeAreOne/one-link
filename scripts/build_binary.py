@@ -327,15 +327,19 @@ def main(argv: list[str] | None = None) -> int:
                   "work in the bundled binary. pip install onnxruntime first.")
 
     icon_arg: list[str] = []
-    if platform.system() == "Windows":
+    if platform.system() in ("Windows", "Darwin"):
         ico = web_dir / "assets" / "one-glyph.ico"
+        # Diagnostic line — without it, an icon-not-embedded build looks
+        # identical to an icon-embedded one until you open the artifact
+        # in Explorer + see the Python+floppy default. Make CI logs
+        # answer the "did the icon flag get applied?" question without
+        # downloading the zip.
         if ico.is_file():
             icon_arg = ["--icon", str(ico)]
-    elif platform.system() == "Darwin":
-        # PyInstaller can take .icns on Mac; .ico is also accepted in recent versions.
-        ico = web_dir / "assets" / "one-glyph.ico"
-        if ico.is_file():
-            icon_arg = ["--icon", str(ico)]
+            print(f"[build] icon embedded: {ico} ({ico.stat().st_size} bytes)")
+        else:
+            print(f"[build] WARNING: icon not found at {ico} — exe will ship "
+                  f"with the default Python+floppy icon")
 
     # v0.21.x: include the Rust-built native extension (one_link_native)
     # so the bundled binary gets the QUIC + coherence-field fast paths.

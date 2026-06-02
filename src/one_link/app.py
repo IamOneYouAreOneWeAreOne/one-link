@@ -735,6 +735,53 @@ def _print_lan_warning(lan_ip: str, port: int, token: str) -> None:
     _safe_echo("")
 
 
+def _spawn_splash() -> Optional[subprocess.Popen]:
+    """Open the native splash window the user sees while the daemon
+    is coming up. Best-effort — if the splash subprocess can't
+    spawn for any reason (no DISPLAY on Linux, broken tkinter, etc.)
+    we return None and the launcher just proceeds without the splash.
+    The splash watches its stdin pipe; closing the pipe (or this
+    process exiting) makes it dismiss itself. No IPC protocol.
+    """
+    try:
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "splash"]
+        else:
+            cmd = [sys.executable, "-m", "one_link.splash"]
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        return subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags if os.name == "nt" else 0,
+            close_fds=True,
+        )
+    except Exception:
+        return None
+
+
+def _close_splash(proc: Optional[subprocess.Popen]) -> None:
+    """Dismiss the splash. Closes its stdin so the watcher thread
+    inside the splash sees EOF and tears down the tk root cleanly.
+    Falls back to terminate() if the close+wait races a hung splash."""
+    if proc is None:
+        return
+    try:
+        if proc.stdin is not None:
+            try: proc.stdin.close()
+            except Exception: pass
+        try:
+            proc.wait(timeout=2.0)
+        except Exception:
+            try: proc.terminate()
+            except Exception: pass
+    except Exception:
+        pass
+
+
 def run_app(
     *,
     no_browser: bool = False,
@@ -742,6 +789,14 @@ def run_app(
     lan: bool = False,
     supervise: bool = False,
 ) -> int:
+    # Splash window opens IMMEDIATELY — before any subprocess work —
+    # so the user sees something the moment they double-click the
+    # icon. Suppressed when --no-browser (headless launches, e.g.
+    # autostart-at-boot) since there's nobody at the keyboard to
+    # look at it. Failures spawning the splash are silently swallowed
+    # — the launcher continues either way, the user just loses the
+    # splash, no other harm done.
+    splash_proc = None if no_browser else _spawn_splash()
     _safe_echo("One Link")
     # v0.15.2: --lan opt-in. Set BEFORE we try to reuse a running
     # daemon so any spawned-fresh daemon inherits the right bind
@@ -787,21 +842,55 @@ def run_app(
             info = None
 
     if info is None:
-        if supervise:
-            _safe_echo("  starting daemon under supervisor...")
-            spawned = _spawn_supervisor()
-        else:
-            _safe_echo("  starting daemon...")
-            spawned = _spawn_daemon()
-        info = _wait_for_daemon()
-        if info is None or not info.compatible:
+        # Spawn-and-wait, with one retry via the error dialog if the
+        # daemon doesn't bind in time. The retry path covers the
+        # transient cases (port still in TIME_WAIT from a previous
+        # daemon, slow disk on first launch, antivirus scanning the
+        # exe). Deterministic failures (corrupt install, missing dep)
+        # fail both attempts and the user gets a friendly Quit.
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
+            if supervise:
+                _safe_echo("  starting daemon under supervisor...")
+                spawned = _spawn_supervisor()
+            else:
+                _safe_echo("  starting daemon...")
+                spawned = _spawn_daemon()
+            info = _wait_for_daemon()
+            if info is not None and info.compatible:
+                _safe_echo("  daemon up.")
+                break
             _safe_echo("  ! daemon failed to start cleanly")
-            try:
-                spawned.terminate()
-            except Exception:
-                pass
-            return 2
-        _safe_echo("  daemon up.")
+            try: spawned.terminate()
+            except Exception: pass
+            spawned = None
+            # Don't let the splash sit behind the error dialog.
+            _close_splash(splash_proc)
+            splash_proc = None
+            if no_browser or attempt >= max_attempts:
+                # Headless caller (autostart at boot) gets no dialog —
+                # they're not at the keyboard to see it. Also bail
+                # silently after the last attempt; the error dialog
+                # would have shown on the prior attempt.
+                return 2
+            # Show the friendly retry/quit dialog. ``choice`` is
+            # either "retry" (loop again) or "quit" (bail clean).
+            from one_link.error_dialog import show_startup_failure
+            choice = show_startup_failure(
+                reason=(
+                    "The background daemon couldn't come up within "
+                    "the startup window. That's usually a transient "
+                    "thing — another copy already running, a port "
+                    "still releasing, or a slow disk on first launch."
+                ),
+                log_path=data_dir() / "daemon-launch.err.log",
+                data_dir=data_dir(),
+            )
+            if choice != "retry":
+                return 2
+            # Reopen the splash for the retry attempt so the user
+            # sees the same "Starting…" feedback as the first try.
+            splash_proc = _spawn_splash()
     else:
         _safe_echo("  using running daemon.")
 
@@ -812,6 +901,11 @@ def run_app(
             _open_browser_url(url, standalone=standalone)
         except Exception as e:
             _safe_echo(f"  (couldn't auto-open browser: {e})")
+    # Browser tab is open (or we deliberately skipped it). Dismiss
+    # the splash now so the user's eye moves to the chat UI, not the
+    # "Starting…" panel sitting on top of it.
+    _close_splash(splash_proc)
+    splash_proc = None
 
     if lan:
         lan_ip = _detect_lan_ip()
