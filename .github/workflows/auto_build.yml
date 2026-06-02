@@ -271,9 +271,159 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # ─── Windows installer (Inno Setup) ──────────────────────────────────
+  # A real Windows installer per architecture so end users get
+  # "double-click, Next, install, Start Menu shortcut, done" instead
+  # of "extract zip into Downloads, hunt for the exe, hope it works."
+  # Per-user install path → no UAC prompt. Inno Setup is pre-installed
+  # on the GitHub-hosted Windows runner images.
+  windows-installer:
+    name: windows installer (${{ matrix.arch }})
+    needs: build
+    runs-on: windows-latest
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            artifact-name: one-link-windows-x86_64
+            installer-name: one-link-setup-x86_64
+          - arch: arm64
+            artifact-name: one-link-windows-arm64
+            installer-name: one-link-setup-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download the windows binary artifact
+        id: dl
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: payload-zip
+
+      - name: skip when this arch did not build
+        id: gate
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "payload-zip/${{ matrix.artifact-name }}.zip")) {
+            Write-Host "::warning::no payload for ${{ matrix.arch }} — skipping installer build"
+            "go=skip" | Out-File -Append $env:GITHUB_OUTPUT -Encoding utf8
+          } else {
+            "go=ok" | Out-File -Append $env:GITHUB_OUTPUT -Encoding utf8
+          }
+
+      - name: extract payload
+        if: steps.gate.outputs.go == 'ok'
+        shell: pwsh
+        run: |
+          Expand-Archive -Path "payload-zip/${{ matrix.artifact-name }}.zip" -DestinationPath "payload" -Force
+          # The zip's top-level dir is ``one-link/`` (per build_binary.py).
+          # The Inno script's PayloadDir default points at it.
+          Get-ChildItem -Recurse payload | Select-Object -First 5 | Format-Table
+
+      - name: compute version stamp
+        id: ver
+        shell: pwsh
+        run: |
+          # Use the short SHA + a 0.0.0-style prefix from pyproject so the
+          # installer's Add/Remove-Programs entry shows something useful
+          # even on auto-latest (untagged) builds.
+          $sha = "${{ github.sha }}".Substring(0,7)
+          $base = (Select-String -Path pyproject.toml -Pattern 'version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if (-not $base) { $base = "0.21.0-alpha" }
+          $ver = "$base+sha.$sha"
+          Write-Host "version stamp: $ver"
+          "version=$ver" | Out-File -Append $env:GITHUB_OUTPUT -Encoding utf8
+
+      - name: compile installer with Inno Setup
+        if: steps.gate.outputs.go == 'ok'
+        shell: pwsh
+        run: |
+          # ISCC.exe ships pre-installed on windows-latest. The
+          # /D flags override .iss script defines so a single .iss
+          # produces both x86_64 + arm64 installers.
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            $iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Source
+          }
+          if (-not $iscc) { throw "ISCC.exe (Inno Setup compiler) not found on runner" }
+          & $iscc `
+            "/DMyAppVersion=${{ steps.ver.outputs.version }}" `
+            "/DPayloadDir=$(Resolve-Path payload/one-link)" `
+            "/DOutputBaseName=${{ matrix.installer-name }}" `
+            "/DOutputDir=$(Resolve-Path .)/installer-out" `
+            packaging/windows/one-link.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed: $LASTEXITCODE" }
+          Get-ChildItem installer-out
+
+      - name: sign installer (if signing secrets are present)
+        if: steps.gate.outputs.go == 'ok'
+        shell: pwsh
+        # Opt-in code-signing infrastructure. These secrets do NOT
+        # need to be configured for the build to succeed — when they
+        # are absent the step inside the shell early-exits and the
+        # installer ships unsigned (users hit SmartScreen "Run
+        # anyway" on first install but everything still works). The
+        # IDE linter flags ``secrets.CSC_LINK`` as
+        # "Context access might be invalid" because it cannot tell
+        # whether the secret exists in the repo; that warning is the
+        # documented behavior and is safe to ignore. To turn signing
+        # on:
+        #   1. Buy an Authenticode certificate (~$100-400/yr).
+        #   2. Export the .pfx, base64-encode it
+        #      (``base64 -w 0 cert.pfx > cert.b64``).
+        #   3. Set repo secret CSC_LINK to the base64 string + secret
+        #      CSC_KEY_PASSWORD to the .pfx password.
+        # GitHub Actions resolves undefined secrets to empty strings
+        # rather than failing the workflow, so the env block stays
+        # safe with or without the secrets present.
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          # Signing is OPT-IN via repo secrets. When CSC_LINK + the
+          # password are configured, every installer + the inner exe
+          # gets signed with Authenticode + a timestamp from the
+          # DigiCert RFC 3161 server. Without the secrets, this step
+          # is a no-op so anyone forking + building doesn't need a
+          # certificate. The signing key NEVER leaves the runner;
+          # it's decoded from a base64-encoded .pfx in the secret,
+          # used in-process, then the .pfx is shredded.
+          if (-not $env:CSC_LINK) {
+            Write-Host "signing secrets not present — skipping signing (build is unsigned)"
+            exit 0
+          }
+          $pfx = "$env:RUNNER_TEMP\cs.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CSC_LINK))
+          $signtool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe"
+          if (-not (Test-Path $signtool)) {
+            $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+          }
+          if (-not $signtool) { throw "signtool.exe not found on runner" }
+          # Sign the installer + every .exe inside the bundle.
+          $targets = @(Get-ChildItem installer-out -Filter *.exe -Recurse) `
+                   + @(Get-ChildItem payload/one-link -Filter *.exe -Recurse)
+          foreach ($t in $targets) {
+            & $signtool sign /fd SHA256 /f $pfx /p $env:CSC_KEY_PASSWORD `
+                /tr http://timestamp.digicert.com /td SHA256 /v $t.FullName
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed on $($t.FullName)" }
+          }
+          Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+
+      - name: upload installer
+        if: steps.gate.outputs.go == 'ok'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.installer-name }}
+          path: installer-out/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
   publish-rolling-latest:
     name: publish rolling `latest` release
-    needs: build
+    needs: [build, windows-installer]
     runs-on: ubuntu-latest
     # ``always()`` makes this job publish even if one or more matrix
     # legs failed or were cancelled. Previously the default behavior
@@ -299,9 +449,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p out
-          # Collect every zip + sha file into one out/ directory.
+          # Collect every zip + sha + installer .exe into out/.
           find artifacts -name '*.zip' -exec cp {} out/ \;
           find artifacts -name '*.sha256' -exec cp {} out/ \;
+          find artifacts -name 'one-link-setup-*.exe' -exec cp {} out/ \;
           # Guard: if no zips landed (every leg failed/was queued out),
           # there is nothing to publish. Exit cleanly so the release
           # action doesn't fire on an empty payload — better to skip
@@ -363,12 +514,18 @@ jobs:
 
             ### Install
 
+            **Windows (recommended):** download `one-link-setup-x86_64.exe`
+            (or `one-link-setup-arm64.exe` for Snapdragon-X / Surface Pro X)
+            and double-click. Per-user install, no UAC prompt, Start
+            Menu shortcut. Uninstall via "Add or Remove Programs."
+
+            **Everything else (or Windows without an installer):**
             1. Download the zip for your OS.
             2. Unzip into a folder you control.
             3. Double-click `one-link` / `one-link.exe`.
 
-            No installer, no admin, no telemetry. Quit via the tray icon
-            to stop the daemon.
+            No telemetry, no accounts, no servers. Quit via the tray
+            icon to stop the daemon.
 
             ### What's bundled
 

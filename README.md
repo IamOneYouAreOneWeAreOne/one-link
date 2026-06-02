@@ -40,12 +40,14 @@ Per-platform install notes:
 
 | Platform | Architecture | File | What you do |
 |---|---|---|---|
-| Windows | x86_64 (Intel/AMD) | `one-link-windows-x86_64.zip` | Unzip, double-click `one-link.exe`. The first run may need "More info → Run anyway" until code-signing lands. |
-| Windows | arm64 (Snapdragon X / Surface Pro X) | `one-link-windows-arm64.zip` | Same flow as x86_64. Native ARM build — no x86 emulation cost. |
+| Windows | x86_64 (Intel/AMD) | **`one-link-setup-x86_64.exe`** (installer) OR `one-link-windows-x86_64.zip` | Installer is per-user (no UAC), drops a Start Menu shortcut, includes an uninstaller. Zip path is "unzip + double-click `one-link.exe`" for users who prefer portable installs. First run may need "More info → Run anyway" until code-signing lands. |
+| Windows | arm64 (Snapdragon X / Surface Pro X) | **`one-link-setup-arm64.exe`** (installer) OR `one-link-windows-arm64.zip` | Same flow as x86_64. Native ARM build — no x86 emulation cost. |
 | macOS | arm64 (Apple Silicon — M1/M2/M3/M4) | `one-link-macos-arm64.zip` | Unzip, double-click `one-link`. The first run may need a right-click → Open to bypass Gatekeeper. |
 | macOS | x86_64 (Intel Macs) | `one-link-macos-x86_64.zip` | Same flow as arm64. For pre-Apple-Silicon Macs. |
 | Linux | x86_64 | `one-link-linux-x86_64.zip` | `unzip one-link-linux-x86_64.zip && cd one-link && chmod +x one-link && ./one-link` |
 | Linux | arm64 (Raspberry Pi 4/5 64-bit, ARM cloud) | `one-link-linux-arm64.zip` | Same flow as x86_64. Pi OS 64-bit + Ubuntu/Debian on ARM. |
+
+**The Windows installer is opinionated about being lightweight + honest:** no admin prompt, no EULA, no telemetry opt-in, no third-party offers, no newsletter checkboxes, no recommended-software garbage. One screen, install button, done. The "Run at Windows boot" toggle is in the in-app settings — never enabled by the installer.
 
 Each download has a matching `.sha256` next to it; `manifest.txt` collates every artifact's hash. Verify before extracting:
 
