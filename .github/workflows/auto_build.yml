@@ -275,7 +275,18 @@ jobs:
     name: publish rolling `latest` release
     needs: build
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/master'
+    # ``always()`` makes this job publish even if one or more matrix
+    # legs failed or were cancelled. Previously the default behavior
+    # ("only run if needs succeeded") meant a single stuck or
+    # cancelled leg blocked every release. The Intel-Mac runner
+    # (macos-13) is a deprecated image with very limited capacity
+    # and routinely sits in "queued" for hours, which kept blocking
+    # auto-latest from updating with every other platform's
+    # successful binary. Now: as long as ANY leg uploaded a zip,
+    # users get a refreshed release containing whatever succeeded.
+    # The release body lists the included platforms so users can see
+    # which one was skipped.
+    if: always() && github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v4
 
@@ -291,6 +302,16 @@ jobs:
           # Collect every zip + sha file into one out/ directory.
           find artifacts -name '*.zip' -exec cp {} out/ \;
           find artifacts -name '*.sha256' -exec cp {} out/ \;
+          # Guard: if no zips landed (every leg failed/was queued out),
+          # there is nothing to publish. Exit cleanly so the release
+          # action doesn't fire on an empty payload — better to skip
+          # this push than to publish a zero-asset release that
+          # overwrites the previous good auto-latest.
+          if ! ls out/*.zip > /dev/null 2>&1; then
+            echo "NO ZIPS to publish — every build leg failed or was queued. Skipping."
+            echo "publish=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # Build a consolidated manifest mapping artifact → SHA256.
           # This lets a verifier `curl <release>/manifest.txt` and
           # cross-check every download in one read.
@@ -302,10 +323,13 @@ jobs:
               shasum -a 256 "$f" >> manifest.txt
             fi
           done
+          echo "publish=ok" >> "$GITHUB_OUTPUT"
           ls -la
           cat manifest.txt
+        id: prepare
 
       - name: update rolling latest release
+        if: steps.prepare.outputs.publish == 'ok'
         # The action upserts a release tagged `auto-latest` so users
         # can grab the most recent build from a stable URL. Releases
         # cut from `v*` tags via .github/workflows/release.yml are
