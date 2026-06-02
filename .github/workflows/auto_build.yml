@@ -157,6 +157,20 @@ jobs:
             C:/vcpkg/packages/openssl_arm64-windows
           key: vcpkg-openssl-arm64-windows-v1
 
+      - name: generate macOS .icns icon
+        # PyInstaller's BUNDLE() block expects a .icns for the Dock
+        # icon to render crisply at every size. Generated from the
+        # existing PNG family via macOS-native iconutil + sips so the
+        # repo never has to carry a pre-baked .icns next to the PNG
+        # (which would drift the moment someone updated the source
+        # art and forgot the regenerate step). Only runs on the
+        # macOS legs; no-op everywhere else.
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          chmod +x packaging/macos/make_icns.sh
+          packaging/macos/make_icns.sh
+
       - name: install build tooling
         shell: bash
         run: |
@@ -261,14 +275,111 @@ jobs:
             powershell -Command "Compress-Archive -Path one-link -DestinationPath ${{ matrix.artifact-name }}.zip"
           fi
 
+      - name: package macOS .dmg
+        # The PyInstaller spec now emits a BUNDLE() block on macOS so
+        # dist/one-link.app/ exists as a proper .app bundle. Wrap it
+        # in a compressed read-only .dmg with a /Applications symlink
+        # — that's the canonical "drag the app to Applications"
+        # install gesture every Mac user knows. hdiutil + ditto +
+        # iconutil are all built-in macOS tools; no homebrew, no extra
+        # CI install step.
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cd dist
+          DMG_NAME="${{ matrix.artifact-name }}.dmg"
+          chmod +x ../packaging/macos/make_dmg.sh
+          ../packaging/macos/make_dmg.sh \
+            "one-link.app" \
+            "$DMG_NAME" \
+            "One Link"
+          shasum -a 256 "$DMG_NAME" > "$DMG_NAME.sha256"
+
+      - name: sign + notarize macOS .dmg (if Apple secrets are present)
+        # Opt-in via repo secrets. APPLE_DEVELOPER_ID names the
+        # Developer ID Application certificate ("Developer ID
+        # Application: <Name> (TEAMID)"); APPLE_CERT_P12_BASE64 +
+        # APPLE_CERT_P12_PASSWORD carry the .p12 export of that cert
+        # so the runner can sign in-process. APPLE_NOTARY_USER +
+        # APPLE_NOTARY_TEAM_ID + APPLE_NOTARY_APP_PWD authenticate
+        # to Apple's notary service. Without these secrets the .dmg
+        # ships unsigned + un-notarized (users hit "right-click →
+        # Open" once on first launch) — everything still WORKS, the
+        # first-run UX is just bumpier.
+        #
+        # When secrets ARE configured, every push gets a signed +
+        # notarized .dmg with a stapled ticket so Gatekeeper
+        # validates offline. ~$99/yr Apple Developer Program
+        # membership unlocks this for the whole org. Until that's
+        # bought, the env block resolves to empty strings and the
+        # step early-exits — same documented-and-safe pattern the
+        # Windows signing step uses.
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_P12_PASSWORD: ${{ secrets.APPLE_CERT_P12_PASSWORD }}
+          APPLE_NOTARY_USER: ${{ secrets.APPLE_NOTARY_USER }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          APPLE_NOTARY_APP_PWD: ${{ secrets.APPLE_NOTARY_APP_PWD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_DEVELOPER_ID:-}" ] || [ -z "${APPLE_CERT_P12_BASE64:-}" ]; then
+            echo "[sign] Apple signing secrets not configured — shipping unsigned"
+            exit 0
+          fi
+          # Import the .p12 into a fresh keychain so we never touch
+          # the runner's default keychain (avoids cert poisoning if
+          # the cleanup step races).
+          KCHAIN="$RUNNER_TEMP/build.keychain"
+          KCHAIN_PWD="$(openssl rand -hex 24)"
+          security create-keychain -p "$KCHAIN_PWD" "$KCHAIN"
+          security set-keychain-settings -lut 21600 "$KCHAIN"
+          security unlock-keychain -p "$KCHAIN_PWD" "$KCHAIN"
+          echo "$APPLE_CERT_P12_BASE64" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
+            -k "$KCHAIN" \
+            -P "$APPLE_CERT_P12_PASSWORD" \
+            -T /usr/bin/codesign
+          security list-keychains -d user -s "$KCHAIN" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KCHAIN_PWD" "$KCHAIN"
+          # Sign the .app bundle with hardened-runtime + a timestamp.
+          codesign --deep --force --options runtime --timestamp \
+            --sign "$APPLE_DEVELOPER_ID" \
+            "dist/one-link.app"
+          # Sign the .dmg itself (Apple requires signed disk images
+          # for notarization).
+          codesign --force --sign "$APPLE_DEVELOPER_ID" --timestamp \
+            "dist/${{ matrix.artifact-name }}.dmg"
+          # Notarize. ``notarytool submit --wait`` blocks until Apple
+          # finishes (usually 1-5 min) and exits non-zero on failure.
+          if [ -n "${APPLE_NOTARY_USER:-}" ] && [ -n "${APPLE_NOTARY_APP_PWD:-}" ]; then
+            xcrun notarytool submit "dist/${{ matrix.artifact-name }}.dmg" \
+              --apple-id "$APPLE_NOTARY_USER" \
+              --team-id "$APPLE_NOTARY_TEAM_ID" \
+              --password "$APPLE_NOTARY_APP_PWD" \
+              --wait
+            # Staple the notarization ticket so Gatekeeper validates
+            # offline — users can open the .dmg with no internet.
+            xcrun stapler staple "dist/${{ matrix.artifact-name }}.dmg"
+          else
+            echo "[sign] notarization secrets not present — signed but un-notarized .dmg"
+          fi
+          # Clean up.
+          security delete-keychain "$KCHAIN" || true
+          rm -f "$RUNNER_TEMP/cert.p12"
+
       - name: upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact-name }}
           path: |
             dist/${{ matrix.artifact-name }}.zip
+            dist/${{ matrix.artifact-name }}.dmg
+            dist/${{ matrix.artifact-name }}.dmg.sha256
             dist/one-link.sha256
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
 
   # ─── Windows installer (Inno Setup) ──────────────────────────────────
@@ -449,8 +560,11 @@ jobs:
         shell: bash
         run: |
           mkdir -p out
-          # Collect every zip + sha + installer .exe into out/.
+          # Collect every distributable into out/: .zip portable
+          # bundles, .dmg macOS disk images, .exe Windows installers,
+          # plus the side-car .sha256 hashes for each.
           find artifacts -name '*.zip' -exec cp {} out/ \;
+          find artifacts -name '*.dmg' -exec cp {} out/ \;
           find artifacts -name '*.sha256' -exec cp {} out/ \;
           find artifacts -name 'one-link-setup-*.exe' -exec cp {} out/ \;
           # Guard: if no zips landed (every leg failed/was queued out),
@@ -467,7 +581,11 @@ jobs:
           # This lets a verifier `curl <release>/manifest.txt` and
           # cross-check every download in one read.
           cd out
-          for f in *.zip; do
+          # Hash everything a user might download — zips, dmgs,
+          # installer .exes. The side-car .sha256 files are per-file
+          # convenience; manifest.txt is the consolidated one.
+          for f in *.zip *.dmg one-link-setup-*.exe; do
+            [ -f "$f" ] || continue
             if command -v sha256sum >/dev/null 2>&1; then
               sha256sum "$f" >> manifest.txt
             else
@@ -519,10 +637,15 @@ jobs:
             and double-click. Per-user install, no UAC prompt, Start
             Menu shortcut. Uninstall via "Add or Remove Programs."
 
-            **Everything else (or Windows without an installer):**
-            1. Download the zip for your OS.
-            2. Unzip into a folder you control.
-            3. Double-click `one-link` / `one-link.exe`.
+            **macOS (recommended):** download `one-link-macos-arm64.dmg`
+            (Apple Silicon) or `one-link-macos-x86_64.dmg` (Intel),
+            double-click, drag One Link into Applications. First
+            launch may need right-click → Open to bypass Gatekeeper
+            until Apple-notarization secrets are configured upstream.
+
+            **Linux + portable Windows / Mac:** download the matching
+            `.zip`. Unzip, then `chmod +x one-link && ./one-link` on
+            POSIX, or double-click `one-link.exe` on Windows.
 
             No telemetry, no accounts, no servers. Quit via the tray
             icon to stop the daemon.

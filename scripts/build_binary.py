@@ -99,6 +99,9 @@ def _render_spec(
     icon: str,
     console: bool,
     forbidden_path_fragments: list[str],
+    macos_bundle: bool = False,
+    bundle_identifier: str = "earth.weareone.one-link",
+    bundle_version: str = "0.21.0",
 ) -> str:
     sep = ";" if platform.system() == "Windows" else ":"
     datas = _split_pyinstaller_pairs(add_data_args, sep)
@@ -199,6 +202,39 @@ def _render_spec(
         ")",
         "",
     ])
+    if macos_bundle:
+        # PyInstaller's BUNDLE() wraps the COLLECT output in a proper
+        # ``.app`` directory layout (Contents/MacOS/, Contents/Resources/,
+        # Contents/Info.plist) — the canonical macOS way to ship an
+        # application. Without this block, dist/ ships only a raw
+        # ``one-link/`` folder which Finder treats as a Unix-executable
+        # blob, not a clickable app. info_plist values seed Spotlight,
+        # Dock title, and `defaults read` metadata so the app feels
+        # native.
+        lines.extend([
+            "app = BUNDLE(",
+            "    coll,",
+            f"    name={name + '.app'!r},",
+            f"    icon={icon!r}," if icon else "    icon=None,",
+            f"    bundle_identifier={bundle_identifier!r},",
+            "    info_plist={",
+            f"        'CFBundleName': 'One Link',",
+            f"        'CFBundleDisplayName': 'One Link',",
+            f"        'CFBundleShortVersionString': {bundle_version!r},",
+            f"        'CFBundleVersion': {bundle_version!r},",
+            "        # No login items, no background launch agents,",
+            "        # no document type associations beyond what's",
+            "        # genuinely needed. The daemon spawns from the",
+            "        # app itself; macOS does not need to know.",
+            "        'LSMinimumSystemVersion': '11.0',",
+            "        'LSUIElement': False,",
+            "        'NSHighResolutionCapable': True,",
+            "        'NSHumanReadableCopyright': 'I am One. You are One. We are One.',",
+            "        'NSRequiresAquaSystemAppearance': False,",
+            "    },",
+            ")",
+            "",
+        ])
     return "\n".join(lines)
 
 
@@ -327,13 +363,26 @@ def main(argv: list[str] | None = None) -> int:
                   "work in the bundled binary. pip install onnxruntime first.")
 
     icon_arg: list[str] = []
-    if platform.system() in ("Windows", "Darwin"):
+    if platform.system() == "Darwin":
+        # Prefer ``.icns`` (native macOS multi-resolution icon format)
+        # over ``.ico``. PyInstaller's BUNDLE() expects .icns; .ico
+        # works for the EXE but produces a low-res Dock icon. The
+        # .icns is generated at CI time on the macOS runner via
+        # ``iconutil`` from the existing PNG family (see
+        # ``packaging/macos/make_icns.sh``); on developer machines
+        # the file may not exist yet, in which case we fall back to
+        # the .ico — still valid for the EXE icon, just less crisp.
+        icns = web_dir / "assets" / "one-glyph.icns"
         ico = web_dir / "assets" / "one-glyph.ico"
-        # Diagnostic line — without it, an icon-not-embedded build looks
-        # identical to an icon-embedded one until you open the artifact
-        # in Explorer + see the Python+floppy default. Make CI logs
-        # answer the "did the icon flag get applied?" question without
-        # downloading the zip.
+        chosen = icns if icns.is_file() else ico
+        if chosen.is_file():
+            icon_arg = ["--icon", str(chosen)]
+            print(f"[build] icon embedded: {chosen} ({chosen.stat().st_size} bytes)")
+        else:
+            print(f"[build] WARNING: no icon found at {icns} or {ico} — "
+                  f"exe will ship with the default Python+floppy icon")
+    elif platform.system() == "Windows":
+        ico = web_dir / "assets" / "one-glyph.ico"
         if ico.is_file():
             icon_arg = ["--icon", str(ico)]
             print(f"[build] icon embedded: {ico} ({ico.stat().st_size} bytes)")
@@ -453,6 +502,14 @@ def main(argv: list[str] | None = None) -> int:
         icon=str(icon_arg[1]).replace("\\", "/") if icon_arg else "",
         console=("--console" == console_flag),
         forbidden_path_fragments=forbidden_paths,
+        # On macOS, BUNDLE() wraps the COLLECT output in a proper
+        # ``one-link.app`` directory. Without this PyInstaller ships
+        # only ``dist/one-link/`` — a UNIX-executable folder that
+        # Finder won't double-click. We only set bundle mode in GUI
+        # builds; the console-binary path is for developers who want
+        # to invoke from a terminal anyway.
+        macos_bundle=(platform.system() == "Darwin" and args.gui),
+        bundle_version=__import__("one_link").__version__,
     ), encoding="utf-8")
 
     # Note: --clean intentionally omitted. PyInstaller's own --clean
