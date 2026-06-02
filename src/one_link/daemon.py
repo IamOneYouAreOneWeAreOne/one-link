@@ -198,11 +198,31 @@ log = logging.getLogger("one_link.daemon")
 
 
 def _is_benign_windows_transport_reset(exc: BaseException | None) -> bool:
-    return (
-        os.name == "nt"
-        and isinstance(exc, ConnectionResetError)
-        and getattr(exc, "winerror", None) == 10054
-    )
+    """Classify a Windows-only socket-teardown error as benign.
+
+    These fire in asyncio's ProactorEventLoop when a peer disconnects
+    or the OS cleans up an accept() whose remote endpoint went away.
+    They are not crashes — the daemon keeps serving — but the default
+    asyncio handler logs them at ERROR which spams the log and (with
+    crash_log.install_loop_hook layered on top) wrote forensic crash
+    files for non-crashes. Both kinds get suppressed here.
+
+      * WinError 10054 (WSAECONNRESET) — peer hung up mid-RW. Surfaces
+        as ``ConnectionResetError`` in
+        ``proactor_events._ProactorBasePipeTransport._call_connection_lost``.
+      * WinError 64 (ERROR_NETNAME_DELETED) — the network name on the
+        far end is no longer reachable; fires when an accept() races
+        a peer disconnect. Surfaces as ``OSError`` in
+        ``proactor_events`` accept loops.
+    """
+    if os.name != "nt" or exc is None:
+        return False
+    winerror = getattr(exc, "winerror", None)
+    if isinstance(exc, ConnectionResetError) and winerror == 10054:
+        return True
+    if isinstance(exc, OSError) and winerror == 64:
+        return True
+    return False
 
 
 def _folder_scope_from_msg(msg: dict) -> bytes:

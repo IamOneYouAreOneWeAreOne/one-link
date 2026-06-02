@@ -5151,7 +5151,14 @@
   /* v0.11.4 session-expired banner. Sits at the top of the viewport
      above all other UI so the user can't miss it. */
   .session-expired-banner {
-    position: fixed; top: 0; left: 0; right: 0;
+    /* Sits directly below the 56px app header — was previously
+       ``top: 0`` which slammed onto the One Link / Chat / Files
+       header row and made the banner unreadable. The header is a
+       fixed 56px grid row (.app grid-template-rows), so anchoring
+       there gives clean side-by-side stacking. On mobile, the safe-
+       area inset is added on top of the header padding via the
+       .top rule, so the banner still clears the notch. */
+    position: fixed; top: 56px; left: 0; right: 0;
     z-index: 9999;
     background: rgba(255,107,107,.18);
     border-bottom: 1px solid var(--bad);
@@ -12894,17 +12901,20 @@
     banner = document.createElement("div");
     banner.id = "session-expired-banner";
     banner.className = "session-expired-banner";
-    // Banner copy is deliberately about USER ACTION ("authorize this
-    // device"), not about transient link status. Doctrine of
-    // Invisibility §3.2.a keeps transport status out of the user's
-    // way - link repair is the engine's job to handle silently
-    // (which the auto-recovery layer above does for every recoverable
-    // case). The banner only ever appears now for a TRUE credential
-    // mismatch where the user must explicitly re-authorize.
+    // Honest wording: the URL's bearer token expired. One Link has
+    // NO user account / sign-in flow, so "Sign-in needed" was
+    // misleading — users reading that line thought they needed to
+    // log in to a service that doesn't have logins. The token is a
+    // per-tab access key that the daemon mints and the URL carries;
+    // when the daemon restarts or the operator rotates credentials,
+    // the existing token in the tab is no longer accepted. Reload
+    // pulls a fresh URL with a fresh token from sessionStorage (or
+    // a tray-driven restart, if the daemon itself is gone).
     banner.innerHTML = `
-      <strong>Sign-in needed for this window.</strong>
-      The security key for this window has expired. Click Reload to
-      get a fresh one, or restart One Link from the tray.
+      <strong>This tab's access key expired.</strong>
+      The daemon was restarted or its credentials were rotated.
+      Click Reload to get a fresh access key for this window, or
+      restart One Link from the tray icon.
       <button class="btn-ghost" id="session-expired-reload">Reload</button>
     `;
     document.body.appendChild(banner);

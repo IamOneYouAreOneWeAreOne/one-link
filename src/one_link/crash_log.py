@@ -255,12 +255,22 @@ def install_loop_hook(loop) -> None:
 
     def _handler(loop, context: dict) -> None:
         exc = context.get("exception")
-        # Skip the benign-suppress case — the chained handler already
-        # decided not to surface it. We mirror its decision by checking
-        # for the same downgrade path: if there's no exception object
-        # or only a 'message' field with the WSAECONNRESET marker, the
-        # prior handler will swallow it via log.debug, and we should too.
+        # Mirror the inner handler's benign-suppress decision BEFORE
+        # writing a forensic dump. Without this we write crash files
+        # for things the inner handler classifies as non-crashes
+        # (Windows socket cleanup, peer disconnect mid-handshake), and
+        # operators chasing real bugs drown in red-herring reports.
+        # The import is lazy so we don't take a circular dep at module
+        # load; the only reason crash_log might be imported before
+        # daemon is in standalone tests, which don't trigger this path.
+        is_benign = False
         if exc is not None:
+            try:
+                from one_link.daemon import _is_benign_windows_transport_reset
+                is_benign = _is_benign_windows_transport_reset(exc)
+            except Exception:
+                is_benign = False
+        if exc is not None and not is_benign:
             try:
                 dump_crash(
                     "asyncio-task",
