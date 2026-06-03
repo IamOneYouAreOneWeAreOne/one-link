@@ -144,8 +144,9 @@ jobs:
           # x86_64 — historical baseline.
           - os: ubuntu-latest
             artifact: native-wheel-linux-x86_64
-          - os: macos-13         # last Intel macOS runner
-            artifact: native-wheel-macos-x86_64
+          # macos-13 (Intel Mac native wheel) dropped — see
+          # auto_build.yml comment for the runner-pool starvation
+          # rationale.
           - os: windows-latest
             artifact: native-wheel-windows-x86_64
           # arm64 — coverage parity.
@@ -218,10 +219,8 @@ jobs:
             asset_name: one-link-windows.exe
             native_artifact: native-wheel-windows-x86_64
           # ── new architecture coverage ────────────────────────
-          - os: macos-13
-            artifact: binary-macos-x86_64
-            asset_name: one-link-macos-x86_64
-            native_artifact: native-wheel-macos-x86_64
+          # macos-13 (Intel Mac binary) dropped — see auto_build.yml
+          # comment for the runner-pool starvation rationale.
           - os: ubuntu-24.04-arm
             artifact: binary-linux-arm64
             asset_name: one-link-linux-arm64

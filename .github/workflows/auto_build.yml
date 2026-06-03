@@ -69,15 +69,21 @@ jobs:
           - os: ubuntu-latest
             artifact-name: one-link-linux-x86_64
             exe-name: one-link
-          # macOS Intel. ``macos-13`` is the last Intel-capable
-          # GitHub-hosted macOS image; macos-14+ are Apple Silicon.
-          # Apple's runner deprecation timeline keeps macos-13
-          # available through at least 2026; revisit if/when GitHub
-          # announces sunset. Covers Intel Macs (pre-M1) that the
-          # arm64 build does not run on natively.
-          - os: macos-13
-            artifact-name: one-link-macos-x86_64
-            exe-name: one-link
+          # macos-13 (Intel Mac) DROPPED from the matrix 2026-06-03.
+          # The deprecated-runner-pool starvation makes that leg sit
+          # in "queued" for 2-24 hours on every push, and
+          # ``timeout-minutes`` only fires once a job is RUNNING — so
+          # a perpetually-queued leg blocks the build job from
+          # concluding, which blocks downstream installer / publish
+          # jobs from firing, which means installers + DMGs +
+          # AppImages never reach the auto-latest release. Intel-Mac
+          # users (a shrinking population — Apple's last Intel Mac
+          # shipped 2022) can run the arm64 .dmg under Rosetta 2 or
+          # use the portable .zip. Revisit when GitHub fixes
+          # macos-13 capacity OR when ``macos-13-large`` (paid) is
+          # acceptable, OR when we ship a separate cron workflow
+          # that builds Intel Mac on a weekly schedule without
+          # gating the main release.
           # ── arm64 — added to close the coverage gap ───────────
           - os: macos-latest
             artifact-name: one-link-macos-arm64
