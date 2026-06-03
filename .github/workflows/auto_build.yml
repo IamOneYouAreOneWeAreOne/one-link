@@ -754,6 +754,9 @@ jobs:
           make_latest: false
           files: |
             out/*.zip
+            out/*.dmg
+            out/*.AppImage
+            out/one-link-setup-*.exe
             out/*.sha256
             out/manifest.txt
         env:
