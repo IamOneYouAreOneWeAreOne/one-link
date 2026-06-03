@@ -40,6 +40,21 @@ jobs:
   build:
     name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # 30-minute cap per matrix leg. The previous setup had no
+    # timeout, which combined with macos-13's deprecated-runner-pool
+    # starvation (Intel-Mac hosted runners often sit "queued" for
+    # hours and occasionally never land at all) meant a single stuck
+    # leg blocked the entire workflow from concluding — the new
+    # ``windows-installer`` + ``publish-rolling-latest`` jobs both
+    # have ``if: always()`` to handle SOME leg failing, but
+    # ``always()`` only fires when needs CONCLUDE, not when they sit
+    # queued forever. A timeout turns "stuck" into "cancelled," the
+    # build job concludes (with one leg's status: cancelled),
+    # downstream jobs fire, the auto-latest release picks up whatever
+    # zips/installers DID build. 30 min is generous for the longest
+    # real build leg (windows-11-arm at ~9 min when warmed) and
+    # short enough that a stuck queue gets caught within one cycle.
+    timeout-minutes: 30
     strategy:
       # fail-fast=false so a single platform's hiccup (rare wheel
       # missing, a transient runner outage) does not torpedo the
