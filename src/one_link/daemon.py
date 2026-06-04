@@ -582,6 +582,82 @@ def _is_transient_send_error(exc: BaseException) -> bool:
     return any(m in msg for m in transient_markers)
 
 
+_SELF_HEALING_FAILURE_MARKERS = (
+    "unsupported ratchet header version",
+    "ratchet header version",
+    "ratchet frame too short",
+    "header too short",
+    "too many skipped messages",
+    "low-order point",
+    "out-of-order delivery on current chain",
+    "replayed message",
+    "wire_version_mismatch",
+    "invalidtag",
+    "handshake timed out",
+    "did not ack",
+    "peer not responsive",
+    "connection aborted",
+    "connection reset",
+    "broken pipe",
+    "winerror 10053",
+    "winerror 10054",
+    "peer offline",
+    "peer unreachable",
+)
+
+
+def _is_self_healing_failure_signature(err_text_lower: str) -> bool:
+    """Return True iff a failed-transfer error string matches a
+    signature that the daemon recovers from on the next session
+    automatically (fresh DR ratchet, reconnect after wire-version
+    mismatch, brief handshake hiccup, etc).
+
+    Used by ``list_attention_items`` to suppress technical
+    crypto/transport errors that already self-heal. The user doesn't
+    benefit from being told "unsupported ratchet header version: 7"
+    — the system has already queued a fresh-session retry.
+    """
+    if not err_text_lower:
+        return False
+    return any(m in err_text_lower for m in _SELF_HEALING_FAILURE_MARKERS)
+
+
+def _humanize_send_error(err: object) -> str | None:
+    """Map a raw send-side error string into one short, plain-English
+    sentence suitable for the attention center / a failed-bubble pill.
+
+    Mirrors the server-side _send_error_to_payload mapping but for
+    the daemon's internal surfaces (attention, doctor reports). Never
+    returns the raw exception text — only categories we've explicitly
+    decided to surface."""
+    if not err:
+        return None
+    s = str(err).lower()
+    if "capability" in s and "disabled" in s:
+        return "this device's policy is blocking that send"
+    if "rejected" in s:
+        return "the other device is blocking this device"
+    if any(m in s for m in (
+        "ratchet header version", "ratchet frame too short",
+        "wire_version_mismatch", "invalidtag", "decrypt",
+    )):
+        return (
+            "the secure session needs to refresh — "
+            "One Link is retrying automatically"
+        )
+    if "handshake" in s or "0 bytes read" in s:
+        return "couldn't open a secure connection — retrying"
+    if "no peer" in s or "unreachable" in s or "not visible" in s:
+        return "the other device is offline — will resume when back"
+    if "timeout" in s or "timed out" in s:
+        return "the other device didn't respond in time — retrying"
+    if "offer" in s and ("timed out" in s or "unanswered" in s):
+        return "the other device didn't accept the file in time"
+    # Anything else: don't leak the raw text. Return a generic line so
+    # the attention card stays calm.
+    return "couldn't send — One Link will retry when the path is healthy"
+
+
 class TransferPausedError(RuntimeError):
     """Raised when an outbound file send is safely resumable later.
 
@@ -13829,6 +13905,32 @@ class Daemon:
                     and not meta.get("transient")
                     and not meta.get("attention_dismissed")
                 ):
+                    # 2026-06-04: a failed transfer whose error string
+                    # matches a known SELF-HEALING signature (wire
+                    # ratchet desync, AEAD decrypt mismatch, brief
+                    # handshake timeout) is auto-recoverable on the
+                    # next session and should NEVER reach the user
+                    # as an attention card. Some send paths set
+                    # status=failed without re-running it through
+                    # _is_transient_send_error (or the transient flag
+                    # got dropped during metadata merge), so we
+                    # re-classify here defensively. If the signature
+                    # matches, skip the row instead of nagging the
+                    # user about "unsupported ratchet header version: 7".
+                    err_text = str(meta.get("error") or "").lower()
+                    if _is_self_healing_failure_signature(err_text):
+                        continue
+                    # Humanize the summary so even non-matching crypto
+                    # technical text never surfaces as the visible
+                    # description. user_message (set by diagnose_transfer
+                    # / _mark_transfer_waiting) wins when present;
+                    # otherwise we run the raw error through the same
+                    # humanizer used by the chat-level error_detail.
+                    summary = (
+                        meta.get("user_message")
+                        or _humanize_send_error(meta.get("error"))
+                        or "couldn't send — try again or check you're both online"
+                    )
                     items.append({
                         "transfer_id": t.id,
                         "kind": "failed_needs_action",
@@ -13837,11 +13939,7 @@ class Daemon:
                         "size": int(t.size or 0),
                         "peer_fp": t.peer_fp,
                         "peer_label": self._peer_label_for_fp(t.peer_fp),
-                        "summary": (
-                            meta.get("user_message")
-                            or meta.get("error")
-                            or "couldn't send — try again or check you're both online"
-                        )[:160],
+                        "summary": summary[:160],
                         "actions": ["dismiss", "retry"],
                         "since_ms": age,
                     })
@@ -20814,13 +20912,23 @@ class Daemon:
                 else f"dial failed: {err_msg}"
             )
             transient = _is_transient_send_error(e)
+            # 2026-06-04: defensive re-classification (see twin block
+            # in the send-loop path). Some wrapped exceptions hide
+            # the marker substring _is_transient_send_error keys off;
+            # checking the lowered error text directly catches them.
+            if not transient and _is_self_healing_failure_signature(err_msg.lower()):
+                transient = True
+            humanized = _humanize_send_error(err_msg)
             if transient:
                 self._mark_transfer_waiting(
                     transfer_id,
                     path=path,
                     error=ledger_msg,
                     error_class=err_class,
-                    base_metadata=base_metadata,
+                    base_metadata={
+                        **base_metadata,
+                        **({"user_message": humanized} if humanized else {}),
+                    },
                 )
             else:
                 self._update_transfer(
@@ -20831,6 +20939,7 @@ class Daemon:
                         "error_class": err_class,
                         "transient": False,
                         "delivery_state": "needs_attention",
+                        **({"user_message": humanized} if humanized else {}),
                     },
                 )
             if transient:
@@ -22349,13 +22458,27 @@ class Daemon:
                 self._transfer_perf.observe_failure(
                     method=str(base_metadata.get("actual_method") or actual_method),
                 )
+            # 2026-06-04: if the failure looks self-healing (ratchet
+            # desync, AEAD InvalidTag, brief handshake hiccup) treat
+            # as transient even if _is_transient_send_error missed
+            # it — wrapped exceptions sometimes strip the marker.
+            # Also stamp a friendly user_message so any surface that
+            # reads metadata (bubble status pill, doctor report)
+            # gets plain English instead of "unsupported ratchet
+            # header version: 7".
+            if not transient and _is_self_healing_failure_signature(err_str.lower()):
+                transient = True
+            humanized = _humanize_send_error(err_str)
             if transient:
                 self._mark_transfer_waiting(
                     transfer_id,
                     path=path,
                     error=err_str,
                     error_class=err_class,
-                    base_metadata=base_metadata,
+                    base_metadata={
+                        **base_metadata,
+                        **({"user_message": humanized} if humanized else {}),
+                    },
                 )
             else:
                 self._update_transfer(
@@ -22367,6 +22490,7 @@ class Daemon:
                         "error_class": err_class,
                         "transient": False,
                         "delivery_state": "needs_attention",
+                        **({"user_message": humanized} if humanized else {}),
                     },
                 )
             # v0.7.0: a mid-stream failure leaves the session in an
