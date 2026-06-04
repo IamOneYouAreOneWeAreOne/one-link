@@ -6214,6 +6214,70 @@
     font-size: 12px;
   }
   .md-preview a { color: var(--accent-2); text-decoration: underline; }
+  /* 2026-06-04: chat-bubble overrides. The .md-preview baseline above
+     is sized for a file-preview pane; reuse the renderer for chat
+     messages but tighten spacing and shrink headings so a 3-paragraph
+     pasted note doesn't tower over a one-line "ok" sibling bubble. */
+  .msg .md-chat {
+    /* The bubble itself has white-space: pre-wrap (so plain-text
+       messages keep newlines). The markdown renderer produces real
+       block elements — we don't want pre-wrap eating the implicit
+       margins between them. Reset to normal inside .md-chat; the
+       block elements (p / li / pre / etc.) handle their own
+       wrapping. */
+    white-space: normal;
+  }
+  .msg .md-chat > :first-child { margin-top: 0; }
+  .msg .md-chat > :last-child  { margin-bottom: 0; }
+  .msg .md-chat h1, .msg .md-chat h2, .msg .md-chat h3,
+  .msg .md-chat h4, .msg .md-chat h5, .msg .md-chat h6 {
+    margin: 10px 0 4px;
+    line-height: 1.25;
+  }
+  .msg .md-chat h1 { font-size: 17px; }
+  .msg .md-chat h2 { font-size: 15px; }
+  .msg .md-chat h3 { font-size: 14px; }
+  .msg .md-chat h4, .msg .md-chat h5, .msg .md-chat h6 { font-size: 13px; }
+  .msg .md-chat p { margin: 0 0 6px; }
+  .msg .md-chat ul, .msg .md-chat ol { margin: 0 0 6px 22px; padding: 0; }
+  .msg .md-chat li { margin-bottom: 2px; }
+  .msg .md-chat li p { margin: 0; }  /* paragraphs inside list items shouldn't double-space */
+  .msg .md-chat pre {
+    /* Slightly darker than the bubble so code stands out, but
+       respect the out-bubble accent vs in-bubble dark scheme. The
+       file-preview pane uses --bg-2 which is too dark on the
+       accent-coloured outgoing bubbles. */
+    background: rgba(0, 0, 0, 0.22);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin: 4px 0 6px;
+    overflow-x: auto;
+    font-size: 12.5px;
+  }
+  .msg.out .md-chat pre { background: rgba(0, 0, 0, 0.28); }
+  .msg .md-chat code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12.5px;
+  }
+  .msg .md-chat :not(pre) > code {
+    background: rgba(255, 255, 255, 0.10);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  .msg.out .md-chat :not(pre) > code { background: rgba(0, 0, 0, 0.22); }
+  .msg .md-chat blockquote {
+    border-left: 3px solid var(--accent);
+    margin: 4px 0 6px;
+    padding: 2px 10px;
+    color: inherit;
+    opacity: 0.85;
+  }
+  .msg .md-chat hr {
+    border: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.18);
+    margin: 8px 0;
+  }
+  .msg.out .md-chat a { color: white; text-decoration: underline; }
   /* Code preview with line-number gutter. */
   .code-preview {
     display: flex;
@@ -16040,17 +16104,39 @@
   // ephemeral state; nothing persisted.
   const COLLAPSE_CHARS = 600;
   const COLLAPSE_LINES = 8;
+  // 2026-06-04: detect when a message has block-level markdown
+  // structure (headings, lists, blockquotes, fenced code, rules).
+  // Casual messages with no markers still go through the lighter
+  // inline path so they don't get rewrapped as <p> tags. Anything
+  // a user is likely to PASTE (a writeup, a doc, a Claude/ChatGPT
+  // answer) almost always has one of these markers and lights up
+  // the full markdown renderer for proper structure.
+  const _MD_BLOCK_RE = /^(?:#{1,6}\s|[-*+]\s|\d+\.\s|>\s?|```|(-{3,}|\*{3,}|_{3,})\s*$)/m;
+  function _looksLikeMarkdown(text) {
+    if (!text) return false;
+    return _MD_BLOCK_RE.test(text);
+  }
+  function _renderChatBody(text) {
+    if (_looksLikeMarkdown(text)) {
+      const node = renderMarkdownDoc(text);
+      // Tag so chat-specific CSS overrides apply (tighter margins,
+      // smaller heading sizes than the file-preview pane).
+      node.classList.add("md-chat");
+      return node;
+    }
+    return renderInlineText(text);
+  }
   function appendCollapsibleText(parent, body) {
     const text = body || "";
     const lines = text.split("\n").length;
     const long = text.length > COLLAPSE_CHARS || lines > COLLAPSE_LINES;
     if (!long) {
-      parent.appendChild(renderInlineText(text));
+      parent.appendChild(_renderChatBody(text));
       return;
     }
     const wrap = document.createElement("div");
     wrap.className = "msg-body collapsible collapsed";
-    wrap.appendChild(renderInlineText(text));
+    wrap.appendChild(_renderChatBody(text));
     parent.appendChild(wrap);
     const toggle = document.createElement("button");
     toggle.type = "button";
@@ -16082,20 +16168,30 @@
     }
   }
   function renderInlineMarks(text, frag) {
-    // Collect non-overlapping ranges for url / bold / italic.
-    const URL_RE  = /\bhttps?:\/\/[^\s<>"']+|\bwww\.[^\s<>"']+/gi;
-    const BOLD_RE = /\*\*([^*\n]+)\*\*/g;
-    const ITAL_RE = /(?:^|[\s(\[{])_([^_\n]+)_(?=$|[\s).,!?:;\]}])/g;
+    // Collect non-overlapping ranges for url / link / bold / italic /
+    // strikethrough. ``LINK_RE`` is checked BEFORE the autolink URL_RE
+    // so a markdown [text](url) match wins over the raw-URL fallback;
+    // the ranges.sort + dedup pass below also drops any URL match
+    // that overlaps an earlier link.
+    const URL_RE   = /\bhttps?:\/\/[^\s<>"')\]]+|\bwww\.[^\s<>"')\]]+/gi;
+    const LINK_RE  = /\[([^\]\n]+)\]\(([^)\s]+)\)/g;
+    const BOLD_RE  = /\*\*([^*\n]+)\*\*/g;
+    const ITAL_RE  = /(?:^|[\s(\[{])_([^_\n]+)_(?=$|[\s).,!?:;\]}])/g;
+    const STRIKE_RE = /~~([^~\n]+)~~/g;
     const ranges = [];
     let m;
-    while ((m = URL_RE.exec(text))  !== null) ranges.push({s: m.index, e: m.index + m[0].length, t: "url",  raw: m[0]});
-    while ((m = BOLD_RE.exec(text)) !== null) ranges.push({s: m.index, e: m.index + m[0].length, t: "bold", raw: m[1]});
-    while ((m = ITAL_RE.exec(text)) !== null) {
+    while ((m = LINK_RE.exec(text))  !== null) ranges.push({s: m.index, e: m.index + m[0].length, t: "link", raw: m[1], href: m[2]});
+    while ((m = URL_RE.exec(text))   !== null) ranges.push({s: m.index, e: m.index + m[0].length, t: "url",  raw: m[0]});
+    while ((m = BOLD_RE.exec(text))  !== null) ranges.push({s: m.index, e: m.index + m[0].length, t: "bold", raw: m[1]});
+    while ((m = ITAL_RE.exec(text))  !== null) {
       // Italic match includes a leading whitespace/open-bracket; offset start.
       const lead = m[0].length - (m[1].length + 2);
       ranges.push({s: m.index + lead, e: m.index + m[0].length, t: "ital", raw: m[1]});
     }
-    ranges.sort((a, b) => a.s - b.s);
+    while ((m = STRIKE_RE.exec(text)) !== null) ranges.push({s: m.index, e: m.index + m[0].length, t: "strike", raw: m[1]});
+    // Sort with link/url winning the tie so a URL captured inside a
+    // markdown link's URL slot doesn't double-render.
+    ranges.sort((a, b) => a.s - b.s || (a.e - b.e));
     const kept = [];
     let cursor = 0;
     for (const r of ranges) {
@@ -16103,10 +16199,30 @@
       kept.push(r);
       cursor = r.e;
     }
+    function _safeHref(href) {
+      // Reject javascript:/data: URIs. Anything else (http, https,
+      // mailto, even relative paths) is fine.
+      const trimmed = String(href || "").trim();
+      if (/^(javascript:|data:|vbscript:)/i.test(trimmed)) return null;
+      return trimmed;
+    }
     let pos = 0;
     for (const r of kept) {
       if (r.s > pos) frag.appendChild(document.createTextNode(text.slice(pos, r.s)));
-      if (r.t === "url") {
+      if (r.t === "link") {
+        const href = _safeHref(r.href);
+        if (!href) {
+          // Unsafe scheme — render as plain text, no anchor.
+          frag.appendChild(document.createTextNode(text.slice(r.s, r.e)));
+        } else {
+          const a = document.createElement("a");
+          a.href = href;
+          a.textContent = r.raw;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          frag.appendChild(a);
+        }
+      } else if (r.t === "url") {
         const a = document.createElement("a");
         const href = r.raw.startsWith("www.") ? "https://" + r.raw : r.raw;
         a.href = href;
@@ -16122,6 +16238,10 @@
         const i = document.createElement("em");
         i.textContent = r.raw;
         frag.appendChild(i);
+      } else if (r.t === "strike") {
+        const s = document.createElement("s");
+        s.textContent = r.raw;
+        frag.appendChild(s);
       }
       pos = r.e;
     }
@@ -31846,28 +31966,199 @@
     }
   }
 
-  // Paste - stage instead of auto-send.
+  // 2026-06-04: HTML-to-markdown converter for rich-text paste.
+  //
+  // When the user pastes from a rendered web page (ChatGPT, Claude,
+  // GitHub, docs) the clipboard contains BOTH ``text/plain`` (which
+  // the browser hands the textarea by default) and ``text/html``
+  // (the source's actual DOM). The plain-text serialisation loses
+  // a lot of structure: bullets become inline, headings lose their
+  // weight, code blocks merge with prose. We grab the HTML version
+  // when present and walk it into clean markdown text — bullets
+  // become "- ", headings become "# ", code stays fenced — so the
+  // chat renderer's markdown path (see ``_renderChatBody``) can
+  // restore the original look on the receiver's side.
+  //
+  // Deliberately conservative: drops scripts/styles, ignores
+  // unknown tags (default case = recurse into children, no
+  // formatting), no inline-style introspection. Anything we
+  // don't recognise degrades to plain text, never to broken HTML.
+  function _htmlToMarkdown(html) {
+    let scratch;
+    try {
+      scratch = document.createElement("div");
+      scratch.innerHTML = html;
+    } catch (_) {
+      return "";
+    }
+    // Strip dangerous / noisy elements before walking.
+    scratch.querySelectorAll(
+      "script, style, link, meta, iframe, noscript, head, title, svg"
+    ).forEach((n) => n.remove());
+    const out = _walkToMd(scratch).trim();
+    // Collapse runs of >2 blank lines (paste from Word / Google Docs
+    // tends to spam blank <p>s); keep at most one blank line between
+    // blocks.
+    return out.replace(/\n{3,}/g, "\n\n");
+  }
+  function _walkToMd(node) {
+    if (!node) return "";
+    if (node.nodeType === Node.TEXT_NODE) {
+      // Collapse whitespace inside text nodes — HTML inline text
+      // is whitespace-insensitive, and preserving the original
+      // newlines would inject random hard breaks inside paragraphs.
+      // The structural newlines come from block-element wrappers
+      // (p / h* / li / pre).
+      return (node.textContent || "").replace(/\s+/g, " ");
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return "";
+    const tag = node.tagName.toLowerCase();
+    const kids = () => Array.from(node.childNodes).map(_walkToMd).join("");
+    switch (tag) {
+      case "br": return "\n";
+      case "p": case "div": case "section": case "article": case "header":
+      case "footer": case "main": case "aside":
+        return "\n" + kids().trim() + "\n";
+      case "h1": return "\n\n# "      + kids().trim() + "\n\n";
+      case "h2": return "\n\n## "     + kids().trim() + "\n\n";
+      case "h3": return "\n\n### "    + kids().trim() + "\n\n";
+      case "h4": return "\n\n#### "   + kids().trim() + "\n\n";
+      case "h5": return "\n\n##### "  + kids().trim() + "\n\n";
+      case "h6": return "\n\n###### " + kids().trim() + "\n\n";
+      case "strong": case "b": {
+        const t = kids().trim();
+        return t ? "**" + t + "**" : "";
+      }
+      case "em": case "i": {
+        const t = kids().trim();
+        return t ? "_" + t + "_" : "";
+      }
+      case "code": {
+        // Inline code only; <pre><code> is handled by the <pre> arm.
+        if (node.parentElement && node.parentElement.tagName.toLowerCase() === "pre") {
+          return kids();
+        }
+        return "`" + (node.textContent || "") + "`";
+      }
+      case "pre": {
+        // Use raw textContent so leading whitespace + newlines inside
+        // the code block survive. The text-node collapser would
+        // otherwise flatten the indentation.
+        const raw = (node.textContent || "").replace(/\n+$/, "");
+        return "\n\n```\n" + raw + "\n```\n\n";
+      }
+      case "blockquote": {
+        const inner = kids().trim();
+        const quoted = inner
+          .split("\n")
+          .map((l) => (l ? "> " + l : ">"))
+          .join("\n");
+        return "\n\n" + quoted + "\n\n";
+      }
+      case "ul": {
+        const items = Array.from(node.children).filter((c) => c.tagName === "LI");
+        const lines = items.map((li) => "- " + _walkToMd(li).trim().replace(/\n+/g, " "));
+        return "\n\n" + lines.join("\n") + "\n\n";
+      }
+      case "ol": {
+        const items = Array.from(node.children).filter((c) => c.tagName === "LI");
+        const lines = items.map((li, idx) =>
+          (idx + 1) + ". " + _walkToMd(li).trim().replace(/\n+/g, " ")
+        );
+        return "\n\n" + lines.join("\n") + "\n\n";
+      }
+      case "li": return kids();
+      case "a": {
+        const href = (node.getAttribute("href") || "").trim();
+        const txt = kids().trim();
+        if (!href || href === txt) return txt;
+        // Skip in-page anchors and pure javascript: links.
+        if (/^(javascript:|#)/i.test(href)) return txt;
+        return "[" + txt + "](" + href + ")";
+      }
+      case "hr": return "\n\n---\n\n";
+      case "img": {
+        const alt = (node.getAttribute("alt") || "").trim();
+        return alt ? "[image: " + alt + "]" : "";
+      }
+      case "table": {
+        const rows = Array.from(node.querySelectorAll("tr"));
+        if (!rows.length) return "";
+        const cellsOf = (tr) =>
+          Array.from(tr.children)
+            .filter((c) => c.tagName === "TD" || c.tagName === "TH")
+            .map((td) => _walkToMd(td).trim().replace(/\n+/g, " ").replace(/\|/g, "\\|"));
+        const lines = rows.map((tr) => "| " + cellsOf(tr).join(" | ") + " |");
+        if (lines.length >= 2) {
+          const ncols = cellsOf(rows[0]).length;
+          lines.splice(1, 0, "|" + " --- |".repeat(ncols));
+        }
+        return "\n\n" + lines.join("\n") + "\n\n";
+      }
+      case "del": case "s": case "strike": {
+        const t = kids().trim();
+        return t ? "~~" + t + "~~" : "";
+      }
+      default: return kids();
+    }
+  }
+
+  // Paste - stage files OR convert rich-text HTML to markdown text.
   function handlePasteImage(e) {
     if (!state.selectedPeer) return false;
-    const items = e.clipboardData?.items;
-    if (!items) return false;
+    const cd = e.clipboardData;
+    if (!cd) return false;
+    const items = cd.items;
+    // Files first (existing behaviour: paste an image → stage attachment).
     let attached = false;
-    for (const item of items) {
-      if (item.kind !== "file") continue;
-      const file = item.getAsFile();
-      if (!file) continue;
-      const ext = (file.type || "image/png").split("/")[1] || "png";
-      const named = file.name && file.name.length > 0
-        ? file
-        : new File([file], `pasted-${Date.now()}.${ext}`, { type: file.type });
-      stageFile(named);
-      attached = true;
+    if (items) {
+      for (const item of items) {
+        if (item.kind !== "file") continue;
+        const file = item.getAsFile();
+        if (!file) continue;
+        const ext = (file.type || "image/png").split("/")[1] || "png";
+        const named = file.name && file.name.length > 0
+          ? file
+          : new File([file], `pasted-${Date.now()}.${ext}`, { type: file.type });
+        stageFile(named);
+        attached = true;
+      }
     }
     if (attached) {
       e.preventDefault();
       return true;
     }
-    return false;
+    // 2026-06-04: rich-text → markdown. Only fires when (a) the paste
+    // target is OUR composer (avoid hijacking other inputs), (b) the
+    // clipboard has an HTML version, and (c) the HTML is non-trivially
+    // richer than the plain-text serialisation (otherwise plain text
+    // is fine and we don't want to spend cycles on a no-op).
+    const target = e.target;
+    if (target !== $("#input")) return false;
+    let html = "";
+    try { html = cd.getData("text/html") || ""; } catch (_) {}
+    if (!html) return false;
+    let plain = "";
+    try { plain = cd.getData("text/plain") || ""; } catch (_) {}
+    const md = _htmlToMarkdown(html);
+    // If the plain-text version already has all the structure
+    // markers (paste from a markdown editor, plain TXT file, etc.)
+    // don't replace it — the user's source is the truth.
+    if (!md || md === plain.trim()) return false;
+    // Insert at the cursor instead of replacing the whole field.
+    const ta = target;
+    const start = ta.selectionStart ?? ta.value.length;
+    const end   = ta.selectionEnd   ?? ta.value.length;
+    const before = ta.value.slice(0, start);
+    const after  = ta.value.slice(end);
+    ta.value = before + md + after;
+    const cursor = start + md.length;
+    ta.selectionStart = ta.selectionEnd = cursor;
+    // Notify any input-event listeners (autosize, send-button enable,
+    // typing-indicator debounce) so the composer state updates.
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    e.preventDefault();
+    return true;
   }
   $("#input").addEventListener("paste", handlePasteImage);
   // v0.12.3: typing indicator. Fires on every non-empty input
