@@ -7882,6 +7882,28 @@ class UIServer:
                     if stored is not None:
                         user_pref = str(stored)
             autoinstall_enabled = user_pref not in ("0", "false", "no")
+        # 2026-06-04: surface the install method so the UI's update
+        # modal can pick the right CTA. ``frozen`` = PyInstaller .exe
+        # / .app / .AppImage (the installer build — the majority);
+        # ``source`` = a working tree with the .py files visible;
+        # ``pip`` = a normal pip install in a venv / system Python.
+        # We default to ``frozen`` when sys.frozen is set (PyInstaller
+        # boot loader pins it), ``pip`` when the package was loaded
+        # from a site-packages path, ``source`` otherwise. The UI
+        # treats unknown / frozen identically (show the installer
+        # CTA); only pip/source gets the pip-upgrade hint.
+        import sys as _sys
+        if getattr(_sys, "frozen", False):
+            install_method = "frozen"
+        else:
+            try:
+                import one_link as _ol_pkg
+                _ol_dir = (getattr(_ol_pkg, "__file__", "") or "").lower()
+                install_method = (
+                    "pip" if "site-packages" in _ol_dir else "source"
+                )
+            except Exception:
+                install_method = "source"
         return web.json_response({
             "short_id": me.short_id,
             "fingerprint": me.fingerprint,
@@ -7899,6 +7921,7 @@ class UIServer:
             "presence": self.daemon.get_my_presence(),
             "suggested_folder": suggested_folder,
             "autoinstall_enabled": autoinstall_enabled,
+            "install_method": install_method,
         })
 
     def _one_setup_snapshot(self) -> dict[str, Any]:
@@ -20378,11 +20401,33 @@ class UIServer:
         # 'self' origin is the only one that can ever hit this route
         # (loopback bound + token gate), so same-origin framing is
         # the maximum safe widening.
-        return web.FileResponse(path, headers={
+        headers = {
             "Content-Type": mime,
             "X-Frame-Options": "SAMEORIGIN",
             "Content-Security-Policy": "frame-ancestors 'self'",
-        })
+        }
+        # 2026-06-04: ``?dl=1`` forces a save-to-Downloads on click.
+        # Without an explicit Content-Disposition the browser uses
+        # the <a download> attribute as a hint only — Edge in
+        # particular ignores it for PDFs/images and opens them
+        # inline, defeating the "↓" download button in the bubble
+        # actions. With dl=1 we emit attachment + RFC 5987-encoded
+        # filename so the original display name (the post-prefix
+        # name, not the inbox-mangled on-disk name) is what lands
+        # in the Downloads folder.
+        if request.query.get("dl") == "1":
+            from urllib.parse import quote as _urlquote
+            display = request.query.get("name") or path.name
+            try:
+                ascii_name = display.encode("ascii").decode("ascii")
+                fallback_disp = f'filename="{ascii_name}"'
+            except UnicodeEncodeError:
+                fallback_disp = 'filename="download"'
+            quoted = _urlquote(display, safe="")
+            headers["Content-Disposition"] = (
+                f"attachment; {fallback_disp}; filename*=UTF-8''{quoted}"
+            )
+        return web.FileResponse(path, headers=headers)
 
     @staticmethod
     def _mime_for_blob(ext_hint: str | None, name_hint: str | None) -> str:
@@ -20429,6 +20474,31 @@ class UIServer:
             "X-Frame-Options": "SAMEORIGIN",
             "Content-Security-Policy": "frame-ancestors 'self'",
         }
+        # 2026-06-04: same ?dl=1 ↦ Content-Disposition: attachment
+        # contract as api_file_download, so the chat UI's content-
+        # addressed download path also forces a save-to-Downloads
+        # instead of inline-open. Computed once and merged into
+        # whichever FileResponse path wins below.
+        def _disposition_headers(name_for_save: str | None) -> dict:
+            if request.query.get("dl") != "1":
+                return {}
+            from urllib.parse import quote as _urlquote
+            display = (
+                request.query.get("name")
+                or name_for_save
+                or f"file-{blob[:12]}"
+            )
+            try:
+                ascii_name = display.encode("ascii").decode("ascii")
+                fallback_disp = f'filename="{ascii_name}"'
+            except UnicodeEncodeError:
+                fallback_disp = 'filename="download"'
+            quoted = _urlquote(display, safe="")
+            return {
+                "Content-Disposition": (
+                    f"attachment; {fallback_disp}; filename*=UTF-8''{quoted}"
+                ),
+            }
         # 1) Ledger path — covers ordinary peer-to-peer received files
         #    (they land in the inbox, not the blob store).
         rec = None
@@ -20440,9 +20510,11 @@ class UIServer:
                 path = Path(path_str)
                 if path.is_file():
                     mime = self._mime_for_blob(ext_hint, rec.name)
-                    return web.FileResponse(
-                        path, headers={"Content-Type": mime, **frame_headers},
-                    )
+                    return web.FileResponse(path, headers={
+                        "Content-Type": mime,
+                        **frame_headers,
+                        **_disposition_headers(rec.name),
+                    })
         # 2) Blob store — folder-sync + pinned-peer content.
         blob_store = getattr(self.daemon, "blob_store", None)
         if (
@@ -20453,7 +20525,11 @@ class UIServer:
             mime = self._mime_for_blob(ext_hint, rec.name if rec else None)
             return web.FileResponse(
                 blob_store.path(blob),
-                headers={"Content-Type": mime, **frame_headers},
+                headers={
+                    "Content-Type": mime,
+                    **frame_headers,
+                    **_disposition_headers(rec.name if rec else None),
+                },
             )
         return web.json_response({"error": "not found"}, status=404)
 
@@ -21320,28 +21396,38 @@ class UIServer:
         from one_link import __version__ as _local_ver
         from one_link.update_check import fetch_latest
 
-        # May 15 2026 — sovereignty default. /api/update/check is the
-        # path the UI's Settings panel and footer banner poll on
-        # tab-load. Honor the same opt-in gate the boot-time loop
-        # uses: env ONE_LINK_UPDATE_CHECK=1 OR setting
-        # update_check_enabled=1. Otherwise return status=disabled
-        # without touching the network.
-        env_on = _os.environ.get(
-            "ONE_LINK_UPDATE_CHECK", ""
-        ).strip().lower() in ("1", "true", "yes", "on")
-        setting_on = False
+        # 2026-06-04: honor the sovereignty preset DEFAULT instead of
+        # requiring an explicit opt-in. The just_works preset
+        # description literally says "You'll see a small note when a
+        # new version of One Link is available" — the previous
+        # implementation required env-var OR a manually-set setting,
+        # so fresh installs silently never checked. Now the resolver
+        # is the single source of truth: explicit user setting wins,
+        # then env var, then the preset default. Result: just_works
+        # users get updates by default; quiet / off_grid users are
+        # silent unless they opt in.
+        from one_link import sovereignty as _sov
+        setting_val: str | None = None
+        preset: str | None = None
         if self.daemon.state is not None:
             with contextlib.suppress(Exception):
-                setting_on = (self.daemon.state.get_setting(
+                setting_val = self.daemon.state.get_setting(
                     "update_check_enabled"
-                ) or "").strip().lower() in ("1", "true", "yes", "on")
-        if not (env_on or setting_on):
+                )
+            with contextlib.suppress(Exception):
+                preset = self.daemon.state.get_setting("sovereignty_preset")
+        enabled = _sov.resolve_update_check_enabled(
+            state_setting=setting_val,
+            env_var=_os.environ.get("ONE_LINK_UPDATE_CHECK"),
+            preset_name=preset,
+        )
+        if not enabled:
             return web.json_response({
                 "status": "disabled",
                 "local_version": _local_ver,
                 "reason": (
-                    "update-check disabled by default for sovereignty. "
-                    "Enable in Settings or set ONE_LINK_UPDATE_CHECK=1."
+                    "update-check disabled by your sovereignty preset. "
+                    "Enable in Settings → Privacy → Auto-update check."
                 ),
             })
 

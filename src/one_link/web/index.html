@@ -5028,6 +5028,198 @@
   }
   .update-banner .dismiss:hover { color: var(--text); }
 
+  /* 2026-06-04: VS Code-style header update chip. Hidden by default;
+     ``.show`` reveals it. Sits in the header's right-hand .me cluster
+     so it reads as an inline status affordance, not a full-width
+     interruption. The orange tint matches the top banner so a user
+     who has dismissed the banner still sees the same hue here. */
+  .header-update-chip {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(245, 196, 81, .55);
+    background: linear-gradient(180deg, rgba(245,196,81,.18), rgba(245,196,81,.10));
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+    transition: transform .12s ease, box-shadow .12s ease, background .12s ease;
+    position: relative;
+  }
+  .header-update-chip.show { display: inline-flex; }
+  .header-update-chip:hover {
+    background: linear-gradient(180deg, rgba(245,196,81,.30), rgba(245,196,81,.18));
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(245, 196, 81, .15);
+  }
+  .header-update-chip:focus-visible {
+    outline: 2px solid var(--warn);
+    outline-offset: 2px;
+  }
+  .header-update-chip svg { color: var(--warn); }
+  .header-update-chip .hu-label { letter-spacing: .2px; }
+  .header-update-chip .hu-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--warn);
+    box-shadow: 0 0 0 0 rgba(245, 196, 81, .85);
+    animation: hu-pulse 2.2s ease-out infinite;
+  }
+  @keyframes hu-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(245, 196, 81, .65); }
+    70%  { box-shadow: 0 0 0 9px rgba(245, 196, 81, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(245, 196, 81, 0); }
+  }
+  /* Hide the label on narrow viewports — keep the icon + pulse so
+     the affordance still reads as "something here." */
+  @media (max-width: 540px) {
+    .header-update-chip .hu-label { display: none; }
+  }
+
+  /* Update modal — opens when the chip / banner action is clicked.
+     Shows version diff, release notes, and a one-click installer
+     download CTA. Built so end users on installer builds get the
+     right thing (link to website /download/auto), and dev users
+     on pip installs see the pip command instead. */
+  .update-modal-backdrop {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0, 0, 0, .65);
+    z-index: 10001;
+    align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .update-modal-backdrop.show { display: flex; }
+  .update-modal {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: 0 24px 64px rgba(0,0,0,.55);
+    max-width: 560px;
+    width: 100%;
+    max-height: 80vh;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .update-modal-header {
+    padding: 18px 22px 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .update-modal-header h2 {
+    margin: 0 0 4px;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .update-modal-header .um-version {
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  .update-modal-header .um-version code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    background: rgba(255,255,255,.08);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .update-modal-body {
+    padding: 14px 22px;
+    overflow-y: auto;
+    flex: 1;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .update-modal-body .um-notes {
+    max-height: 320px;
+    overflow-y: auto;
+    background: rgba(0,0,0,.18);
+    padding: 12px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    font-size: 12.5px;
+  }
+  .update-modal-body .um-notes h1,
+  .update-modal-body .um-notes h2,
+  .update-modal-body .um-notes h3 {
+    font-size: 14px;
+    margin: 8px 0 4px;
+  }
+  .update-modal-body .um-notes p { margin: 0 0 6px; }
+  .update-modal-body .um-notes ul,
+  .update-modal-body .um-notes ol { margin: 0 0 6px 20px; padding: 0; }
+  .update-modal-body .um-notes li { margin-bottom: 2px; }
+  .update-modal-body .um-notes code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    background: rgba(255,255,255,.10);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .update-modal-body .um-notes pre {
+    background: rgba(0,0,0,.30);
+    border-radius: 6px;
+    padding: 8px 10px;
+    overflow-x: auto;
+    font-size: 12px;
+  }
+  .update-modal-body .um-loading,
+  .update-modal-body .um-notes-error {
+    font-style: italic;
+    color: var(--text-dim);
+    padding: 12px 0;
+  }
+  .update-modal-body .um-howto {
+    margin-top: 12px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .update-modal-body .um-howto code {
+    user-select: all;
+  }
+  .update-modal-footer {
+    padding: 12px 22px 18px;
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    border-top: 1px solid var(--line);
+  }
+  .update-modal-footer button,
+  .update-modal-footer a {
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    border: 0;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .update-modal-footer .um-cancel {
+    background: transparent;
+    color: var(--text-dim);
+  }
+  .update-modal-footer .um-cancel:hover { color: var(--text); }
+  .update-modal-footer .um-download {
+    background: var(--warn);
+    color: white;
+  }
+  .update-modal-footer .um-download:hover {
+    filter: brightness(1.05);
+  }
+  .update-modal-footer .um-release-link {
+    background: transparent;
+    color: var(--accent-2);
+    border: 1px solid var(--line);
+  }
+  .update-modal-footer .um-release-link:hover {
+    background: rgba(78,193,255,.08);
+  }
+
   /* v0.21.x: identity-rotation status banner. Same shape as
      .update-banner (top-fixed, dismissible, accent-bordered) but
      informational rather than calling for action. Shown whenever
@@ -6828,6 +7020,19 @@
   }
   .msg.file .actions button:hover, .msg.file .actions a:hover {
     background: rgba(255,255,255,.18);
+  }
+  /* 2026-06-04: download "↓ + tray" icon button. Tight padding, SVG
+     centered, square-ish footprint so it reads as a glyph between
+     the textual Open / Show in folder buttons. */
+  .msg.file .actions a.btn-download-arrow {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 8px;
+    line-height: 1;
+  }
+  .msg.file .actions a.btn-download-arrow svg {
+    display: block;
   }
   .msg.file .img-preview {
     margin-top: 6px;
@@ -9125,6 +9330,50 @@
     </div>
   </div>
 
+  <!-- 2026-06-04: Update modal — opens from the header chip or the
+       banner's primary action. Shows version diff + release notes
+       (fetched from the GitHub Releases payload) + the right CTA
+       for the current install method (installer download URL for
+       frozen builds; pip command for source installs). Keyboard
+       accessible: Esc to close, Tab through actions. -->
+  <div class="update-modal-backdrop" id="update-modal-backdrop"
+       role="dialog" aria-modal="true" aria-labelledby="update-modal-title">
+    <div class="update-modal">
+      <div class="update-modal-header">
+        <h2 id="update-modal-title">A newer One Link is ready</h2>
+        <div class="um-version">
+          Update from <code id="um-current-version">…</code>
+          to <code id="um-latest-version">…</code>
+        </div>
+      </div>
+      <div class="update-modal-body">
+        <div class="um-notes" id="um-notes">
+          <div class="um-loading">Loading release notes…</div>
+        </div>
+        <div class="um-howto" id="um-howto"></div>
+      </div>
+      <div class="update-modal-footer">
+        <button class="um-cancel" id="update-modal-cancel" type="button">Later</button>
+        <a class="um-release-link" id="update-modal-release-link"
+           href="https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest"
+           target="_blank" rel="noopener noreferrer">View on GitHub</a>
+        <a class="um-download" id="update-modal-download"
+           href="https://weareone-link.org/download/auto"
+           target="_blank" rel="noopener noreferrer">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.2"
+               stroke-linecap="round" stroke-linejoin="round"
+               aria-hidden="true">
+            <path d="M12 4v11"/>
+            <path d="M7 10l5 5 5-5"/>
+            <path d="M5 19h14"/>
+          </svg>
+          Download installer
+        </a>
+      </div>
+    </div>
+  </div>
+
   <!-- v0.21.x rotation-in-progress banner. Shown whenever the
        rotation queue has unacked peers so a user who rotated and
        closed the wizard still sees that N peers haven't received
@@ -9258,6 +9507,29 @@
       <button class="gear" id="btn-settings"
               title="Settings"
               aria-label="Open Settings">⚙</button>
+      <!-- 2026-06-04: VS Code-style header update chip. Hidden by
+           default; checkForUpdate() reveals it when the daemon's
+           periodic GitHub-Releases poll reports a newer tag. Click
+           opens an in-app modal with release notes + a one-click
+           "Download installer" CTA (links to /download/auto on the
+           website, which auto-redirects to the platform installer).
+           Dismissable per-version via the same key the top banner
+           uses, so dismissing one hides the other. -->
+      <button class="header-update-chip" id="header-update-chip"
+              type="button"
+              title="A newer version of One Link is available — click for details"
+              aria-label="Update available">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2.2"
+             stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true">
+          <path d="M12 19V5"/>
+          <path d="M7 10l5-5 5 5"/>
+          <path d="M5 21h14"/>
+        </svg>
+        <span class="hu-label">Update</span>
+        <span class="hu-dot" aria-hidden="true"></span>
+      </button>
     </div>
     <!-- v0.10.4 presence dropdown menu - anchored to the pill;
          hidden by default. -->
@@ -13400,33 +13672,70 @@
     // notifications" row, populated by populateNotifSettings().
   }
 
-  // v0.21.x: read /api/update/check and surface the orange "update
-  // available" banner if the latest GitHub Release is newer than
-  // this build. Per-version dismiss in localStorage so a user who
-  // dismissed v0.22.0 still sees the banner when v0.23.0 ships.
+  // v0.21.x: read /api/update/check and surface the "update available"
+  // affordance — both the top banner and the inline header chip — when
+  // the latest GitHub Release is newer than this build. Per-version
+  // dismiss in localStorage so a user who dismissed v0.22.0 still
+  // sees both surfaces when v0.23.0 ships.
+  //
+  // 2026-06-04: rewrote to be honest about HOW the user updates.
+  // The previous copy hard-coded "Run pip install --upgrade one-link"
+  // which is wrong for installer-build users (the majority — they
+  // have no pip). We now branch on the install method:
+  //   - Installer build (frozen) → "Download installer" CTA that
+  //     opens weareone-link.org/download/auto. The website's worker
+  //     redirects to the platform-specific asset (Win .exe, Mac
+  //     .dmg, Linux .AppImage).
+  //   - Source/pip install → show the pip command in the modal.
+  // The state.me.install_method field, populated by /api/me, tells
+  // us which world we're in.
+  //
+  // The chip+banner+modal share a single source of truth: the
+  // latest CheckResult cached at ``state._updateInfo``. The modal's
+  // CTAs read from there; dismissal of either banner or chip writes
+  // the same localStorage key so the surfaces stay consistent.
+  function _isFrozenInstall() {
+    // Default to installer-build assumption when /api/me hasn't
+    // told us yet — that's the majority path and the safest CTA
+    // for an unknown environment (an installer-download link is a
+    // safe no-op for a pip user who can still ignore it; whereas
+    // showing a pip command to an installer user is confusing).
+    const m = (state.me && state.me.install_method) || "";
+    return m !== "pip" && m !== "source";
+  }
   async function checkForUpdate() {
     const banner = $("#update-banner");
-    if (!banner) return;
+    const chip   = $("#header-update-chip");
     let info;
     try {
       info = await api.get("/api/update/check");
     } catch (_e) {
       return;  // network/auth fail - silently no-op
     }
+    state._updateInfo = info || null;
+    // Treat any non-"newer" result as "nothing to do" — hide both
+    // surfaces, return.
     if (!info || info.status !== "newer") {
-      banner.classList.remove("show");
+      banner?.classList.remove("show");
+      chip?.classList.remove("show");
       return;
     }
     const dismissKey = `ol_update_dismissed:${info.latest_version}`;
     if (localStorage.getItem(dismissKey) === "1") {
-      banner.classList.remove("show");
+      banner?.classList.remove("show");
+      chip?.classList.remove("show");
       return;
     }
+    // ── Top banner copy (kept for users who want the full text) ──
     const txt = $("#update-banner-text");
     const link = $("#update-banner-link");
     if (txt) {
+      // Honest, install-method-agnostic copy. The banner now nudges
+      // the user toward the in-app modal where the install method is
+      // detected and the right CTA is offered. No more dead-end
+      // "Run pip install" instructions for installer users.
       txt.textContent =
-        ` Latest is ${info.latest_version}; you're on v${info.local_version}. Run "pip install --upgrade one-link" or click the link.`;
+        ` Latest is ${info.latest_version}; you're on v${info.local_version}.`;
     }
     if (link && info.latest_url) {
       link.href = info.latest_url;
@@ -13438,7 +13747,102 @@
     if (installBtn) {
       installBtn.style.display = state.me?.autoinstall_enabled ? "" : "none";
     }
-    banner.classList.add("show");
+    banner?.classList.add("show");
+    // ── Header chip ──
+    if (chip) {
+      chip.classList.add("show");
+      const labelEl = chip.querySelector(".hu-label");
+      if (labelEl) labelEl.textContent = "Update";
+      chip.setAttribute(
+        "title",
+        `Update to ${info.latest_version} (you're on v${info.local_version}) — click for release notes`,
+      );
+    }
+  }
+  function openUpdateModal() {
+    const info = state._updateInfo;
+    const backdrop = $("#update-modal-backdrop");
+    if (!backdrop || !info) return;
+    // Versions
+    const cur = $("#um-current-version");
+    const nxt = $("#um-latest-version");
+    if (cur) cur.textContent = "v" + (info.local_version || "?");
+    if (nxt) nxt.textContent = info.latest_version || "latest";
+    // Release-notes body — re-uses the renderMarkdownDoc renderer
+    // built for chat. info.latest.body is the GitHub Release's
+    // markdown notes; some releases have none, so we degrade
+    // gracefully to "No release notes were provided."
+    const notesHost = $("#um-notes");
+    if (notesHost) {
+      notesHost.innerHTML = "";
+      const body = (info.latest && info.latest.body) || "";
+      if (body.trim()) {
+        try {
+          const md = renderMarkdownDoc(body);
+          notesHost.appendChild(md);
+        } catch (_e) {
+          const pre = document.createElement("pre");
+          pre.textContent = body;
+          notesHost.appendChild(pre);
+        }
+      } else {
+        const e = document.createElement("div");
+        e.className = "um-notes-error";
+        e.textContent = "No release notes were provided for this release.";
+        notesHost.appendChild(e);
+      }
+    }
+    // Right CTA + how-to copy depending on install method.
+    const dl = $("#update-modal-download");
+    const releaseLink = $("#update-modal-release-link");
+    const howto = $("#um-howto");
+    if (releaseLink && info.latest_url) {
+      releaseLink.href = info.latest_url;
+    }
+    if (_isFrozenInstall()) {
+      // Installer build — point at the website's smart redirector.
+      if (dl) {
+        dl.href = "https://weareone-link.org/download/auto";
+        dl.style.display = "";
+        dl.querySelector("span, .um-download-label")?.remove();
+        dl.lastChild.textContent && (dl.lastChild.textContent = "Download installer");
+      }
+      if (howto) {
+        howto.innerHTML =
+          'Clicking <strong>Download installer</strong> sends you to '
+          + 'the right installer for your computer. Run it once to '
+          + 'update — your peers, messages, and settings are preserved.';
+      }
+    } else {
+      // Pip / source install — hide the installer button, show the
+      // pip command instead.
+      if (dl) dl.style.display = "none";
+      if (howto) {
+        howto.innerHTML =
+          'To update a pip install, run:<br>'
+          + '<code>pip install --upgrade one-link</code> '
+          + 'then restart the daemon.';
+      }
+    }
+    backdrop.classList.add("show");
+    // Focus the close button so Esc-to-close works without a click.
+    setTimeout(() => $("#update-modal-cancel")?.focus(), 30);
+  }
+  function closeUpdateModal() {
+    $("#update-modal-backdrop")?.classList.remove("show");
+  }
+  function _dismissUpdateForCurrentVersion() {
+    const info = state._updateInfo;
+    if (info && info.latest_version) {
+      try {
+        localStorage.setItem(
+          `ol_update_dismissed:${info.latest_version}`,
+          "1",
+        );
+      } catch (_e) {}
+    }
+    $("#update-banner")?.classList.remove("show");
+    $("#header-update-chip")?.classList.remove("show");
   }
 
   // May 16 2026 - RED-TEAM FIX. This script block runs at end-of-
@@ -13487,20 +13891,54 @@
   });
 
   // Per-version dismiss; clicked once, hidden until a newer version
-  // is published.
+  // is published. The dismiss button on the banner and the close
+  // button on the modal both route through _dismissUpdateForCurrentVersion
+  // so the chip + banner stay consistent.
   _onReady(() => {
     const dismiss = document.getElementById("update-banner-dismiss");
-    if (!dismiss) return;
-    dismiss.addEventListener("click", () => {
-      const link = document.getElementById("update-banner-link");
-      // Derive the version from the link href if we have it; otherwise
-      // just hide the banner for this session.
-      try {
-        const url = new URL(link?.href || "");
-        const tag = url.pathname.split("/").pop();
-        if (tag) localStorage.setItem(`ol_update_dismissed:${tag}`, "1");
-      } catch (_e) { /* swallow - best-effort */ }
-      document.getElementById("update-banner")?.classList.remove("show");
+    if (dismiss) {
+      dismiss.addEventListener("click", _dismissUpdateForCurrentVersion);
+    }
+    // 2026-06-04: chip → opens the polished update modal. Clicking
+    // the chip is the most visible affordance; the modal does the
+    // heavy lifting of explaining what's available + offering the
+    // right CTA. Defer the listener attach via _onReady so the
+    // chip element exists when we wire to it.
+    const chip = document.getElementById("header-update-chip");
+    if (chip) {
+      chip.addEventListener("click", () => {
+        if (state._updateInfo && state._updateInfo.status === "newer") {
+          openUpdateModal();
+        }
+      });
+    }
+    // Modal interactions — cancel button, backdrop click, Esc key.
+    const backdrop = document.getElementById("update-modal-backdrop");
+    const cancel   = document.getElementById("update-modal-cancel");
+    cancel?.addEventListener("click", closeUpdateModal);
+    backdrop?.addEventListener("click", (ev) => {
+      // Click on the backdrop itself (not the modal panel) closes.
+      if (ev.target === backdrop) closeUpdateModal();
+    });
+    // Esc-to-close (only when the modal is the topmost overlay so
+    // we don't steal Esc from a dialog stacked above us). Use
+    // capture phase so we run before any global handler eats it.
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Escape") return;
+      if (!backdrop || !backdrop.classList.contains("show")) return;
+      ev.preventDefault();
+      closeUpdateModal();
+    });
+    // Banner "View release" link click also opens the modal — the
+    // modal is the better UX (release notes + download CTA),
+    // so we intercept the GitHub-redirect-only path. Ctrl/Cmd+
+    // click still opens in a new tab via the anchor's default
+    // behavior for power users.
+    const bannerLink = document.getElementById("update-banner-link");
+    bannerLink?.addEventListener("click", (ev) => {
+      if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button === 1) return;
+      ev.preventDefault();
+      openUpdateModal();
     });
   });
 
@@ -20151,27 +20589,34 @@
         open.href = `/api/files/${encodeURIComponent(fname)}`;
         open.target = "_blank";
         actions.appendChild(open);
-        // One-click download to the browser's Downloads folder
-        // (the chrome/gmail "↓" UX). <a download> hands the URL to
-        // the browser as a save instead of an open; the download
-        // attribute carries the suggested filename so the prefix-
-        // stripped display name is what the user sees on disk.
+        // 2026-06-04: One-click save-to-Downloads. ?dl=1 makes the
+        // server emit ``Content-Disposition: attachment`` so the
+        // browser always saves the file instead of opening it
+        // inline (Edge previously ignored the <a download> attribute
+        // for PDFs/images and opened them in a tab). The ``name``
+        // query carries the display name so the file lands in
+        // Downloads with the user's original filename, not the
+        // inbox's prefix-mangled on-disk name.
+        const saveAs = displayFileName(msg.name || fname);
         const download = el("a", "btn-download-arrow");
-        download.href = `/api/files/${encodeURIComponent(fname)}`;
-        download.setAttribute("download", displayFileName(msg.name || fname));
+        download.href = (
+          `/api/files/${encodeURIComponent(fname)}`
+          + `?dl=1&name=${encodeURIComponent(saveAs)}`
+        );
+        download.setAttribute("download", saveAs);
         download.title = "Download to your Downloads folder";
         download.setAttribute("aria-label", "Download to Downloads folder");
-        download.style.display = "inline-flex";
-        download.style.alignItems = "center";
-        download.style.justifyContent = "center";
-        download.style.padding = "4px 8px";
-        download.style.textDecoration = "none";
-        download.style.lineHeight = "1";
         download.innerHTML = (
-          '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" '
-          + 'stroke="currentColor" stroke-width="2.4" stroke-linecap="round" '
+          // Material file_download silhouette: arrow shaft + arrow
+          // head + a horizontal tray at the bottom so the icon
+          // reads as "save to disk" at a glance, not just "down".
+          '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" '
+          + 'stroke="currentColor" stroke-width="2.2" stroke-linecap="round" '
           + 'stroke-linejoin="round" aria-hidden="true">'
-          + '<path d="M12 5v14M5 12l7 7 7-7"/></svg>'
+          + '<path d="M12 4v11"/>'
+          + '<path d="M7 10l5 5 5-5"/>'
+          + '<path d="M5 19h14"/>'
+          + '</svg>'
         );
         actions.appendChild(download);
         // v0.9.7: "Reveal" → "Show in folder". The button used to
