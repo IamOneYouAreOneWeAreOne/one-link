@@ -51,6 +51,29 @@ SUPERVISOR_PID_FILE = "supervisor.pid"
 DAEMON_LAUNCH_LOG = "daemon-launch.err.log"
 
 
+def _daemon_exit_is_already_running_conflict(log_path: Path) -> bool:
+    """Tell apart a real crash from "another daemon owns the lock".
+
+    Scans the tail of the launch log for the marker the daemon's
+    instance-lock code raises (``One Link daemon is already running
+    ... for this ONE_LINK_HOME``). When that marker is the most
+    recent failure reason, retrying is pointless — the new daemon
+    will hit the same wall every time. The supervisor's caller
+    treats this exit code as "ask the user to close the other
+    instance," not "wait + try again."
+    """
+    try:
+        with open(log_path, "rb") as fh:
+            try:
+                fh.seek(-4096, os.SEEK_END)
+            except OSError:
+                fh.seek(0)
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    return "already running" in tail and "ONE_LINK_HOME" in tail
+
+
 def _backoff(idx: int) -> float:
     """Return the backoff delay for the ``idx``-th consecutive crash.
 
@@ -225,6 +248,30 @@ def run(
                 return 0
 
             # CRASH path.
+            #
+            # Specific case: the daemon exited because ANOTHER One
+            # Link daemon is already running for this ONE_LINK_HOME.
+            # That is not a transient crash — retrying will hit the
+            # same wall every time. The launcher's "replace stale
+            # daemon" path failed (or wasn't invoked) and the only
+            # graceful next step is to ask the user to close the
+            # other instance. Bail out with a distinct exit code so
+            # the launcher's friendly error dialog can recognise the
+            # situation and surface the right copy instead of the
+            # generic "couldn't come up" message.
+            if _daemon_exit_is_already_running_conflict(log_path):
+                log.critical(
+                    "supervisor: another One Link daemon already owns this "
+                    "ONE_LINK_HOME — refusing to retry. Close the other "
+                    "One Link window/tray icon, then launch again.",
+                )
+                crash_log.dump_crash(
+                    "daemon-already-running", None,
+                    extra={"exit_code": exit_code},
+                )
+                _append_restart_log("already-running", exit_code)
+                return 4  # distinct from 2 (spawn fail) / 3 (circuit breaker)
+
             t = now()
             crashes.append(t)
             consecutive_crashes += 1

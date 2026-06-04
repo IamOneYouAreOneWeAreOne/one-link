@@ -2099,17 +2099,34 @@ class Daemon:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         f = open(lock_path, "a+b")
         try:
-            # Step 1: acquire the OS-level lock IMMEDIATELY — before
-            # any read, before any check. This is the critical-section
-            # entry point; nothing else may happen until the lock is
-            # held (or we've bailed out).
+            # Step 1: acquire the OS-level lock with a short retry
+            # window. The previous one-shot acquisition lost the race
+            # with the launcher's "replace old daemon" sequence —
+            # the launcher would shutdown the old daemon, the new
+            # daemon would spawn ~100ms later, and the kernel hadn't
+            # released the old daemon's lock yet. ~5 seconds of
+            # gentle polling lets the graceful-handoff path succeed
+            # without sacrificing the protection against a truly
+            # concurrent second daemon (which would still hold the
+            # lock past the 5s window).
+            _LOCK_HANDOFF_RETRIES = 50      # 50 × 100ms = 5 s
+            _LOCK_HANDOFF_INTERVAL = 0.1
             if os.name == "nt":
                 import msvcrt
 
-                f.seek(0)
-                try:
-                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-                except OSError as e:
+                last_exc = None
+                for _ in range(_LOCK_HANDOFF_RETRIES):
+                    f.seek(0)
+                    try:
+                        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                        last_exc = None
+                        break
+                    except OSError as e:
+                        last_exc = e
+                        time.sleep(_LOCK_HANDOFF_INTERVAL)
+                if last_exc is not None:
+                    e = last_exc
+                    f.seek(0)
                     # Read whatever PID is in the file for a friendlier
                     # error message; if we can't read it, fall back to
                     # the generic message.
@@ -2129,12 +2146,20 @@ class Daemon:
                 # resolvable from its real stub set.
                 import fcntl
 
-                try:
-                    fcntl.flock(
-                        f.fileno(),
-                        fcntl.LOCK_EX | fcntl.LOCK_NB,
-                    )
-                except OSError as e:
+                last_exc = None
+                for _ in range(_LOCK_HANDOFF_RETRIES):
+                    try:
+                        fcntl.flock(
+                            f.fileno(),
+                            fcntl.LOCK_EX | fcntl.LOCK_NB,
+                        )
+                        last_exc = None
+                        break
+                    except OSError as e:
+                        last_exc = e
+                        time.sleep(_LOCK_HANDOFF_INTERVAL)
+                if last_exc is not None:
+                    e = last_exc
                     f.seek(0)
                     pid_hint = ""
                     with contextlib.suppress(Exception):

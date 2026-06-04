@@ -735,6 +735,26 @@ def _print_lan_warning(lan_ip: str, port: int, token: str) -> None:
     _safe_echo("")
 
 
+def _launch_log_says_already_running(log_path: Path) -> bool:
+    """Tail-scan the launch log for the daemon's instance-lock
+    rejection marker. Used by the friendly error dialog to swap in
+    the focused "another One Link is running" copy instead of the
+    generic "couldn't come up" message when that's what actually
+    happened. Best-effort — missing file / unreadable bytes return
+    False so we fall back to the generic copy.
+    """
+    try:
+        with open(log_path, "rb") as fh:
+            try:
+                fh.seek(-4096, os.SEEK_END)
+            except OSError:
+                fh.seek(0)
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    return "already running" in tail and "ONE_LINK_HOME" in tail
+
+
 def _spawn_splash() -> Optional[subprocess.Popen]:
     """Open the native splash window the user sees while the daemon
     is coming up. Best-effort — if the splash subprocess can't
@@ -875,15 +895,33 @@ def run_app(
                 return 2
             # Show the friendly retry/quit dialog. ``choice`` is
             # either "retry" (loop again) or "quit" (bail clean).
+            #
+            # Specific case detection: if the launch log shows the
+            # "already running" marker, the daemon couldn't acquire
+            # the instance lock because ANOTHER One Link is alive on
+            # this account. Retrying will hit the same wall. Show a
+            # focused message instead of the generic "couldn't come
+            # up" copy so the user knows exactly what to do.
+            log_path = data_dir() / "daemon-launch.err.log"
+            already_running = _launch_log_says_already_running(log_path)
             from one_link.error_dialog import show_startup_failure
-            choice = show_startup_failure(
-                reason=(
+            if already_running:
+                reason = (
+                    "Another One Link is already running for your "
+                    "account — open the tray icon or the existing "
+                    "browser tab to use it, or close it and then "
+                    "click Try again to launch this version."
+                )
+            else:
+                reason = (
                     "The background daemon couldn't come up within "
                     "the startup window. That's usually a transient "
                     "thing — another copy already running, a port "
                     "still releasing, or a slow disk on first launch."
-                ),
-                log_path=data_dir() / "daemon-launch.err.log",
+                )
+            choice = show_startup_failure(
+                reason=reason,
+                log_path=log_path,
                 data_dir=data_dir(),
             )
             if choice != "retry":
