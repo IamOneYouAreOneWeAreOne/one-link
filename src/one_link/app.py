@@ -646,7 +646,7 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
                     if os.name == "nt"
                     else 0
                 )
-                proc = subprocess.Popen(
+                subprocess.Popen(
                     args,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -654,16 +654,26 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
                     creationflags=flags,
                     close_fds=True,
                 )
-                if os.name == "nt":
-                    time.sleep(0.75)
-                    if proc.poll() is not None or not _is_existing_app_window_running(
-                        profile_dir
-                    ):
-                        os.startfile(url)  # type: ignore[attr-defined]
+                # 2026-06-04: Do NOT call os.startfile(url) as a
+                # "fallback" after a successful Popen. Edge's
+                # msedge.exe --app=URL launcher process detaches a
+                # real Edge window into the existing edge.exe browser
+                # process group then exits — so proc.poll() != None
+                # within ~1 s is the NORMAL success path, not a
+                # failure. The previous code treated that fast exit
+                # as failure and ran os.startfile, which opened a
+                # SECOND tab in the user's default browser on top of
+                # the Chromium app-mode window. Result reported by
+                # users on first-install: "two windows opened at
+                # once." Popen raising is the only real failure
+                # signal; if it didn't raise, the launch succeeded
+                # and Edge/Chrome will surface the window in a
+                # moment.
                 return
             except Exception:
-                # Standalone failed — fall through to default
-                # browser. User gets a tab but at least sees something.
+                # Popen raised — Chromium really did fail to launch.
+                # Fall through to default browser. User gets a tab
+                # but at least sees something.
                 pass
     if os.name == "nt":
         os.startfile(url)  # type: ignore[attr-defined]
