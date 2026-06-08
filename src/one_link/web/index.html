@@ -32620,12 +32620,14 @@
         return "\n\n```\n" + raw + "\n```\n\n";
       }
       case "blockquote": {
-        const inner = kids().trim();
-        const quoted = inner
-          .split("\n")
-          .map((l) => (l ? "> " + l : ">"))
-          .join("\n");
-        return "\n\n" + quoted + "\n\n";
+        // 2026-06-04: do NOT emit "> " line prefixes. The composer
+        // textarea can't render markdown, so users see literal ">"
+        // characters and read it as garbage — especially when the
+        // source is an email reply whose entire body is wrapped in
+        // <blockquote> for quoting. Preserve the text as plain
+        // paragraphs; if the user genuinely wants a blockquote on
+        // the receiver side they can type "> " themselves.
+        return "\n\n" + kids().trim() + "\n\n";
       }
       case "ul": {
         const items = Array.from(node.children).filter((c) => c.tagName === "LI");
@@ -32700,37 +32702,86 @@
       e.preventDefault();
       return true;
     }
-    // 2026-06-04: rich-text → markdown. Only fires when (a) the paste
-    // target is OUR composer (avoid hijacking other inputs), (b) the
-    // clipboard has an HTML version, and (c) the HTML is non-trivially
-    // richer than the plain-text serialisation (otherwise plain text
-    // is fine and we don't want to spend cycles on a no-op).
+    // 2026-06-04: rich-text → markdown. Only fires when the paste
+    // target is OUR composer (avoid hijacking other inputs). The
+    // clipboard may have a text/html version (we walk it to clean
+    // markdown) or only text/plain. EITHER way we run a final
+    // ``_cleanPastedText`` pass that strips email-style ">" quote
+    // prefixes — they're never wanted in the composer because the
+    // textarea can't render markdown. If the source had both HTML
+    // and a richer-than-plain conversion, prefer the HTML output;
+    // otherwise fall through to a cleaned-plain rewrite.
     const target = e.target;
     if (target !== $("#input")) return false;
     let html = "";
     try { html = cd.getData("text/html") || ""; } catch (_) {}
-    if (!html) return false;
     let plain = "";
     try { plain = cd.getData("text/plain") || ""; } catch (_) {}
-    const md = _htmlToMarkdown(html);
-    // If the plain-text version already has all the structure
-    // markers (paste from a markdown editor, plain TXT file, etc.)
-    // don't replace it — the user's source is the truth.
-    if (!md || md === plain.trim()) return false;
+    let insertText = "";
+    if (html) {
+      const md = _htmlToMarkdown(html);
+      // If the HTML version produced something distinct from the
+      // plain version, use the HTML walk; otherwise fall through to
+      // the plain-text path so the email-quote cleanup runs on it.
+      if (md && md.trim() !== plain.trim()) {
+        insertText = _cleanPastedText(md);
+      }
+    }
+    if (!insertText && plain) {
+      const cleaned = _cleanPastedText(plain);
+      // Only intercept the plain-text path if the cleanup actually
+      // changed anything — otherwise let the browser do its native
+      // paste (faster, preserves IME state on mobile).
+      if (cleaned !== plain) insertText = cleaned;
+    }
+    if (!insertText) return false;
     // Insert at the cursor instead of replacing the whole field.
     const ta = target;
     const start = ta.selectionStart ?? ta.value.length;
     const end   = ta.selectionEnd   ?? ta.value.length;
     const before = ta.value.slice(0, start);
     const after  = ta.value.slice(end);
-    ta.value = before + md + after;
-    const cursor = start + md.length;
+    ta.value = before + insertText + after;
+    const cursor = start + insertText.length;
     ta.selectionStart = ta.selectionEnd = cursor;
     // Notify any input-event listeners (autosize, send-button enable,
     // typing-indicator debounce) so the composer state updates.
     ta.dispatchEvent(new Event("input", { bubbles: true }));
     e.preventDefault();
     return true;
+  }
+  // 2026-06-04: strip artifacts users never want to read in a
+  // composer textarea. Today: email-style ">" / ">>" quote prefixes,
+  // and runs of empty ">"-only lines collapsing to a single blank.
+  // Conservative: only acts when the marker is at line start AND a
+  // meaningful fraction of lines have them (so a one-off "> note"
+  // in casual prose is preserved, but a 50-line reply quote chain
+  // is flattened).
+  function _cleanPastedText(text) {
+    if (!text) return text;
+    const lines = text.split(/\r?\n/);
+    // Count lines that look like email-quote markers. Accept any
+    // depth of nesting ("> >>>>") because mailing lists chain them.
+    const QUOTE_RE = /^\s*(?:>\s*)+/;
+    let quoted = 0;
+    let nonEmpty = 0;
+    for (const ln of lines) {
+      if (!ln.trim()) continue;
+      nonEmpty += 1;
+      if (QUOTE_RE.test(ln)) quoted += 1;
+    }
+    if (nonEmpty === 0) return text;
+    // 30% threshold: a real quote-reply block is overwhelmingly
+    // quoted; casual prose almost never starts a line with ">".
+    if (quoted / nonEmpty < 0.30) return text;
+    // Strip the prefix; collapse empty-quote-only lines ("> ") into
+    // a single empty line; squeeze 3+ blank lines down to 2.
+    const cleaned = lines
+      .map((ln) => ln.replace(QUOTE_RE, ""))
+      .join("\n")
+      .replace(/[ \t]+$/gm, "")
+      .replace(/\n{3,}/g, "\n\n");
+    return cleaned;
   }
   $("#input").addEventListener("paste", handlePasteImage);
   // v0.12.3: typing indicator. Fires on every non-empty input
