@@ -241,6 +241,63 @@ def test_accept_handler_requires_local_path():
     )
 
 
+def test_accept_sets_receiver_pull_only():
+    """2026-06-04 regression: accepting a folder offer must set the
+    receiver's per-peer permission to PULL-ONLY. With the old default
+    'rw', the receiver's 30s folder-sync loop pushed the just-received
+    folder back at the sender — wrong-direction 'Sending' pill, a
+    manifest race that dropped the blobs, and the folder re-surfacing
+    under the sender's 'Incoming shares'. Pull-only makes the receiver
+    a pure recipient; the sender's forward push still delivers because
+    the inbound path gates on 'pull', not 'push'."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "one_link" / "server.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def api_accept_folder_offer(")
+    assert idx > 0
+    body = src[idx:idx + 12000]
+    assert 'set_folder_peer_permission(' in body and '"pull"' in body, (
+        "accept handler must downgrade the received folder's per-peer "
+        "permission to pull-only so the receiver never spuriously "
+        "pushes it back at the sender"
+    )
+
+
+def test_self_mesh_auto_accept_sets_pull_only():
+    """The self-mesh auto-accept path must apply the same pull-only
+    permission as the manual accept — otherwise a folder sent between
+    the user's own devices hits the identical wrong-direction /
+    blobs-never-arrive bug."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "one_link" / "daemon.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def _auto_accept_self_mesh_folder_offer(")
+    assert idx > 0
+    body = src[idx:idx + 4000]
+    assert 'set_folder_peer_permission(' in body and '"pull"' in body, (
+        "self-mesh auto-accept must also set pull-only permission"
+    )
+
+
+def test_received_folder_pull_only_blocks_push_allows_pull(state):
+    """End-to-end at the state layer: a folder whose per-peer
+    permission is 'pull' must FORBID push (so push_folder_to_peer /
+    the sync loop short-circuit before creating an outbound transfer
+    row) and ALLOW pull (so _handle_manifest_push accepts the sender's
+    blobs). This is the invariant the whole fix rests on."""
+    peer_fp = "ab" * 32
+    with tempfile.TemporaryDirectory() as d:
+        state.add_folder(
+            name="papers", local_path=str(d), shared_with=[peer_fp],
+            conflict_policy="latest-wins",
+        )
+        state.set_folder_peer_permission("papers", peer_fp, "pull")
+        assert state.folder_peer_allows("papers", peer_fp, "push") is False
+        assert state.folder_peer_allows("papers", peer_fp, "pull") is True
+
+
 def test_decline_handler_marks_offer_only(monkeypatch):
     """Decline must NOT modify peer caps or shared_with; it's a
     purely receiver-side audit decision."""

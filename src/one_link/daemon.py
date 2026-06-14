@@ -4837,6 +4837,88 @@ class Daemon:
                 log.warning("could not reap transfer %s: %s", t.id, e)
         return reaped
 
+    def _reconcile_received_folder_permissions_on_boot(self) -> int:
+        """2026-06-04 one-time, flag-guarded boot reconciliation that
+        fixes folders RECEIVED via an accepted offer that are still
+        carrying the buggy default "rw" per-peer permission.
+
+        Background: until this fix, ``api_accept_folder_offer`` /
+        ``_auto_accept_self_mesh_folder_offer`` created the received
+        folder with the default "rw" permission. That let the
+        receiver's 30s ``_folder_sync_loop`` push the just-received
+        folder back at the sender — producing a wrong-direction
+        "Sending" pill, a manifest race that dropped the blobs, and
+        the folder re-surfacing under the sender's "Incoming shares".
+        New accepts now set "pull". This pass repairs folders that
+        were accepted BEFORE the fix.
+
+        Strictly safe + unambiguous: it only touches a (folder, peer)
+        pair that has a matching ACCEPTED row in ``pending_folder_offers``
+        — i.e. this device demonstrably RECEIVED that folder from that
+        peer, so it is the recipient and pull-only is correct. Folders
+        the user created/shared themselves have no accepted-offer row
+        and are never touched.
+
+        Runs ONCE, guarded by the ``folder_perm_reconcile_v1_done``
+        setting, so a user who later explicitly Shares a received
+        folder back (setting "rw" for two-way) is not clobbered on a
+        subsequent boot. Returns the count repaired."""
+        if self.state is None:
+            return 0
+        try:
+            done = self.state.get_setting("folder_perm_reconcile_v1_done")
+        except Exception:
+            done = None
+        if str(done or "") == "1":
+            return 0
+        repaired = 0
+        try:
+            accepted = self.state.list_folder_offers(
+                state_filter="accepted", limit=1000,
+            )
+        except Exception:
+            accepted = []
+        for offer in accepted:
+            folder_name = offer.get("folder_name")
+            peer_fp = offer.get("peer_fp")
+            if not folder_name or not peer_fp:
+                continue
+            f = self.state.get_folder(folder_name)
+            if not f or peer_fp not in f.get("shared_with", []):
+                continue
+            try:
+                mode = self.state.get_folder_peer_permission(
+                    folder_name, peer_fp,
+                )
+            except Exception:
+                continue
+            # Only downgrade an explicit/default rw — never widen a
+            # permission, never touch one already pull/push.
+            if mode != "rw":
+                continue
+            try:
+                self.state.set_folder_peer_permission(
+                    folder_name, peer_fp, "pull",
+                )
+                repaired += 1
+                log.info(
+                    "folder-perm reconcile: %r received from %s -> pull-only "
+                    "(was rw)", folder_name, peer_fp[:8],
+                )
+            except Exception as e:
+                log.debug(
+                    "folder-perm reconcile skipped %r/%s: %s",
+                    folder_name, peer_fp[:8], e,
+                )
+        with contextlib.suppress(Exception):
+            self.state.set_setting("folder_perm_reconcile_v1_done", "1")
+        if repaired:
+            log.info(
+                "folder-perm reconcile: repaired %d received folder(s) to "
+                "pull-only", repaired,
+            )
+        return repaired
+
     def _reconcile_orphaned_transfers_on_boot(self) -> int:
         """One-shot, run once at startup before any peer connection is
         served. A freshly-booted daemon has ZERO live transfers — every
@@ -20140,6 +20222,20 @@ class Daemon:
                 folder_name, e,
             )
             return
+        # 2026-06-04: same pull-only fix as api_accept_folder_offer.
+        # add_folder defaults the per-peer permission to "rw", which
+        # would let this receiver's periodic _folder_sync_loop push
+        # the just-received folder back at the sender (wrong-direction
+        # "Sending" pill + manifest race that drops the blobs + the
+        # folder re-surfacing under the sender's "Incoming shares").
+        # Pull-only makes this device a pure recipient; the sender's
+        # forward push (via notify_peer_folder_accepted below) still
+        # delivers because _handle_manifest_push gates inbound on
+        # "pull", not "push".
+        with contextlib.suppress(Exception):
+            self.state.set_folder_peer_permission(
+                folder_name, peer_fp, "pull",
+            )
         with contextlib.suppress(Exception):
             if offer_id is not None:
                 self.state.mark_folder_offer_accepted(
@@ -24295,6 +24391,12 @@ class Daemon:
             # Flip them to waiting/retryable now (within ms of boot).
             with contextlib.suppress(Exception):
                 self._reconcile_orphaned_transfers_on_boot()
+            # One-time repair of folders received via an accepted offer
+            # that still carry the buggy default "rw" permission (which
+            # made the receiver spuriously push them back). Flag-guarded
+            # so it runs once and never clobbers an explicit later Share.
+            with contextlib.suppress(Exception):
+                self._reconcile_received_folder_permissions_on_boot()
             # Deferred DB integrity check. quick_check on an encrypted
             # 200 MB+ state.db is 13-18s of full-file decrypt — it used
             # to run inline in State() and dominated boot. It now runs

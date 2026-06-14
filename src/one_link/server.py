@@ -17033,6 +17033,30 @@ class UIServer:
         self._ensure_folder_caps_for(
             peer_fp, note=f"folder={folder_name}/accept",
         )
+        # 2026-06-04 ROOT-CAUSE FIX for the "folder sent but shows
+        # Sending/never arrives" bug. add_folder defaults a freshly-
+        # created shared folder's per-peer permission to "rw". That
+        # let the receiver's 30s _folder_sync_loop treat this just-
+        # ACCEPTED (incoming) folder as outgoing and call
+        # push_folder_to_peer on it, which:
+        #   1. created a direction="out" transfer row -> the header
+        #      pill wrongly read "Sending 1 file to <peer>";
+        #   2. raced the sender's real forward push, corrupting the
+        #      manifest exchange so the blobs never landed;
+        #   3. re-pushed the folder name back to the sender, which
+        #      surfaced it under the sender's "Incoming shares".
+        # Setting the receiver's permission to PULL-ONLY makes this
+        # device a pure recipient for the accepted folder: every push
+        # site (push_folder_to_peer, _send_local_manifest_in_channel,
+        # _handle_manifest_wants) gates on folder_peer_allows(...,
+        # "push") and now short-circuits, while the inbound path
+        # (_handle_manifest_push) gates on "pull" and still accepts
+        # the sender's blobs. Two-way mirroring remains an explicit
+        # opt-in via the Share button (which sets "rw").
+        with contextlib.suppress(Exception):
+            self.daemon.state.set_folder_peer_permission(
+                folder_name, peer_fp, "pull",
+            )
         self.daemon.state.mark_folder_offer_accepted(
             offer_id, local_path=effective_local_path,
         )
