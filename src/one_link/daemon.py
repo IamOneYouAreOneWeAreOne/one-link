@@ -4706,17 +4706,6 @@ class Daemon:
     # v0.6.3: transfer-ledger watchdog.
     STUCK_TRANSFER_DEADLINE_MS = 5 * 60 * 1000  # 5 min without progress
     STUCK_TRANSFER_PLANNING_DEADLINE_MS = 2 * 60 * 1000
-    # 2026-06-04: separate, shorter deadline for OFFERED transfers
-    # that never get ack'd. An offer sitting at 0% for 5 minutes
-    # reads as "stuck/broken app" to the user — and in nearly every
-    # case the peer either is offline (won't ack ever) or is online
-    # but didn't accept (will explicitly decline, on a different
-    # path). 90s is long enough that a slow LAN handshake completes;
-    # short enough that the misleading "Sending 1 file 0%" pill
-    # doesn't dominate the header for minutes. Reaped offered rows
-    # flip to 'failed' with a clear reason — NOT 'paused', because
-    # there's nothing to resume; the peer simply never said yes.
-    STUCK_OFFERED_DEADLINE_MS = 90 * 1000
 
     def _reap_stuck_transfers(self) -> int:
         """Mark any stale active transfer as paused/retryable if it
@@ -4771,47 +4760,6 @@ class Daemon:
                 reaped += 1
                 continue
             if t.status not in ("offered", "active"):
-                continue
-            # 2026-06-04: offered-row short circuit. A FILE_OFFER that
-            # hasn't moved to active within 90s is functionally
-            # rejected (or the peer is gone). Flip it to FAILED with
-            # a clear reason so the UI's stuck "Sending 1 file 0%"
-            # pill drops it AND the user sees a real explanation in
-            # the file bubble's status pill. Don't use the waiting
-            # path here — there's nothing to resume; a peer that
-            # didn't ack an offer won't suddenly ack a re-poke.
-            if t.status == "offered":
-                offered_cutoff = now_ms - self.STUCK_OFFERED_DEADLINE_MS
-                if t.updated_ms > offered_cutoff:
-                    continue
-                try:
-                    self._update_transfer(
-                        t.id,
-                        status="failed",
-                        metadata={
-                            **meta,
-                            "error": (
-                                "peer didn't respond to the offer; "
-                                "send aborted automatically"
-                            ),
-                            "error_class": "OfferTimedOut",
-                            "transient": True,
-                            "delivery_state": "needs_attention",
-                            "reaped": True,
-                            "reaped_reason": "offer_unanswered",
-                            "reaped_at_ms": now_ms,
-                        },
-                    )
-                    reaped += 1
-                    log.info(
-                        "reaped unanswered file offer %s "
-                        "(last update %d ms ago)",
-                        t.id, now_ms - t.updated_ms,
-                    )
-                except Exception as e:
-                    log.warning(
-                        "could not reap offered transfer %s: %s", t.id, e,
-                    )
                 continue
             if t.updated_ms > cutoff:
                 continue

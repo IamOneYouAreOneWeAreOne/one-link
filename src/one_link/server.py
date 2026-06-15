@@ -20462,6 +20462,43 @@ class UIServer:
             )
         return web.FileResponse(path, headers=headers)
 
+    # 2026-06-04: explicit MIME map for common media types. Python's
+    # mimetypes derives types from the OS registry, which is
+    # inconsistent across machines — e.g. a Windows host without the
+    # webp registry key returns None for .webp, so an inline image
+    # preview would be served as application/octet-stream and the
+    # browser would download instead of render it. This table makes the
+    # Content-Type deterministic for the formats One Link actually
+    # previews, regardless of the host's registry. guess_type is still
+    # consulted for anything not listed here.
+    _MIME_FALLBACK = {
+        "webp": "image/webp",
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "gif": "image/gif",
+        "bmp": "image/bmp",
+        "svg": "image/svg+xml",
+        "avif": "image/avif",
+        "heic": "image/heic",
+        "ico": "image/x-icon",
+        "mp4": "video/mp4",
+        "webm": "video/webm",
+        "mov": "video/quicktime",
+        "m4v": "video/x-m4v",
+        "mp3": "audio/mpeg",
+        "wav": "audio/wav",
+        "ogg": "audio/ogg",
+        "oga": "audio/ogg",
+        "m4a": "audio/mp4",
+        "aac": "audio/aac",
+        "flac": "audio/flac",
+        "opus": "audio/opus",
+        "pdf": "application/pdf",
+        "json": "application/json",
+        "txt": "text/plain",
+    }
+
     @staticmethod
     def _mime_for_blob(ext_hint: str | None, name_hint: str | None) -> str:
         """Pick a Content-Type for a content-addressed blob.
@@ -20474,10 +20511,17 @@ class UIServer:
         sniffing but is correct for downloads."""
         ext = (ext_hint or "").lstrip(".").lower()
         if ext and ext.isalnum() and len(ext) <= 8:
+            # Deterministic table first (OS-registry-independent), then
+            # the OS guesser for anything not enumerated.
+            if ext in UIServer._MIME_FALLBACK:
+                return UIServer._MIME_FALLBACK[ext]
             guess = mimetypes.guess_type(f"x.{ext}")[0]
             if guess:
                 return guess
         if name_hint:
+            n_ext = name_hint.rsplit(".", 1)[-1].lower() if "." in name_hint else ""
+            if n_ext in UIServer._MIME_FALLBACK:
+                return UIServer._MIME_FALLBACK[n_ext]
             guess = mimetypes.guess_type(name_hint)[0]
             if guess:
                 return guess
@@ -21429,38 +21473,33 @@ class UIServer:
         from one_link import __version__ as _local_ver
         from one_link.update_check import fetch_latest
 
-        # 2026-06-04: honor the sovereignty preset DEFAULT instead of
-        # requiring an explicit opt-in. The just_works preset
-        # description literally says "You'll see a small note when a
-        # new version of One Link is available" — the previous
-        # implementation required env-var OR a manually-set setting,
-        # so fresh installs silently never checked. Now the resolver
-        # is the single source of truth: explicit user setting wins,
-        # then env var, then the preset default. Result: just_works
-        # users get updates by default; quiet / off_grid users are
-        # silent unless they opt in.
-        from one_link import sovereignty as _sov
-        setting_val: str | None = None
-        preset: str | None = None
+        # May 15 2026 — sovereignty default. /api/update/check is the
+        # path the UI's Settings panel + update chip poll on tab-load.
+        # It stays OPT-IN by default to honor One Link's "no calls home"
+        # promise: the GitHub Releases poll is the ONLY external call
+        # surface in the daemon, so a fresh install must NOT reach out
+        # until the user enables it (env ONE_LINK_UPDATE_CHECK=1 OR the
+        # update_check_enabled setting). The update chip simply stays
+        # hidden until then. (2026-06-04: an earlier attempt to honor
+        # the preset default here was reverted — it would have made
+        # fresh installs poll GitHub automatically, breaking the
+        # privacy promise pinned by test_api_update_check_disabled_by_default.)
+        env_on = _os.environ.get(
+            "ONE_LINK_UPDATE_CHECK", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
+        setting_on = False
         if self.daemon.state is not None:
             with contextlib.suppress(Exception):
-                setting_val = self.daemon.state.get_setting(
+                setting_on = (self.daemon.state.get_setting(
                     "update_check_enabled"
-                )
-            with contextlib.suppress(Exception):
-                preset = self.daemon.state.get_setting("sovereignty_preset")
-        enabled = _sov.resolve_update_check_enabled(
-            state_setting=setting_val,
-            env_var=_os.environ.get("ONE_LINK_UPDATE_CHECK"),
-            preset_name=preset,
-        )
-        if not enabled:
+                ) or "").strip().lower() in ("1", "true", "yes", "on")
+        if not (env_on or setting_on):
             return web.json_response({
                 "status": "disabled",
                 "local_version": _local_ver,
                 "reason": (
-                    "update-check disabled by your sovereignty preset. "
-                    "Enable in Settings → Privacy → Auto-update check."
+                    "update-check is opt-in for sovereignty. Enable in "
+                    "Settings or set ONE_LINK_UPDATE_CHECK=1."
                 ),
             })
 

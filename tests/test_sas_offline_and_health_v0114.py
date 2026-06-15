@@ -211,11 +211,16 @@ def test_session_expired_banner_has_relaunch_guidance(index_html: str):
     """The banner must tell the user WHAT to do, not just announce
     a problem."""
     idx = index_html.find("function showSessionExpiredBanner()")
-    snippet = index_html[idx:idx + 1500]
-    # The restart instruction is the load-bearing UX: without it
+    snippet = index_html[idx:idx + 3200]
+    # The actionable instruction is the load-bearing UX: without it
     # the user is stuck staring at a banner that says "expired".
-    assert "restart One Link" in snippet
+    # 2026-06-04: the banner is now case-aware — when a token is
+    # stashed it offers "Reload" (which works); when none is, it tells
+    # the user to re-open from the desktop shortcut / tray (the only
+    # real fix) rather than a Reload button that would re-land on the
+    # banner. Either way it must give a concrete next step.
     assert "Reload" in snippet
+    assert "desktop shortcut" in snippet or "tray" in snippet
 
 
 def test_session_expired_banner_only_shows_once(index_html: str):

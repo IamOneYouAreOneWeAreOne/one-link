@@ -172,12 +172,21 @@ def test_pill_renderer_present(index_html: str):
 def test_pill_decays_via_interval(index_html: str):
     """Need a setInterval so a stalled transfer's stale rate fades
     even when no new transfer events arrive."""
-    # find the setInterval near renderTransferHeaderPill
-    idx = index_html.find("renderTransferHeaderPill();")
-    assert idx > 0
-    # search in a wide window for setInterval that calls render again
-    window = index_html[max(0, idx - 200):idx + 400]
-    assert "setInterval(" in window
+    # 2026-06-04: `renderTransferHeaderPill();` now appears at multiple
+    # call sites (the periodic interval AND the X-cancel handler that
+    # re-renders to drop the pill immediately). The naive find() landed
+    # on the cancel-handler occurrence, so anchor on the setInterval
+    # block itself and assert it re-renders the pill.
+    idx = index_html.find("setInterval(() => {")
+    while idx != -1:
+        window = index_html[idx:idx + 400]
+        if "renderTransferHeaderPill()" in window:
+            return  # found the decay interval that re-renders the pill
+        idx = index_html.find("setInterval(() => {", idx + 1)
+    raise AssertionError(
+        "no setInterval that re-renders the transfer pill — a stalled "
+        "transfer's stale rate would never fade without new events"
+    )
 
 
 def test_pill_click_opens_files_pane(index_html: str):

@@ -84,7 +84,10 @@ def test_bandit_skips_are_only_documented_exemptions():
     p = _read_pyproject()
     skips = set(p["tool"]["bandit"].get("skips", []))
     # Each entry below has a documented reason in pyproject.toml.
-    allowed = {"B101", "B404", "B603"}
+    # B104 (2026-06-04): hardcoded bind to 0.0.0.0 IS the intentional,
+    # documented `--lan` feature (binding all interfaces is how a phone
+    # on your Wi-Fi reaches the UI); justified in pyproject.toml.
+    allowed = {"B101", "B404", "B603", "B104"}
     extra = skips - allowed
     assert not extra, (
         f"bandit skips include undocumented entries: {sorted(extra)}. "
