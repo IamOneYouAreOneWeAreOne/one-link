@@ -23,6 +23,10 @@ from .capabilities import (
 
 
 SEMVER_RE = re.compile(r"^\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?")
+# Wire-protocol versions are stamped like "OL1.2" — a non-digit prefix
+# then a dotted number. We search (not match) for the first numeric run
+# so the prefix is ignored.
+WIRE_VER_RE = re.compile(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?")
 BASELINE_CAPABILITIES = (CHAT, FILES)
 
 
@@ -37,6 +41,19 @@ class Version:
         if not value:
             return None
         m = SEMVER_RE.match(str(value))
+        if not m:
+            return None
+        return cls(*(int(part or 0) for part in m.groups()))
+
+    @classmethod
+    def parse_wire(cls, value: str | None) -> "Version | None":
+        """Parse a WIRE protocol version like ``OL1.2`` (or a bare
+        ``1.2``). Unlike :meth:`parse`, tolerates a leading non-digit
+        prefix so the wire tag and the app semver can be parsed by the
+        same type. Returns None if no numeric run is present."""
+        if not value:
+            return None
+        m = WIRE_VER_RE.search(str(value))
         if not m:
             return None
         return cls(*(int(part or 0) for part in m.groups()))
@@ -75,7 +92,27 @@ def negotiate(
     local_capabilities: Iterable[str],
     peer_capabilities: Iterable[str],
     required: Iterable[str] = (),
+    local_wire_version: str | None = None,
+    peer_wire_version: str | None = None,
 ) -> CompatibilityResult:
+    """Decide how two One Link builds should talk.
+
+    Core principle (2026-06-04): **different versions ALWAYS work as
+    long as they share a baseline capability.** Compatibility is driven
+    by shared CAPABILITIES, never by a version number alone. A version
+    difference can only DOWNGRADE the negotiated mode (disable advanced
+    framing), never sever the connection outright.
+
+    The "major boundary" check that gates advanced modes prefers the
+    WIRE protocol version (``local_wire_version`` / ``peer_wire_version``,
+    e.g. ``OL1.2``) — the thing that actually governs frame shape — and
+    falls back to the app semver only when a (legacy) peer doesn't
+    advertise a wire version. This decoupling means a routine app major
+    bump (e.g. 0.x -> 1.0) with an UNCHANGED wire no longer breaks
+    interop: same wire major -> full negotiation regardless of app
+    version. Only a genuine wire-major boundary conservatively drops
+    the pair to the universal CHAT/FILES baseline until both upgrade.
+    """
     local_v = Version.parse(local_version)
     peer_v = Version.parse(peer_version)
     local_caps = set(normalize_caps(local_capabilities))
@@ -85,17 +122,30 @@ def negotiate(
     missing = tuple(c for c in required_caps if c not in common)
     reasons: list[str] = []
 
-    if local_v is not None and peer_v is not None and local_v.major != peer_v.major:
-        reasons.append("major_version_mismatch")
-        return CompatibilityResult(
-            compatible=False,
-            mode="incompatible_major",
-            local_version=local_v,
-            peer_version=peer_v,
-            common_capabilities=common,
-            missing_required=missing,
-            reasons=tuple(reasons),
-        )
+    # Is this a major boundary? Prefer the wire protocol version; fall
+    # back to the app semver only when wire versions aren't advertised.
+    local_wire_v = Version.parse_wire(local_wire_version)
+    peer_wire_v = Version.parse_wire(peer_wire_version)
+    if local_wire_v is not None and peer_wire_v is not None:
+        cross_major = local_wire_v.major != peer_wire_v.major
+    elif local_v is not None and peer_v is not None:
+        cross_major = local_v.major != peer_v.major
+    else:
+        cross_major = False
+
+    if cross_major:
+        # DEGRADE, do not refuse. Across a major boundary the advanced
+        # framing (CDC / swarm / resumable / compression) may have
+        # changed shape, so we trust ONLY the universal baseline
+        # (CHAT / FILES). Chat + basic file transfer keep working; the
+        # fancy modes re-enable once both sides share a major. This is
+        # what makes "different versions always work" true instead of
+        # aspirational. The previous code returned compatible=False
+        # here, which turned a marketing-version bump into a hard
+        # interop wall.
+        reasons.append("major_version_boundary")
+        common = tuple(c for c in common if c in BASELINE_CAPABILITIES)
+        missing = tuple(c for c in required_caps if c not in common)
 
     if missing:
         reasons.append("missing_required_capability")
@@ -109,7 +159,11 @@ def negotiate(
             reasons=tuple(reasons),
         )
 
-    if FILE_SWARM in common and FILE_CDC in common:
+    if cross_major and any(c in common for c in BASELINE_CAPABILITIES):
+        # Distinct label so the UI / logs can say "talking in safe
+        # cross-version mode" rather than a plain baseline.
+        mode = "baseline_cross_major"
+    elif FILE_SWARM in common and FILE_CDC in common:
         mode = "swarm_advanced"
     elif FILE_RESUMABLE in common and FILE_CDC in common:
         mode = "resumable_advanced"

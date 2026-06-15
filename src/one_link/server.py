@@ -14640,13 +14640,20 @@ class UIServer:
             # an opaque InvalidTag. None until first CAPS exchange.
             p["app_version"] = None
             peer_features: list[str] = []
+            peer_wire_version: str | None = None
             if sess is not None:
                 ch = getattr(sess, "channel", None)
                 if ch is not None and getattr(ch, "peer_caps", None):
                     p["app_version"] = ch.peer_caps.get("app_version")
                     peer_features = ch.peer_caps.get("features") or []
+                    # 2026-06-04: the peer's WIRE protocol version
+                    # (e.g. "OL1.2") governs frame compatibility — pass
+                    # it so negotiate() keys the major-boundary check off
+                    # the wire, not the marketing app version.
+                    peer_wire_version = ch.peer_caps.get("protocol")
             try:
                 from one_link import __version__ as _local_app_version
+                from one_link.daemon import PROTOCOL_VERSION as _local_wire_version
                 from one_link.capabilities import LOCAL_CAPABILITIES
                 from one_link.protocol_compat import fallback_order, negotiate
                 compat = negotiate(
@@ -14654,6 +14661,8 @@ class UIServer:
                     peer_version=p.get("app_version"),
                     local_capabilities=LOCAL_CAPABILITIES,
                     peer_capabilities=peer_features,
+                    local_wire_version=_local_wire_version,
+                    peer_wire_version=peer_wire_version,
                 )
                 p["compatibility"] = {
                     "compatible": compat.compatible,

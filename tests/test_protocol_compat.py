@@ -67,16 +67,60 @@ def test_same_major_falls_back_to_baseline_file_mode():
     assert "file_cdc" not in fallback_order(res)
 
 
-def test_major_mismatch_is_explicit_incompatible():
+def test_app_major_mismatch_degrades_to_baseline_not_refused():
+    """2026-06-04: an APP-version major difference must NOT sever
+    interop — it degrades to the universal baseline so chat + basic
+    file transfer always work. (Previously this returned
+    compatible=False / incompatible_major, which would have turned a
+    routine 1.0 release into a hard wall against every 0.x user.)"""
     res = negotiate(
         local_version="1.0.0",
         peer_version="2.0.0",
-        local_capabilities=[CHAT, FILES],
-        peer_capabilities=[CHAT, FILES],
+        local_capabilities=[CHAT, FILES, FILE_CDC],
+        peer_capabilities=[CHAT, FILES, FILE_CDC],
     )
-    assert res.compatible is False
-    assert res.mode == "incompatible_major"
-    assert "major_version_mismatch" in res.reasons
+    assert res.compatible is True
+    assert res.mode == "baseline_cross_major"
+    assert "major_version_boundary" in res.reasons
+    # Advanced framing (CDC) is conservatively disabled across the
+    # boundary; only the baseline survives.
+    assert "file_cdc" not in fallback_order(res)
+    assert res.common_capabilities == (CHAT, FILES)
+
+
+def test_same_wire_major_ignores_app_major_difference():
+    """When both peers advertise the SAME wire protocol version, an
+    app-version major difference is irrelevant — full advanced
+    negotiation proceeds. This is the decoupling that lets the app
+    bump to 1.0 (or 2.0) without downgrading transfers."""
+    res = negotiate(
+        local_version="2.0.0",
+        peer_version="1.0.0",
+        local_capabilities=[CHAT, FILES, FILE_CDC],
+        peer_capabilities=[CHAT, FILES, FILE_CDC],
+        local_wire_version="OL1.2",
+        peer_wire_version="OL1.2",
+    )
+    assert res.compatible is True
+    assert res.mode == "advanced"
+    assert "major_version_boundary" not in res.reasons
+
+
+def test_wire_major_boundary_degrades_to_baseline():
+    """A genuine WIRE-protocol major boundary (frame shape may have
+    changed) conservatively drops the pair to baseline rather than
+    risking a corrupt advanced transfer — but still does NOT refuse."""
+    res = negotiate(
+        local_version="1.5.0",
+        peer_version="1.5.0",
+        local_capabilities=[CHAT, FILES, FILE_CDC],
+        peer_capabilities=[CHAT, FILES, FILE_CDC],
+        local_wire_version="OL2.0",
+        peer_wire_version="OL1.2",
+    )
+    assert res.compatible is True
+    assert res.mode == "baseline_cross_major"
+    assert "file_cdc" not in fallback_order(res)
 
 
 def test_required_capability_must_be_common():
