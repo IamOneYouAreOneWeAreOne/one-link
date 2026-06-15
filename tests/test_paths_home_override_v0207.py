@@ -130,8 +130,14 @@ def test_parent_owned_by_other_uid_rejected(tmp_path, monkeypatch, caplog):
                 return real_geteuid() + 99999  # a uid that's NOT us
             return getattr(self.real, name)
 
-    def fake_stat(self):
-        return _FakeStat(real_stat(self))
+    # 2026-06-04: accept + forward **kwargs. Python 3.12's
+    # Path.exists()/Path.is_*() call self.stat(follow_symlinks=...),
+    # so a fake_stat(self) with no kwargs raises TypeError — which,
+    # because this monkeypatch is global on Path.stat, also breaks
+    # pytest's own traceback formatter (it calls p.exists()) and
+    # turned a normal test failure into a suite-aborting INTERNALERROR.
+    def fake_stat(self, **kwargs):
+        return _FakeStat(real_stat(self, **kwargs))
 
     monkeypatch.setattr(Path, "stat", fake_stat)
     with caplog.at_level("WARNING", logger="one_link.paths"):
