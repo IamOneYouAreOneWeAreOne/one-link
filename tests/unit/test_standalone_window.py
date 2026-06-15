@@ -248,6 +248,15 @@ def test_desktop_launcher_waits_for_slow_packaged_daemon_startup():
     assert sig.parameters["timeout"].default >= 45.0
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason=(
+        "exercises the Windows-only taskkill fallback in _terminate_pid; "
+        "the os.name='nt' monkeypatch can't fully simulate Windows signal "
+        "semantics on POSIX (subprocess.run is never reached), so run it "
+        "where it's real — the windows-latest CI leg covers it"
+    ),
+)
 def test_terminate_pid_windows_fallback_uses_absolute_taskkill(monkeypatch):
     from one_link import app as app_mod
 

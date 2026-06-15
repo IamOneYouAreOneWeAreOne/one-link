@@ -82,8 +82,21 @@ class NativePathHelper:
             raise ValueError("native helper path_id must be alphanumeric/underscore")
         if not self.command:
             raise ValueError("native helper command is required")
-        exe = Path(str(self.command[0]))
-        if not exe.is_absolute():
+        # 2026-06-04: a native helper is platform-specific (e.g. a
+        # Windows ".exe" registered for supported_systems=("windows",)),
+        # so its path must be validated with the TARGET platform's
+        # rules, not the host's. Path(...).is_absolute() uses the host
+        # pathlib, so a legitimate Windows path like "C:/OneLink/x.exe"
+        # was rejected as "not absolute" when the check ran on a POSIX
+        # box (CI / a Linux peer). Accept a command path that is
+        # absolute under EITHER Windows or POSIX semantics — the real
+        # intent is to reject RELATIVE paths (PATH-hijacking risk),
+        # which are non-absolute under both.
+        import ntpath
+        import posixpath
+
+        cmd0 = str(self.command[0])
+        if not (ntpath.isabs(cmd0) or posixpath.isabs(cmd0)):
             raise ValueError("native helper executable path must be absolute")
 
     def applies_to(self, path_id: str, system: str) -> bool:
