@@ -69,9 +69,19 @@ def _force_kill_windows_pid(pid: int) -> None:
     """Terminate a stale daemon process on Windows without invoking a shell."""
     if pid <= 0:
         raise ValueError("pid must be positive")
-    taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
+    # 2026-06-04: build the path with ntpath, not pathlib. This code
+    # only ever runs on Windows (caller guards on os.name == 'nt'), but
+    # pathlib.Path on a POSIX CI runner joins with '/', producing
+    # 'C:\\Windows/System32/taskkill.exe' — which broke the
+    # cross-platform unit test and obscured the real argv. ntpath.join
+    # always emits the correct Windows path regardless of host OS, so
+    # the produced argv is deterministic everywhere.
+    import ntpath
+    taskkill = ntpath.join(
+        os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe",
+    )
     subprocess.run(
-        [str(taskkill), "/F", "/PID", str(int(pid))],
+        [taskkill, "/F", "/PID", str(int(pid))],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         timeout=3,

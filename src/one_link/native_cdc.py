@@ -348,7 +348,11 @@ def _compile(compiler: str, src: Path, lib: Path) -> None:
         ]
         if os.name != "nt":
             cmd.insert(3, "-fPIC")
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+    # 2026-06-04: 30s was too tight for a cold CI runner (first gcc
+    # invocation on a fresh image, no warm caches) and intermittently
+    # timed out, hard-failing the whole installer build. 120s gives
+    # the cold path room while still bounding a genuinely hung compile.
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
     if proc.returncode != 0 or not lib.is_file():
         stderr = (proc.stderr or proc.stdout or "").strip()
         raise RuntimeError(f"native CDC compile failed: {stderr[:500]}")

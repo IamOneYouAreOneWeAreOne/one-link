@@ -9,10 +9,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import pytest
 
-
+np = pytest.importorskip("numpy")
 torch = pytest.importorskip("torch", exc_type=(ImportError, OSError))
 
 CKPT_PATH = Path(__file__).resolve().parents[1] / "assets" / "models" / "voice_predictor_v3_librispeech" / "checkpoint.pt"

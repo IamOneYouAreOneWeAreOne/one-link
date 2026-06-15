@@ -258,7 +258,15 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: |
-          python scripts/build_binary.py --gui
+          # --allow-native-cdc-fallback: the native CDC scanner is an
+          # OPTIONAL accelerator — the app runs correctly in pure
+          # Python without it (same philosophy as the maturin/Rust
+          # crate, which already ships pure-Python on build failure).
+          # Without this flag a flaky gcc compile (cold-runner timeout)
+          # hard-failed the whole installer build, blocking every
+          # download. The fallback ships a working pure-Python
+          # installer instead of nothing.
+          python scripts/build_binary.py --gui --allow-native-cdc-fallback
 
       - name: stamp build metadata
         shell: bash

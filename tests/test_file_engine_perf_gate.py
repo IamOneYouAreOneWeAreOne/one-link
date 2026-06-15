@@ -23,8 +23,9 @@ import threading
 import time
 from pathlib import Path
 
-import psutil
 import pytest
+
+psutil = pytest.importorskip("psutil")
 
 from tests.harness import (
     daemon_pair,

@@ -15,10 +15,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import pytest
 
-
+np = pytest.importorskip("numpy")
 pytest.importorskip("onnxruntime")
 torch = pytest.importorskip("torch", exc_type=(ImportError, OSError))
 

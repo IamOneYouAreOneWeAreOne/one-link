@@ -12,11 +12,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import pytest
 
-
-# Skip the whole module if torch is unavailable — the codec needs it.
+# Skip the whole module if numpy/torch are unavailable — the codec needs them.
+np = pytest.importorskip("numpy")
 torch = pytest.importorskip("torch", exc_type=(ImportError, OSError))
 
 CKPT_PATH = Path(__file__).resolve().parents[1] / "assets" / "models" / "voice_predictor_v3_librispeech" / "checkpoint.pt"
