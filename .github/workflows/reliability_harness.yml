@@ -53,6 +53,15 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     timeout-minutes: 30
+    # 2026-06-04: run every step under bash on BOTH OSes. The harness
+    # step uses bash line-continuations (`\`), which PowerShell (the
+    # Windows default shell) can't parse — it failed with
+    # "ParserError ... .ps1:3" on the windows-latest leg. GitHub runners
+    # ship git-bash on Windows, and `python scripts/...` is shell-
+    # agnostic, so bash is safe everywhere.
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - uses: actions/checkout@v4

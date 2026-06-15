@@ -190,4 +190,14 @@ exclude_dirs = ["tests", "scripts", ".venv", "build", "dist"]
 # Skips: B101 (assert) is fine in production checks here; B404 (subprocess
 # import) is unavoidable for the reveal-in-folder feature; B603 (subprocess
 # without shell=True) is what we want, not what we avoid.
-skips = ["B101", "B404", "B603"]
+# B104 (hardcoded bind to 0.0.0.0) is the intentional, documented `--lan`
+# feature — binding all interfaces is HOW a phone on your Wi-Fi reaches the
+# UI. It fires at the real bind sites (server/lan_discovery) and inside
+# hardening_checks.py which references the address as a string to DETECT it.
+# 2026-06-04: the CI gate now fails only on MEDIUM+ severity (see
+# .github/workflows/security.yml), so the ~255 LOW-severity intentional
+# patterns here — try/except/pass best-effort cleanup (B110/B112), non-crypto
+# random (B311), no-shell subprocess (B606, sibling of skipped B603), and
+# partial exe paths (B607) — are recorded in the archived bandit.json
+# artifact but don't block CI.
+skips = ["B101", "B404", "B603", "B104"]
