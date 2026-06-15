@@ -105,13 +105,19 @@ jobs:
           pip install pyinstaller
 
       - name: build
-        run: python scripts/build_binary.py
+        # --allow-native-cdc-fallback: native CDC is an optional
+        # accelerator; don't hard-fail the smoke build on a flaky gcc
+        # compile (matches auto_build.yml + the maturin fallback).
+        run: python scripts/build_binary.py --allow-native-cdc-fallback
 
       - name: upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: one-link-windows
-          path: dist/one-link.exe
+          # onedir layout: the exe lives in dist/one-link/, not dist/.
+          # The previous dist/one-link.exe path never matched, so this
+          # smoke job's upload step always failed.
+          path: dist/one-link/one-link.exe
           if-no-files-found: error
 
   # --------------------------------------------------------------------------
