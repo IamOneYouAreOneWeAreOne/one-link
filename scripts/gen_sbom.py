@@ -40,15 +40,19 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+        # 2026-06-04: the CycloneDX CLI flag is --output-file (alias -o),
+        # not --outfile. The stale --outfile failed CI's SBOM step with
+        # "unrecognized arguments: --outfile". Output format value is the
+        # uppercase enum (JSON) the current cyclonedx_py expects.
         cmd = [
             sys.executable, "-m", "cyclonedx_py", "requirements",
-            str(lock), "--output-format", "json",
-            "--outfile", str(out),
+            str(lock), "--output-format", "JSON",
+            "--output-file", str(out),
         ]
     else:
         cmd = [
             sys.executable, "-m", "cyclonedx_py", "environment",
-            "--output-format", "json", "--outfile", str(out),
+            "--output-format", "JSON", "--output-file", str(out),
         ]
     print("$ " + " ".join(cmd))
     rc = subprocess.run(cmd, check=False).returncode
