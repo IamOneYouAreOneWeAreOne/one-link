@@ -21,6 +21,22 @@ from one_link import master_seed as ms
 from one_link.daemon import Daemon
 from one_link.identity import load_or_create as load_or_create_identity
 
+# 2026-06-04: every test here exercises the Rust native crate —
+# durability.LocalStripeStore needs one_link_native.erasure (ADR-0018)
+# and the Fountain encoder/decoder need one_link_native.fountain
+# (ADR-0015). Both raise RuntimeError at call time when the compiled
+# crate isn't installed. Skip the whole module in that case (e.g. CI
+# without maturin) instead of erroring 26 tests.
+from one_link import erasure_native as _en
+
+pytestmark = pytest.mark.skipif(
+    not (_en.HAS_NATIVE and fountain.HAS_NATIVE),
+    reason=(
+        "one_link_native.erasure / .fountain not installed "
+        "(ADR-0018/0015 native durability)"
+    ),
+)
+
 
 @pytest.fixture
 def daemon_with_seed(monkeypatch):

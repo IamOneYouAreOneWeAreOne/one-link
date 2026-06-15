@@ -17,17 +17,20 @@ from one_link.crdt import (
     merge_manifest_entries,
 )
 
-try:
-    from one_link import folder_native as fn
+from one_link import folder_native as fn
 
-    HAS_NATIVE = True
-except ImportError:  # pragma: no cover
-    HAS_NATIVE = False
-    fn = None  # type: ignore[assignment]
+# 2026-06-04: the OLD guard keyed off whether the `folder_native`
+# wrapper module imports — but that ALWAYS succeeds (it's pure Python).
+# The actual Rust backend (`one_link_native.crdt`) is the thing that
+# may be absent, and the wrapper raises a RuntimeError at call time
+# when it is. So the skip must key off the real native flag,
+# `crdt_native.HAS_NATIVE`, or the whole module errors in any CI/env
+# without the compiled crate instead of skipping cleanly.
+from one_link import crdt_native
 
 pytestmark = pytest.mark.skipif(
-    not HAS_NATIVE,
-    reason="one_link_native CRDT folder not installed",
+    not crdt_native.HAS_NATIVE,
+    reason="one_link_native.crdt not installed (ADR-0022 native CRDT folder)",
 )
 
 

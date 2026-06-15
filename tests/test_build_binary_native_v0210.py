@@ -15,6 +15,14 @@ from pathlib import Path
 
 import pytest
 
+# 2026-06-04: every test here calls build_binary.main(), which returns
+# 2 immediately if PyInstaller can't be imported (see build_binary.py
+# "PyInstaller is not installed" guard). PyInstaller is only installed
+# in the dedicated build jobs, not the full pytest-suite job, so
+# without this guard all 6 tests fail with `assert 2 == <expected>` in
+# that env. Skip cleanly when PyInstaller is absent.
+pytest.importorskip("PyInstaller")
+
 
 SCRIPT = (
     Path(__file__).resolve().parent.parent

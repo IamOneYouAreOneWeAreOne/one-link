@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,22 @@ from one_link.daemon import Daemon
 from one_link.identity import Identity, fingerprint_of
 from one_link.server import MAX_FAILED_AUTH_ATTEMPTS, MAX_JSON_REQUEST_BYTES, UIServer
 from one_link.state import State
+
+# 2026-06-04: native Wi-Fi path creation (private_hotspot / wifi_direct)
+# is only supported on Windows (netsh) in this build. On other platforms
+# execute_native_creation_plan returns state="unsupported" BEFORE the
+# opt-in / dry-run / kill-switch logic these tests exercise, so the
+# assertions (expecting "blocked"/"dry_run"/200) don't hold. The
+# behavior under test is platform-independent in design but only
+# reachable on a supported OS — so run these on the Windows CI leg and
+# skip elsewhere (the full pytest suite runs on both windows + ubuntu).
+_needs_native_path_create = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason=(
+        "native Wi-Fi path creation is Windows-only in this build; "
+        "other platforms short-circuit to 'unsupported'"
+    ),
+)
 
 
 def _identity() -> Identity:
@@ -518,6 +535,7 @@ async def test_api_fabric_path_create_is_read_only_and_safety_gated(ctx):
     assert "bulk payloads are never forced through BLE" in ble["safeguards"]
 
 
+@_needs_native_path_create
 @pytest.mark.asyncio
 async def test_api_fabric_path_create_launch_is_kill_switch_safe(ctx, monkeypatch):
     client, daemon, _, token, _ = ctx
@@ -577,6 +595,7 @@ async def test_api_fabric_path_create_launch_rejects_unsupported(ctx):
     assert j["error"] == "path_creation_launch_rejected"
 
 
+@_needs_native_path_create
 @pytest.mark.asyncio
 async def test_api_fabric_path_create_native_dry_run_redacts_key(ctx):
     client, daemon, _, token, _ = ctx
@@ -618,6 +637,7 @@ async def test_api_fabric_path_create_native_dry_run_redacts_key(ctx):
     assert "key=********" in rendered
 
 
+@_needs_native_path_create
 @pytest.mark.asyncio
 async def test_api_fabric_path_create_native_requires_opt_in(ctx):
     client, daemon, _, token, _ = ctx
@@ -688,6 +708,7 @@ async def test_api_fabric_path_create_native_rejects_wifi_direct_silent_api(ctx)
     assert "no safe silent native creation API" in j["hint"]
 
 
+@_needs_native_path_create
 @pytest.mark.asyncio
 async def test_api_fabric_path_create_native_uses_registered_helper_dry_run(ctx, monkeypatch):
     client, daemon, _, token, _ = ctx
