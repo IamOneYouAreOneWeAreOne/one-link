@@ -21756,7 +21756,11 @@ class UIServer:
         async def _shutdown_soon():
             await asyncio.sleep(0.5)
             log.info("daemon shutdown: exiting with code 0")
-            _os._exit(0)
+            # Was `_os._exit(0)` — but `_os` is never imported in this
+            # handler (module-level import is plain `os`), so the
+            # shutdown endpoint raised NameError instead of exiting.
+            # External-audit / mypy caught this real runtime bug.
+            os._exit(0)
         asyncio.create_task(_shutdown_soon())
 
         return resp

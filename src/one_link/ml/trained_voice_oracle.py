@@ -169,6 +169,12 @@ class TrainedVoiceOracle:
 
 def _selftest() -> int:
     import time
+    from pathlib import Path
+    # REPO_ROOT was used here but never defined (undefined-name bug
+    # caught by the external audit / mypy — _selftest() would NameError).
+    # This file is src/one_link/ml/trained_voice_oracle.py, so the repo
+    # root is parents[3].
+    REPO_ROOT = Path(__file__).resolve().parents[3]
     ckpt = REPO_ROOT / "models" / "voice_predictor_v1" / "checkpoint.pt"
     if not ckpt.exists():
         print(f"voice oracle selftest: SKIP (no checkpoint at {ckpt})")

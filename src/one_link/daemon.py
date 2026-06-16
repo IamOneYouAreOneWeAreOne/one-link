@@ -12359,7 +12359,12 @@ class Daemon:
                 self._degradation_events.append({
                     "at_ms": int(time.time() * 1000),
                     "kind": "direct_dial_failed_relay_fallback",
-                    "peer_fp": fingerprint_of(peer.ed_pub)[:16],
+                    # Peer has ed_pub_hex (a hex string), not ed_pub, and
+                    # fingerprint_of wants bytes — the old peer.ed_pub
+                    # raised AttributeError, crashing this degradation-
+                    # logging path on every direct->relay fallback
+                    # (real bug caught by the external audit / mypy).
+                    "peer_fp": fingerprint_of(bytes.fromhex(peer.ed_pub_hex))[:16],
                     "reason": f"{type(direct_err).__name__}: {direct_err}",
                     "expected": "direct LAN/Internet dial",
                     "actual": "encrypted relay",
@@ -23185,7 +23190,11 @@ class Daemon:
                     delivered = 0
                     for peer in peers:
                         try:
-                            fp = fingerprint_of(peer.ed_pub)
+                            # Peer.ed_pub_hex (hex str), not ed_pub;
+                            # fingerprint_of wants bytes. Same
+                            # AttributeError bug as the relay-fallback
+                            # path — fixed for the QUIC-advertise path too.
+                            fp = fingerprint_of(bytes.fromhex(peer.ed_pub_hex))
                             ok = await self._reply_endpoint_update_to_peer(
                                 fp,
                                 reason="manual_quic_advertise",
