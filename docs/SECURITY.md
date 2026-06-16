@@ -30,12 +30,22 @@ not currently shipped guarantees.
 
 **Tier B — Desktop daemon (alive).** The Python daemon shipped via
 `pip install one_link` or the bundled binary is what most users run
-today. Its at-rest story is intentionally narrower than the PWA story
-above: the SQLite state file, blob store, UI bearer token, and Ed25519
-identity key live cleartext on disk under the user-account directory
-by default. The user can encrypt the identity key by setting
-`ONE_LINK_PASSPHRASE` before launch (PBKDF2-wrapped PKCS#8); the rest
-of the at-rest scope is documented as future work.
+today. As of 2026-06-16 (external-audit remediation) the SQLite state
+file is **encrypted at rest by default** (SQLCipher AES-256). The key
+is obtained from the OS keychain (Windows Credential Manager / macOS
+Keychain / Linux Secret Service) when available, and from a local
+`0600` key file in the data dir as a fallback so encryption stays on
+even where no OS keychain exists. The daemon **refuses to run with a
+plaintext state DB** unless the operator explicitly opts in with
+`ONE_LINK_ALLOW_PLAINTEXT=1` — there is no longer a *silent* plaintext
+fallback, and the migration's temporary plaintext backup is securely
+deleted once the encrypted DB is verified (no lingering cleartext
+copy). Honest caveat: a local key file sitting beside the DB is weaker
+than the OS keychain against an attacker who already has read access
+to the data dir; the OS keychain (plus OS full-disk encryption) is the
+strong configuration, and the daemon logs which key store is in use.
+The blob store and UI bearer token remain on the at-rest roadmap;
+`ONE_LINK_PASSPHRASE` still lets you supply the DB key explicitly.
 
 **What this means for each threat status below.** Status cells that
 explicitly call out browser-PWA-only mechanisms (OPFS, Web Crypto

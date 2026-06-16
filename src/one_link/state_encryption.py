@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Optional
@@ -130,19 +131,22 @@ def migrate_plaintext_to_encrypted(
 
     Steps (atomic with crash safety at each):
       1. Verify SQLCipher import is available — refuse if not.
-      2. Copy the existing file to ``<path>.pre-encryption-backup``
-         (safety net — never auto-deleted).
+      2. Copy the existing file to ``<path>.pre-encryption-backup`` as a
+         crash-safety net DURING the migration only.
       3. Open the plaintext source with stdlib sqlite3.
       4. ATTACH a new encrypted DB at ``<path>.encrypted`` using
          the passphrase, ``sqlcipher_export()`` everything over.
-      5. Close both; rename ``<path>.encrypted`` → ``<path>`` (the
-         backup makes this safe even mid-rename).
-      6. Sanity-open the encrypted file with the passphrase to confirm
-         it works before returning; raise if it doesn't.
+      5. Sanity-open the encrypted file with the passphrase to confirm
+         it works; raise if it doesn't.
+      6. Rename ``<path>.encrypted`` → ``<path>`` (the backup makes
+         this safe even mid-rename).
+      7. SECURELY DELETE the plaintext backup — once the encrypted DB
+         is verified + live, a lingering plaintext copy is a data-leak
+         liability (external-audit finding), not a safety net.
 
-    Returns the backup path so the caller can surface it in a log /
-    UI banner ('Plaintext backup saved to X — delete after verifying
-    the encrypted DB works.')"""
+    Returns the backup path ONLY if it could not be removed (so the
+    caller can warn the user to delete it manually); returns None in
+    the normal case where the plaintext backup was securely deleted."""
     if not _have_sqlcipher():
         raise RuntimeError(
             "sqlcipher3 not installed; cannot migrate to encrypted DB"
@@ -232,12 +236,37 @@ def migrate_plaintext_to_encrypted(
     db_path.unlink()
     enc_path.rename(db_path)
 
+    # 5. Securely delete the plaintext backup. 2026-06-16 (external-audit
+    # remediation): the backup was previously kept FOREVER ("never
+    # auto-deleted") — a full plaintext copy of every message + identity
+    # key sitting on disk, which an external audit (rightly) flagged as a
+    # data-at-rest leak that defeats the whole point of encrypting the
+    # DB. The backup exists only as a crash-safety net DURING migration;
+    # by this point the encrypted DB has been sanity-opened (step 3) AND
+    # is now the live file (step 4), so the plaintext copy is pure
+    # liability. Overwrite its bytes before unlinking so the plaintext
+    # doesn't survive in free space / on SSDs as easily.
+    with contextlib.suppress(Exception):
+        if backup_path.exists():
+            size = backup_path.stat().st_size
+            with open(backup_path, "r+b") as fh:
+                fh.write(os.urandom(max(4096, min(size, 8 * 1024 * 1024))))
+                fh.flush()
+                os.fsync(fh.fileno())
+            backup_path.unlink()
+    backup_removed = not backup_path.exists()
+
     log.info(
         "state.db migrated to SQLCipher AES-256 (kdf_iter=%d, "
-        "page_size=%d). Backup at %s.",
-        SQLCIPHER_KDF_ITER, SQLCIPHER_PAGE_SIZE, backup_path,
+        "page_size=%d). Plaintext backup %s.",
+        SQLCIPHER_KDF_ITER, SQLCIPHER_PAGE_SIZE,
+        "securely deleted" if backup_removed else (
+            "could NOT be removed — delete it manually: %s" % backup_path
+        ),
     )
-    return backup_path
+    # Return the backup path only if it still exists (couldn't be
+    # removed); None when it was securely deleted (the common path).
+    return None if backup_removed else backup_path
 
 
 def harden_existing_connection(conn: Any) -> None:

@@ -27,14 +27,22 @@ os.environ.setdefault("ONE_LINK_DISABLE_REVEAL", "1")
 # osascript / zenity folder dialog on the developer's screen.
 os.environ.setdefault("ONE_LINK_DISABLE_NATIVE_PICKER", "1")
 
-# v0.21.x: disable at-rest SQLCipher encryption for the test suite by
-# default. Unit tests construct thousands of throwaway State() objects;
-# routing each through the OS keychain (keyring) would pollute the
-# developer's real credential store AND exhaust keychain / file handles
-# at scale (observed as a 500+ ERROR cascade in the full suite). The
-# at-rest encryption path has its OWN dedicated coverage in
-# test_at_rest_encryption_v021.py, which opts back IN by setting
-# ONE_LINK_PASSPHRASE explicitly (that always overrides this flag).
+# disable at-rest SQLCipher encryption for the test suite by default.
+# Unit tests construct thousands of throwaway State() objects; routing
+# each through the OS keychain (keyring) would pollute the developer's
+# real credential store AND exhaust keychain / file handles at scale
+# (observed as a 500+ ERROR cascade in the full suite).
+#
+# IMPORTANT: this is a TEST-ISOLATION flag, NOT the product default.
+# In PRODUCTION at-rest encryption is fail-CLOSED (2026-06-16
+# external-audit remediation): State() encrypts by default using the
+# OS keychain or a local 0600 key file, and REFUSES to run plaintext
+# unless the operator explicitly sets ONE_LINK_ALLOW_PLAINTEXT=1. The
+# encrypted path + the "no plaintext ever leaks to disk" guarantee
+# have dedicated coverage in test_at_rest_encryption_v021.py
+# (test_migration_securely_deletes_plaintext_backup,
+# test_state_db_encrypted_via_local_key_file_no_keyring,
+# test_plaintext_refused_without_optin), which opt back IN.
 os.environ.setdefault("ONE_LINK_DISABLE_AT_REST_ENCRYPTION", "1")
 
 # v0.21.x accept-first: a standalone incoming file is HELD pending the

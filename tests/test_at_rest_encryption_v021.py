@@ -102,20 +102,32 @@ def test_migration_preserves_all_data(tmp_path: Path):
 
 
 @pytest.mark.skipif(not se._have_sqlcipher(), reason="sqlcipher3 not installed")
-def test_migration_writes_backup_with_plaintext(tmp_path: Path):
+def test_migration_securely_deletes_plaintext_backup(tmp_path: Path):
+    """2026-06-16 (external-audit remediation): the migration used to
+    keep a plaintext .pre-encryption-backup FOREVER — a full plaintext
+    copy of every message + identity on disk, defeating the point of
+    encrypting the DB. It must now be securely deleted once the
+    encrypted DB is verified + live. NO plaintext may survive on disk."""
     p = tmp_path / "s.db"
     c = sqlite3.connect(str(p))
     c.execute("CREATE TABLE schema_version(version INTEGER)")
     c.execute("INSERT INTO schema_version VALUES(1)")
     c.execute("CREATE TABLE t(body TEXT)")
-    c.execute("INSERT INTO t VALUES('plaintext lives in backup')")
+    c.execute("INSERT INTO t VALUES('plaintext must not survive')")
     c.commit(); c.close()
     backup = se.migrate_plaintext_to_encrypted(p, "test-pass")
-    assert backup.exists()
-    assert backup.name.endswith(".pre-encryption-backup")
-    assert b"plaintext lives in backup" in backup.read_bytes()
-    # The live file must NOT contain the plaintext.
-    assert b"plaintext lives in backup" not in p.read_bytes()
+    # Normal path: backup securely deleted, function returns None.
+    assert backup is None
+    backup_path = tmp_path / "s.db.pre-encryption-backup"
+    assert not backup_path.exists(), "plaintext backup must be deleted"
+    # The live (encrypted) file must NOT contain the plaintext.
+    assert b"plaintext must not survive" not in p.read_bytes()
+    # Belt-and-suspenders: NO file in the dir holds the plaintext.
+    for f in tmp_path.rglob("*"):
+        if f.is_file():
+            assert b"plaintext must not survive" not in f.read_bytes(), (
+                f"plaintext leaked into {f.name}"
+            )
 
 
 @pytest.mark.skipif(not se._have_sqlcipher(), reason="sqlcipher3 not installed")
@@ -184,9 +196,16 @@ def test_keychain_env_var_overrides(monkeypatch):
 
 
 def test_keychain_no_backend_no_env_returns_none(monkeypatch):
+    """ensure_passphrase returns None ONLY when neither the OS keychain
+    NOR the local key file can hold a key. (2026-06-16: with a working
+    local key file the no-keyring path now mints a key there instead of
+    returning None — see test_ensure_passphrase_falls_back_to_local_key
+    _file. Here we block BOTH stores to exercise the true None path.)"""
     monkeypatch.delenv(kc.ENV_VAR, raising=False)
     monkeypatch.delenv("ONE_LINK_DISABLE_AT_REST_ENCRYPTION", raising=False)
     monkeypatch.setattr(kc, "_load_keyring", lambda: None)
+    monkeypatch.setattr(kc, "_read_local_key", lambda: None)
+    monkeypatch.setattr(kc, "_write_local_key", lambda pw: False)
     assert kc.ensure_passphrase() is None
 
 
@@ -240,10 +259,15 @@ def test_state_migration_on_first_open_with_passphrase(
     assert s.get_setting("marker") == "should survive migration"
     s.close()
     assert b"should survive migration" not in dbp.read_bytes()
-    # Backup must exist with the original plaintext.
+    # The plaintext backup must be securely deleted after migration —
+    # no plaintext copy may linger anywhere in the data dir.
     backup = dbp.with_suffix(".db.pre-encryption-backup")
-    assert backup.exists()
-    assert b"should survive migration" in backup.read_bytes()
+    assert not backup.exists()
+    for f in tmp_path.rglob("*"):
+        if f.is_file():
+            assert b"should survive migration" not in f.read_bytes(), (
+                f"plaintext leaked into {f.name}"
+            )
 
 
 @pytest.mark.skipif(not se._have_sqlcipher(), reason="sqlcipher3 not installed")
@@ -425,3 +449,80 @@ def test_settings_privacy_pane_renders_security_audit():
     assert "sev-info" in src
     assert "sev-warn" in src
     assert "sev-fail" in src
+
+
+# ── local key-file fallback (2026-06-16 external-audit remediation) ──
+# When the OS keychain is unavailable, the key must fall back to a 0600
+# local key file so at-rest encryption STAYS ON — never silent plaintext.
+
+def test_ensure_passphrase_falls_back_to_local_key_file(tmp_path, monkeypatch):
+    """No env var + no usable OS keychain => mint a key into a 0600
+    local key file (NOT return None / go plaintext)."""
+    monkeypatch.delenv(kc.ENV_VAR, raising=False)
+    monkeypatch.delenv(kc.DISABLE_ENV, raising=False)
+    # Simulate "no OS keychain backend at all".
+    monkeypatch.setattr(kc, "_load_keyring", lambda: None)
+    # Point the local key file at the temp dir.
+    keyfile = tmp_path / kc.LOCAL_KEY_FILENAME
+    monkeypatch.setattr(kc, "_local_key_path", lambda: keyfile)
+
+    pw = kc.ensure_passphrase()
+    assert pw, "must mint a key, not fall to plaintext"
+    assert keyfile.exists(), "key must be persisted to the local key file"
+    assert keyfile.read_text(encoding="utf-8").strip() == pw
+    # get_passphrase must read it back on the next boot.
+    assert kc.get_passphrase() == pw
+    # 0600 perms on POSIX (owner-only).
+    if os.name != "nt":
+        import stat as _stat
+        mode = _stat.S_IMODE(keyfile.stat().st_mode)
+        assert mode == 0o600, f"key file perms must be 0600, got {oct(mode)}"
+
+
+@pytest.mark.skipif(not se._have_sqlcipher(), reason="sqlcipher3 not installed")
+def test_state_db_encrypted_via_local_key_file_no_keyring(tmp_path, monkeypatch):
+    """End-to-end: with NO OS keychain, State() still encrypts at rest
+    using the local key file — the DB on disk must be opaque."""
+    from one_link.state import State
+    monkeypatch.delenv(kc.ENV_VAR, raising=False)
+    monkeypatch.delenv(kc.DISABLE_ENV, raising=False)
+    monkeypatch.delenv("ONE_LINK_ALLOW_PLAINTEXT", raising=False)
+    monkeypatch.setattr(kc, "_load_keyring", lambda: None)
+    monkeypatch.setattr(kc, "_local_key_path", lambda: tmp_path / kc.LOCAL_KEY_FILENAME)
+
+    dbp = tmp_path / "ek.db"
+    s = State(db_path=dbp)
+    assert s.is_encrypted is True, "must encrypt via local key file, not plaintext"
+    s.set_setting("secret_marker", "do-not-find-me-in-cleartext")
+    s.close()
+    # The DB file must be opaque (no plaintext marker).
+    assert b"do-not-find-me-in-cleartext" not in dbp.read_bytes()
+
+
+def test_plaintext_refused_without_optin(tmp_path, monkeypatch):
+    """No key obtainable + no opt-in => State refuses to start plaintext."""
+    from one_link.state import State
+    monkeypatch.delenv(kc.ENV_VAR, raising=False)
+    monkeypatch.delenv(kc.DISABLE_ENV, raising=False)
+    monkeypatch.delenv("ONE_LINK_ALLOW_PLAINTEXT", raising=False)
+    # No keychain AND local key file can't be written (force write fail).
+    monkeypatch.setattr(kc, "_load_keyring", lambda: None)
+    monkeypatch.setattr(kc, "_write_local_key", lambda pw: False)
+    monkeypatch.setattr(kc, "_read_local_key", lambda: None)
+    with pytest.raises(RuntimeError, match="UNENCRYPTED"):
+        State(db_path=tmp_path / "refuse.db")
+
+
+def test_plaintext_allowed_with_explicit_optin(tmp_path, monkeypatch):
+    """ONE_LINK_ALLOW_PLAINTEXT=1 lets a no-key environment run plaintext
+    (explicit operator consent, loudly logged)."""
+    from one_link.state import State
+    monkeypatch.delenv(kc.ENV_VAR, raising=False)
+    monkeypatch.delenv(kc.DISABLE_ENV, raising=False)
+    monkeypatch.setenv("ONE_LINK_ALLOW_PLAINTEXT", "1")
+    monkeypatch.setattr(kc, "_load_keyring", lambda: None)
+    monkeypatch.setattr(kc, "_write_local_key", lambda pw: False)
+    monkeypatch.setattr(kc, "_read_local_key", lambda: None)
+    s = State(db_path=tmp_path / "plain.db")
+    assert s.is_encrypted is False
+    s.close()

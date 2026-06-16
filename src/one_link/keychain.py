@@ -42,23 +42,95 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import stat
 
 log = logging.getLogger("one_link.keychain")
 
 ONE_LINK_KEYCHAIN_SERVICE = "one_link"
 ONE_LINK_KEYCHAIN_USER = "state_db_key"
 ENV_VAR = "ONE_LINK_PASSPHRASE"
+# Filename of the local key-file fallback (see _local_key_path).
+LOCAL_KEY_FILENAME = "state.key"
 
 
 def _load_keyring():
     """Return the keyring module or None if the library isn't installed.
     Lazy-import so a stripped-down install without the keyring dep
-    still boots — it just stays in plaintext-state.db mode."""
+    still boots — it falls back to the local key file (see
+    _ensure_local_key) rather than to plaintext."""
     try:
         import keyring  # type: ignore[import-not-found]
         return keyring
     except Exception:  # pragma: no cover - depends on install env
         return None
+
+
+# ── Local key-file fallback ───────────────────────────────────────────
+# 2026-06-16 (external-audit remediation): the OS keychain is the
+# PREFERRED home for the state.db key, but on headless Linux (no Secret
+# Service / D-Bus), locked-down service accounts, or when keyring's
+# backend write simply fails, it isn't available. Previously the daemon
+# silently fell back to a PLAINTEXT state.db in that case — a direct
+# breach of One Link's "your data is yours and protected" promise.
+#
+# Now, when the OS keychain can't hold the key, we mint one and store it
+# in a 0600 key file inside the data dir so at-rest encryption STAYS ON
+# by default. Honest about the trade-off: a key file next to the DB is
+# weaker than the OS keychain against an attacker who already has read
+# access to the data dir — but it is strictly stronger than plaintext
+# (opaque DB to backup/cloud-sync scrapes, misconfigured shares,
+# forensic free-page recovery, casual inspection) and, combined with
+# OS full-disk encryption (FileVault/BitLocker), gives real protection
+# on a lost/stolen device. Plaintext now requires an explicit opt-in
+# (see state.py ONE_LINK_ALLOW_PLAINTEXT) instead of happening silently.
+
+def _local_key_path():
+    from one_link.paths import data_dir
+    return data_dir() / LOCAL_KEY_FILENAME
+
+
+def _read_local_key() -> str | None:
+    try:
+        p = _local_key_path()
+        if not p.exists():
+            return None
+        v = p.read_text(encoding="utf-8").strip()
+        return v or None
+    except Exception as e:  # pragma: no cover - fs edge
+        log.warning("local key-file read failed: %s", type(e).__name__)
+        return None
+
+
+def _write_local_key(pw: str) -> bool:
+    """Persist the key to a 0600 file in the data dir. Returns True on
+    success. Best-effort restrictive perms (POSIX chmod; on Windows the
+    file lives under the per-user profile dir whose ACLs already deny
+    other standard users)."""
+    try:
+        p = _local_key_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # Create with 0600 from the start where supported, so there's
+        # no window where the key is world-readable.
+        fd = os.open(
+            str(p),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        try:
+            os.write(fd, pw.encode("utf-8"))
+        finally:
+            os.close(fd)
+        with contextlib_suppress():
+            os.chmod(str(p), stat.S_IRUSR | stat.S_IWUSR)
+        return True
+    except Exception as e:
+        log.warning("local key-file write failed: %s", type(e).__name__)
+        return False
+
+
+class contextlib_suppress:
+    def __enter__(self): return self
+    def __exit__(self, *a): return True
 
 
 DISABLE_ENV = "ONE_LINK_DISABLE_AT_REST_ENCRYPTION"
@@ -86,19 +158,20 @@ def get_passphrase() -> str | None:
         # from the user's real credential store.
         return None
     kr = _load_keyring()
-    if kr is None:
-        return None
-    try:
-        v = kr.get_password(ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER)
-        if v:
-            return v
-    except Exception as e:
-        # Common on Linux without an active D-Bus session, or Windows
-        # in unusual security contexts. Don't crash — fall through to
-        # None so the daemon can boot in plaintext mode (legacy
-        # behavior) instead of refusing to start.
-        log.warning("keychain read failed: %s", type(e).__name__)
-    return None
+    if kr is not None:
+        try:
+            v = kr.get_password(ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER)
+            if v:
+                return v
+        except Exception as e:
+            # Common on Linux without an active D-Bus session, or Windows
+            # in unusual security contexts. Fall through to the local
+            # key file rather than to plaintext.
+            log.warning("keychain read failed: %s", type(e).__name__)
+    # Local key-file fallback (minted by ensure_passphrase when the OS
+    # keychain is unavailable). Keeps at-rest encryption on across
+    # restarts even where no OS keychain exists.
+    return _read_local_key()
 
 
 def ensure_passphrase() -> str | None:
@@ -115,31 +188,47 @@ def ensure_passphrase() -> str | None:
         # Explicitly disabled (tests / opt-out): stay plaintext, never
         # mint a keychain entry.
         return None
-    kr = _load_keyring()
-    if kr is None:
-        log.warning(
-            "keyring library not available; state.db will use plaintext "
-            "(legacy) at-rest mode. Install `keyring` to enable "
-            "SQLCipher encryption with auto-generated key."
-        )
-        return None
     new_pw = secrets.token_urlsafe(32)
-    try:
-        kr.set_password(
-            ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER, new_pw,
-        )
-    except Exception as e:
+    kr = _load_keyring()
+    if kr is not None:
+        try:
+            kr.set_password(
+                ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER, new_pw,
+            )
+            log.info(
+                "keychain: minted fresh state.db encryption key; stored "
+                "in the OS credential store. Future restarts pick it up "
+                "automatically."
+            )
+            return new_pw
+        except Exception as e:
+            log.warning(
+                "keychain write failed (%s); falling back to the local "
+                "0600 key file so at-rest encryption stays ON",
+                type(e).__name__,
+            )
+    else:
         log.warning(
-            "keychain write failed (%s); falling back to plaintext "
-            "state.db this run", type(e).__name__,
+            "keyring library/back end unavailable; using the local 0600 "
+            "key file so at-rest encryption stays ON (the OS keychain is "
+            "preferred — install/enable it for stronger key isolation)"
         )
-        return None
-    log.info(
-        "keychain: minted fresh state.db encryption key; stored in "
-        "the OS credential store. Future restarts pick it up "
-        "automatically."
+    # OS keychain unavailable → local key-file fallback (still encrypted).
+    if _write_local_key(new_pw):
+        log.info(
+            "keychain: minted fresh state.db encryption key; stored in a "
+            "0600 local key file (%s). at-rest encryption ACTIVE.",
+            LOCAL_KEY_FILENAME,
+        )
+        return new_pw
+    # Could not obtain or persist a key anywhere. Returning None signals
+    # the caller; state.py refuses to silently run plaintext unless the
+    # operator explicitly sets ONE_LINK_ALLOW_PLAINTEXT=1.
+    log.error(
+        "could not store a state.db encryption key in the OS keychain "
+        "OR a local key file — at-rest encryption cannot be enabled"
     )
-    return new_pw
+    return None
 
 
 def rotate_passphrase() -> str | None:
@@ -165,13 +254,31 @@ def rotate_passphrase() -> str | None:
 
 
 def forget_passphrase() -> bool:
-    """Delete the keychain entry. Caller should have already
-    decrypted-then-deleted state.db, or the user is permanently
-    locked out of the existing DB. Returns True iff a row was
-    actually deleted."""
+    """Delete the key from BOTH the OS keychain AND the local key file.
+    Caller should have already decrypted-then-deleted state.db, or the
+    user is permanently locked out of the existing DB. Returns True iff
+    a key was actually removed from either store."""
+    removed = False
+    # Local key file (secure-overwrite before unlink so the key bytes
+    # don't linger in free space).
+    try:
+        p = _local_key_path()
+        if p.exists():
+            try:
+                size = p.stat().st_size
+                with open(p, "r+b") as fh:
+                    fh.write(secrets.token_bytes(max(32, size)))
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            except Exception:
+                pass
+            p.unlink()
+            removed = True
+    except Exception as e:
+        log.warning("local key-file delete failed: %s", type(e).__name__)
     kr = _load_keyring()
     if kr is None:
-        return False
+        return removed
     try:
         kr.delete_password(
             ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER,
@@ -184,9 +291,9 @@ def forget_passphrase() -> bool:
             "PasswordDeleteError", "PasswordError",
             "KeyringError", "NoKeyringError",
         ):
-            return False
+            return removed
         log.warning("keychain delete failed: %s", type(e).__name__)
-        return False
+        return removed
 
 
 def backend_label() -> str:

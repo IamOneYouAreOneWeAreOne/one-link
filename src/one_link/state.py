@@ -614,16 +614,61 @@ class State:
         # ciphertext as a real filesystem path.
         return out if out is not None else value
 
+    # 2026-06-16 (external-audit remediation): plaintext at-rest mode is
+    # no longer a SILENT fallback. It is allowed only when the operator
+    # explicitly opts in (ONE_LINK_ALLOW_PLAINTEXT=1) or the test suite
+    # has disabled at-rest encryption. Any other "couldn't encrypt" path
+    # REFUSES TO START with an actionable error rather than quietly
+    # writing the user's messages + identity to a plaintext DB — which
+    # would betray One Link's core "your data is yours and protected"
+    # promise.
+    _ALLOW_PLAINTEXT_ENV = "ONE_LINK_ALLOW_PLAINTEXT"
+
+    def _plaintext_connection_or_refuse(self, reason: str):
+        import os as _os
+        from one_link import keychain as _kc
+        opted_in = (
+            _os.environ.get(self._ALLOW_PLAINTEXT_ENV, "").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
+        # The test suite's encryption-disable flag is an implicit opt-in
+        # so thousands of throwaway State() objects don't each hit the
+        # OS keychain. (conftest hardening is tracked separately.)
+        if opted_in or _kc._disabled():
+            log.warning(
+                "state.db: at-rest encryption OFF (%s). Running PLAINTEXT "
+                "because %s is set. Your messages + identity are NOT "
+                "encrypted at rest.",
+                reason,
+                self._ALLOW_PLAINTEXT_ENV if opted_in else _kc.DISABLE_ENV,
+            )
+            self.is_encrypted = False
+            return sqlite3.connect(
+                self.db_path,
+                check_same_thread=False, isolation_level=None,
+            )
+        raise RuntimeError(
+            "One Link refuses to start with an UNENCRYPTED state.db. "
+            f"Reason: {reason}. At-rest encryption protects your messages "
+            "and identity keys. Fix the underlying issue (install/enable "
+            "the OS keychain, or set ONE_LINK_PASSPHRASE), or — if you "
+            "truly accept plaintext storage — re-run with "
+            f"{self._ALLOW_PLAINTEXT_ENV}=1."
+        )
+
     def _open_connection_with_encryption_if_available(self):
-        """v0.21.x: open self.db_path with SQLCipher when possible,
-        falling back to stdlib sqlite3 (legacy plaintext) when:
-          - sqlcipher3 is not installed
-          - keyring + ONE_LINK_PASSPHRASE both unavailable
-          - any unexpected failure in the encrypted path
+        """Open self.db_path with SQLCipher. At-rest encryption is the
+        DEFAULT and stays on as long as a key can be obtained from the
+        OS keychain OR a local 0600 key file (keychain.ensure_passphrase
+        falls back to the file when no OS keychain exists).
+
+        Plaintext is NOT a silent fallback: every path that cannot
+        encrypt routes through _plaintext_connection_or_refuse, which
+        refuses to start unless plaintext is explicitly opted into.
 
         On first encrypted open of a previously-plaintext file, an
-        in-place migration runs. A timestamped backup is written
-        next to the db (never auto-deleted).
+        in-place migration runs and the temporary plaintext backup is
+        securely deleted once the encrypted DB is verified.
 
         Returns the open connection; sets self.is_encrypted accordingly.
         """
@@ -636,25 +681,17 @@ class State:
         # live write connection). None in legacy plaintext mode.
         self._db_passphrase = passphrase
         if not passphrase or not _se._have_sqlcipher():
-            # Legacy plaintext path. Log so the user sees it once
-            # at boot — operators can install `keyring` + `sqlcipher3`
-            # and restart to get encryption.
+            # No key or no cipher engine. This is NOT a silent plaintext
+            # fallback any more — refuse unless plaintext is opted into.
             if not passphrase:
-                log.warning(
-                    "state.db: at-rest encryption DISABLED — no "
-                    "passphrase available (set ONE_LINK_PASSPHRASE "
-                    "env var or install `keyring` for OS-keychain "
-                    "auto-mint)"
+                reason = (
+                    "no encryption key available (OS keychain unusable "
+                    "and the local key file could not be written; set "
+                    "ONE_LINK_PASSPHRASE to provide one)"
                 )
-            elif not _se._have_sqlcipher():
-                log.warning(
-                    "state.db: at-rest encryption DISABLED — "
-                    "`sqlcipher3` not installed (pip install sqlcipher3)"
-                )
-            return sqlite3.connect(
-                self.db_path,
-                check_same_thread=False, isolation_level=None,
-            )
+            else:
+                reason = "sqlcipher3 is not installed/importable"
+            return self._plaintext_connection_or_refuse(reason)
 
         # Encrypted path. Possible states:
         #   - missing  → fresh install; open encrypted from scratch
@@ -670,14 +707,11 @@ class State:
                 )
             except Exception as e:
                 log.error(
-                    "state.db: plaintext→encrypted migration FAILED "
-                    "(%s). Falling back to plaintext mode this boot; "
-                    "your data is intact, but at-rest encryption is "
-                    "OFF until the underlying issue is fixed.", e,
+                    "state.db: plaintext→encrypted migration FAILED (%s). "
+                    "Your data is intact (untouched plaintext file).", e,
                 )
-                return sqlite3.connect(
-                    self.db_path,
-                    check_same_thread=False, isolation_level=None,
+                return self._plaintext_connection_or_refuse(
+                    f"plaintext→encrypted migration failed ({type(e).__name__})"
                 )
 
         try:
@@ -708,13 +742,12 @@ class State:
                     f"error: {type(e).__name__})"
                 ) from e
             log.error(
-                "state.db: failed to open encrypted DB (%s) but the "
-                "file appears empty/missing — falling back to plaintext "
-                "mode so the daemon can boot.", e,
+                "state.db: failed to open encrypted DB (%s) and the "
+                "file appears empty/missing.", e,
             )
-            return sqlite3.connect(
-                self.db_path,
-                check_same_thread=False, isolation_level=None,
+            return self._plaintext_connection_or_refuse(
+                f"encrypted open failed on an empty/missing file "
+                f"({type(e).__name__})"
             )
 
     def _init_pragmas(self) -> None:
