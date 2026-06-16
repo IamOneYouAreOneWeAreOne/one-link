@@ -22760,7 +22760,15 @@
     const targetEl = $("#folder-send-confirm-target");
     targetEl.innerHTML = "";
     const head = document.createElement("div");
-    head.innerHTML = `<strong>${displayName}</strong>${displayPath ? ` · ${displayPath}` : ""}<br>To ${peerHostname || peerFp.slice(0, 8)}`;
+    // 2026-06-16 (external-audit XSS fix): escape ALL interpolated
+    // values. displayName/displayPath are user-chosen folder name +
+    // local path; peerHostname is PEER-CONTROLLED (a malicious peer
+    // could advertise a hostname like "<img src=x onerror=...>"). All
+    // three previously went into innerHTML raw — a real stored-XSS
+    // vector in this confirm modal.
+    head.innerHTML = `<strong>${_escapeHtml(displayName)}</strong>`
+      + (displayPath ? ` · ${_escapeHtml(displayPath)}` : "")
+      + `<br>To ${_escapeHtml(peerHostname || (peerFp || "").slice(0, 8))}`;
     targetEl.appendChild(head);
     const statsEl = $("#folder-send-confirm-stats");
     statsEl.innerHTML = `
@@ -22785,7 +22793,10 @@
     } catch (e) {
       const status = e?.status;
       const errMsg = errorToastBody(e) || (e?.message ?? "Pre-check failed.");
-      statsEl.innerHTML = `<div class="fss-row" style="color: var(--bad, #e85c5c)"><span>${errMsg}</span></div>`;
+      // 2026-06-16 (external-audit XSS fix): errMsg can carry
+      // server/peer-supplied text (error_detail / hint); escape it
+      // before it enters innerHTML.
+      statsEl.innerHTML = `<div class="fss-row" style="color: var(--bad, #e85c5c)"><span>${_escapeHtml(errMsg)}</span></div>`;
       // For peer_offline / folder_path_missing / etc the user can't
       // proceed; keep Send disabled. For other failures (e.g. the
       // peer's daemon doesn't speak BLOB_INVENTORY_QUERY) we allow

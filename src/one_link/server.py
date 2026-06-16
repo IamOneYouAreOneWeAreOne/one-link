@@ -3139,30 +3139,36 @@ class UIServer:
         # post-scrub injection) forces a conditional GET; matched
         # → 304, drift → 200 fresh body. Every code ship reaches
         # every browser on the next load.
+        import base64
         import hashlib
+        import re as _re
         etag = '"' + hashlib.sha256(html.encode("utf-8")).hexdigest()[:16] + '"'
-        if request.headers.get("If-None-Match") == etag:
-            resp = web.Response(status=304)
-            resp.headers["ETag"] = etag
-            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
-            return resp
-        resp = web.Response(text=html, content_type="text/html", charset="utf-8")
-        resp.headers["ETag"] = etag
-        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
-        resp.headers["Referrer-Policy"] = "no-referrer"
-        # v0.20.7 (security audit H9): Content-Security-Policy on the
-        # main UI. The previous response set X-Frame-Options + X-CTO
-        # via the security middleware but no CSP, so a regression
-        # that introduced an XSS sink would have nothing blocking
-        # exfiltration. SECURITY.md commits to a strict CSP; this
-        # gets us defense-in-depth coverage without breaking the
-        # bundled UI's existing inline scripts/styles. Mirrors the
-        # /peer shell CSP shape with adjustments for index's local
-        # WebSocket target. Tighten further once the bundle is
-        # refactored to remove inline scripts.
-        resp.headers["Content-Security-Policy"] = (
+        # 2026-06-16 (external-audit XSS hardening): build a HASH-based
+        # script-src so we can DROP 'unsafe-inline' from script-src.
+        # Without 'unsafe-inline', even if a future bug injected an
+        # attacker-controlled inline <script> or on*= handler, the
+        # browser would refuse to execute it (it isn't in the hash
+        # allowlist). We hash the exact inner text of every inline
+        # <script> block in the FINAL served html (the 2 bundled blocks
+        # + the injected bootstrap scrub), so the hashes always match
+        # what the browser sees — and because they're derived from the
+        # same html as the ETag, they stay cache-stable (a 304 reuses
+        # the cached body whose hashes still match). WASM isn't used in
+        # the UI, so 'wasm-unsafe-eval' is dropped too. Inline STYLES
+        # (189 style="" attrs, a far weaker vector) keep 'unsafe-inline'
+        # under style-src — nonce/hashing every inline style is a
+        # separate, lower-value refactor.
+        _script_hashes = " ".join(
+            "'sha256-%s'" % base64.b64encode(
+                hashlib.sha256(block.encode("utf-8")).digest()
+            ).decode("ascii")
+            for block in _re.findall(
+                r"<script\b[^>]*>(.*?)</script>", html, _re.DOTALL,
+            )
+        )
+        csp = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
+            f"script-src 'self' {_script_hashes}; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob:; "
             "connect-src 'self' ws: wss: https:; "
@@ -3174,6 +3180,19 @@ class UIServer:
             "base-uri 'self'; "
             "form-action 'none'"
         )
+        if request.headers.get("If-None-Match") == etag:
+            resp = web.Response(status=304)
+            resp.headers["ETag"] = etag
+            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+            # Re-send the CSP on the 304 too so a browser that doesn't
+            # cache response headers still enforces it on the reused body.
+            resp.headers["Content-Security-Policy"] = csp
+            return resp
+        resp = web.Response(text=html, content_type="text/html", charset="utf-8")
+        resp.headers["ETag"] = etag
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["Content-Security-Policy"] = csp
         # Desktop/app-mode recovery: a user can reopen One Link from a
         # cached browser tab, taskbar entry, or our own "fresh" helper
         # URL without the ``?t=`` bootstrap token. On loopback, a
