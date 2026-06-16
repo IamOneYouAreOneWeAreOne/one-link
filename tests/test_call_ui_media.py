@@ -913,7 +913,11 @@ vm.runInContext(driver, context, {{ timeout: 1000 }});
             ["node", str(tmp_path)],
             text=True,
             capture_output=True,
-            timeout=10,
+            # 2026-06-16: was 10s — too tight for a cold/loaded Windows
+            # CI runner (node process spin-up alone can approach that),
+            # causing a flaky TimeoutExpired. 60s de-flakes it while
+            # still bounding a genuine hang.
+            timeout=60,
             check=False,
         )
     finally:
