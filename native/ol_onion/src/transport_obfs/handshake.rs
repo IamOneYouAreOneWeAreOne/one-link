@@ -128,10 +128,7 @@ impl BridgeKeypair {
 
     /// Construct from raw seed + id bytes. The secret is the X25519
     /// seed; clamping happens at use.
-    pub fn from_parts(
-        secret_seed: [u8; BRIDGE_SECRET_LEN],
-        id: [u8; BRIDGE_ID_LEN],
-    ) -> Self {
+    pub fn from_parts(secret_seed: [u8; BRIDGE_SECRET_LEN], id: [u8; BRIDGE_ID_LEN]) -> Self {
         let secret = StaticSecret::from(secret_seed);
         let public = PublicKey::from(&secret);
         Self { secret, public, id }
@@ -246,10 +243,7 @@ impl ClientHandshake {
         // ECDH: shared = client_ephem * bridge_pubkey.
         // (We use bridge_pubkey here, not server_ephem_pk; the
         // server side mirrors via bridge_secret * client_ephem.)
-        let ephem = self
-            .ephem
-            .take()
-            .ok_or(HandshakeError::SmallOrderPubkey)?;
+        let ephem = self.ephem.take().ok_or(HandshakeError::SmallOrderPubkey)?;
         let shared = ephem.diffie_hellman(&self.bridge_pubkey);
         if shared.as_bytes().iter().all(|&b| b == 0) {
             return Err(HandshakeError::SmallOrderPubkey);
@@ -339,8 +333,7 @@ impl ServerHandshake {
         // the client did, but the Session ctor produces a symmetric
         // pair where each side names its own keys properly. To keep
         // both sides aligned, ServerSession::for_server swaps them.
-        let session =
-            Session::for_server(client_tx_key, server_tx_key);
+        let session = Session::for_server(client_tx_key, server_tx_key);
         // Drop the server_ephem after deriving — we don't need it
         // again.
         let _ = server_ephem;
@@ -436,12 +429,7 @@ mod tests {
         let bridge_pk_bytes: [u8; BRIDGE_PUBKEY_LEN] = *bridge.public.as_bytes();
         let now = 1_700_000_000u64;
 
-        let client = ClientHandshake::start(
-            &mut OsRng,
-            &bridge_pk_bytes,
-            &bridge.id,
-            now,
-        );
+        let client = ClientHandshake::start(&mut OsRng, &bridge_pk_bytes, &bridge.id, now);
         let first = *client.first_message();
 
         let (reply, server_session) =
@@ -467,15 +455,9 @@ mod tests {
         let bridge_pk_bytes: [u8; BRIDGE_PUBKEY_LEN] = *bridge.public.as_bytes();
         let wrong_id = [0x99u8; BRIDGE_ID_LEN];
         let now = 1_700_000_000u64;
-        let client = ClientHandshake::start(
-            &mut OsRng,
-            &bridge_pk_bytes,
-            &wrong_id,
-            now,
-        );
+        let client = ClientHandshake::start(&mut OsRng, &bridge_pk_bytes, &wrong_id, now);
         let err =
-            ServerHandshake::accept(&mut OsRng, &bridge, client.first_message(), now)
-                .unwrap_err();
+            ServerHandshake::accept(&mut OsRng, &bridge, client.first_message(), now).unwrap_err();
         assert_eq!(err, HandshakeError::BadMac);
     }
 
@@ -484,8 +466,7 @@ mod tests {
         let bridge = BridgeKeypair::generate(&mut OsRng);
         let bridge_pk_bytes: [u8; BRIDGE_PUBKEY_LEN] = *bridge.public.as_bytes();
         let client_now = 1_700_000_000u64;
-        let client =
-            ClientHandshake::start(&mut OsRng, &bridge_pk_bytes, &bridge.id, client_now);
+        let client = ClientHandshake::start(&mut OsRng, &bridge_pk_bytes, &bridge.id, client_now);
         // Server is ~1 epoch ahead (3600 sec).
         let server_now = client_now + HANDSHAKE_EPOCH_SECS;
         let (_reply, _session) =
@@ -498,13 +479,11 @@ mod tests {
         let bridge = BridgeKeypair::generate(&mut OsRng);
         let bridge_pk_bytes: [u8; BRIDGE_PUBKEY_LEN] = *bridge.public.as_bytes();
         let client_now = 1_700_000_000u64;
-        let client =
-            ClientHandshake::start(&mut OsRng, &bridge_pk_bytes, &bridge.id, client_now);
+        let client = ClientHandshake::start(&mut OsRng, &bridge_pk_bytes, &bridge.id, client_now);
         // Server is 2 epochs ahead.
         let server_now = client_now + 2 * HANDSHAKE_EPOCH_SECS;
-        let err =
-            ServerHandshake::accept(&mut OsRng, &bridge, client.first_message(), server_now)
-                .unwrap_err();
+        let err = ServerHandshake::accept(&mut OsRng, &bridge, client.first_message(), server_now)
+            .unwrap_err();
         assert_eq!(err, HandshakeError::BadMac);
     }
 
@@ -513,8 +492,7 @@ mod tests {
         let bridge = BridgeKeypair::generate(&mut OsRng);
         let bridge_pk_bytes: [u8; BRIDGE_PUBKEY_LEN] = *bridge.public.as_bytes();
         let now = 1_700_000_000u64;
-        let client =
-            ClientHandshake::start(&mut OsRng, &bridge_pk_bytes, &bridge.id, now);
+        let client = ClientHandshake::start(&mut OsRng, &bridge_pk_bytes, &bridge.id, now);
         let (mut reply, _server_session) =
             ServerHandshake::accept(&mut OsRng, &bridge, client.first_message(), now).unwrap();
         reply[40] ^= 0x01; // flip a byte in the auth tag
@@ -534,12 +512,8 @@ mod tests {
     fn handshake_message_size_is_constant() {
         let bridge = BridgeKeypair::generate(&mut OsRng);
         let bridge_pk_bytes: [u8; BRIDGE_PUBKEY_LEN] = *bridge.public.as_bytes();
-        let client = ClientHandshake::start(
-            &mut OsRng,
-            &bridge_pk_bytes,
-            &bridge.id,
-            1_700_000_000,
-        );
+        let client =
+            ClientHandshake::start(&mut OsRng, &bridge_pk_bytes, &bridge.id, 1_700_000_000);
         assert_eq!(client.first_message().len(), HANDSHAKE_LEN);
         assert_eq!(HANDSHAKE_LEN, 48);
     }
@@ -550,14 +524,12 @@ mod tests {
         let bridge_pk_bytes: [u8; BRIDGE_PUBKEY_LEN] = *bridge.public.as_bytes();
         let now = 1_700_000_000u64;
 
-        let client_a =
-            ClientHandshake::start(&mut OsRng, &bridge_pk_bytes, &bridge.id, now);
+        let client_a = ClientHandshake::start(&mut OsRng, &bridge_pk_bytes, &bridge.id, now);
         let (reply_a, server_a) =
             ServerHandshake::accept(&mut OsRng, &bridge, client_a.first_message(), now).unwrap();
         let session_a = client_a.finish(&reply_a).unwrap();
 
-        let client_b =
-            ClientHandshake::start(&mut OsRng, &bridge_pk_bytes, &bridge.id, now);
+        let client_b = ClientHandshake::start(&mut OsRng, &bridge_pk_bytes, &bridge.id, now);
         let (reply_b, server_b) =
             ServerHandshake::accept(&mut OsRng, &bridge, client_b.first_message(), now).unwrap();
         let session_b = client_b.finish(&reply_b).unwrap();

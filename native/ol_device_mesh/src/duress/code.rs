@@ -52,10 +52,7 @@ impl std::fmt::Debug for DuressCode {
 
 /// Derive a [`DuressCode`] from the user-entered bytes + a per-
 /// envelope salt via Argon2id.
-pub fn derive_duress_key(
-    user_code: &[u8],
-    salt: &[u8],
-) -> DeviceMeshResult<DuressCode> {
+pub fn derive_duress_key(user_code: &[u8], salt: &[u8]) -> DeviceMeshResult<DuressCode> {
     if user_code.is_empty() {
         return Err(DeviceMeshError::DuressCodeEmpty);
     }

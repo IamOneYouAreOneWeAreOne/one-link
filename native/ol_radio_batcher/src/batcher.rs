@@ -76,8 +76,12 @@ impl<T> Batcher<T> {
     pub fn new() -> Self {
         // Constructor parameters are valid by construction so the
         // `Result` would always be Ok; unwrap is safe.
-        Self::with_config(DEFAULT_DRX_WINDOW_MS, DEFAULT_MAX_QUEUE_SIZE, DEFAULT_MAX_AGE_MS)
-            .expect("default config is always valid")
+        Self::with_config(
+            DEFAULT_DRX_WINDOW_MS,
+            DEFAULT_MAX_QUEUE_SIZE,
+            DEFAULT_MAX_AGE_MS,
+        )
+        .expect("default config is always valid")
     }
 
     /// Construct with explicit configuration.
@@ -397,7 +401,10 @@ mod tests {
             b.enqueue("p", i, Priority::Normal, 1000).unwrap();
         }
         let r = b.enqueue("p", 99, Priority::Normal, 1000);
-        assert!(matches!(r, Err(BatcherError::QueueFull { size: 3, max: 3 })));
+        assert!(matches!(
+            r,
+            Err(BatcherError::QueueFull { size: 3, max: 3 })
+        ));
         assert_eq!(b.stats().rejected_full, 1);
     }
 

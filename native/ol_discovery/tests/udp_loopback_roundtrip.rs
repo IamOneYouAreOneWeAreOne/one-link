@@ -12,12 +12,8 @@ use tokio::sync::Mutex;
 
 use ol_discovery::lookup::Transport;
 use ol_discovery::node_id::NodeId;
-use ol_discovery::rpc::{
-    FindValueOutcome, Request, Response, RpcEnvelope,
-};
-use ol_discovery::udp_transport::{
-    EndpointResolver, RequestHandler, UdpTransport,
-};
+use ol_discovery::rpc::{FindValueOutcome, Request, Response, RpcEnvelope};
+use ol_discovery::udp_transport::{EndpointResolver, RequestHandler, UdpTransport};
 
 fn id(b: u8) -> NodeId {
     NodeId([b; 32])
@@ -73,10 +69,8 @@ async fn spawn_two_peers(
         let a = a_id;
         Arc::new(move |peer: NodeId| if peer == a { Some(addr_a) } else { None })
     };
-    let t_a = UdpTransport::new(sock_a.clone(), a_id, r_a)
-        .with_timeout_ms(1000);
-    let t_b = UdpTransport::new(sock_b.clone(), b_id, r_b)
-        .with_timeout_ms(1000);
+    let t_a = UdpTransport::new(sock_a.clone(), a_id, r_a).with_timeout_ms(1000);
+    let t_b = UdpTransport::new(sock_b.clone(), b_id, r_b).with_timeout_ms(1000);
     // B runs a receiver with the handler.
     let _h_b = t_b.spawn_receiver(handler_b);
     // A also runs a receiver so it can receive responses. Empty handler.
@@ -101,8 +95,7 @@ async fn find_node_query_over_udp_loopback() {
     let handler = Arc::new(StubHandler {
         closest_to_return: Mutex::new(canned_closest.clone()),
     });
-    let (t_a, _, _t_b, _) =
-        spawn_two_peers(a_id, b_id, handler).await;
+    let (t_a, _, _t_b, _) = spawn_two_peers(a_id, b_id, handler).await;
     // Give the receivers a beat to start.
     tokio::time::sleep(Duration::from_millis(20)).await;
     // Alice queries Bob for closest to a target.
@@ -141,10 +134,8 @@ async fn query_unknown_peer_returns_failed() {
     // Alice's resolver doesn't know peer 0xFF.
     let sock_a = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let a_id = id(0x01);
-    let resolver: Arc<dyn EndpointResolver> =
-        Arc::new(|_peer: NodeId| None);
-    let t_a = UdpTransport::new(sock_a, a_id, resolver)
-        .with_timeout_ms(500);
+    let resolver: Arc<dyn EndpointResolver> = Arc::new(|_peer: NodeId| None);
+    let t_a = UdpTransport::new(sock_a, a_id, resolver).with_timeout_ms(500);
     let result = t_a.query(id(0xFF), id(0xAA), false).await;
     assert!(matches!(
         result,
@@ -162,8 +153,7 @@ async fn query_to_silent_peer_times_out_to_failed() {
     let b_id = id(0x02);
     let resolver: Arc<dyn EndpointResolver> =
         Arc::new(move |peer: NodeId| if peer == b_id { Some(addr_b) } else { None });
-    let t_a = UdpTransport::new(sock_a, a_id, resolver)
-        .with_timeout_ms(200);
+    let t_a = UdpTransport::new(sock_a, a_id, resolver).with_timeout_ms(200);
     let result = t_a.query(b_id, id(0xCC), false).await;
     assert!(matches!(
         result,

@@ -55,7 +55,7 @@ pub struct RouteAnnouncement {
 
 impl RouteAnnouncement {
     /// Canonical bytes the announcer's subkey signs.
-    #[must_use] 
+    #[must_use]
     pub fn canonical_transcript(
         announcer_device_id: &[u8; DEVICE_ID_LEN],
         announcer_day_index: u64,
@@ -177,8 +177,7 @@ mod tests {
     fn make() -> (DeviceSubkey, HybridVerifyingKey) {
         let master = MasterIdentity::generate(&mut OsRng);
         let id = fresh_device_id(&mut OsRng);
-        let (sk, att) =
-            mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+        let (sk, att) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
         let vk = HybridVerifyingKey::from_bytes(&att.subkey_vk_bytes).unwrap();
         (sk, vk)
     }
@@ -195,12 +194,8 @@ mod tests {
     #[test]
     fn sign_verify_round_trip() {
         let (sk, vk) = make();
-        let ann = sign_route_announcement(
-            &sk,
-            1,
-            vec![link(0xAA, 100, 1), link(0xBB, 50, 1)],
-        )
-        .unwrap();
+        let ann =
+            sign_route_announcement(&sk, 1, vec![link(0xAA, 100, 1), link(0xBB, 50, 1)]).unwrap();
         ann.verify(&vk).unwrap();
     }
 
@@ -210,11 +205,7 @@ mod tests {
         let ann = sign_route_announcement(
             &sk,
             1,
-            vec![
-                link(0xAA, 50, 1),
-                link(0xAA, 100, 1),
-                link(0xAA, 25, 1),
-            ],
+            vec![link(0xAA, 50, 1), link(0xAA, 100, 1), link(0xAA, 25, 1)],
         )
         .unwrap();
         assert_eq!(ann.links.len(), 1);
@@ -260,13 +251,9 @@ mod tests {
     fn cross_subkey_verify_fails() {
         let (sk_a, _vk_a) = make();
         let (_sk_b, vk_b) = make();
-        let ann =
-            sign_route_announcement(&sk_a, 1, vec![link(0xAA, 100, 1)]).unwrap();
+        let ann = sign_route_announcement(&sk_a, 1, vec![link(0xAA, 100, 1)]).unwrap();
         let err = ann.verify(&vk_b).unwrap_err();
-        assert!(matches!(
-            err,
-            DeviceMeshError::RouteAnnouncementVerifyFail
-        ));
+        assert!(matches!(err, DeviceMeshError::RouteAnnouncementVerifyFail));
     }
 
     #[test]

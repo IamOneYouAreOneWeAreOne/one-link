@@ -4,12 +4,8 @@
 use std::time::Instant;
 
 use ol_device_mesh::distributed_fs::FILE_ID_LEN;
-use ol_device_mesh::fan_out::{
-    sign_fetch_request, FetchRequest, FETCH_NONCE_LEN,
-};
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::fan_out::{sign_fetch_request, FetchRequest, FETCH_NONCE_LEN};
+use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN};
 use ol_pqsig::HybridVerifyingKey;
 use rand::rngs::OsRng;
 
@@ -17,8 +13,7 @@ const SAMPLES_PER_BUCKET: usize = 200;
 
 fn relative_stddev(samples: &[f64]) -> f64 {
     let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
-    let var: f64 =
-        samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+    let var: f64 = samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64;
     var.sqrt() / mean
 }
 
@@ -33,10 +28,8 @@ fn measure<F: FnMut()>(mut work: F, iters: usize) -> u128 {
 #[test]
 fn fetch_request_verify_constant_time_across_tamper_positions() {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk, att_l1) = mint_subkey(
-        &master, DeviceClass::Phone, [0x55; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk, att_l1) =
+        mint_subkey(&master, DeviceClass::Phone, [0x55; DEVICE_ID_LEN], 0, 365).unwrap();
     let vk = HybridVerifyingKey::from_bytes(&att_l1.subkey_vk_bytes).unwrap();
     let real = sign_fetch_request(
         &sk,
@@ -81,9 +74,7 @@ fn fetch_request_verify_constant_time_across_tamper_positions() {
         totals.push(ns);
     }
     let rel = relative_stddev(&totals);
-    eprintln!(
-        "fetch-req verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}"
-    );
+    eprintln!("fetch-req verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
     assert!(
         rel < 0.30,
         "fetch-req verify relative stddev {rel:.4} exceeds 30% gate"

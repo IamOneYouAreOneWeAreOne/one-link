@@ -33,8 +33,7 @@ use thiserror::Error;
 use crate::node_id::NodeId;
 use crate::record::{PeerRecord, SignedRecord};
 use crate::rpc::{
-    FindValueOutcome, Header, Nonce, Request, Response, RpcEnvelope,
-    StoreOutcome, MAX_FIND_RESULTS,
+    FindValueOutcome, Header, Nonce, Request, Response, RpcEnvelope, StoreOutcome, MAX_FIND_RESULTS,
 };
 
 /// Wire-format magic. Disambiguates from other UDP traffic on the
@@ -194,18 +193,14 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedEnvelope, WireError> {
                     let rec = decode_signed_record(&mut c)?;
                     Ok(DecodedEnvelope::Response(RpcEnvelope {
                         header,
-                        body: Response::FindValueResult(
-                            FindValueOutcome::Found(rec),
-                        ),
+                        body: Response::FindValueResult(FindValueOutcome::Found(rec)),
                     }))
                 }
                 FIND_VALUE_CLOSER => {
                     let closer = decode_id_list(&mut c)?;
                     Ok(DecodedEnvelope::Response(RpcEnvelope {
                         header,
-                        body: Response::FindValueResult(
-                            FindValueOutcome::Closer(closer),
-                        ),
+                        body: Response::FindValueResult(FindValueOutcome::Closer(closer)),
                     }))
                 }
                 other => Err(WireError::BadTag { got: other }),
@@ -366,8 +361,7 @@ fn parse_canonical_record(bytes: &[u8]) -> Result<PeerRecord, WireError> {
         let ep_len = u16::from_be_bytes(len_bytes) as usize;
         let ep_bytes = c.take(ep_len)?;
         endpoints.push(
-            String::from_utf8(ep_bytes.to_vec())
-                .map_err(|_| WireError::BadTag { got: 0xFF })?,
+            String::from_utf8(ep_bytes.to_vec()).map_err(|_| WireError::BadTag { got: 0xFF })?,
         );
     }
     Ok(PeerRecord {
@@ -503,10 +497,7 @@ mod tests {
     fn find_value_closer_roundtrip() {
         let env = RpcEnvelope {
             header: hdr(),
-            body: Response::FindValueResult(FindValueOutcome::Closer(vec![
-                id(7),
-                id(8),
-            ])),
+            body: Response::FindValueResult(FindValueOutcome::Closer(vec![id(7), id(8)])),
         };
         let bytes = encode_response(&env).unwrap();
         let dec = decode(&bytes).unwrap();

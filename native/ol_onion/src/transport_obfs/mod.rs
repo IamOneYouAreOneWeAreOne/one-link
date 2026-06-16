@@ -52,9 +52,9 @@ pub mod primitive;
 pub mod session;
 
 pub use handshake::{
-    ClientHandshake, HandshakeError, HandshakeResult, ServerHandshake, BridgeKeypair,
-    BRIDGE_ID_LEN, BRIDGE_PUBKEY_LEN, BRIDGE_SECRET_LEN, HANDSHAKE_LEN, HANDSHAKE_MAC_LEN,
-    HANDSHAKE_EPOCH_SECS,
+    BridgeKeypair, ClientHandshake, HandshakeError, HandshakeResult, ServerHandshake,
+    BRIDGE_ID_LEN, BRIDGE_PUBKEY_LEN, BRIDGE_SECRET_LEN, HANDSHAKE_EPOCH_SECS, HANDSHAKE_LEN,
+    HANDSHAKE_MAC_LEN,
 };
 pub use primitive::{
     deobfuscate, deobfuscate_in_place, derive_nonce, obfuscate, obfuscate_in_place, ObfsError,

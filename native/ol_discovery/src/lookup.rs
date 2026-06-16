@@ -199,7 +199,11 @@ impl<'a> Lookup<'a> {
             // via futures::future::join_all; punted to wiring time.
             let mut any_new_closer = false;
             for peer in to_query {
-                match self.transport.query(peer, self.target, self.want_value).await {
+                match self
+                    .transport
+                    .query(peer, self.target, self.want_value)
+                    .await
+                {
                     LookupQueryResult::Found(record) => {
                         return Ok(LookupResult::Value(record));
                     }
@@ -208,12 +212,9 @@ impl<'a> Lookup<'a> {
                             if c == peer {
                                 continue; // peer returning itself: ignore
                             }
-                            if !self.queried.contains_key(&c)
-                                && !self.pending.contains(&c)
-                            {
+                            if !self.queried.contains_key(&c) && !self.pending.contains(&c) {
                                 self.pending.push(c);
-                                any_new_closer = self.maybe_add_to_closest(c)
-                                    || any_new_closer;
+                                any_new_closer = self.maybe_add_to_closest(c) || any_new_closer;
                             }
                         }
                     }
@@ -310,8 +311,8 @@ mod tests {
     }
 
     fn block_on<F: Future>(f: F) -> F::Output {
-        use std::task::{Context, Poll, Wake, Waker};
         use std::sync::Arc;
+        use std::task::{Context, Poll, Wake, Waker};
         struct N;
         impl Wake for N {
             fn wake(self: Arc<Self>) {}
@@ -342,8 +343,7 @@ mod tests {
         let mut t = StubTransport::new();
         let peer = id(0x42);
         t.set_response(peer, LookupQueryResult::CloserPeers(vec![]));
-        let lookup =
-            Lookup::with_params(id(0xFF), vec![peer], &t, false, 3, 1);
+        let lookup = Lookup::with_params(id(0xFF), vec![peer], &t, false, 3, 1);
         let result = block_on(lookup.run()).unwrap();
         match result {
             LookupResult::Closest(c) => {
@@ -385,8 +385,7 @@ mod tests {
         let b = id(0xF0);
         t.set_response(a, LookupQueryResult::CloserPeers(vec![b]));
         t.set_response(b, LookupQueryResult::CloserPeers(vec![]));
-        let lookup =
-            Lookup::with_params(id(0xFF), vec![a], &t, false, 3, 2);
+        let lookup = Lookup::with_params(id(0xFF), vec![a], &t, false, 3, 2);
         let result = block_on(lookup.run()).unwrap();
         match result {
             LookupResult::Closest(c) => {
@@ -400,8 +399,7 @@ mod tests {
         }
         let queries = t.queries_seen.lock().unwrap();
         // Both a and b were queried.
-        let queried_peers: Vec<NodeId> =
-            queries.iter().map(|(p, _)| *p).collect();
+        let queried_peers: Vec<NodeId> = queries.iter().map(|(p, _)| *p).collect();
         assert!(queried_peers.contains(&a));
         assert!(queried_peers.contains(&b));
     }
@@ -411,8 +409,7 @@ mod tests {
         let mut t = StubTransport::new();
         let a = id(0x42);
         t.set_response(a, LookupQueryResult::Failed);
-        let lookup =
-            Lookup::with_params(id(0xFF), vec![a], &t, false, 3, 1);
+        let lookup = Lookup::with_params(id(0xFF), vec![a], &t, false, 3, 1);
         let _ = block_on(lookup.run()).unwrap();
         // Should only have queried a once despite failure.
         let queries = t.queries_seen.lock().unwrap();
@@ -424,8 +421,7 @@ mod tests {
         let mut t = StubTransport::new();
         let a = id(0x42);
         t.set_response(a, LookupQueryResult::CloserPeers(vec![]));
-        let lookup =
-            Lookup::with_params(id(0xFF), vec![a, a, a], &t, false, 3, 1);
+        let lookup = Lookup::with_params(id(0xFF), vec![a, a, a], &t, false, 3, 1);
         let _ = block_on(lookup.run()).unwrap();
         let queries = t.queries_seen.lock().unwrap();
         // Despite 3x bootstrap, queried only once.
@@ -440,8 +436,7 @@ mod tests {
         let mut t = StubTransport::new();
         let a = id(0x42);
         t.set_response(a, LookupQueryResult::CloserPeers(vec![a, a, a]));
-        let lookup =
-            Lookup::with_params(id(0xFF), vec![a], &t, false, 3, 5);
+        let lookup = Lookup::with_params(id(0xFF), vec![a], &t, false, 3, 5);
         let _ = block_on(lookup.run()).unwrap();
         let queries = t.queries_seen.lock().unwrap();
         // Queried a exactly once; self-loop ignored.

@@ -141,11 +141,10 @@ impl Caveat {
                         reason: "OperationIn header < 4 bytes",
                     });
                 }
-                let count_bytes: [u8; 4] = body[..4].try_into().map_err(|_| {
-                    CapError::Malformed {
+                let count_bytes: [u8; 4] =
+                    body[..4].try_into().map_err(|_| CapError::Malformed {
                         reason: "OperationIn count field not 4 bytes",
-                    }
-                })?;
+                    })?;
                 let count = u32::from_le_bytes(count_bytes) as usize;
                 let mut ops = Vec::with_capacity(count);
                 let mut cursor = 4usize;
@@ -155,11 +154,12 @@ impl Caveat {
                             reason: "OperationIn entry truncated",
                         });
                     }
-                    let entry_len_bytes: [u8; 4] = body[cursor..cursor + 4]
-                        .try_into()
-                        .map_err(|_| CapError::Malformed {
-                            reason: "OperationIn entry length not 4 bytes",
-                        })?;
+                    let entry_len_bytes: [u8; 4] =
+                        body[cursor..cursor + 4]
+                            .try_into()
+                            .map_err(|_| CapError::Malformed {
+                                reason: "OperationIn entry length not 4 bytes",
+                            })?;
                     let l = u32::from_le_bytes(entry_len_bytes) as usize;
                     cursor += 4;
                     if body.len() < cursor + l {

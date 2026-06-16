@@ -1,15 +1,12 @@
 //! Adversarial vectors for Row 8 Layer 8 distributed compute.
 
 use ol_device_mesh::compute::{
-    pick_executor, sign_capability_attestation, sign_task_request,
-    sign_task_result, CapabilityRegistry, DeviceCapability, TaskClass,
-    MAX_TASK_CLASS_LEN,
+    pick_executor, sign_capability_attestation, sign_task_request, sign_task_result,
+    CapabilityRegistry, DeviceCapability, TaskClass, MAX_TASK_CLASS_LEN,
 };
 use ol_device_mesh::distributed_fs::FILE_ID_LEN;
 use ol_device_mesh::fan_out::SourceCapacity;
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN};
 use rand::rngs::OsRng;
 
 fn make_subkey() -> ol_device_mesh::DeviceSubkey {
@@ -100,14 +97,10 @@ fn adversarial_task_class_oversize_rejected() {
 #[test]
 fn adversarial_task_request_cross_subkey_rejected() {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk_a, _) = mint_subkey(
-        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
-    let (sk_b, _) = mint_subkey(
-        &master, DeviceClass::Laptop, [0xBB; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk_a, _) =
+        mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
+    let (sk_b, _) =
+        mint_subkey(&master, DeviceClass::Laptop, [0xBB; DEVICE_ID_LEN], 0, 365).unwrap();
     let req = sign_task_request(
         &sk_a,
         TaskClass::new(b"x").unwrap(),
@@ -186,10 +179,7 @@ fn adversarial_task_request_capabilities_post_sign_unsort_rejected() {
     .unwrap();
     req.required_capabilities.swap(0, 2);
     let err = req.verify(&sk.verifying_key()).unwrap_err();
-    assert!(matches!(
-        err,
-        DeviceMeshError::TaskCapabilitiesNotSorted
-    ));
+    assert!(matches!(err, DeviceMeshError::TaskCapabilitiesNotSorted));
 }
 
 // ── TaskResult adversarial ────────────────────────────────────────
@@ -197,22 +187,11 @@ fn adversarial_task_request_capabilities_post_sign_unsort_rejected() {
 #[test]
 fn adversarial_task_result_cross_executor_rejected() {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk_a, _) = mint_subkey(
-        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
-    let (sk_b, _) = mint_subkey(
-        &master, DeviceClass::Laptop, [0xBB; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
-    let result = sign_task_result(
-        &sk_a,
-        [0xEE; 32],
-        [0xFF; FILE_ID_LEN],
-        8192,
-        1,
-    )
-    .unwrap();
+    let (sk_a, _) =
+        mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
+    let (sk_b, _) =
+        mint_subkey(&master, DeviceClass::Laptop, [0xBB; DEVICE_ID_LEN], 0, 365).unwrap();
+    let result = sign_task_result(&sk_a, [0xEE; 32], [0xFF; FILE_ID_LEN], 8192, 1).unwrap();
     let err = result.verify(&sk_b.verifying_key()).unwrap_err();
     assert!(matches!(err, DeviceMeshError::TaskResultVerifyFail));
 }
@@ -220,14 +199,7 @@ fn adversarial_task_result_cross_executor_rejected() {
 #[test]
 fn adversarial_task_result_tampered_output_size_rejected() {
     let sk = make_subkey();
-    let mut result = sign_task_result(
-        &sk,
-        [0xEE; 32],
-        [0xFF; FILE_ID_LEN],
-        8192,
-        1,
-    )
-    .unwrap();
+    let mut result = sign_task_result(&sk, [0xEE; 32], [0xFF; FILE_ID_LEN], 8192, 1).unwrap();
     result.output_byte_size = 9_999_999;
     let err = result.verify(&sk.verifying_key()).unwrap_err();
     assert!(matches!(err, DeviceMeshError::TaskResultVerifyFail));
@@ -236,14 +208,7 @@ fn adversarial_task_result_tampered_output_size_rejected() {
 #[test]
 fn adversarial_task_result_substitute_executor_id_rejected() {
     let sk = make_subkey();
-    let mut result = sign_task_result(
-        &sk,
-        [0xEE; 32],
-        [0xFF; FILE_ID_LEN],
-        8192,
-        1,
-    )
-    .unwrap();
+    let mut result = sign_task_result(&sk, [0xEE; 32], [0xFF; FILE_ID_LEN], 8192, 1).unwrap();
     result.executor_device_id = [0xCD; DEVICE_ID_LEN];
     let err = result.verify(&sk.verifying_key()).unwrap_err();
     assert!(matches!(err, DeviceMeshError::TaskResultVerifyFail));

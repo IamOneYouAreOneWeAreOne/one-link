@@ -164,13 +164,8 @@ mod tests {
         let master = [0x42u8; MASTER_SEED_LEN];
         let id = [0x55u8; 16];
         let raw = derive_subkey_seed(&master, DeviceClass::Phone, &id, 0);
-        let bound = derive_field_bound_subkey_seed(
-            &master,
-            DeviceClass::Phone,
-            &id,
-            0,
-            &[0xCC; 32],
-        );
+        let bound =
+            derive_field_bound_subkey_seed(&master, DeviceClass::Phone, &id, 0, &[0xCC; 32]);
         assert_ne!(raw, bound);
     }
 
@@ -178,20 +173,8 @@ mod tests {
     fn field_binding_with_distinct_witness_yields_distinct_seed() {
         let master = [0x42u8; MASTER_SEED_LEN];
         let id = [0x55u8; 16];
-        let a = derive_field_bound_subkey_seed(
-            &master,
-            DeviceClass::Phone,
-            &id,
-            0,
-            &[0xAA; 32],
-        );
-        let b = derive_field_bound_subkey_seed(
-            &master,
-            DeviceClass::Phone,
-            &id,
-            0,
-            &[0xBB; 32],
-        );
+        let a = derive_field_bound_subkey_seed(&master, DeviceClass::Phone, &id, 0, &[0xAA; 32]);
+        let b = derive_field_bound_subkey_seed(&master, DeviceClass::Phone, &id, 0, &[0xBB; 32]);
         assert_ne!(a, b);
     }
 }

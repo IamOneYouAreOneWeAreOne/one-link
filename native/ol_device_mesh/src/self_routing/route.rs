@@ -55,7 +55,7 @@ pub fn pick_best_route(
     src: &[u8; DEVICE_ID_LEN],
     dst: &[u8; DEVICE_ID_LEN],
 ) -> Option<Route> {
-    use std::collections::{BinaryHeap, BTreeMap};
+    use std::collections::{BTreeMap, BinaryHeap};
 
     if src == dst {
         return Some(Route {
@@ -98,10 +98,13 @@ pub fn pick_best_route(
             let edge_seen = link.last_seen_unix;
             let new_bottleneck = cur_tau.min(edge_tau);
             let new_seen = cur_seen.min(edge_seen);
-            let prior = best_tau.get(&link.peer_device_id).copied().unwrap_or(TAU_UNKNOWN);
+            let prior = best_tau
+                .get(&link.peer_device_id)
+                .copied()
+                .unwrap_or(TAU_UNKNOWN);
             let prior_seen = best_seen.get(&link.peer_device_id).copied().unwrap_or(0);
-            let dominates = new_bottleneck > prior
-                || (new_bottleneck == prior && new_seen > prior_seen);
+            let dominates =
+                new_bottleneck > prior || (new_bottleneck == prior && new_seen > prior_seen);
             if dominates {
                 best_tau.insert(link.peer_device_id, new_bottleneck);
                 best_seen.insert(link.peer_device_id, new_seen);
@@ -158,8 +161,7 @@ mod tests {
         let mut atts = Vec::new();
         for _ in 0..n {
             let id = fresh_device_id(&mut OsRng);
-            let (sk, a) =
-                mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+            let (sk, a) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
             ids.push(id);
             sks.push(sk);
             atts.push(a);
@@ -222,47 +224,45 @@ mod tests {
         let via_b = ids[3];
         let mut table = RouteTable::empty();
         // src reaches a (100), b (50), dst direct (30).
-        table.ingest(
-            sign_route_announcement(
-                &sks[0],
-                1,
-                vec![
-                    link(via_a, 100, 1),
-                    link(via_b, 50, 1),
-                    link(dst, 30, 1),
-                ],
+        table
+            .ingest(
+                sign_route_announcement(
+                    &sks[0],
+                    1,
+                    vec![link(via_a, 100, 1), link(via_b, 50, 1), link(dst, 30, 1)],
+                )
+                .unwrap(),
+                &vk(&atts[0]),
             )
-            .unwrap(),
-            &vk(&atts[0]),
-        )
-        .unwrap();
+            .unwrap();
         // a reaches dst (100).
-        table.ingest(
-            sign_route_announcement(
-                &sks[2], 1, vec![link(dst, 100, 1), link(src, 100, 1)],
+        table
+            .ingest(
+                sign_route_announcement(&sks[2], 1, vec![link(dst, 100, 1), link(src, 100, 1)])
+                    .unwrap(),
+                &vk(&atts[2]),
             )
-            .unwrap(),
-            &vk(&atts[2]),
-        )
-        .unwrap();
+            .unwrap();
         // b reaches dst (50).
-        table.ingest(
-            sign_route_announcement(
-                &sks[3], 1, vec![link(dst, 50, 1), link(src, 50, 1)],
+        table
+            .ingest(
+                sign_route_announcement(&sks[3], 1, vec![link(dst, 50, 1), link(src, 50, 1)])
+                    .unwrap(),
+                &vk(&atts[3]),
             )
-            .unwrap(),
-            &vk(&atts[3]),
-        )
-        .unwrap();
+            .unwrap();
         // dst announces its own reachability.
-        table.ingest(
-            sign_route_announcement(
-                &sks[1], 1, vec![link(src, 30, 1), link(via_a, 100, 1), link(via_b, 50, 1)],
+        table
+            .ingest(
+                sign_route_announcement(
+                    &sks[1],
+                    1,
+                    vec![link(src, 30, 1), link(via_a, 100, 1), link(via_b, 50, 1)],
+                )
+                .unwrap(),
+                &vk(&atts[1]),
             )
-            .unwrap(),
-            &vk(&atts[1]),
-        )
-        .unwrap();
+            .unwrap();
         let r = pick_best_route(&table, &src, &dst).unwrap();
         // Bottleneck on path src → a → dst is min(100, 100) = 100.
         // Direct src → dst is 30. Through b is min(50, 50) = 50.

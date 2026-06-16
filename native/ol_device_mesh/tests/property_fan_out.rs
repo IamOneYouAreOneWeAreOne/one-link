@@ -7,8 +7,8 @@ use ol_device_mesh::distributed_fs::{
     ChunkHash, ChunkPlacement, ErasurePolicy, FileManifest, FILE_ID_LEN,
 };
 use ol_device_mesh::fan_out::{
-    fan_out_plan, replan_after_source_failure, sign_chunk_ack, sign_fetch_request,
-    FanOutPlan, SourceCapacity, TransferProgress, FETCH_NONCE_LEN,
+    fan_out_plan, replan_after_source_failure, sign_chunk_ack, sign_fetch_request, FanOutPlan,
+    SourceCapacity, TransferProgress, FETCH_NONCE_LEN,
 };
 use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN};
 

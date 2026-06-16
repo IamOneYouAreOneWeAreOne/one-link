@@ -2,12 +2,9 @@
 
 use ol_device_mesh::duress::{
     create_duress_envelope, sign_duress_alert, unlock_duress_envelope,
-    verify_pairing_cross_channel, PairingChannel,
-    PairingCommitment, UnlockOutcome,
+    verify_pairing_cross_channel, PairingChannel, PairingCommitment, UnlockOutcome,
 };
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN};
 use rand::rngs::OsRng;
 
 // ── DuressEnvelope adversarial ─────────────────────────────────────
@@ -48,8 +45,7 @@ fn adversarial_captor_with_real_code_and_wrong_witness_fails() {
         &mut OsRng,
     )
     .unwrap();
-    let outcome =
-        unlock_duress_envelope(&env, b"real-pass", Some(&witness_attacker)).unwrap();
+    let outcome = unlock_duress_envelope(&env, b"real-pass", Some(&witness_attacker)).unwrap();
     assert!(matches!(outcome, UnlockOutcome::WrongCode));
 }
 
@@ -68,8 +64,7 @@ fn adversarial_tampered_real_ciphertext_yields_wrong_code() {
     env.real_ct[0] ^= 0xFF;
     // Real path fails (AEAD MAC mismatch); decoy path fails too
     // since "real-pass" isn't the decoy code.
-    let outcome =
-        unlock_duress_envelope(&env, b"real-pass", Some(&witness)).unwrap();
+    let outcome = unlock_duress_envelope(&env, b"real-pass", Some(&witness)).unwrap();
     assert!(matches!(outcome, UnlockOutcome::WrongCode));
 }
 
@@ -94,10 +89,8 @@ fn adversarial_tampered_decoy_ciphertext_yields_wrong_code() {
 #[test]
 fn adversarial_identical_codes_rejected() {
     let witness = [0x42; 32];
-    let err = create_duress_envelope(
-        b"real", b"decoy", b"same", b"same", &witness, &mut OsRng,
-    )
-    .unwrap_err();
+    let err = create_duress_envelope(b"real", b"decoy", b"same", b"same", &witness, &mut OsRng)
+        .unwrap_err();
     assert!(matches!(err, DeviceMeshError::DuressCodesIdentical));
 }
 
@@ -106,10 +99,8 @@ fn adversarial_oversize_plaintext_rejected() {
     // 16 MiB + 1 byte.
     let big = vec![0u8; 16 * 1024 * 1024 + 1];
     let witness = [0x42; 32];
-    let err = create_duress_envelope(
-        &big, b"decoy", b"real", b"duress", &witness, &mut OsRng,
-    )
-    .unwrap_err();
+    let err = create_duress_envelope(&big, b"decoy", b"real", b"duress", &witness, &mut OsRng)
+        .unwrap_err();
     assert!(matches!(
         err,
         DeviceMeshError::DuressEnvelopePlaintextTooLong { .. }
@@ -141,14 +132,10 @@ fn adversarial_structural_indistinguishability() {
 #[test]
 fn adversarial_alert_cross_subkey_rejected() {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk_a, _) = mint_subkey(
-        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
-    let (sk_b, _) = mint_subkey(
-        &master, DeviceClass::Laptop, [0xBB; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk_a, _) =
+        mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
+    let (sk_b, _) =
+        mint_subkey(&master, DeviceClass::Laptop, [0xBB; DEVICE_ID_LEN], 0, 365).unwrap();
     let alert = sign_duress_alert(&sk_a, 1, [0xCC; 16]).unwrap();
     let err = alert.verify(&sk_b.verifying_key()).unwrap_err();
     assert!(matches!(err, DeviceMeshError::DuressAlertVerifyFail));
@@ -157,10 +144,7 @@ fn adversarial_alert_cross_subkey_rejected() {
 #[test]
 fn adversarial_alert_truncated_signature_rejected() {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk, _) = mint_subkey(
-        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk, _) = mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
     let mut alert = sign_duress_alert(&sk, 1, [0xCC; 16]).unwrap();
     alert.subkey_sig.truncate(8);
     let err = alert.verify(&sk.verifying_key()).unwrap_err();
@@ -174,7 +158,10 @@ fn adversarial_qr_only_pair_rejected() {
     // Attacker photographs the QR but can't reproduce audio/motion.
     let secret = b"real-pair-secret";
     let commits = vec![PairingCommitment::build(
-        PairingChannel::Qr, secret, [0; 16], 100,
+        PairingChannel::Qr,
+        secret,
+        [0; 16],
+        100,
     )];
     let err = verify_pairing_cross_channel(&commits, secret, 1_000).unwrap_err();
     assert!(matches!(err, DeviceMeshError::PairChannelMissing { .. }));

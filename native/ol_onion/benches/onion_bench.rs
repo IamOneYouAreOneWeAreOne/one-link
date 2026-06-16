@@ -4,9 +4,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rand::rngs::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-use ol_onion::{
-    build_onion, peel_one_layer, Circuit, HopDescriptor, HopId, HOP_ID_LEN,
-};
+use ol_onion::{build_onion, peel_one_layer, Circuit, HopDescriptor, HopId, HOP_ID_LEN};
 
 fn make_hop(i: u8) -> (StaticSecret, HopDescriptor) {
     let sk = StaticSecret::from([i; 32]);
@@ -57,5 +55,10 @@ fn bench_peel_1_hop(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_build_1_hop, bench_build_3_hop, bench_peel_1_hop);
+criterion_group!(
+    benches,
+    bench_build_1_hop,
+    bench_build_3_hop,
+    bench_peel_1_hop
+);
 criterion_main!(benches);

@@ -133,11 +133,7 @@ pub fn header_mac(key: &[u8; 32], header: &[u8]) -> [u8; SLOT_MAC_LEN] {
 }
 
 /// Constant-time MAC comparison.
-pub fn verify_header_mac(
-    key: &[u8; 32],
-    header: &[u8],
-    expected: &[u8; SLOT_MAC_LEN],
-) -> bool {
+pub fn verify_header_mac(key: &[u8; 32], header: &[u8], expected: &[u8; SLOT_MAC_LEN]) -> bool {
     let actual = header_mac(key, header);
     bool::from(actual.ct_eq(expected))
 }

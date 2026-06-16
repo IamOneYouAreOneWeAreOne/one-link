@@ -35,9 +35,7 @@ pub enum RatchetError {
     /// current chain position. Closes the audit L11 (May 2026)
     /// DoS where a malicious peer could ship `seq = u64::MAX` and
     /// force the receiver into an indefinite BLAKE3 derive loop.
-    #[error(
-        "skip too large: from step {from} requested {target} (delta {delta}, max {max})"
-    )]
+    #[error("skip too large: from step {from} requested {target} (delta {delta}, max {max})")]
     SkipTooLarge {
         /// Current chain step.
         from: u64,

@@ -1,9 +1,9 @@
 //! Pinned KAT vectors for Row 8 Layer 10 duress.
 
 use ol_device_mesh::duress::{
-    derive_duress_key, DuressAlert, PairingChannel, PairingCommitment,
-    ARGON2_M_COST_KIB, ARGON2_T_COST, DUR_ALERT_DOMAIN, DUR_ENVELOPE_DOMAIN,
-    DUR_SALT_LEN, PAIR_COMMITMENT_DOMAIN, REQUIRED_PAIR_CHANNELS,
+    derive_duress_key, DuressAlert, PairingChannel, PairingCommitment, ARGON2_M_COST_KIB,
+    ARGON2_T_COST, DUR_ALERT_DOMAIN, DUR_ENVELOPE_DOMAIN, DUR_SALT_LEN, PAIR_COMMITMENT_DOMAIN,
+    REQUIRED_PAIR_CHANNELS,
 };
 use ol_device_mesh::DEVICE_ID_LEN;
 
@@ -42,12 +42,8 @@ fn kat_pairing_channel_tags_pinned() {
 
 #[test]
 fn kat_duress_alert_canonical_transcript_pinned() {
-    let bytes = DuressAlert::canonical_transcript(
-        &[0xAA; DEVICE_ID_LEN],
-        7,
-        1_700_000_000,
-        &[0xBB; 16],
-    );
+    let bytes =
+        DuressAlert::canonical_transcript(&[0xAA; DEVICE_ID_LEN], 7, 1_700_000_000, &[0xBB; 16]);
     let hex = to_hex(&bytes);
     let domain_hex = to_hex(DUR_ALERT_DOMAIN);
     assert!(hex.starts_with(&domain_hex));
@@ -55,11 +51,11 @@ fn kat_duress_alert_canonical_transcript_pinned() {
         eprintln!("    EXPECTED_HEX = \"{hex}\"");
     });
     const EXPECTED_HEX: &str = concat!(
-        "4f4c2d6d6573682d6475726573732d616c6572742d7631",  // domain
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",                 // device_id
-        "0000000000000007",                                 // day_index
-        "000000006553f100",                                 // triggered_unix
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",                 // nonce
+        "4f4c2d6d6573682d6475726573732d616c6572742d7631", // domain
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",               // device_id
+        "0000000000000007",                               // day_index
+        "000000006553f100",                               // triggered_unix
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",               // nonce
     );
     assert_eq!(hex, EXPECTED_HEX, "duress-alert transcript drift");
 }
@@ -67,12 +63,7 @@ fn kat_duress_alert_canonical_transcript_pinned() {
 #[test]
 fn kat_pair_commitment_pinned() {
     let secret = b"shared-pair-secret";
-    let commit = PairingCommitment::build(
-        PairingChannel::Qr,
-        secret,
-        [0xCC; 16],
-        1_700_000_000,
-    );
+    let commit = PairingCommitment::build(PairingChannel::Qr, secret, [0xCC; 16], 1_700_000_000);
     let hex = to_hex(&commit.commitment);
     check_regen("pair commitment (QR, fixed inputs)", || {
         eprintln!("    EXPECTED_COMMITMENT_HEX = \"{hex}\"");

@@ -1,15 +1,11 @@
 //! Adversarial vectors for Row 8 Layer 5 fan-out.
 
-use ol_device_mesh::distributed_fs::{
-    ChunkHash, ErasurePolicy, FileManifest, FILE_ID_LEN,
-};
+use ol_device_mesh::distributed_fs::{ChunkHash, ErasurePolicy, FileManifest, FILE_ID_LEN};
 use ol_device_mesh::fan_out::{
-    fan_out_plan, replan_after_source_failure, sign_chunk_ack, sign_fetch_request,
-    SourceCapacity, TransferProgress, FETCH_NONCE_LEN, MAX_CHUNKS_PER_FETCH,
+    fan_out_plan, replan_after_source_failure, sign_chunk_ack, sign_fetch_request, SourceCapacity,
+    TransferProgress, FETCH_NONCE_LEN, MAX_CHUNKS_PER_FETCH,
 };
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN};
 use rand::rngs::OsRng;
 
 fn manifest_for(chunks: Vec<ChunkHash>) -> FileManifest {
@@ -29,14 +25,10 @@ fn manifest_for(chunks: Vec<ChunkHash>) -> FileManifest {
 #[test]
 fn adversarial_fetch_request_wrong_subkey_rejected() {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk_a, _) = mint_subkey(
-        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
-    let (sk_b, _) = mint_subkey(
-        &master, DeviceClass::Laptop, [0xBB; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk_a, _) =
+        mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
+    let (sk_b, _) =
+        mint_subkey(&master, DeviceClass::Laptop, [0xBB; DEVICE_ID_LEN], 0, 365).unwrap();
     let req = sign_fetch_request(
         &sk_a,
         [0xCC; DEVICE_ID_LEN],
@@ -55,10 +47,7 @@ fn adversarial_fetch_request_wrong_subkey_rejected() {
 #[test]
 fn adversarial_fetch_request_oversize_rejected() {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk, _) = mint_subkey(
-        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk, _) = mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
     let chunks: Vec<ChunkHash> = (0..(MAX_CHUNKS_PER_FETCH as u32 + 1))
         .map(|i| {
             let mut h = [0u8; 32];
@@ -86,10 +75,7 @@ fn adversarial_fetch_request_oversize_rejected() {
 #[test]
 fn adversarial_fetch_request_tampered_budget_rejected() {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk, _) = mint_subkey(
-        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk, _) = mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
     let mut req = sign_fetch_request(
         &sk,
         [0xBB; DEVICE_ID_LEN],
@@ -109,10 +95,7 @@ fn adversarial_fetch_request_tampered_budget_rejected() {
 #[test]
 fn adversarial_fetch_request_unsort_after_sign_rejected() {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk, _) = mint_subkey(
-        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk, _) = mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
     let mut req = sign_fetch_request(
         &sk,
         [0xBB; DEVICE_ID_LEN],
@@ -126,10 +109,7 @@ fn adversarial_fetch_request_unsort_after_sign_rejected() {
     .unwrap();
     req.chunk_hashes.swap(0, 2);
     let err = req.verify(&sk.verifying_key()).unwrap_err();
-    assert!(matches!(
-        err,
-        DeviceMeshError::FetchRequestChunksNotSorted
-    ));
+    assert!(matches!(err, DeviceMeshError::FetchRequestChunksNotSorted));
 }
 
 // ── ChunkAck forgery + tampering ───────────────────────────────────
@@ -137,14 +117,10 @@ fn adversarial_fetch_request_unsort_after_sign_rejected() {
 #[test]
 fn adversarial_chunk_ack_wrong_source_rejected() {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk_a, _) = mint_subkey(
-        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
-    let (sk_b, _) = mint_subkey(
-        &master, DeviceClass::Laptop, [0xBB; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk_a, _) =
+        mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
+    let (sk_b, _) =
+        mint_subkey(&master, DeviceClass::Laptop, [0xBB; DEVICE_ID_LEN], 0, 365).unwrap();
     let ack = sign_chunk_ack(
         &sk_a,
         [0xCC; FILE_ID_LEN],
@@ -163,10 +139,7 @@ fn adversarial_chunk_ack_replay_to_other_receiver_rejected() {
     // Attacker captures A→C ack and tries to re-present it as A→D
     // by mutating the receiver field. Signature won't validate.
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk, _) = mint_subkey(
-        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk, _) = mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
     let mut ack = sign_chunk_ack(
         &sk,
         [0xCC; FILE_ID_LEN],
@@ -228,13 +201,18 @@ fn adversarial_replan_with_no_chunks_rejected() {
     let chunks: Vec<ChunkHash> = (1u8..=3).map(|i| [i; 32]).collect();
     let m = manifest_for(chunks);
     let sources = vec![
-        SourceCapacity { device_id: [1; 16], estimated_bps: 1, current_load_bytes: 0 },
-        SourceCapacity { device_id: [2; 16], estimated_bps: 1, current_load_bytes: 0 },
+        SourceCapacity {
+            device_id: [1; 16],
+            estimated_bps: 1,
+            current_load_bytes: 0,
+        },
+        SourceCapacity {
+            device_id: [2; 16],
+            estimated_bps: 1,
+            current_load_bytes: 0,
+        },
     ];
-    let err = replan_after_source_failure(
-        &m, &[], &sources, [2; 16], &[], 1.0,
-    )
-    .unwrap_err();
+    let err = replan_after_source_failure(&m, &[], &sources, [2; 16], &[], 1.0).unwrap_err();
     assert!(matches!(err, DeviceMeshError::FanOutNothingToReplan));
 }
 
@@ -247,10 +225,7 @@ fn adversarial_replan_all_sources_failed_rejected() {
         estimated_bps: 1,
         current_load_bytes: 0,
     }];
-    let err = replan_after_source_failure(
-        &m, &[], &sources, [1; 16], &chunks, 1.0,
-    )
-    .unwrap_err();
+    let err = replan_after_source_failure(&m, &[], &sources, [1; 16], &chunks, 1.0).unwrap_err();
     assert!(matches!(err, DeviceMeshError::FanOutNoSources));
 }
 

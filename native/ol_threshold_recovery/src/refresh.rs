@@ -49,10 +49,7 @@ pub fn refresh_byte(in_shares: &[Share], delta_shares: &[Share]) -> Vec<Share> {
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         debug_assert_eq!(in_shares[i].x, delta_shares[i].x);
-        let new_y = gf_add(
-            u32::from(in_shares[i].y),
-            u32::from(delta_shares[i].y),
-        ) as u8;
+        let new_y = gf_add(u32::from(in_shares[i].y), u32::from(delta_shares[i].y)) as u8;
         out.push(Share::new(in_shares[i].x, new_y));
     }
     out
@@ -104,8 +101,7 @@ mod tests {
         let old_three: Vec<Share> = shares.iter().take(3).copied().collect();
         assert_eq!(reconstruct_byte(&old_three, 3).unwrap(), secret);
         // Refreshed K-of-N reconstructs the same secret.
-        let new_three: Vec<Share> =
-            refreshed.iter().take(3).copied().collect();
+        let new_three: Vec<Share> = refreshed.iter().take(3).copied().collect();
         assert_eq!(reconstruct_byte(&new_three, 3).unwrap(), secret);
     }
 
@@ -130,10 +126,8 @@ mod tests {
         // Reconstruct old + refreshed; both yield the same secret.
         use crate::shamir::reconstruct_bytes;
         let xs = vec![1u8, 2, 3];
-        let old_refs: Vec<&[u8]> =
-            streams[..3].iter().map(Vec::as_slice).collect();
-        let new_refs: Vec<&[u8]> =
-            refreshed[..3].iter().map(Vec::as_slice).collect();
+        let old_refs: Vec<&[u8]> = streams[..3].iter().map(Vec::as_slice).collect();
+        let new_refs: Vec<&[u8]> = refreshed[..3].iter().map(Vec::as_slice).collect();
         let recovered_old = reconstruct_bytes(&xs, &old_refs, 3).unwrap();
         let recovered_new = reconstruct_bytes(&xs, &new_refs, 3).unwrap();
         assert_eq!(recovered_old, secret);

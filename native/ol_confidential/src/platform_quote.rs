@@ -244,7 +244,14 @@ mod tests {
             120,
             Some(&[2u8; 32]),
         );
-        for other in [alt_tag, alt_vk, alt_nonce, alt_issued, alt_deadline, alt_witness] {
+        for other in [
+            alt_tag,
+            alt_vk,
+            alt_nonce,
+            alt_issued,
+            alt_deadline,
+            alt_witness,
+        ] {
             assert_ne!(base, other);
         }
     }

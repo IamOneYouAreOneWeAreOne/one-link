@@ -187,7 +187,10 @@ mod tests {
         // r1 → r2
         let o1 = peel_one_layer(&r1_sk, &packet).unwrap();
         let (nh1, b1) = match o1 {
-            PeelOutcome::Forward { next_hop, inner_packet_bytes } => (next_hop, inner_packet_bytes),
+            PeelOutcome::Forward {
+                next_hop,
+                inner_packet_bytes,
+            } => (next_hop, inner_packet_bytes),
             _ => panic!(),
         };
         assert_eq!(nh1, r2.id);
@@ -195,7 +198,10 @@ mod tests {
         let p2 = OnionPacket::decode(&b1).unwrap();
         let o2 = peel_one_layer(&r2_sk, &p2).unwrap();
         let (nh2, b2) = match o2 {
-            PeelOutcome::Forward { next_hop, inner_packet_bytes } => (next_hop, inner_packet_bytes),
+            PeelOutcome::Forward {
+                next_hop,
+                inner_packet_bytes,
+            } => (next_hop, inner_packet_bytes),
             _ => panic!(),
         };
         assert_eq!(nh2, r3.id);
@@ -203,7 +209,10 @@ mod tests {
         let p3 = OnionPacket::decode(&b2).unwrap();
         let o3 = peel_one_layer(&r3_sk, &p3).unwrap();
         let (nh3, b3) = match o3 {
-            PeelOutcome::Forward { next_hop, inner_packet_bytes } => (next_hop, inner_packet_bytes),
+            PeelOutcome::Forward {
+                next_hop,
+                inner_packet_bytes,
+            } => (next_hop, inner_packet_bytes),
             _ => panic!(),
         };
         assert_eq!(nh3, dest.id);

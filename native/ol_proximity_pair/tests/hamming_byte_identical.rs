@@ -5,13 +5,13 @@
 //! Double Ratchet seed. This is the property F1.4-polish unlocks.
 
 use ol_proximity_pair::{
-    hamming_reconcile, parity_bits_for_string, privacy_amplify,
-    quantize_observations, QuantizeConfig,
+    hamming_reconcile, parity_bits_for_string, privacy_amplify, quantize_observations,
+    QuantizeConfig,
 };
 
 fn co_located_observations(seed: u64) -> (Vec<u8>, Vec<u8>) {
     let base: Vec<u8> = (0..1024u32)
-        .map(|i| (((i.wrapping_mul(seed as u32 + 7919))) % 256) as u8)
+        .map(|i| ((i.wrapping_mul(seed as u32 + 7919)) % 256) as u8)
         .collect();
     let mut rng_a = seed.wrapping_mul(31);
     let mut rng_b = seed.wrapping_mul(37);
@@ -76,8 +76,7 @@ fn hamming_byte_identical_with_low_error_rate() {
     // Hand-crafted: 3 errors total spread across blocks so each
     // block has at most 1 error. Hamming reconciliation should
     // produce byte-identical output.
-    let peer_bits: Vec<u8> =
-        (0..256).map(|i| ((i * 11 + 5) & 1) as u8).collect();
+    let peer_bits: Vec<u8> = (0..256).map(|i| ((i * 11 + 5) & 1) as u8).collect();
     let mut my_bits = peer_bits.clone();
     my_bits[20] ^= 1; // block 0 (positions 0..120)
     my_bits[150] ^= 1; // block 1 (positions 120..240)
@@ -96,8 +95,7 @@ fn hamming_single_error_per_block_byte_identical() {
     // The honest scope of plain Hamming(127,120) SEC: ONE error per
     // 120-bit block, byte-identical output. This is the property
     // proven by the exhaustive single-error-location unit test.
-    let peer_bits: Vec<u8> =
-        (0..360).map(|i| ((i * 7) & 1) as u8).collect();
+    let peer_bits: Vec<u8> = (0..360).map(|i| ((i * 7) & 1) as u8).collect();
     let mut my_bits = peer_bits.clone();
     my_bits[10] ^= 1; // block 0
     my_bits[150] ^= 1; // block 1

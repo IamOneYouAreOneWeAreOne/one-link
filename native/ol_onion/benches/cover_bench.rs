@@ -6,8 +6,8 @@ use rand::Rng;
 
 use ol_onion::sphinx::core::{generate_static_keypair, SphinxHop};
 use ol_onion::sphinx::cover::{
-    build_cover_packet, is_cover_payload, CoverScheduler, RateEqualizer, COVER_SENTINEL,
-    COVER_PAYLOAD_MIN,
+    build_cover_packet, is_cover_payload, CoverScheduler, RateEqualizer, COVER_PAYLOAD_MIN,
+    COVER_SENTINEL,
 };
 use ol_onion::HopId;
 
@@ -93,13 +93,8 @@ fn bench_build_cover_packet_3_hop(c: &mut Criterion) {
     c.bench_function("cover::build_cover_packet_3_hop", |b| {
         b.iter(|| {
             let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-            let p = build_cover_packet(
-                black_box(&eph_sk),
-                black_box(&circuit),
-                256,
-                &mut OsRng,
-            )
-            .unwrap();
+            let p = build_cover_packet(black_box(&eph_sk), black_box(&circuit), 256, &mut OsRng)
+                .unwrap();
             black_box(p);
         });
     });

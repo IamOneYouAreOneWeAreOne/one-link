@@ -67,21 +67,16 @@ pub mod reconcile;
 
 pub use amplify::{privacy_amplify, AMPLIFIED_KEY_BYTES};
 pub use cascade::{
-    multi_pass_reconcile, multi_pass_syndromes, permutation_for_pass,
-    CASCADE_PASSES_DEFAULT,
+    multi_pass_reconcile, multi_pass_syndromes, permutation_for_pass, CASCADE_PASSES_DEFAULT,
 };
 pub use hamming::{
-    decode_syndrome_to_data_index, hamming_reconcile,
-    parity_bits_for_block, parity_bits_for_string,
-    HAMMING_CODEWORD_BITS, HAMMING_DATA_BITS, HAMMING_PARITY_BITS,
+    decode_syndrome_to_data_index, hamming_reconcile, parity_bits_for_block,
+    parity_bits_for_string, HAMMING_CODEWORD_BITS, HAMMING_DATA_BITS, HAMMING_PARITY_BITS,
 };
 pub use quantize::{
-    quantize_observations, QuantizeConfig, GUARD_BAND_DEFAULT,
-    OBSERVATION_BYTES_DEFAULT,
+    quantize_observations, QuantizeConfig, GUARD_BAND_DEFAULT, OBSERVATION_BYTES_DEFAULT,
 };
-pub use reconcile::{
-    block_syndrome, reconcile_with_syndrome, SYNDROME_BLOCK_BITS_DEFAULT,
-};
+pub use reconcile::{block_syndrome, reconcile_with_syndrome, SYNDROME_BLOCK_BITS_DEFAULT};
 
 use thiserror::Error;
 
@@ -146,15 +141,11 @@ pub fn derive_factor2_secret(
     config: &PipelineConfig,
 ) -> Result<[u8; AMPLIFIED_KEY_BYTES], PairError> {
     let quantized = quantize_observations(my_observations, &config.quantize)?;
-    let reconciled = reconcile_with_syndrome(
-        &quantized,
-        peer_syndrome,
-        config.syndrome_block_bits,
-    );
+    let reconciled = reconcile_with_syndrome(&quantized, peer_syndrome, config.syndrome_block_bits);
     // Syndrome leaks one bit per syndrome byte. Final key has
     // AMPLIFIED_KEY_BYTES*8 = 256 bits. We need at least that much
     // residual entropy after leakage.
-    let leaked_bits = peer_syndrome.len();  // 1 bit per byte (one parity per block)
+    let leaked_bits = peer_syndrome.len(); // 1 bit per byte (one parity per block)
     let key_bits = AMPLIFIED_KEY_BYTES * 8;
     if reconciled.len() < leaked_bits + key_bits {
         return Err(PairError::InsufficientEntropy {

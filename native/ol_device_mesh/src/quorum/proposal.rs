@@ -55,7 +55,7 @@ pub struct QuorumProposal {
 
 impl QuorumProposal {
     /// Canonical bytes the issuer signs over.
-    #[must_use] 
+    #[must_use]
     pub fn canonical_transcript(
         policy_id: &QuorumPolicyId,
         operation_digest: &[u8; OPERATION_DIGEST_LEN],
@@ -87,7 +87,7 @@ impl QuorumProposal {
     }
 
     /// Compute the [`ProposalId`] (BLAKE3 over the canonical transcript).
-    #[must_use] 
+    #[must_use]
     pub fn proposal_id(&self) -> ProposalId {
         let transcript = Self::canonical_transcript(
             &self.policy_id,
@@ -184,8 +184,7 @@ mod tests {
     fn setup() -> (MasterIdentity, DeviceSubkey, QuorumPolicy) {
         let master = MasterIdentity::generate(&mut OsRng);
         let id = fresh_device_id(&mut OsRng);
-        let (sk, _att) =
-            mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+        let (sk, _att) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
         let policy = super::super::policy::mint_policy(
             &master,
             [0x42; 16],
@@ -217,10 +216,7 @@ mod tests {
     fn proposal_id_is_deterministic() {
         let (_m, sk, policy) = setup();
         let now: u64 = 1_700_000_000;
-        let p = propose_operation(
-            &sk, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600,
-        )
-        .unwrap();
+        let p = propose_operation(&sk, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600).unwrap();
         assert_eq!(p.proposal_id(), p.proposal_id());
     }
 
@@ -228,8 +224,7 @@ mod tests {
     fn ineligible_issuer_rejected() {
         let master = MasterIdentity::generate(&mut OsRng);
         let id = fresh_device_id(&mut OsRng);
-        let (sk, _att) =
-            mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+        let (sk, _att) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
         // Policy that excludes `id`.
         let policy = super::super::policy::mint_policy(
             &master,
@@ -240,20 +235,15 @@ mod tests {
         )
         .unwrap();
         let now: u64 = 1_700_000_000;
-        let err = propose_operation(
-            &sk, &policy, [0xEE; 32], [0xDA; 16], now, now + 100,
-        )
-        .unwrap_err();
+        let err =
+            propose_operation(&sk, &policy, [0xEE; 32], [0xDA; 16], now, now + 100).unwrap_err();
         assert!(matches!(err, DeviceMeshError::IssuerNotEligible { .. }));
     }
 
     #[test]
     fn deadline_before_issue_rejected() {
         let (_m, sk, policy) = setup();
-        let err = propose_operation(
-            &sk, &policy, [0xEE; 32], [0xDA; 16], 1000, 1000,
-        )
-        .unwrap_err();
+        let err = propose_operation(&sk, &policy, [0xEE; 32], [0xDA; 16], 1000, 1000).unwrap_err();
         assert!(matches!(
             err,
             DeviceMeshError::ProposalDeadlineNotAfterIssue { .. }
@@ -264,10 +254,8 @@ mod tests {
     fn tampered_operation_digest_breaks_verify() {
         let (_m, sk, policy) = setup();
         let now: u64 = 1_700_000_000;
-        let mut p = propose_operation(
-            &sk, &policy, [0xEE; 32], [0xDA; 16], now, now + 100,
-        )
-        .unwrap();
+        let mut p =
+            propose_operation(&sk, &policy, [0xEE; 32], [0xDA; 16], now, now + 100).unwrap();
         p.operation_digest[0] ^= 0xFF;
         let err = p.verify_issuer(&sk.verifying_key()).unwrap_err();
         assert!(matches!(err, DeviceMeshError::ProposalIssuerVerifyFail));

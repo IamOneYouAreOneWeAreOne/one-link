@@ -86,12 +86,7 @@ impl Dispatcher {
     /// well (tiny / already-compressed). Returns lz4 for fast sync
     /// paths and zstd for bulk transfer.
     #[must_use]
-    pub fn pick(
-        &self,
-        kind: EventKind,
-        size: usize,
-        precompressed: PreCompressed,
-    ) -> Algorithm {
+    pub fn pick(&self, kind: EventKind, size: usize, precompressed: PreCompressed) -> Algorithm {
         if precompressed == PreCompressed::Yes {
             return Algorithm::None;
         }
@@ -128,11 +123,7 @@ impl Dispatcher {
     ///
     /// # Errors
     /// zstd I/O errors propagate as [`CompressError::Zstd`].
-    pub fn compress(
-        &self,
-        algo: Algorithm,
-        bytes: &[u8],
-    ) -> Result<Vec<u8>, CompressError> {
+    pub fn compress(&self, algo: Algorithm, bytes: &[u8]) -> Result<Vec<u8>, CompressError> {
         let mut out = Vec::with_capacity(bytes.len() + 8);
         out.push(algo.tag());
         match algo {
@@ -164,11 +155,7 @@ impl Dispatcher {
     /// [`CompressError::PayloadTooShort`] for empty inputs, decoder
     /// errors for malformed payloads, and
     /// [`CompressError::OutputTooLarge`] if the output exceeds `max_size`.
-    pub fn decompress(
-        &self,
-        payload: &[u8],
-        max_size: usize,
-    ) -> Result<Vec<u8>, CompressError> {
+    pub fn decompress(&self, payload: &[u8], max_size: usize) -> Result<Vec<u8>, CompressError> {
         if payload.is_empty() {
             return Err(CompressError::PayloadTooShort { len: 0 });
         }
@@ -177,9 +164,7 @@ impl Dispatcher {
         let out = match algo {
             Algorithm::None => body.to_vec(),
             Algorithm::Lz4 => lz4_flex::block::decompress_size_prepended(body)?,
-            Algorithm::ZstdBalanced | Algorithm::ZstdAggressive => {
-                zstd::stream::decode_all(body)?
-            }
+            Algorithm::ZstdBalanced | Algorithm::ZstdAggressive => zstd::stream::decode_all(body)?,
         };
         if out.len() > max_size {
             return Err(CompressError::OutputTooLarge {
@@ -204,7 +189,10 @@ mod tests {
     #[test]
     fn pick_msg_small_returns_none() {
         let d = dispatcher();
-        assert_eq!(d.pick(EventKind::Msg, 200, PreCompressed::No), Algorithm::None);
+        assert_eq!(
+            d.pick(EventKind::Msg, 200, PreCompressed::No),
+            Algorithm::None
+        );
     }
 
     #[test]
@@ -232,7 +220,10 @@ mod tests {
     #[test]
     fn pick_sync_small_lz4_large_zstd() {
         let d = dispatcher();
-        assert_eq!(d.pick(EventKind::Sync, 200, PreCompressed::No), Algorithm::Lz4);
+        assert_eq!(
+            d.pick(EventKind::Sync, 200, PreCompressed::No),
+            Algorithm::Lz4
+        );
         assert_eq!(
             d.pick(EventKind::Sync, 50_000, PreCompressed::No),
             Algorithm::ZstdBalanced

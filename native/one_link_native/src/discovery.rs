@@ -456,11 +456,7 @@ impl PyDhtNode {
     /// in `max_age_secs` seconds. Daemon-side scheduler calls this
     /// periodically (e.g., every 60s). Returns count of buckets
     /// refreshed.
-    fn refresh_stale_buckets(
-        &self,
-        now_unix: u64,
-        max_age_secs: u64,
-    ) -> PyResult<usize> {
+    fn refresh_stale_buckets(&self, now_unix: u64, max_age_secs: u64) -> PyResult<usize> {
         let node = self.require()?;
         Ok(node.refresh_stale_buckets(now_unix, max_age_secs))
     }
@@ -469,11 +465,7 @@ impl PyDhtNode {
     /// `max_age_secs`. Daemons call this periodically so K-closest
     /// peers don't expire the records. Returns count of records
     /// republished.
-    fn republish_records(
-        &self,
-        now_unix: u64,
-        max_age_secs: u64,
-    ) -> PyResult<usize> {
+    fn republish_records(&self, now_unix: u64, max_age_secs: u64) -> PyResult<usize> {
         let node = self.require()?;
         Ok(node.republish_records(now_unix, max_age_secs))
     }
@@ -488,11 +480,7 @@ impl PyDhtNode {
         record_max_age_secs: u64,
     ) -> PyResult<(usize, usize)> {
         let node = self.require()?;
-        Ok(node.tick_maintenance(
-            now_unix,
-            bucket_max_age_secs,
-            record_max_age_secs,
-        ))
+        Ok(node.tick_maintenance(now_unix, bucket_max_age_secs, record_max_age_secs))
     }
 
     /// Graceful shutdown. After this call the node is dead and any

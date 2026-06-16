@@ -139,10 +139,7 @@ impl Decision {
     /// uphold. This method is the gate the daemon can use to assert
     /// the selector's output matches the user's declared mode.
     #[must_use]
-    pub fn verify_contract(
-        &self,
-        user_mode: ContractMode,
-    ) -> Vec<ContractViolation> {
+    pub fn verify_contract(&self, user_mode: ContractMode) -> Vec<ContractViolation> {
         let mut violations = Vec::new();
         match user_mode {
             ContractMode::Normal => {
@@ -374,7 +371,10 @@ mod tests {
 
     #[test]
     fn contract_mode_parses_labels() {
-        assert_eq!(ContractMode::from_label_or_default("paranoid"), ContractMode::Paranoid);
+        assert_eq!(
+            ContractMode::from_label_or_default("paranoid"),
+            ContractMode::Paranoid
+        );
         assert_eq!(
             ContractMode::from_label_or_default("battery_save"),
             ContractMode::BatterySave
@@ -387,16 +387,37 @@ mod tests {
             ContractMode::from_label_or_default("latency_strict"),
             ContractMode::LatencyStrict
         );
-        assert_eq!(ContractMode::from_label_or_default("garbage"), ContractMode::Normal);
-        assert_eq!(ContractMode::from_label_or_default(""), ContractMode::Normal);
+        assert_eq!(
+            ContractMode::from_label_or_default("garbage"),
+            ContractMode::Normal
+        );
+        assert_eq!(
+            ContractMode::from_label_or_default(""),
+            ContractMode::Normal
+        );
     }
 
     #[test]
     fn contract_violation_labels_stable() {
-        assert_eq!(ContractViolation::ParanoidUnderHops.as_str(), "paranoid_under_hops");
-        assert_eq!(ContractViolation::ParanoidNoCover.as_str(), "paranoid_no_cover");
-        assert_eq!(ContractViolation::BatterySaveCover.as_str(), "battery_save_cover");
-        assert_eq!(ContractViolation::LatencyStrictBatched.as_str(), "latency_strict_batched");
-        assert_eq!(ContractViolation::LatencyStrictRelay.as_str(), "latency_strict_relay");
+        assert_eq!(
+            ContractViolation::ParanoidUnderHops.as_str(),
+            "paranoid_under_hops"
+        );
+        assert_eq!(
+            ContractViolation::ParanoidNoCover.as_str(),
+            "paranoid_no_cover"
+        );
+        assert_eq!(
+            ContractViolation::BatterySaveCover.as_str(),
+            "battery_save_cover"
+        );
+        assert_eq!(
+            ContractViolation::LatencyStrictBatched.as_str(),
+            "latency_strict_batched"
+        );
+        assert_eq!(
+            ContractViolation::LatencyStrictRelay.as_str(),
+            "latency_strict_relay"
+        );
     }
 }

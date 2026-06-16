@@ -45,9 +45,12 @@ impl OnionKeyRegistry {
         device_id: &[u8; DEVICE_ID_LEN],
         day: u64,
     ) -> DeviceMeshResult<[u8; ONION_PUBKEY_LEN]> {
-        let att = self.entries.get(device_id).ok_or(
-            DeviceMeshError::OnionRegistryDeviceMissing { device_id: *device_id },
-        )?;
+        let att =
+            self.entries
+                .get(device_id)
+                .ok_or(DeviceMeshError::OnionRegistryDeviceMissing {
+                    device_id: *device_id,
+                })?;
         if !att.covers_day(day) {
             return Err(DeviceMeshError::OnionRegistryDayOutOfWindow {
                 device_id: *device_id,
@@ -90,14 +93,7 @@ mod tests {
         let master = MasterIdentity::generate(&mut OsRng);
         let id = [0xAA; DEVICE_ID_LEN];
         let identity = derive_onion_identity(&master, &id);
-        let att = sign_onion_attestation(
-            &master,
-            id,
-            identity.public_bytes(),
-            0,
-            365,
-        )
-        .unwrap();
+        let att = sign_onion_attestation(&master, id, identity.public_bytes(), 0, 365).unwrap();
         let mut reg = OnionKeyRegistry::empty();
         reg.ingest(att, &master.verifying_key()).unwrap();
         let pk = reg.pubkey_for(&id, 100).unwrap();
@@ -119,14 +115,7 @@ mod tests {
         let master = MasterIdentity::generate(&mut OsRng);
         let id = [0xAA; DEVICE_ID_LEN];
         let identity = derive_onion_identity(&master, &id);
-        let att = sign_onion_attestation(
-            &master,
-            id,
-            identity.public_bytes(),
-            10,
-            100,
-        )
-        .unwrap();
+        let att = sign_onion_attestation(&master, id, identity.public_bytes(), 10, 100).unwrap();
         let mut reg = OnionKeyRegistry::empty();
         reg.ingest(att, &master.verifying_key()).unwrap();
         let err = reg.pubkey_for(&id, 5).unwrap_err();
@@ -142,19 +131,9 @@ mod tests {
         let master_b = MasterIdentity::generate(&mut OsRng);
         let id = [0xAA; DEVICE_ID_LEN];
         let identity = derive_onion_identity(&master_a, &id);
-        let att = sign_onion_attestation(
-            &master_a,
-            id,
-            identity.public_bytes(),
-            0,
-            365,
-        )
-        .unwrap();
+        let att = sign_onion_attestation(&master_a, id, identity.public_bytes(), 0, 365).unwrap();
         let mut reg = OnionKeyRegistry::empty();
         let err = reg.ingest(att, &master_b.verifying_key()).unwrap_err();
-        assert!(matches!(
-            err,
-            DeviceMeshError::OnionAttestationVerifyFail
-        ));
+        assert!(matches!(err, DeviceMeshError::OnionAttestationVerifyFail));
     }
 }

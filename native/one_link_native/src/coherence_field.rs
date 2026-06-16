@@ -300,8 +300,8 @@ impl PyFieldObservations {
     #[new]
     #[pyo3(signature = (alpha = 0.05, initial_value = 0.5))]
     fn new(alpha: f32, initial_value: f32) -> PyResult<Self> {
-        let inner = FieldObservations::with_initial(alpha, initial_value)
-            .map_err(observation_err_to_py)?;
+        let inner =
+            FieldObservations::with_initial(alpha, initial_value).map_err(observation_err_to_py)?;
         Ok(Self { inner })
     }
 
@@ -311,12 +311,7 @@ impl PyFieldObservations {
     /// computes this from align_native.trust_for(...) before calling
     /// this method.
     #[pyo3(signature = (peer_id, observed_tau, trust_weight = 1.0))]
-    fn update(
-        &mut self,
-        peer_id: &str,
-        observed_tau: f32,
-        trust_weight: f32,
-    ) -> PyResult<()> {
+    fn update(&mut self, peer_id: &str, observed_tau: f32, trust_weight: f32) -> PyResult<()> {
         self.inner
             .update(peer_id, observed_tau, trust_weight)
             .map_err(observation_err_to_py)

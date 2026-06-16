@@ -1,9 +1,8 @@
 //! Pinned KAT vectors for Row 8 Layer 7 self-onion.
 
 use ol_device_mesh::self_onion::{
-    derive_onion_identity, OnionAttestation, ONION_ATTESTATION_DOMAIN,
-    ONION_DERIVATION_DOMAIN, ONION_PUBKEY_LEN, ONION_SECRET_LEN,
-    SELF_ONION_DOMAIN_PAYLOAD,
+    derive_onion_identity, OnionAttestation, ONION_ATTESTATION_DOMAIN, ONION_DERIVATION_DOMAIN,
+    ONION_PUBKEY_LEN, ONION_SECRET_LEN, SELF_ONION_DOMAIN_PAYLOAD,
 };
 use ol_device_mesh::{MasterIdentity, DEVICE_ID_LEN};
 
@@ -63,10 +62,10 @@ fn kat_attestation_canonical_transcript_pinned() {
     });
     const EXPECTED_HEX: &str = concat!(
         "4f4c2d6d6573682d6f6e696f6e2d6174746573746174696f6e2d7631", // domain
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",                          // device_id
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",  // onion_pubkey
-        "0000000000000007",                                          // mint_day = 7
-        "000000000000016d",                                          // expiry_day = 365
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",                         // device_id
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", // onion_pubkey
+        "0000000000000007",                                         // mint_day = 7
+        "000000000000016d",                                         // expiry_day = 365
     );
     assert_eq!(hex, EXPECTED_HEX, "onion-attestation transcript drift");
 }

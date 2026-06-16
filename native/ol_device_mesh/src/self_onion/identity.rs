@@ -38,14 +38,14 @@ pub struct OnionIdentity {
 
 impl OnionIdentity {
     /// Construct from raw scalar bytes (e.g., after at-rest load).
-    #[must_use] 
+    #[must_use]
     pub const fn from_secret_bytes(secret_bytes: [u8; ONION_SECRET_LEN]) -> Self {
         Self { secret_bytes }
     }
 
     /// Borrow the raw secret bytes. DANGEROUS — only for at-rest
     /// serialization via the hardware wrapper.
-    #[must_use] 
+    #[must_use]
     pub const fn secret_bytes(&self) -> &[u8; ONION_SECRET_LEN] {
         &self.secret_bytes
     }
@@ -58,21 +58,21 @@ impl OnionIdentity {
     }
 
     /// Compute the public point.
-    #[must_use] 
+    #[must_use]
     pub fn public_point(&self) -> RistrettoPoint {
         let s = self.scalar();
         &s * RISTRETTO_BASEPOINT_TABLE
     }
 
     /// Compressed public-point bytes (32-byte Ristretto255 encoding).
-    #[must_use] 
+    #[must_use]
     pub fn public_bytes(&self) -> [u8; ONION_PUBKEY_LEN] {
         self.public_point().compress().to_bytes()
     }
 
     /// Borrow the secret scalar for the Sphinx peel path. The
     /// caller must NOT log or persist the result.
-    #[must_use] 
+    #[must_use]
     pub fn peel_scalar(&self) -> Scalar {
         self.scalar()
     }

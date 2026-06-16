@@ -209,9 +209,7 @@ mod tests {
             | MountError::UnsupportedMacOS
             | MountError::UnsupportedWindows
             | MountError::Backend(_) => {}
-            other => panic!(
-                "expected platform-unsupported or Backend variant, got {other:?}"
-            ),
+            other => panic!("expected platform-unsupported or Backend variant, got {other:?}"),
         }
     }
 

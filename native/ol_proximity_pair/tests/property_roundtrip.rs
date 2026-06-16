@@ -5,9 +5,8 @@
 use proptest::prelude::*;
 
 use ol_proximity_pair::{
-    block_syndrome, hamming_reconcile, parity_bits_for_block,
-    parity_bits_for_string, permutation_for_pass, privacy_amplify,
-    HAMMING_DATA_BITS,
+    block_syndrome, hamming_reconcile, parity_bits_for_block, parity_bits_for_string,
+    permutation_for_pass, privacy_amplify, HAMMING_DATA_BITS,
 };
 
 fn cases() -> u32 {

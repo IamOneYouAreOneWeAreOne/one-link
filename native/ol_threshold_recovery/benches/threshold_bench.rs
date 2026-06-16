@@ -3,19 +3,14 @@
 //! Establishes throughput baselines + per-operation cycle estimates.
 //! Re-run after any change to verify no regression.
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion,
-    Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use ol_threshold_recovery::field_bound::{
     field_bound_reconstruct, field_bound_split, FieldWitness,
 };
 use ol_threshold_recovery::gf256::{gf_mul, gf_mul_fast};
 use ol_threshold_recovery::prng::PrngState;
-use ol_threshold_recovery::shamir::{
-    reconstruct_bytes, share_bytes,
-};
+use ol_threshold_recovery::shamir::{reconstruct_bytes, share_bytes};
 
 fn bench_gf_mul(c: &mut Criterion) {
     let mut g = c.benchmark_group("gf256");
@@ -37,10 +32,7 @@ fn bench_gf_mul(c: &mut Criterion) {
             let mut acc: u32 = 0;
             for a in 0u8..16 {
                 for b in 0u8..16 {
-                    acc = acc.wrapping_add(u32::from(gf_mul_fast(
-                        black_box(a),
-                        black_box(b),
-                    )));
+                    acc = acc.wrapping_add(u32::from(gf_mul_fast(black_box(a), black_box(b))));
                 }
             }
             black_box(acc);
@@ -54,17 +46,13 @@ fn bench_shamir_split(c: &mut Criterion) {
     for &n_bytes in &[32usize, 256, 1024, 4096] {
         let secret = vec![0x42u8; n_bytes];
         g.throughput(Throughput::Bytes(n_bytes as u64));
-        g.bench_with_input(
-            BenchmarkId::new("3_of_5", n_bytes),
-            &secret,
-            |bch, s| {
-                bch.iter(|| {
-                    let mut st = PrngState::new(0xDEAD_BEEF);
-                    let out = share_bytes(black_box(s), 3, 5, &mut st);
-                    black_box(out)
-                });
-            },
-        );
+        g.bench_with_input(BenchmarkId::new("3_of_5", n_bytes), &secret, |bch, s| {
+            bch.iter(|| {
+                let mut st = PrngState::new(0xDEAD_BEEF);
+                let out = share_bytes(black_box(s), 3, 5, &mut st);
+                black_box(out)
+            });
+        });
     }
     g.finish();
 }
@@ -82,13 +70,8 @@ fn bench_shamir_reconstruct(c: &mut Criterion) {
             &streams,
             |bch, streams| {
                 bch.iter(|| {
-                    let refs: Vec<&[u8]> =
-                        streams[..3].iter().map(Vec::as_slice).collect();
-                    let out = reconstruct_bytes(
-                        black_box(&xs),
-                        black_box(&refs),
-                        3,
-                    );
+                    let refs: Vec<&[u8]> = streams[..3].iter().map(Vec::as_slice).collect();
+                    let out = reconstruct_bytes(black_box(&xs), black_box(&refs), 3);
                     black_box(out)
                 });
             },
@@ -107,23 +90,13 @@ fn bench_field_bound_split(c: &mut Criterion) {
             epoch_ns: 1_700_000_000_000_000_000,
         };
         g.throughput(Throughput::Bytes(n_bytes as u64));
-        g.bench_with_input(
-            BenchmarkId::new("3_of_5", n_bytes),
-            &secret,
-            |bch, s| {
-                bch.iter(|| {
-                    let mut st = PrngState::new(0xDEAD_BEEF);
-                    let out = field_bound_split(
-                        black_box(s),
-                        3,
-                        5,
-                        &mut st,
-                        &witness,
-                    );
-                    black_box(out)
-                });
-            },
-        );
+        g.bench_with_input(BenchmarkId::new("3_of_5", n_bytes), &secret, |bch, s| {
+            bch.iter(|| {
+                let mut st = PrngState::new(0xDEAD_BEEF);
+                let out = field_bound_split(black_box(s), 3, 5, &mut st, &witness);
+                black_box(out)
+            });
+        });
     }
     g.finish();
 }
@@ -138,8 +111,7 @@ fn bench_field_bound_reconstruct(c: &mut Criterion) {
             epoch_ns: 1_700_000_000_000_000_000,
         };
         let mut st = PrngState::new(0xDEAD_BEEF);
-        let masked =
-            field_bound_split(&secret, 3, 5, &mut st, &witness).unwrap();
+        let masked = field_bound_split(&secret, 3, 5, &mut st, &witness).unwrap();
         let xs = vec![1u8, 2, 3];
         let indices = vec![0usize, 1, 2];
         g.throughput(Throughput::Bytes(n_bytes as u64));
@@ -148,8 +120,7 @@ fn bench_field_bound_reconstruct(c: &mut Criterion) {
             &masked,
             |bch, masked| {
                 bch.iter(|| {
-                    let supplied: Vec<&[u8]> =
-                        masked[..3].iter().map(Vec::as_slice).collect();
+                    let supplied: Vec<&[u8]> = masked[..3].iter().map(Vec::as_slice).collect();
                     let out = field_bound_reconstruct(
                         black_box(&xs),
                         black_box(&supplied),

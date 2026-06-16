@@ -16,9 +16,7 @@
 
 use proptest::prelude::*;
 
-use ol_onion::sphinx::cover::{
-    is_cover_payload, CoverScheduler, RateEqualizer, COVER_SENTINEL,
-};
+use ol_onion::sphinx::cover::{is_cover_payload, CoverScheduler, RateEqualizer, COVER_SENTINEL};
 
 fn cases() -> u32 {
     if std::env::var("ONE_LINK_F1_GATE").as_deref() == Ok("1") {

@@ -345,8 +345,8 @@ impl OnlineLearner {
             0.0
         };
         let big_d = (10.0_f32 - scale_size - sens + urg).max(0.0);
-        let sum_e = s.e_quantum(ctx, d) + s.e_coherence(ctx, d) + s.e_alignment(ctx, d)
-            + s.e_dark(d);
+        let sum_e =
+            s.e_quantum(ctx, d) + s.e_coherence(ctx, d) + s.e_alignment(ctx, d) + s.e_dark(d);
         let d_lambda_dynamic = -big_d * cd * sum_e;
 
         EnergyGradient {
@@ -529,8 +529,7 @@ mod tests {
         assert!(w.cover_penalty >= 0.0 && w.cover_penalty <= def.cover_penalty * 10.0);
         assert!(w.anchor_cost >= 0.0 && w.anchor_cost <= def.anchor_cost * 10.0);
         assert!(
-            w.batch_latency_cost >= 0.0
-                && w.batch_latency_cost <= def.batch_latency_cost * 10.0
+            w.batch_latency_cost >= 0.0 && w.batch_latency_cost <= def.batch_latency_cost * 10.0
         );
         assert!(w.onion_hop_cost >= 0.0 && w.onion_hop_cost <= def.onion_hop_cost * 10.0);
         assert!(
@@ -550,12 +549,7 @@ mod tests {
         // Context must produce a non-zero gradient for the weight
         // under test. Stranger peer + 1-hop + no-cover has a sizeable
         // alignment gap → privacy_weight gradient is non-trivial.
-        let mut l = OnlineLearner::with_config(
-            Weights::defaults(),
-            0.005,
-            0.5,
-            10.0,
-        );
+        let mut l = OnlineLearner::with_config(Weights::defaults(), 0.005, 0.5, 10.0);
         let stranger_no_cover = Context {
             peer: PeerRelationship::Stranger,
             user_mode: UserMode::Normal,

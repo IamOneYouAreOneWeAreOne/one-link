@@ -96,11 +96,7 @@ pub trait ConfidentialProvider: Send + Sync {
     /// # Errors
     /// Returns `SealedKeyAuthFail` if the blob can't be unsealed; or
     /// `PqSig` if the underlying signing primitive fails.
-    fn sealed_sign(
-        &self,
-        sealed: &SealedKey,
-        transcript: &[u8],
-    ) -> ConfidentialResult<Vec<u8>>;
+    fn sealed_sign(&self, sealed: &SealedKey, transcript: &[u8]) -> ConfidentialResult<Vec<u8>>;
 
     /// Return the verifying-key bytes for the keypair represented by
     /// `sealed`. Safe to expose because this is the public half.

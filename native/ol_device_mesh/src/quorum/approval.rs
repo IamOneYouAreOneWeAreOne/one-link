@@ -32,16 +32,14 @@ pub struct QuorumApproval {
 
 impl QuorumApproval {
     /// Canonical bytes the approver signs over.
-    #[must_use] 
+    #[must_use]
     pub fn canonical_transcript(
         proposal_id: &ProposalId,
         approver_device_id: &[u8; DEVICE_ID_LEN],
         approver_day_index: u64,
         approved_unix: u64,
     ) -> Vec<u8> {
-        let mut out = Vec::with_capacity(
-            APPROVAL_DOMAIN.len() + 32 + DEVICE_ID_LEN + 8 + 8,
-        );
+        let mut out = Vec::with_capacity(APPROVAL_DOMAIN.len() + 32 + DEVICE_ID_LEN + 8 + 8);
         out.extend_from_slice(APPROVAL_DOMAIN);
         out.extend_from_slice(proposal_id);
         out.extend_from_slice(approver_device_id);
@@ -122,14 +120,10 @@ mod tests {
         let id1 = fresh_device_id(&mut OsRng);
         let id2 = fresh_device_id(&mut OsRng);
         let id3 = fresh_device_id(&mut OsRng);
-        let (sk1, _) =
-            mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
-        let (sk2, _) =
-            mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
-        let (sk3, _) =
-            mint_subkey(&master, DeviceClass::Desktop, id3, 0, 365).unwrap();
-        let policy =
-            mint_policy(&master, [0x42; 16], b"p", 2, vec![id1, id2, id3]).unwrap();
+        let (sk1, _) = mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
+        let (sk2, _) = mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
+        let (sk3, _) = mint_subkey(&master, DeviceClass::Desktop, id3, 0, 365).unwrap();
+        let policy = mint_policy(&master, [0x42; 16], b"p", 2, vec![id1, id2, id3]).unwrap();
         (master, sk1, sk2, sk3, policy)
     }
 
@@ -138,8 +132,12 @@ mod tests {
         let (_m, sk1, sk2, _sk3, policy) = three_devices();
         let now: u64 = 1_700_000_000;
         let proposal = propose_operation(
-            &sk1, &policy, [0xEE; OPERATION_DIGEST_LEN], [0xDA; 16],
-            now, now + 3600,
+            &sk1,
+            &policy,
+            [0xEE; OPERATION_DIGEST_LEN],
+            [0xDA; 16],
+            now,
+            now + 3600,
         )
         .unwrap();
         let approval = sign_approval(&sk2, &proposal, now + 60).unwrap();
@@ -150,11 +148,8 @@ mod tests {
     fn past_deadline_rejected_at_sign() {
         let (_m, sk1, sk2, _sk3, policy) = three_devices();
         let now: u64 = 1_700_000_000;
-        let proposal = propose_operation(
-            &sk1, &policy, [0xEE; 32], [0xDA; 16],
-            now, now + 100,
-        )
-        .unwrap();
+        let proposal =
+            propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 100).unwrap();
         let err = sign_approval(&sk2, &proposal, now + 200).unwrap_err();
         assert!(matches!(err, DeviceMeshError::ApprovalPastDeadline { .. }));
     }
@@ -163,11 +158,8 @@ mod tests {
     fn approval_cant_be_verified_under_different_subkey() {
         let (_m, sk1, sk2, sk3, policy) = three_devices();
         let now: u64 = 1_700_000_000;
-        let proposal = propose_operation(
-            &sk1, &policy, [0xEE; 32], [0xDA; 16],
-            now, now + 100,
-        )
-        .unwrap();
+        let proposal =
+            propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 100).unwrap();
         let approval = sign_approval(&sk2, &proposal, now + 1).unwrap();
         let err = approval.verify(&sk3.verifying_key()).unwrap_err();
         assert!(matches!(err, DeviceMeshError::ApprovalVerifyFail));
@@ -177,11 +169,8 @@ mod tests {
     fn approval_for_different_proposal_id_breaks_verify() {
         let (_m, sk1, sk2, _sk3, policy) = three_devices();
         let now: u64 = 1_700_000_000;
-        let proposal = propose_operation(
-            &sk1, &policy, [0xEE; 32], [0xDA; 16],
-            now, now + 100,
-        )
-        .unwrap();
+        let proposal =
+            propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 100).unwrap();
         let mut approval = sign_approval(&sk2, &proposal, now + 1).unwrap();
         approval.proposal_id[0] ^= 0xFF;
         let err = approval.verify(&sk2.verifying_key()).unwrap_err();

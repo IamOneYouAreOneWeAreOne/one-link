@@ -16,8 +16,8 @@ use rand::rngs::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use ol_onion::{
-    build_onion, peel_one_layer, Circuit, HopDescriptor, HopId, OnionPacket,
-    PeelOutcome, HOP_ID_LEN,
+    build_onion, peel_one_layer, Circuit, HopDescriptor, HopId, OnionPacket, PeelOutcome,
+    HOP_ID_LEN,
 };
 
 fn make_hop(i: u8) -> (StaticSecret, HopDescriptor) {

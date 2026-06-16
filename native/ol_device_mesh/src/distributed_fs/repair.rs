@@ -133,12 +133,14 @@ mod tests {
         assert_eq!(plan.len(), 4);
         // Every assigned device must not already hold its chunk.
         for a in &plan {
-            let placement_for_chunk: Option<&ChunkPlacement> =
-                [&h1, &h2].into_iter().find(|p| p.chunk_hash == a.chunk_hash);
+            let placement_for_chunk: Option<&ChunkPlacement> = [&h1, &h2]
+                .into_iter()
+                .find(|p| p.chunk_hash == a.chunk_hash);
             assert!(placement_for_chunk.is_some());
-            assert!(
-                !placement_for_chunk.unwrap().device_ids.contains(&a.assigned_to)
-            );
+            assert!(!placement_for_chunk
+                .unwrap()
+                .device_ids
+                .contains(&a.assigned_to));
         }
     }
 
@@ -151,8 +153,7 @@ mod tests {
         // We can only assign 4 unique devices; plan returns the
         // achievable subset, never duplicating a device.
         assert!(plan.len() <= 4);
-        let unique: BTreeSet<[u8; DEVICE_ID_LEN]> =
-            plan.iter().map(|a| a.assigned_to).collect();
+        let unique: BTreeSet<[u8; DEVICE_ID_LEN]> = plan.iter().map(|a| a.assigned_to).collect();
         assert_eq!(unique.len(), plan.len());
     }
 

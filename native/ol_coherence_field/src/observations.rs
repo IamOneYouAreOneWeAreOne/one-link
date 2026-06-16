@@ -121,9 +121,7 @@ impl FieldObservations {
     pub fn with_initial(alpha: f32, initial_value: f32) -> Result<Self, ObservationError> {
         let mut s = Self::new(alpha)?;
         if !initial_value.is_finite() || !(0.0..=1.0).contains(&initial_value) {
-            return Err(ObservationError::InvalidObservation {
-                got: initial_value,
-            });
+            return Err(ObservationError::InvalidObservation { got: initial_value });
         }
         s.initial_value = initial_value;
         Ok(s)
@@ -152,7 +150,11 @@ impl FieldObservations {
             return Err(ObservationError::InvalidTrust { got: trust_weight });
         }
 
-        let current = self.values.get(peer_id).copied().unwrap_or(self.initial_value);
+        let current = self
+            .values
+            .get(peer_id)
+            .copied()
+            .unwrap_or(self.initial_value);
         let effective_alpha = self.alpha * trust_weight;
         // Standard EWMA with damped α:
         //   new = (1 − α') · old + α' · obs

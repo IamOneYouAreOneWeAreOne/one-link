@@ -6,8 +6,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 use ol_device_mesh::active_routing::{
-    pick_device_for_context, CohortPrior, DeviceActionRecord, RoutingContext,
-    RoutingHistory,
+    pick_device_for_context, CohortPrior, DeviceActionRecord, RoutingContext, RoutingHistory,
 };
 use ol_device_mesh::{DeviceClass, DEVICE_ID_LEN};
 
@@ -121,9 +120,7 @@ fn picker_convergence_to_majority_winner() {
     let mut phone_picks = 0;
     let trials = 500;
     for _ in 0..trials {
-        if let Some(p) =
-            pick_device_for_context(&ctx, &candidates, &history, &cohort, &mut rng)
-        {
+        if let Some(p) = pick_device_for_context(&ctx, &candidates, &history, &cohort, &mut rng) {
             if p == [0x01; DEVICE_ID_LEN] {
                 phone_picks += 1;
             }
@@ -159,9 +156,7 @@ fn picker_explores_when_uninformed() {
     let mut counts = std::collections::HashMap::<[u8; DEVICE_ID_LEN], u32>::new();
     let trials = 600;
     for _ in 0..trials {
-        if let Some(p) =
-            pick_device_for_context(&ctx, &candidates, &history, &cohort, &mut rng)
-        {
+        if let Some(p) = pick_device_for_context(&ctx, &candidates, &history, &cohort, &mut rng) {
             *counts.entry(p).or_default() += 1;
         }
     }

@@ -79,7 +79,10 @@ fn adversarial_attestation_doc_from_one_master_cant_be_signed_by_another() {
     // Swap the published master_vk to victim's.
     doc.master_vk = victim.verifying_key();
     let r = verify_sw(&doc, &nonce, None, 110);
-    assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
+    assert!(matches!(
+        r,
+        Err(ConfidentialError::AttestationMasterSigFail)
+    ));
 }
 
 #[test]
@@ -92,7 +95,10 @@ fn adversarial_cross_provider_doc_via_tag_swap_breaks_master_sig() {
     let mut doc = sign_sw(&sk, nonce, 100, 120, None, vec![]).unwrap();
     doc.provider_tag = ProviderTag::IntelSgx;
     let r = verify_sw(&doc, &nonce, None, 110);
-    assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
+    assert!(matches!(
+        r,
+        Err(ConfidentialError::AttestationMasterSigFail)
+    ));
 }
 
 #[test]
@@ -101,8 +107,7 @@ fn adversarial_witness_swap_breaks_master_sig() {
     let nonce = fresh_attestation_nonce(&mut OsRng);
     let witness_a = [0xAA; 32];
     let witness_b = [0xBB; 32];
-    let mut doc = sign_sw(&sk, nonce, 100, 120, Some(&witness_a), vec![])
-    .unwrap();
+    let mut doc = sign_sw(&sk, nonce, 100, 120, Some(&witness_a), vec![]).unwrap();
     // Swap the commitment leaf (attacker re-derives for a different
     // witness B). Sig over the original transcript should now fail.
     let new_cmt = {
@@ -113,7 +118,10 @@ fn adversarial_witness_swap_breaks_master_sig() {
     };
     doc.field_witness_commitment = Some(new_cmt);
     let r = verify_sw(&doc, &nonce, Some(&witness_b), 110);
-    assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
+    assert!(matches!(
+        r,
+        Err(ConfidentialError::AttestationMasterSigFail)
+    ));
 }
 
 #[test]
@@ -124,8 +132,16 @@ fn adversarial_deadline_extension_breaks_master_sig() {
     // Attacker tries to extend the deadline to defeat the freshness
     // check. Sig over the original (deadline=120) bytes won't verify.
     doc.deadline_unix = 100 + ATTESTATION_FRESHNESS_WINDOW_SECS;
-    let r = verify_sw(&doc, &nonce, None, 100 + ATTESTATION_FRESHNESS_WINDOW_SECS - 1);
-    assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
+    let r = verify_sw(
+        &doc,
+        &nonce,
+        None,
+        100 + ATTESTATION_FRESHNESS_WINDOW_SECS - 1,
+    );
+    assert!(matches!(
+        r,
+        Err(ConfidentialError::AttestationMasterSigFail)
+    ));
 }
 
 #[test]
@@ -137,7 +153,10 @@ fn adversarial_platform_quote_tamper_breaks_master_sig() {
     // Attacker injects fake SGX quote bytes; sig should now fail.
     doc.platform_quote = b"fake SGX quote bytes".to_vec();
     let r = verify_sw(&doc, &nonce, None, 110);
-    assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
+    assert!(matches!(
+        r,
+        Err(ConfidentialError::AttestationMasterSigFail)
+    ));
 }
 
 #[test]
@@ -147,7 +166,10 @@ fn adversarial_replay_after_deadline_rejected() {
     let doc = sign_sw(&sk, nonce, 100, 120, None, vec![]).unwrap();
     // The peer captured the doc and tries to replay it 100s later.
     let r = verify_sw(&doc, &nonce, None, 220);
-    assert!(matches!(r, Err(ConfidentialError::AttestationExpired { .. })));
+    assert!(matches!(
+        r,
+        Err(ConfidentialError::AttestationExpired { .. })
+    ));
 }
 
 #[test]
@@ -158,7 +180,10 @@ fn adversarial_doc_minted_for_peer_a_rejected_by_peer_b() {
     let doc = sign_sw(&sk, nonce_a, 100, 120, None, vec![]).unwrap();
     // Peer B's verifier sees a doc bound to peer A's nonce; rejects.
     let r = verify_sw(&doc, &nonce_b, None, 110);
-    assert!(matches!(r, Err(ConfidentialError::AttestationPeerNonceMismatch)));
+    assert!(matches!(
+        r,
+        Err(ConfidentialError::AttestationPeerNonceMismatch)
+    ));
 }
 
 #[test]
@@ -168,7 +193,10 @@ fn adversarial_truncated_sig_rejected() {
     let mut doc = sign_sw(&sk, nonce, 100, 120, None, vec![]).unwrap();
     doc.master_sig.truncate(doc.master_sig.len() - 1);
     let r = verify_sw(&doc, &nonce, None, 110);
-    assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
+    assert!(matches!(
+        r,
+        Err(ConfidentialError::AttestationMasterSigFail)
+    ));
 }
 
 #[test]

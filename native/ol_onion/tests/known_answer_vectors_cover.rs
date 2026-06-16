@@ -31,9 +31,7 @@ const SCHED_RATE_HZ: f64 = 1.0;
 /// Generated via the BLAKE3 keystream over (seed || counter); pinning
 /// these prevents an accidental swap of the keystream-derivation
 /// algorithm from silently changing every daemon's emission pattern.
-const EXPECTED_FIRST_8_WAITS_MS: [u64; 8] = [
-    1906, 1970, 2078, 1167, 3119, 1609, 1013, 1204,
-];
+const EXPECTED_FIRST_8_WAITS_MS: [u64; 8] = [1906, 1970, 2078, 1167, 3119, 1609, 1013, 1204];
 
 fn check_regen<F: FnOnce()>(label: &str, dump: F) {
     if std::env::var("OL_COVER_KAT_REGEN").as_deref() == Ok("1") {
@@ -48,7 +46,10 @@ fn kat_cover_sentinel_pinned() {
     check_regen("COVER_SENTINEL bytes", || {
         eprintln!("    EXPECTED_SENTINEL_HEX = \"{actual_hex}\"");
     });
-    assert_eq!(actual_hex, EXPECTED_SENTINEL_HEX, "COVER_SENTINEL byte drift");
+    assert_eq!(
+        actual_hex, EXPECTED_SENTINEL_HEX,
+        "COVER_SENTINEL byte drift"
+    );
     assert_eq!(COVER_SENTINEL.len(), 8, "Sentinel size pinned at 8 bytes");
     assert_eq!(COVER_SENTINEL, b"OL-COVER", "Sentinel meaning pinned");
 }
@@ -71,14 +72,10 @@ fn kat_scheduler_deterministic_sequence_pinned() {
     let mut s = CoverScheduler::new(SCHED_RATE_HZ, SCHED_SEED);
     let actual: Vec<u64> = (0..8).map(|_| s.next_wait_ms()).collect();
     check_regen("First 8 waits (rate=1.0, seed=[0x42; 32])", || {
-        eprintln!(
-            "    EXPECTED_FIRST_8_WAITS_MS = {:?}",
-            actual
-        );
+        eprintln!("    EXPECTED_FIRST_8_WAITS_MS = {:?}", actual);
     });
     assert_eq!(
-        actual,
-        EXPECTED_FIRST_8_WAITS_MS,
+        actual, EXPECTED_FIRST_8_WAITS_MS,
         "Scheduler keystream drift — every daemon's emission pattern would change!"
     );
 }
@@ -99,9 +96,7 @@ fn kat_scheduler_second_call_advances_counter() {
 
 // ── Audit M4: authenticated cover-trailer KAT ──────────────────────
 
-use ol_onion::sphinx::cover::{
-    is_cover_payload_authenticated, COVER_TRAILER_LEN,
-};
+use ol_onion::sphinx::cover::{is_cover_payload_authenticated, COVER_TRAILER_LEN};
 
 /// Pin the audit-M4 cover-trailer derivation.
 ///
@@ -120,8 +115,7 @@ fn kat_m4_authenticated_trailer_round_trip() {
     payload.extend_from_slice(&body_bytes);
     // Compute trailer over (sentinel || body).
     let trailer_input = payload.clone();
-    let derived =
-        blake3::derive_key("ol-sphinx-cover-trailer-v1", &shared_key);
+    let derived = blake3::derive_key("ol-sphinx-cover-trailer-v1", &shared_key);
     let mut h = blake3::Hasher::new_keyed(&derived);
     h.update(&trailer_input);
     let mut tag = [0u8; COVER_TRAILER_LEN];

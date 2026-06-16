@@ -15,8 +15,8 @@ use ol_discovery::node_id::{NodeId, NODE_ID_BITS};
 use ol_discovery::record::{PeerRecord, RecordError, SignedRecord};
 use ol_discovery::routing::{InsertOutcome, RoutingTable};
 use ol_discovery::rpc::{
-    validate_response_size, FindValueOutcome, Header, Response, RpcError,
-    MAX_CLOCK_SKEW_SECS, MAX_FIND_RESULTS,
+    validate_response_size, FindValueOutcome, Header, Response, RpcError, MAX_CLOCK_SKEW_SECS,
+    MAX_FIND_RESULTS,
 };
 
 fn make_key() -> SigningKey {

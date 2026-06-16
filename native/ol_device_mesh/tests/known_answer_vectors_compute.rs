@@ -2,8 +2,8 @@
 
 use ol_device_mesh::compute::{
     CapabilityAttestation, DeviceCapability, TaskRequest, TaskResult,
-    CAPABILITY_ATTESTATION_DOMAIN, MAX_CAPABILITIES_PER_DEVICE,
-    MAX_TASK_CLASS_LEN, TASK_REQUEST_DOMAIN, TASK_RESULT_DOMAIN,
+    CAPABILITY_ATTESTATION_DOMAIN, MAX_CAPABILITIES_PER_DEVICE, MAX_TASK_CLASS_LEN,
+    TASK_REQUEST_DOMAIN, TASK_RESULT_DOMAIN,
 };
 use ol_device_mesh::distributed_fs::FILE_ID_LEN;
 use ol_device_mesh::DEVICE_ID_LEN;
@@ -66,12 +66,12 @@ fn kat_capability_attestation_canonical_transcript_pinned() {
     });
     const EXPECTED_HEX: &str = concat!(
         "4f4c2d6d6573682d6361706162696c6974792d6174746573746174696f6e2d7631", // domain
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",  // device_id
-        "0002",                              // count = 2
-        "4f4c2d43502d4750",                  // OL-CP-GP
-        "4f4c2d43502d4348",                  // OL-CP-CH
-        "0000000000000007",                  // mint_day = 7
-        "000000000000016d",                  // expiry_day = 365
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",                                   // device_id
+        "0002",                                                               // count = 2
+        "4f4c2d43502d4750",                                                   // OL-CP-GP
+        "4f4c2d43502d4348",                                                   // OL-CP-CH
+        "0000000000000007",                                                   // mint_day = 7
+        "000000000000016d",                                                   // expiry_day = 365
     );
     assert_eq!(hex, EXPECTED_HEX, "capability-attestation transcript drift");
 }
@@ -94,12 +94,12 @@ fn kat_task_result_canonical_transcript_pinned() {
     });
     const EXPECTED_HEX: &str = concat!(
         "4f4c2d6d6573682d7461736b2d726573756c742d7631", // domain
-        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",  // task_request_id
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",  // executor
-        "0000000000000003",                  // day = 3
-        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",  // output_file_id
-        "0000000000002000",                  // output_byte_size = 8192
-        "000000006553f100",                  // completed_unix = 1_700_000_000
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", // task_request_id
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",             // executor
+        "0000000000000003",                             // day = 3
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // output_file_id
+        "0000000000002000",                             // output_byte_size = 8192
+        "000000006553f100",                             // completed_unix = 1_700_000_000
     );
     assert_eq!(hex, EXPECTED_HEX, "task-result transcript drift");
 }

@@ -63,11 +63,7 @@ fn header_mac_verify_constant_time() {
     for b in &buckets {
         let ns = measure(
             || {
-                std::hint::black_box(verify_header_mac(
-                    &key,
-                    &data,
-                    std::hint::black_box(b),
-                ));
+                std::hint::black_box(verify_header_mac(&key, &data, std::hint::black_box(b)));
             },
             SAMPLES_PER_BUCKET,
         ) as f64;

@@ -83,7 +83,9 @@ pub enum DeviceMeshError {
     #[error("quorum proposal failed cryptographic verification by issuer")]
     ProposalIssuerVerifyFail,
     /// Quorum proposal: deadline is not strictly after `issued_unix`.
-    #[error("quorum proposal deadline_unix={deadline_unix} must be after issued_unix={issued_unix}")]
+    #[error(
+        "quorum proposal deadline_unix={deadline_unix} must be after issued_unix={issued_unix}"
+    )]
     ProposalDeadlineNotAfterIssue {
         /// Issue wall-clock.
         issued_unix: u64,
@@ -109,7 +111,9 @@ pub enum DeviceMeshError {
     #[error("quorum approval's proposal_id does not match the certificate's proposal")]
     ApprovalForOtherProposal,
     /// Quorum approval signed past its proposal's deadline.
-    #[error("quorum approval at approved_unix={approved_unix} is past deadline_unix={deadline_unix}")]
+    #[error(
+        "quorum approval at approved_unix={approved_unix} is past deadline_unix={deadline_unix}"
+    )]
     ApprovalPastDeadline {
         /// Approval wall-clock.
         approved_unix: u64,
@@ -135,7 +139,9 @@ pub enum DeviceMeshError {
     #[error("certificate's proposal.policy_id mismatches the certificate's policy.policy_id")]
     CertProposalPolicyMismatch,
     /// Certificate's proposal deadline is past the verifier's wall clock.
-    #[error("certificate's proposal expired at deadline_unix={deadline_unix} (now_unix={now_unix})")]
+    #[error(
+        "certificate's proposal expired at deadline_unix={deadline_unix} (now_unix={now_unix})"
+    )]
     CertProposalExpired {
         /// Deadline wall-clock.
         deadline_unix: u64,
@@ -311,7 +317,9 @@ pub enum DeviceMeshError {
         max: usize,
     },
     /// Route announcement links are not strictly sorted by peer id.
-    #[error("route announcement links must be sorted ascending by peer_device_id with no duplicates")]
+    #[error(
+        "route announcement links must be sorted ascending by peer_device_id with no duplicates"
+    )]
     RouteAnnouncementLinksNotSorted,
     /// Route announcement carries a self-loop (announcer listed
     /// itself as one of its peers).
@@ -407,7 +415,9 @@ pub enum DeviceMeshError {
     },
     /// One of the required pairing channels (QR / Audio / Motion)
     /// was missing from the supplied commitment set.
-    #[error("pairing commitment set missing required channel(s): qr={qr} audio={audio} motion={motion}")]
+    #[error(
+        "pairing commitment set missing required channel(s): qr={qr} audio={audio} motion={motion}"
+    )]
     PairChannelMissing {
         /// Whether QR was seen.
         qr: bool,

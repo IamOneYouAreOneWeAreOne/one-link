@@ -229,7 +229,10 @@ mod tests {
         // Differ in many positions (BLAKE3 avalanche).
         let d = id1.distance(&id2);
         let popcount: u32 = d.iter().map(|b| b.count_ones()).sum();
-        assert!(popcount > 100, "BLAKE3 should give >100 bit-differences; got {popcount}");
+        assert!(
+            popcount > 100,
+            "BLAKE3 should give >100 bit-differences; got {popcount}"
+        );
     }
 
     #[test]

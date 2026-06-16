@@ -1,8 +1,8 @@
 //! Adversarial vectors for Row 8 Layer 9 active routing.
 
 use ol_device_mesh::active_routing::{
-    pick_device_for_context, CohortPrior, DeviceActionRecord, RoutingContext,
-    RoutingHistory, MAX_POSTERIOR_COUNT,
+    pick_device_for_context, CohortPrior, DeviceActionRecord, RoutingContext, RoutingHistory,
+    MAX_POSTERIOR_COUNT,
 };
 use ol_device_mesh::{DeviceClass, DEVICE_ID_LEN};
 use rand::SeedableRng;
@@ -118,20 +118,8 @@ fn adversarial_picker_attacker_can_only_bias_via_observations() {
     ];
     let mut rng1 = ChaCha20Rng::from_seed([0xAA; 32]);
     let mut rng2 = ChaCha20Rng::from_seed([0xAA; 32]);
-    let p1 = pick_device_for_context(
-        &ctx(),
-        &candidates,
-        &h,
-        &CohortPrior::uniform(),
-        &mut rng1,
-    );
-    let p2 = pick_device_for_context(
-        &ctx(),
-        &candidates,
-        &h,
-        &CohortPrior::uniform(),
-        &mut rng2,
-    );
+    let p1 = pick_device_for_context(&ctx(), &candidates, &h, &CohortPrior::uniform(), &mut rng1);
+    let p2 = pick_device_for_context(&ctx(), &candidates, &h, &CohortPrior::uniform(), &mut rng2);
     assert_eq!(p1, p2);
 }
 
@@ -161,13 +149,9 @@ fn adversarial_record_history_drift_under_intermittent_decay() {
     let mut phone_picks = 0;
     let trials = 200;
     for _ in 0..trials {
-        if let Some(p) = pick_device_for_context(
-            &ctx(),
-            &candidates,
-            &h,
-            &CohortPrior::uniform(),
-            &mut rng,
-        ) {
+        if let Some(p) =
+            pick_device_for_context(&ctx(), &candidates, &h, &CohortPrior::uniform(), &mut rng)
+        {
             if p == [0x01; DEVICE_ID_LEN] {
                 phone_picks += 1;
             }

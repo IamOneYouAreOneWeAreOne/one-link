@@ -38,11 +38,7 @@ impl ChunkPlacement {
     }
 
     /// Record that `device_id` attested at `attest_unix`.
-    pub fn add_holder(
-        &mut self,
-        device_id: [u8; DEVICE_ID_LEN],
-        attest_unix: u64,
-    ) {
+    pub fn add_holder(&mut self, device_id: [u8; DEVICE_ID_LEN], attest_unix: u64) {
         self.device_ids.insert(device_id);
         if attest_unix > self.last_attest_unix {
             self.last_attest_unix = attest_unix;
@@ -66,10 +62,7 @@ impl ChunkPlacement {
 /// Among the supplied placements, return the chunk hashes that fall
 /// below the policy's durability rule.
 #[must_use]
-pub fn under_replicated<'a, I>(
-    placements: I,
-    policy: &ErasurePolicy,
-) -> Vec<ChunkHash>
+pub fn under_replicated<'a, I>(placements: I, policy: &ErasurePolicy) -> Vec<ChunkHash>
 where
     I: IntoIterator<Item = &'a ChunkPlacement>,
 {
@@ -84,9 +77,7 @@ where
 /// across a placement collection. Used by the repair planner to
 /// pick the least-loaded device for the next assignment.
 #[must_use]
-pub fn device_load_map<'a, I>(
-    placements: I,
-) -> BTreeMap<[u8; DEVICE_ID_LEN], usize>
+pub fn device_load_map<'a, I>(placements: I) -> BTreeMap<[u8; DEVICE_ID_LEN], usize>
 where
     I: IntoIterator<Item = &'a ChunkPlacement>,
 {

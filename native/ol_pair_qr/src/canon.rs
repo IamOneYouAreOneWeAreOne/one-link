@@ -250,7 +250,10 @@ mod tests {
         let mut r = Reader::new(&bytes);
         let err = r.read_var().unwrap_err();
         match err {
-            PairError::Truncated { needed: 100, got: 2 } => {}
+            PairError::Truncated {
+                needed: 100,
+                got: 2,
+            } => {}
             other => panic!("unexpected error: {other:?}"),
         }
     }

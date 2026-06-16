@@ -70,7 +70,9 @@ fn bench_attest_verify(c: &mut Criterion) {
     let sealed = provider.seal_master(&seed).unwrap();
     let nonce = fresh_attestation_nonce(&mut OsRng);
     let sdp = [0u8; ol_confidential::ISSUER_SDP_PUBKEY_LEN];
-    let doc = provider.attest(&sealed, nonce, 100, 120, None, sdp).unwrap();
+    let doc = provider
+        .attest(&sealed, nonce, 100, 120, None, sdp)
+        .unwrap();
     c.bench_function("confidential::attest_verify", |b| {
         b.iter(|| {
             verify_attestation(

@@ -216,7 +216,11 @@ pub fn batch_verify(
     // weighting. Public coin — no need for verifier randomness.
     let mut transcript = Hasher::new();
     transcript.update(BATCH_WEIGHT_DOMAIN);
-    transcript.update(&u32::try_from(entries.len()).unwrap_or(u32::MAX).to_be_bytes());
+    transcript.update(
+        &u32::try_from(entries.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
     for (vk, msg, sig) in entries {
         transcript.update(&vk.0);
         transcript.update(&u32::try_from(msg.len()).unwrap_or(u32::MAX).to_be_bytes());
@@ -483,9 +487,7 @@ pub fn bn_verify(
     indices.sort_unstable_by_key(|&i| entries[i].0 .0);
     for w in indices.windows(2) {
         if entries[w[0]].0 .0 == entries[w[1]].0 .0 {
-            return Err(OnionError::Internal(
-                "duplicate participant in BN verify",
-            ));
+            return Err(OnionError::Internal("duplicate participant in BN verify"));
         }
     }
     let sorted_pubkeys: Vec<[u8; 32]> = indices.iter().map(|&i| entries[i].0 .0).collect();
@@ -570,10 +572,7 @@ fn deterministic_nonce(sk: &Scalar, vk_bytes: &[u8; 32], msg: &[u8]) -> Scalar {
     s
 }
 
-fn participant_list_digest(
-    pubkeys: &[[u8; 32]],
-    msg_hashes: &[[u8; 32]],
-) -> [u8; 32] {
+fn participant_list_digest(pubkeys: &[[u8; 32]], msg_hashes: &[[u8; 32]]) -> [u8; 32] {
     // Audit L4 May 2026 — additionally bind per-entry message
     // digests into the participant list. Without this, two BN
     // aggregates with the SAME signer set but DIFFERENT per-signer
@@ -593,7 +592,11 @@ fn participant_list_digest(
     );
     let mut h = Hasher::new();
     h.update(b"OL-sphinx-aggsig-participant-list-v2");
-    h.update(&u32::try_from(pubkeys.len()).unwrap_or(u32::MAX).to_be_bytes());
+    h.update(
+        &u32::try_from(pubkeys.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
     for (pk, mh) in pubkeys.iter().zip(msg_hashes.iter()) {
         h.update(pk);
         h.update(mh);
@@ -669,7 +672,10 @@ mod tests {
         let msg = b"determinism";
         let sig1 = sk.sign(msg);
         let sig2 = sk.sign(msg);
-        assert_eq!(sig1.0, sig2.0, "sign must be deterministic for same (sk, msg)");
+        assert_eq!(
+            sig1.0, sig2.0,
+            "sign must be deterministic for same (sk, msg)"
+        );
     }
 
     #[test]
@@ -720,7 +726,10 @@ mod tests {
         // who accidentally filtered to zero entries believe they had
         // proof-of-N-signers. Now Internal-errors.
         let entries: Vec<(SchnorrVerifyingKey, &[u8], SchnorrSignature)> = Vec::new();
-        assert!(matches!(batch_verify(&entries), Err(OnionError::Internal(_))));
+        assert!(matches!(
+            batch_verify(&entries),
+            Err(OnionError::Internal(_))
+        ));
     }
 
     #[test]
@@ -786,7 +795,10 @@ mod tests {
     fn bn_borrow(
         owned: &[(SchnorrVerifyingKey, Vec<u8>, SchnorrSignature)],
     ) -> Vec<(SchnorrVerifyingKey, &[u8], SchnorrSignature)> {
-        owned.iter().map(|(vk, m, s)| (*vk, m.as_slice(), *s)).collect()
+        owned
+            .iter()
+            .map(|(vk, m, s)| (*vk, m.as_slice(), *s))
+            .collect()
     }
 
     fn bn_borrow_verify(
@@ -894,7 +906,10 @@ mod tests {
         // Flip a bit in the middle R_i.
         agg.r_per_signer[1][3] ^= 0x10;
         let r = bn_verify(&bn_borrow_verify(&owned), &agg);
-        assert!(matches!(r, Err(OnionError::SignatureInvalid) | Err(OnionError::Internal(_))));
+        assert!(matches!(
+            r,
+            Err(OnionError::SignatureInvalid) | Err(OnionError::Internal(_))
+        ));
     }
 
     #[test]
@@ -933,7 +948,10 @@ mod tests {
         let r = bn_verify(&entries, &agg);
         // Could be SignatureInvalid or Internal depending on sort
         // order — both are acceptable rejections.
-        assert!(matches!(r, Err(OnionError::SignatureInvalid) | Err(OnionError::Internal(_))));
+        assert!(matches!(
+            r,
+            Err(OnionError::SignatureInvalid) | Err(OnionError::Internal(_))
+        ));
         let _ = sks;
     }
 

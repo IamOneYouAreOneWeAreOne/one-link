@@ -3,12 +3,10 @@
 use std::collections::BTreeSet;
 
 use ol_device_mesh::distributed_fs::{
-    repair_plan, sign_storage_attestation, under_replicated, ChunkHash,
-    ChunkPlacement, ErasurePolicy, FileManifest, MAX_CHUNKS_PER_FILE,
+    repair_plan, sign_storage_attestation, under_replicated, ChunkHash, ChunkPlacement,
+    ErasurePolicy, FileManifest, MAX_CHUNKS_PER_FILE,
 };
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN};
 use rand::rngs::OsRng;
 
 // ── Manifest forgery + tampering ───────────────────────────────────
@@ -99,10 +97,8 @@ fn adversarial_attestation_wrong_subkey_rejected() {
 #[test]
 fn adversarial_attestation_tampered_chunks_rejected() {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk, _) =
-        mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
-    let mut att =
-        sign_storage_attestation(&sk, 1, vec![[0x01; 32], [0x02; 32]]).unwrap();
+    let (sk, _) = mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
+    let mut att = sign_storage_attestation(&sk, 1, vec![[0x01; 32], [0x02; 32]]).unwrap();
     // Flip a byte in a chunk hash (preserve sort order so shape_check passes).
     att.chunk_hashes[1][31] ^= 0x01;
     let err = att.verify(&sk.verifying_key()).unwrap_err();
@@ -112,8 +108,7 @@ fn adversarial_attestation_tampered_chunks_rejected() {
 #[test]
 fn adversarial_attestation_manual_unsort_rejected() {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk, _) =
-        mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
+    let (sk, _) = mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
     let mut att =
         sign_storage_attestation(&sk, 1, vec![[0x01; 32], [0x02; 32], [0x03; 32]]).unwrap();
     att.chunk_hashes.swap(0, 2); // not sorted anymore
@@ -140,8 +135,7 @@ fn adversarial_under_replicated_catches_all_failing_chunks() {
 fn adversarial_repair_plan_with_too_few_devices_emits_partial() {
     // Need 5 holders; mesh has only 3 → planner emits the 3 it can.
     let policy = ErasurePolicy::new(2, 1, 5).unwrap();
-    let mesh: BTreeSet<[u8; DEVICE_ID_LEN]> =
-        (1u8..=3).map(|i| [i; DEVICE_ID_LEN]).collect();
+    let mesh: BTreeSet<[u8; DEVICE_ID_LEN]> = (1u8..=3).map(|i| [i; DEVICE_ID_LEN]).collect();
     let p = ChunkPlacement::empty([0x01; 32]);
     let plan = repair_plan([&p], &mesh, &policy);
     assert_eq!(plan.len(), 3); // exhausted the mesh
@@ -152,11 +146,9 @@ fn adversarial_repair_plan_load_balanced() {
     // 4 chunks needing 2 new holders each across a 4-device mesh.
     // Total assignments = 8 across 4 devices = 2 each (load-balanced).
     let policy = ErasurePolicy::new(2, 1, 2).unwrap();
-    let mesh: BTreeSet<[u8; DEVICE_ID_LEN]> =
-        (1u8..=4).map(|i| [i; DEVICE_ID_LEN]).collect();
-    let placements: Vec<ChunkPlacement> = (0u8..4)
-        .map(|i| ChunkPlacement::empty([i; 32]))
-        .collect();
+    let mesh: BTreeSet<[u8; DEVICE_ID_LEN]> = (1u8..=4).map(|i| [i; DEVICE_ID_LEN]).collect();
+    let placements: Vec<ChunkPlacement> =
+        (0u8..4).map(|i| ChunkPlacement::empty([i; 32])).collect();
     let plan = repair_plan(placements.iter(), &mesh, &policy);
     assert_eq!(plan.len(), 8);
     let mut device_counts = std::collections::BTreeMap::<[u8; 16], usize>::new();

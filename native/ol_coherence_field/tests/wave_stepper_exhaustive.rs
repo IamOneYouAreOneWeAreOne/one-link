@@ -27,9 +27,7 @@
 
 use std::collections::HashMap;
 
-use ol_coherence_field::wave::{
-    WaveError, WaveStepper, DEFAULT_DAMPING, DEFAULT_WAVE_SPEED,
-};
+use ol_coherence_field::wave::{WaveError, WaveStepper, DEFAULT_DAMPING, DEFAULT_WAVE_SPEED};
 use proptest::prelude::*;
 
 // ─── Helpers ──────────────────────────────────────────────────────
@@ -66,10 +64,7 @@ fn ring_neighbors(n: usize) -> HashMap<String, Vec<String>> {
 
 /// Build a constant field across `nodes`.
 fn constant_field(nodes: &[&str], value: f32) -> HashMap<String, f32> {
-    nodes
-        .iter()
-        .map(|n| ((*n).to_string(), value))
-        .collect()
+    nodes.iter().map(|n| ((*n).to_string(), value)).collect()
 }
 
 // ─── Group 1: Numerical Invariants (proptest) ───────────────────────
@@ -255,8 +250,10 @@ fn disturbance_propagates_at_finite_speed() {
     // disturbance must be visible at n4 and n6 but NOT at n3 or n7
     // (signal cone bounded by c · dt < 1 grid spacing).
     let mut w = WaveStepper::new()
-        .with_wave_speed(1.0).unwrap()
-        .with_damping(0.0).unwrap();
+        .with_wave_speed(1.0)
+        .unwrap()
+        .with_damping(0.0)
+        .unwrap();
     let mut initial = HashMap::new();
     for i in 0..11 {
         initial.insert(format!("n{}", i), 0.0);
@@ -269,10 +266,23 @@ fn disturbance_propagates_at_finite_speed() {
     // Immediate neighbors should have moved.
     let n4 = w.psi_at("n4").unwrap();
     let n6 = w.psi_at("n6").unwrap();
-    assert!(n4.abs() > 1e-6, "n4 should have received signal: got {}", n4);
-    assert!(n6.abs() > 1e-6, "n6 should have received signal: got {}", n6);
+    assert!(
+        n4.abs() > 1e-6,
+        "n4 should have received signal: got {}",
+        n4
+    );
+    assert!(
+        n6.abs() > 1e-6,
+        "n6 should have received signal: got {}",
+        n6
+    );
     // Symmetry — n4 == n6 to machine precision.
-    assert!((n4 - n6).abs() < 1e-6, "broken symmetry: n4={} n6={}", n4, n6);
+    assert!(
+        (n4 - n6).abs() < 1e-6,
+        "broken symmetry: n4={} n6={}",
+        n4,
+        n6
+    );
     // Distant nodes should still be (close to) zero.
     let n0 = w.psi_at("n0").unwrap();
     assert!(n0.abs() < 1e-6, "n0 leaked signal: {}", n0);
@@ -283,8 +293,10 @@ fn ring_topology_periodic_wraparound() {
     // On a ring, a disturbance at n0 should propagate to both n1 AND
     // n_{N-1} (wraparound) symmetrically.
     let mut w = WaveStepper::new()
-        .with_wave_speed(1.0).unwrap()
-        .with_damping(0.0).unwrap();
+        .with_wave_speed(1.0)
+        .unwrap()
+        .with_damping(0.0)
+        .unwrap();
     let n = 8;
     let mut initial = HashMap::new();
     for i in 0..n {
@@ -296,7 +308,12 @@ fn ring_topology_periodic_wraparound() {
     w.step(0.3, &neighbors).unwrap();
     let n1 = w.psi_at("n1").unwrap();
     let n_last = w.psi_at(&format!("n{}", n - 1)).unwrap();
-    assert!((n1 - n_last).abs() < 1e-6, "wraparound broken: n1={} n_last={}", n1, n_last);
+    assert!(
+        (n1 - n_last).abs() < 1e-6,
+        "wraparound broken: n1={} n_last={}",
+        n1,
+        n_last
+    );
 }
 
 // ─── Group 3: Energy Conservation ────────────────────────────────────
@@ -308,8 +325,10 @@ fn undamped_energy_drift_bounded() {
     // steps we allow drift up to 10% for safety, but typically
     // observe much less.
     let mut w = WaveStepper::new()
-        .with_wave_speed(0.7).unwrap()
-        .with_damping(0.0).unwrap();
+        .with_wave_speed(0.7)
+        .unwrap()
+        .with_damping(0.0)
+        .unwrap();
     let n = 11;
     let mut initial = HashMap::new();
     for i in 0..n {
@@ -333,7 +352,9 @@ fn undamped_energy_drift_bounded() {
         assert!(
             relative_drift < 0.5,
             "energy drift too large: initial={} final={} drift={}",
-            initial_energy, final_energy, relative_drift,
+            initial_energy,
+            final_energy,
+            relative_drift,
         );
     }
 }
@@ -344,8 +365,10 @@ fn damped_energy_decays_monotonically() {
     // small leapfrog oscillation). We check that after 50 steps the
     // energy is strictly less than at step 5.
     let mut w = WaveStepper::new()
-        .with_wave_speed(0.5).unwrap()
-        .with_damping(0.2).unwrap();
+        .with_wave_speed(0.5)
+        .unwrap()
+        .with_damping(0.2)
+        .unwrap();
     let n = 7;
     let mut initial = HashMap::new();
     for i in 0..n {
@@ -367,7 +390,8 @@ fn damped_energy_decays_monotonically() {
     assert!(
         late_energy < early_energy,
         "damped energy didn't decay: early={} late={}",
-        early_energy, late_energy,
+        early_energy,
+        late_energy,
     );
 }
 
@@ -376,8 +400,7 @@ fn damped_energy_decays_monotonically() {
 #[test]
 fn stress_1000_nodes_100_steps_no_panic() {
     let n = 1000;
-    let mut w = WaveStepper::new()
-        .with_wave_speed(0.5).unwrap();
+    let mut w = WaveStepper::new().with_wave_speed(0.5).unwrap();
     let mut initial = HashMap::new();
     let mut neighbors: HashMap<String, Vec<String>> = HashMap::new();
     for i in 0..n {
@@ -416,7 +439,8 @@ fn clamp_traps_runaway() {
     // Construct a stepper with a tight clamp + an initial condition
     // guaranteed to exceed it within one step.
     let mut w = WaveStepper::new()
-        .with_wave_speed(0.5).unwrap()
+        .with_wave_speed(0.5)
+        .unwrap()
         .with_clamp_range(Some((0.0, 1.0)));
     let n = 5;
     let mut initial = HashMap::new();
@@ -438,14 +462,15 @@ fn step_atomicity_on_error() {
     // On error, the snapshots must NOT advance — the caller can
     // inspect the pre-step state to diagnose.
     let mut w = WaveStepper::new()
-        .with_wave_speed(0.5).unwrap()
+        .with_wave_speed(0.5)
+        .unwrap()
         .with_clamp_range(Some((0.0, 1.0)));
     let mut initial = HashMap::new();
     initial.insert("n0".to_string(), 0.5);
     initial.insert("n1".to_string(), 2.5);
     w.seed(&initial);
     let before = w.psi_at("n0").unwrap();
-    let _ = w.step(0.3, &chain_neighbors(2));  // expected to error
+    let _ = w.step(0.3, &chain_neighbors(2)); // expected to error
     let after = w.psi_at("n0").unwrap();
     assert_eq!(before, after, "snapshots advanced on error");
     assert_eq!(w.step_count(), 0, "step_count incremented on error");
@@ -485,8 +510,10 @@ fn empty_graph_is_a_no_op() {
 fn zero_wave_speed_field_just_damps() {
     // c = 0 means no wave propagation; only damping should act.
     let mut w = WaveStepper::new()
-        .with_wave_speed(0.0).unwrap()
-        .with_damping(0.5).unwrap();
+        .with_wave_speed(0.0)
+        .unwrap()
+        .with_damping(0.5)
+        .unwrap();
     let mut initial = HashMap::new();
     initial.insert("n0".to_string(), 1.0);
     w.seed(&initial);
@@ -506,7 +533,8 @@ fn cfl_can_be_disabled_for_advanced_callers() {
     // a courant > 1. Useful for golden-vector regression tests where
     // the inputs are known-stable for some other reason.
     let mut w = WaveStepper::new()
-        .with_wave_speed(2.0).unwrap()  // intentionally fast
+        .with_wave_speed(2.0)
+        .unwrap() // intentionally fast
         .with_cfl_enforce(false);
     let mut initial = HashMap::new();
     for i in 0..3 {
@@ -522,8 +550,9 @@ fn cfl_can_be_disabled_for_advanced_callers() {
 #[test]
 fn cascade_warnings_counter_matches_returned_value() {
     let mut w = WaveStepper::new()
-        .with_wave_speed(1.0).unwrap()
-        .with_threshold(0.001);  // very sensitive
+        .with_wave_speed(1.0)
+        .unwrap()
+        .with_threshold(0.001); // very sensitive
     let mut initial = HashMap::new();
     initial.insert("n0".to_string(), 1.0);
     initial.insert("n1".to_string(), 0.0);
@@ -538,7 +567,8 @@ fn cascade_warnings_counter_matches_returned_value() {
 #[test]
 fn reset_warnings_preserves_state() {
     let mut w = WaveStepper::new()
-        .with_wave_speed(1.0).unwrap()
+        .with_wave_speed(1.0)
+        .unwrap()
         .with_threshold(0.001);
     let mut initial = HashMap::new();
     initial.insert("n0".to_string(), 1.0);

@@ -31,9 +31,7 @@
 //! candidate-enumeration is in a fixed order and ties are broken by
 //! enumeration order. No state, no randomness, no clock reads.
 
-use crate::decision::{
-    BatchDecision, ContractMode, Decision, OnionHops, Path, Transport,
-};
+use crate::decision::{BatchDecision, ContractMode, Decision, OnionHops, Path, Transport};
 use crate::weights::Weights;
 use ol_decide::{Context, Decide, EventKind, NetworkType, PeerRelationship, UserMode};
 
@@ -223,7 +221,11 @@ impl UnifiedMin {
         let needed = (1.0_f32 - a_x_t) * dc_ds;
         let mut cost = (needed - delta_c).max(0.0) * self.weights.privacy_weight;
         if !d.cover_traffic {
-            let mode_mult: f32 = if ctx.user_mode == UserMode::Paranoid { 1.0 } else { 0.3 };
+            let mode_mult: f32 = if ctx.user_mode == UserMode::Paranoid {
+                1.0
+            } else {
+                0.3
+            };
             cost += self.weights.cover_penalty * mode_mult;
         }
         cost
@@ -315,7 +317,9 @@ fn transport_options(ctx: &Context) -> Vec<Transport> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ol_decide::{Context, EventKind, NetworkType, PeerRelationship, RadioState, Urgency, UserMode};
+    use ol_decide::{
+        Context, EventKind, NetworkType, PeerRelationship, RadioState, Urgency, UserMode,
+    };
 
     fn paired_msg(size: usize) -> Context {
         Context {

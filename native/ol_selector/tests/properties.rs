@@ -71,7 +71,17 @@ fn arb_context() -> impl Strategy<Value = Context> {
         0.0f32..1.0,
     )
         .prop_map(
-            |(kind, size, peer, urgency, radio_state, network, user_mode, observed_loss, pattern_strength)| {
+            |(
+                kind,
+                size,
+                peer,
+                urgency,
+                radio_state,
+                network,
+                user_mode,
+                observed_loss,
+                pattern_strength,
+            )| {
                 Context {
                     kind,
                     size,

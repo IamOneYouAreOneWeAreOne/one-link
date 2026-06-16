@@ -18,8 +18,8 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use ol_onion::keyderiv::derive_layer_key_sender;
 use ol_onion::{
-    build_onion, peel_one_layer, Circuit, HopDescriptor, HopId, OnionPacket,
-    PeelOutcome, HOP_ID_LEN,
+    build_onion, peel_one_layer, Circuit, HopDescriptor, HopId, OnionPacket, PeelOutcome,
+    HOP_ID_LEN,
 };
 
 // ── Fixed test inputs ─────────────────────────────────────────────
@@ -106,8 +106,7 @@ fn build_kat_circuit() -> (
     let r1 = make(RELAY_1_SK, 1);
     let r2 = make(RELAY_2_SK, 2);
     let dest = make(DEST_SK, 3);
-    let circuit =
-        Circuit::new(vec![r1.1.clone(), r2.1.clone(), dest.1.clone()]).unwrap();
+    let circuit = Circuit::new(vec![r1.1.clone(), r2.1.clone(), dest.1.clone()]).unwrap();
     (r1, r2, dest, circuit)
 }
 
@@ -119,11 +118,7 @@ fn kat_outer_packet_length_pinned() {
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(RNG_SEED);
     let packet = build_onion(&circuit, PAYLOAD, &mut rng).unwrap();
     let enc = packet.encode();
-    assert_or_regen_usize(
-        "OUTER_PACKET_LEN",
-        EXPECTED_OUTER_PACKET_LEN,
-        enc.len(),
-    );
+    assert_or_regen_usize("OUTER_PACKET_LEN", EXPECTED_OUTER_PACKET_LEN, enc.len());
 }
 
 #[test]
@@ -160,11 +155,7 @@ fn kat_outermost_header_metadata_pinned() {
         }
         panic!("EXPECTED_OUTERMOST_AAD_HEX is empty; rerun with OL_ONION_KAT_REGEN=1");
     }
-    assert_or_regen_str(
-        "OUTERMOST_AAD_HEX",
-        EXPECTED_OUTERMOST_AAD_HEX,
-        &aad_hex,
-    );
+    assert_or_regen_str("OUTERMOST_AAD_HEX", EXPECTED_OUTERMOST_AAD_HEX, &aad_hex);
 }
 
 #[test]
@@ -185,8 +176,7 @@ fn kat_layer_key_sender_and_relay_paths_match() {
 
 #[test]
 fn kat_end_to_end_payload_pinned() {
-    let ((r1_sk, _), (r2_sk, _), (dest_sk, _), circuit) =
-        build_kat_circuit();
+    let ((r1_sk, _), (r2_sk, _), (dest_sk, _), circuit) = build_kat_circuit();
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(RNG_SEED);
     let mut packet = build_onion(&circuit, PAYLOAD, &mut rng).unwrap();
     // r1 → r2 → dest

@@ -256,7 +256,11 @@ mod tests {
         let r0 = make_hop_keys(0x21);
         let dest = make_hop_keys(0x22);
         let next_hop_ids = vec![[0x22; SLOT_ID_LEN], DESTINATION_MARKER];
-        let built = build_header(&[r0.clone(), dest.clone()], &next_hop_ids, &random_pad_for(2));
+        let built = build_header(
+            &[r0.clone(), dest.clone()],
+            &next_hop_ids,
+            &random_pad_for(2),
+        );
 
         // r0 peels first.
         let outcome = peel_header(&r0, &built.header, &built.mac).unwrap();

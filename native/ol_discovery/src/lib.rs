@@ -98,30 +98,22 @@ pub mod rpc;
 pub mod udp_transport;
 pub mod wire;
 
+pub use dht_node::{
+    DhtError, DhtNode, DEFAULT_BUCKET_REFRESH_INTERVAL_SECS, DEFAULT_REPUBLISH_INTERVAL_SECS,
+};
 pub use lookup::{
-    Lookup, LookupError, LookupQueryResult, LookupResult, Transport,
-    ALPHA_DEFAULT, LOOKUP_K_DEFAULT, MAX_LOOKUP_ITERS,
+    Lookup, LookupError, LookupQueryResult, LookupResult, Transport, ALPHA_DEFAULT,
+    LOOKUP_K_DEFAULT, MAX_LOOKUP_ITERS,
 };
-pub use node_id::{NodeId, NODE_ID_BYTES, NODE_ID_BITS};
-pub use record::{
-    PeerRecord, RecordError, SignedRecord, RECORD_DEFAULT_TTL_SECS,
-};
-pub use routing::{
-    RoutingTable, K_BUCKET_DEFAULT, MAX_BUCKETS,
-};
+pub use node_id::{NodeId, NODE_ID_BITS, NODE_ID_BYTES};
+pub use record::{PeerRecord, RecordError, SignedRecord, RECORD_DEFAULT_TTL_SECS};
+pub use routing::{RoutingTable, K_BUCKET_DEFAULT, MAX_BUCKETS};
 pub use rpc::{
-    Header, Nonce, Request, Response, RpcEnvelope, RpcError,
-    FindValueOutcome, StoreOutcome,
+    FindValueOutcome, Header, Nonce, Request, Response, RpcEnvelope, RpcError, StoreOutcome,
     MAX_CLOCK_SKEW_SECS, MAX_FIND_RESULTS,
 };
-pub use dht_node::{
-    DhtError, DhtNode, DEFAULT_BUCKET_REFRESH_INTERVAL_SECS,
-    DEFAULT_REPUBLISH_INTERVAL_SECS,
-};
-pub use udp_transport::{
-    EndpointResolver, RequestHandler, UdpTransport, DEFAULT_QUERY_TIMEOUT_MS,
-};
+pub use udp_transport::{EndpointResolver, RequestHandler, UdpTransport, DEFAULT_QUERY_TIMEOUT_MS};
 pub use wire::{
-    decode, encode_request, encode_response, DecodedEnvelope, WireError,
-    MAX_WIRE_BYTES, WIRE_MAGIC, WIRE_VERSION,
+    decode, encode_request, encode_response, DecodedEnvelope, WireError, MAX_WIRE_BYTES,
+    WIRE_MAGIC, WIRE_VERSION,
 };

@@ -32,8 +32,8 @@ use ol_device_mesh::active_routing::{
 };
 use ol_device_mesh::duress::{create_duress_envelope, unlock_duress_envelope, UnlockOutcome};
 use ol_device_mesh::self_onion::{
-    build_self_onion_circuit, derive_onion_identity, peel_self_onion_layer,
-    sign_onion_attestation, OnionKeyRegistry, SelfOnionPeelOutcome,
+    build_self_onion_circuit, derive_onion_identity, peel_self_onion_layer, sign_onion_attestation,
+    OnionKeyRegistry, SelfOnionPeelOutcome,
 };
 use ol_device_mesh::self_routing::{
     pick_best_route, sign_route_announcement, PeerLink, RouteTable,
@@ -51,14 +51,11 @@ fn composed_mesh_walks_all_ten_rows() {
     let master = MasterIdentity::generate(&mut OsRng);
     let phone_id = fresh_device_id(&mut OsRng);
     let laptop_id = fresh_device_id(&mut OsRng);
-    let (phone_sk, phone_att) =
-        mint_subkey(&master, DeviceClass::Phone, phone_id, 0, 365).unwrap();
+    let (phone_sk, phone_att) = mint_subkey(&master, DeviceClass::Phone, phone_id, 0, 365).unwrap();
     let (_laptop_sk, laptop_att) =
         mint_subkey(&master, DeviceClass::Laptop, laptop_id, 0, 365).unwrap();
-    let phone_vk =
-        HybridVerifyingKey::from_bytes(&phone_att.subkey_vk_bytes).unwrap();
-    let laptop_vk =
-        HybridVerifyingKey::from_bytes(&laptop_att.subkey_vk_bytes).unwrap();
+    let phone_vk = HybridVerifyingKey::from_bytes(&phone_att.subkey_vk_bytes).unwrap();
+    let laptop_vk = HybridVerifyingKey::from_bytes(&laptop_att.subkey_vk_bytes).unwrap();
     // Verify the attestations under the master.
     phone_att.verify(&master.verifying_key()).unwrap();
     laptop_att.verify(&master.verifying_key()).unwrap();
@@ -77,8 +74,7 @@ fn composed_mesh_walks_all_ten_rows() {
         }],
     )
     .unwrap();
-    let phone_vk2 =
-        HybridVerifyingKey::from_bytes(&phone_att.subkey_vk_bytes).unwrap();
+    let phone_vk2 = HybridVerifyingKey::from_bytes(&phone_att.subkey_vk_bytes).unwrap();
     let mut table = RouteTable::empty();
     table.ingest(ann, &phone_vk2).unwrap();
     let route = pick_best_route(&table, &phone_id, &laptop_id).unwrap();
@@ -129,8 +125,11 @@ fn composed_mesh_walks_all_ten_rows() {
     assert_eq!(streams.len(), 5);
     // Pick any 3 of 5 (x-values are 1, 3, 5 — share indices 0, 2, 4).
     let xs: [u8; 3] = [1, 3, 5];
-    let chosen_streams: Vec<&[u8]> =
-        vec![streams[0].as_slice(), streams[2].as_slice(), streams[4].as_slice()];
+    let chosen_streams: Vec<&[u8]> = vec![
+        streams[0].as_slice(),
+        streams[2].as_slice(),
+        streams[4].as_slice(),
+    ];
     let recovered = reconstruct_bytes(&xs, &chosen_streams, 3).unwrap();
     assert_eq!(recovered, secret);
 

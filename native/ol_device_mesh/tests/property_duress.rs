@@ -8,12 +8,10 @@ use proptest::prelude::*;
 use rand::rngs::OsRng;
 
 use ol_device_mesh::duress::{
-    create_duress_envelope, sign_duress_alert, unlock_duress_envelope,
-    PairingChannel, PairingCommitment, UnlockOutcome,
+    create_duress_envelope, sign_duress_alert, unlock_duress_envelope, PairingChannel,
+    PairingCommitment, UnlockOutcome,
 };
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN};
 
 fn cheap_cases() -> u32 {
     if std::env::var("ONE_LINK_F1_GATE").as_deref() == Ok("1") {

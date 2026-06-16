@@ -7,9 +7,8 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 use ol_confidential::{
-    sign_attestation, verify_attestation, AttestationDoc, ConfidentialProvider,
-    ConfidentialTier, ProviderTag, SoftwareProvider, ATTESTATION_NONCE_LEN,
-    ISSUER_SDP_PUBKEY_LEN,
+    sign_attestation, verify_attestation, AttestationDoc, ConfidentialProvider, ConfidentialTier,
+    ProviderTag, SoftwareProvider, ATTESTATION_NONCE_LEN, ISSUER_SDP_PUBKEY_LEN,
 };
 use ol_pqsig::HybridSigningKey;
 
@@ -61,18 +60,16 @@ fn fuzz_body(data: &[u8]) {
     let offset = (u64::from(data.get(2).copied().unwrap_or(1)) % 35) + 1;
     let deadline = issued.saturating_add(offset);
     let quote: Vec<u8> = data.iter().skip(3).take(64).copied().collect();
-    if let Ok(doc) =
-        sign_attestation(
-            &sk,
-            provider_tag,
-            nonce,
-            issued,
-            deadline,
-            None,
-            quote,
-            TEST_SDP_PUBKEY,
-        )
-    {
+    if let Ok(doc) = sign_attestation(
+        &sk,
+        provider_tag,
+        nonce,
+        issued,
+        deadline,
+        None,
+        quote,
+        TEST_SDP_PUBKEY,
+    ) {
         let now = issued.saturating_add(offset / 2);
         let _ = verify_attestation(
             &doc,

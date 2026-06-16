@@ -48,9 +48,12 @@ fn hop_id_eq_constant_time() {
         HopId::from_bytes([0xCDu8; HOP_ID_LEN]),
     ];
     for c in &candidates {
-        let _ = measure(|| {
-            let _ = base == *c;
-        }, 10_000);
+        let _ = measure(
+            || {
+                let _ = base == *c;
+            },
+            10_000,
+        );
     }
     let mut totals: Vec<f64> = Vec::with_capacity(candidates.len());
     for c in &candidates {
@@ -64,7 +67,10 @@ fn hop_id_eq_constant_time() {
     }
     let rel = relative_stddev(&totals);
     eprintln!("hop_id eq totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
-    assert!(rel < 0.05, "hop_id eq relative stddev {rel:.4} exceeds 5% gate");
+    assert!(
+        rel < 0.05,
+        "hop_id eq relative stddev {rel:.4} exceeds 5% gate"
+    );
 }
 
 #[test]
@@ -91,9 +97,12 @@ fn layer_key_eq_constant_time() {
     ];
     // Warm up.
     for c in &candidates {
-        let _ = measure(|| {
-            let _ = base == *c;
-        }, 10_000);
+        let _ = measure(
+            || {
+                let _ = base == *c;
+            },
+            10_000,
+        );
     }
     let mut totals: Vec<f64> = Vec::with_capacity(candidates.len());
     for c in &candidates {
@@ -107,5 +116,8 @@ fn layer_key_eq_constant_time() {
     }
     let rel = relative_stddev(&totals);
     eprintln!("layer_key eq totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
-    assert!(rel < 0.05, "layer_key eq relative stddev {rel:.4} exceeds 5% gate");
+    assert!(
+        rel < 0.05,
+        "layer_key eq relative stddev {rel:.4} exceeds 5% gate"
+    );
 }

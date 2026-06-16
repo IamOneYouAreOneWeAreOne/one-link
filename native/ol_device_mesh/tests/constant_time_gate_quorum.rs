@@ -7,20 +7,15 @@
 
 use std::time::Instant;
 
-use ol_device_mesh::quorum::{
-    mint_policy, propose_operation, sign_approval, QuorumCertificate,
-};
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, MasterIdentity,
-};
+use ol_device_mesh::quorum::{mint_policy, propose_operation, sign_approval, QuorumCertificate};
+use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity};
 use rand::rngs::OsRng;
 
 const SAMPLES_PER_BUCKET: usize = 200;
 
 fn relative_stddev(samples: &[f64]) -> f64 {
     let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
-    let var: f64 =
-        samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+    let var: f64 = samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64;
     var.sqrt() / mean
 }
 
@@ -38,19 +33,13 @@ fn quorum_certificate_verify_constant_time_across_approval_tamper() {
     let id1 = [0x11u8; 16];
     let id2 = [0x22u8; 16];
     let id3 = [0x33u8; 16];
-    let (sk1, a1) =
-        mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
-    let (sk2, a2) =
-        mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
-    let (sk3, a3) =
-        mint_subkey(&master, DeviceClass::Desktop, id3, 0, 365).unwrap();
-    let policy =
-        mint_policy(&master, [0xAA; 16], b"p", 2, vec![id1, id2, id3]).unwrap();
+    let (sk1, a1) = mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
+    let (sk2, a2) = mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
+    let (sk3, a3) = mint_subkey(&master, DeviceClass::Desktop, id3, 0, 365).unwrap();
+    let policy = mint_policy(&master, [0xAA; 16], b"p", 2, vec![id1, id2, id3]).unwrap();
     let now: u64 = 1_700_000_000;
-    let proposal = propose_operation(
-        &sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600,
-    )
-    .unwrap();
+    let proposal =
+        propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600).unwrap();
     let ap2 = sign_approval(&sk2, &proposal, now + 60).unwrap();
     let ap3 = sign_approval(&sk3, &proposal, now + 120).unwrap();
 
@@ -88,19 +77,16 @@ fn quorum_certificate_verify_constant_time_across_approval_tamper() {
     for cert in &mut variants {
         let ns = measure(
             || {
-                let _ = std::hint::black_box(cert.verify(
-                    std::hint::black_box(&master.verifying_key()),
-                    now + 200,
-                ));
+                let _ = std::hint::black_box(
+                    cert.verify(std::hint::black_box(&master.verifying_key()), now + 200),
+                );
             },
             SAMPLES_PER_BUCKET,
         ) as f64;
         totals.push(ns);
     }
     let rel = relative_stddev(&totals);
-    eprintln!(
-        "cert-verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}"
-    );
+    eprintln!("cert-verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
     assert!(
         rel < 0.30,
         "cert verify relative stddev {rel:.4} exceeds 30% gate"

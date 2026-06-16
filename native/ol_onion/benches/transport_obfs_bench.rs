@@ -72,12 +72,7 @@ fn bench_handshake_accept(c: &mut Criterion) {
     let first = *client.first_message();
     c.bench_function("obfs::handshake_server_accept", |b| {
         b.iter(|| {
-            let r = ServerHandshake::accept(
-                &mut OsRng,
-                black_box(&bridge),
-                black_box(&first),
-                now,
-            );
+            let r = ServerHandshake::accept(&mut OsRng, black_box(&bridge), black_box(&first), now);
             black_box(r.ok());
         });
     });
@@ -91,8 +86,7 @@ fn bench_handshake_full_round_trip(c: &mut Criterion) {
         b.iter(|| {
             let client = ClientHandshake::start(&mut OsRng, &bridge_pk, &bridge.id, now);
             let (reply, server_session) =
-                ServerHandshake::accept(&mut OsRng, &bridge, client.first_message(), now)
-                    .unwrap();
+                ServerHandshake::accept(&mut OsRng, &bridge, client.first_message(), now).unwrap();
             let client_session = client.finish(&reply).unwrap();
             black_box((client_session, server_session));
         });

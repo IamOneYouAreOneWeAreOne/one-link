@@ -262,10 +262,7 @@ impl WaveStepper {
             // Graph Laplacian: mean(neighbors) − self.
             let lap = match neighbors.get(node) {
                 Some(ns) if !ns.is_empty() => {
-                    let sum: f32 = ns
-                        .iter()
-                        .map(|n| *self.psi_t.get(n).unwrap_or(&0.0))
-                        .sum();
+                    let sum: f32 = ns.iter().map(|n| *self.psi_t.get(n).unwrap_or(&0.0)).sum();
                     let mean = sum / ns.len() as f32;
                     mean - current
                 }
@@ -273,10 +270,7 @@ impl WaveStepper {
             };
             // Leapfrog with damping:
             //   ψ(t+dt) = 2·ψ(t) − ψ(t−dt) + c²·dt²·Δψ − γ·dt·(ψ(t)−ψ(t−dt))
-            let next_value = 2.0 * current
-                - prev
-                + c2_dt2 * lap
-                - gamma_dt * (current - prev);
+            let next_value = 2.0 * current - prev + c2_dt2 * lap - gamma_dt * (current - prev);
             // Clamp check — if configured AND the value drifted out
             // of range, return early so the caller sees a clean
             // diagnostic. Snapshots are NOT shifted on clamp error,
@@ -358,11 +352,7 @@ impl WaveStepper {
     /// term needs both ψ_t and ψ_{t-dt}, which `seed()` initialises
     /// to identical values producing zero kinetic energy).
     #[must_use]
-    pub fn total_energy(
-        &self,
-        dt: f32,
-        neighbors: &HashMap<String, Vec<String>>,
-    ) -> f32 {
+    pub fn total_energy(&self, dt: f32, neighbors: &HashMap<String, Vec<String>>) -> f32 {
         if dt <= 0.0 || !dt.is_finite() {
             return 0.0;
         }

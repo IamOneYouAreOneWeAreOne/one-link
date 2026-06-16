@@ -63,16 +63,14 @@ pub mod identity;
 pub mod policy;
 pub mod registry;
 
-pub use attestation::{
-    sign_onion_attestation, OnionAttestation, ONION_ATTESTATION_DOMAIN,
-};
+pub use attestation::{sign_onion_attestation, OnionAttestation, ONION_ATTESTATION_DOMAIN};
 pub use circuit::{
     build_self_onion_circuit, peel_self_onion_layer, SelfOnionPeelOutcome,
     SELF_ONION_DOMAIN_PAYLOAD,
 };
 pub use identity::{
-    derive_onion_identity, OnionIdentity, ONION_DERIVATION_DOMAIN, ONION_SECRET_LEN,
-    ONION_PUBKEY_LEN,
+    derive_onion_identity, OnionIdentity, ONION_DERIVATION_DOMAIN, ONION_PUBKEY_LEN,
+    ONION_SECRET_LEN,
 };
 pub use policy::{SelfOnionContext, DEFAULT_MIN_HOPS};
 pub use registry::OnionKeyRegistry;

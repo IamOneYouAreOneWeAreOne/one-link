@@ -12,8 +12,8 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 use ol_onion::transport_obfs::handshake::{
-    BridgeKeypair, ClientHandshake, HandshakeError, ServerHandshake,
-    BRIDGE_ID_LEN, BRIDGE_PUBKEY_LEN, HANDSHAKE_EPOCH_SECS, HANDSHAKE_LEN,
+    BridgeKeypair, ClientHandshake, HandshakeError, ServerHandshake, BRIDGE_ID_LEN,
+    BRIDGE_PUBKEY_LEN, HANDSHAKE_EPOCH_SECS, HANDSHAKE_LEN,
 };
 use ol_onion::transport_obfs::primitive::{
     deobfuscate, derive_nonce, obfuscate, OBFS_KEY_LEN, OBFS_NONCE_LEN,

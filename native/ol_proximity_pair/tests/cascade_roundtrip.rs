@@ -6,15 +6,15 @@
 //! produce matching keys.
 
 use ol_proximity_pair::{
-    multi_pass_reconcile, multi_pass_syndromes, privacy_amplify,
-    quantize_observations, QuantizeConfig,
+    multi_pass_reconcile, multi_pass_syndromes, privacy_amplify, quantize_observations,
+    QuantizeConfig,
 };
 
 /// Simulate two devices observing the same environment with small
 /// independent noise. Bigger sample so we have lots of entropy.
 fn co_located_observations(seed: u64) -> (Vec<u8>, Vec<u8>) {
     let base: Vec<u8> = (0..1024u32)
-        .map(|i| (((i.wrapping_mul(seed as u32 + 7919))) % 256) as u8)
+        .map(|i| ((i.wrapping_mul(seed as u32 + 7919)) % 256) as u8)
         .collect();
     let mut rng_a = seed.wrapping_mul(31);
     let mut rng_b = seed.wrapping_mul(37);
@@ -68,8 +68,7 @@ fn alien_tech_acceptance_byte_identical_keys() {
     let passes = 4;
 
     // Bob ships its multi-pass syndromes to Alice.
-    let bob_syndromes =
-        multi_pass_syndromes(bob_trim, block_bits, passes, perm_seed);
+    let bob_syndromes = multi_pass_syndromes(bob_trim, block_bits, passes, perm_seed);
 
     // Alice reconciles to Bob's bits.
     let alice_reconciled =
@@ -116,8 +115,7 @@ fn cascade_block_parities_align_after_multi_pass() {
     // doesn't drive bit error to zero on its own; it aligns block
     // PARITIES. Real bisection (F1.4-polish next ship) drives bit
     // error to zero. Test what the current impl actually delivers.
-    let peer_bits: Vec<u8> =
-        (0..512).map(|i| ((i * 11 + 5) & 1) as u8).collect();
+    let peer_bits: Vec<u8> = (0..512).map(|i| ((i * 11 + 5) & 1) as u8).collect();
     let mut my_bits = peer_bits.clone();
     my_bits[15] ^= 1;
     my_bits[143] ^= 1;
@@ -126,8 +124,7 @@ fn cascade_block_parities_align_after_multi_pass() {
     let block_bits = 8;
     let passes = 6;
     let syndromes = multi_pass_syndromes(&peer_bits, block_bits, passes, seed);
-    let reconciled =
-        multi_pass_reconcile(&my_bits, &syndromes, block_bits, passes, seed);
+    let reconciled = multi_pass_reconcile(&my_bits, &syndromes, block_bits, passes, seed);
     // After all passes, the last-pass-permuted block parities of
     // `reconciled` MUST match peer's last-pass syndrome.
     use ol_proximity_pair::{block_syndrome, permutation_for_pass};
@@ -141,8 +138,7 @@ fn cascade_block_parities_align_after_multi_pass() {
 #[test]
 fn cascade_handles_arbitrary_error_distributions_without_panic() {
     // Robustness: many different error patterns, all must run cleanly.
-    let peer_bits: Vec<u8> =
-        (0..512).map(|i| ((i * 13) & 1) as u8).collect();
+    let peer_bits: Vec<u8> = (0..512).map(|i| ((i * 13) & 1) as u8).collect();
     for error_positions in &[
         vec![0u32],
         vec![511],

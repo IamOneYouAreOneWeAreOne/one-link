@@ -15,9 +15,8 @@
 //! ```
 
 use ol_device_mesh::distributed_fs::{
-    ChunkHash, ErasurePolicy, FileManifest, StorageAttestation,
-    ATTEST_DOMAIN, MANIFEST_DOMAIN, MAX_CHUNKS_PER_ATTESTATION,
-    MAX_CHUNKS_PER_FILE, MAX_K_PLUS_M, MAX_MIME_LEN,
+    ChunkHash, ErasurePolicy, FileManifest, StorageAttestation, ATTEST_DOMAIN, MANIFEST_DOMAIN,
+    MAX_CHUNKS_PER_ATTESTATION, MAX_CHUNKS_PER_FILE, MAX_K_PLUS_M, MAX_MIME_LEN,
 };
 use ol_device_mesh::DEVICE_ID_LEN;
 
@@ -76,15 +75,15 @@ fn kat_manifest_canonical_bytes_pinned() {
 
     const EXPECTED_MANIFEST_HEX: &str = concat!(
         "4f4c2d6d6573682d66696c652d6d616e69666573742d7631", // "OL-mesh-file-manifest-v1"
-        "0000000000000001",                                  // file_size = 1
-        "00000100",                                          // chunk_size = 256
-        "02",                                                // policy.k = 2
-        "01",                                                // policy.m = 1
-        "01",                                                // policy.min_devices_per_shard = 1
-        "0000000000000001",                                  // created_unix = 1
-        "000a",                                              // mime length = 10
-        "746578742f706c61696e",                              // "text/plain"
-        "00000003",                                          // chunk_count = 3
+        "0000000000000001",                                 // file_size = 1
+        "00000100",                                         // chunk_size = 256
+        "02",                                               // policy.k = 2
+        "01",                                               // policy.m = 1
+        "01",                                               // policy.min_devices_per_shard = 1
+        "0000000000000001",                                 // created_unix = 1
+        "000a",                                             // mime length = 10
+        "746578742f706c61696e",                             // "text/plain"
+        "00000003",                                         // chunk_count = 3
         "1111111111111111111111111111111111111111111111111111111111111111",
         "2222222222222222222222222222222222222222222222222222222222222222",
         "3333333333333333333333333333333333333333333333333333333333333333",
@@ -122,9 +121,8 @@ fn kat_attestation_canonical_transcript_pinned() {
     let day_index: u64 = 7;
     let attest_unix: u64 = 1_700_000_000;
     let chunks: Vec<ChunkHash> = vec![[0xAA; 32], [0xBB; 32]];
-    let bytes = StorageAttestation::canonical_transcript(
-        &device_id, day_index, attest_unix, &chunks,
-    );
+    let bytes =
+        StorageAttestation::canonical_transcript(&device_id, day_index, attest_unix, &chunks);
     let hex = to_hex(&bytes);
     let domain_hex = to_hex(ATTEST_DOMAIN);
     assert!(hex.starts_with(&domain_hex));
@@ -133,10 +131,10 @@ fn kat_attestation_canonical_transcript_pinned() {
     });
     const EXPECTED_ATTEST_HEX: &str = concat!(
         "4f4c2d6d6573682d73746f726167652d6174746573742d7631", // "OL-mesh-storage-attest-v1"
-        "11111111111111111111111111111111",                    // device_id
-        "0000000000000007",                                    // day_index = 7
-        "000000006553f100",                                    // attest_unix = 1_700_000_000
-        "00000002",                                            // chunk_count = 2
+        "11111111111111111111111111111111",                   // device_id
+        "0000000000000007",                                   // day_index = 7
+        "000000006553f100",                                   // attest_unix = 1_700_000_000
+        "00000002",                                           // chunk_count = 2
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     );

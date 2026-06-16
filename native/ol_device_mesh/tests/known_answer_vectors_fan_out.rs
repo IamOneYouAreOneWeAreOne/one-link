@@ -2,8 +2,7 @@
 
 use ol_device_mesh::distributed_fs::FILE_ID_LEN;
 use ol_device_mesh::fan_out::{
-    ChunkAck, FetchRequest, ACK_DOMAIN, FETCH_NONCE_LEN, FETCH_REQUEST_DOMAIN,
-    MAX_CHUNKS_PER_FETCH,
+    ChunkAck, FetchRequest, ACK_DOMAIN, FETCH_NONCE_LEN, FETCH_REQUEST_DOMAIN, MAX_CHUNKS_PER_FETCH,
 };
 use ol_device_mesh::DEVICE_ID_LEN;
 
@@ -51,17 +50,17 @@ fn kat_fetch_request_canonical_transcript_pinned() {
     });
     const EXPECTED_FETCH_REQ_HEX: &str = concat!(
         "4f4c2d6d6573682d66657463682d726571756573742d7631", // "OL-mesh-fetch-request-v1"
-        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",  // file_id
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",  // receiver
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",  // source
-        "00000002",                          // chunk_count
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", // file_id
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",                 // receiver
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",                 // source
+        "00000002",                                         // chunk_count
         "1111111111111111111111111111111111111111111111111111111111111111",
         "2222222222222222222222222222222222222222222222222222222222222222",
-        "00000000000f4240",                  // max_byte_budget = 1_000_000
-        "000000006553ff10",                  // deadline_unix
-        "dadadadadadadadadadadadadadadada",  // nonce
-        "0000000000000007",                  // receiver_day_index = 7
-        "000000006553f100",                  // issued_unix = 1_700_000_000
+        "00000000000f4240",                 // max_byte_budget = 1_000_000
+        "000000006553ff10",                 // deadline_unix
+        "dadadadadadadadadadadadadadadada", // nonce
+        "0000000000000007",                 // receiver_day_index = 7
+        "000000006553f100",                 // issued_unix = 1_700_000_000
     );
     assert_eq!(hex, EXPECTED_FETCH_REQ_HEX, "fetch req transcript drift");
 }
@@ -84,14 +83,14 @@ fn kat_chunk_ack_canonical_transcript_pinned() {
         eprintln!("    EXPECTED_ACK_HEX = \"{hex}\"");
     });
     const EXPECTED_ACK_HEX: &str = concat!(
-        "4f4c2d6d6573682d6368756e6b2d61636b2d7631",                   // "OL-mesh-chunk-ack-v1"
-        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",  // file_id
-        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",  // chunk_hash
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",  // source
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",  // receiver
-        "0000000000000003",                  // source_day_index = 3
-        "000000006553f100",                  // delivered_unix
-        "00002000",                          // byte_size = 8192
+        "4f4c2d6d6573682d6368756e6b2d61636b2d7631", // "OL-mesh-chunk-ack-v1"
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", // file_id
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", // chunk_hash
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",         // source
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",         // receiver
+        "0000000000000003",                         // source_day_index = 3
+        "000000006553f100",                         // delivered_unix
+        "00002000",                                 // byte_size = 8192
     );
     assert_eq!(hex, EXPECTED_ACK_HEX, "chunk-ack transcript drift");
 }

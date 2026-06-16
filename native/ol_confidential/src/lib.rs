@@ -86,15 +86,15 @@ pub mod windows_tpm;
 
 pub use attestation::{
     fresh_attestation_nonce, sign_attestation, verify_attestation, AttestationDoc,
-    AttestationNonce, IssuerSdpPubkey, ATTESTATION_DOMAIN,
-    ATTESTATION_FRESHNESS_WINDOW_SECS, ATTESTATION_MAX_AGE_SECS,
-    ATTESTATION_MAX_CLOCK_SKEW_SECS, ATTESTATION_NONCE_LEN, ISSUER_SDP_PUBKEY_LEN,
+    AttestationNonce, IssuerSdpPubkey, ATTESTATION_DOMAIN, ATTESTATION_FRESHNESS_WINDOW_SECS,
+    ATTESTATION_MAX_AGE_SECS, ATTESTATION_MAX_CLOCK_SKEW_SECS, ATTESTATION_NONCE_LEN,
+    ISSUER_SDP_PUBKEY_LEN,
 };
+pub use errors::{ConfidentialError, ConfidentialResult};
 pub use platform_quote::{
     canonical_platform_quote_subtranscript, parse_platform_quote, verify_platform_quote,
     PLATFORM_QUOTE_DOMAIN,
 };
-pub use errors::{ConfidentialError, ConfidentialResult};
 pub use provider::{ConfidentialProvider, ProviderTag};
 pub use sealed_key::SealedKey;
 pub use software::SoftwareProvider;

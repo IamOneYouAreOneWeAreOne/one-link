@@ -97,10 +97,7 @@ mod tests {
     #[test]
     fn zero_min_devices_rejected() {
         let err = ErasurePolicy::new(10, 4, 0).unwrap_err();
-        assert!(matches!(
-            err,
-            DeviceMeshError::ErasurePolicyZeroMinDevices
-        ));
+        assert!(matches!(err, DeviceMeshError::ErasurePolicyZeroMinDevices));
     }
 
     #[test]

@@ -220,9 +220,7 @@ impl Context {
         pattern_strength: f32,
     ) -> Result<Self, DecideError> {
         if !observed_loss.is_finite() || !(0.0..=1.0).contains(&observed_loss) {
-            return Err(DecideError::InvalidLoss {
-                got: observed_loss,
-            });
+            return Err(DecideError::InvalidLoss { got: observed_loss });
         }
         if !pattern_strength.is_finite() || !(0.0..=1.0).contains(&pattern_strength) {
             return Err(DecideError::InvalidPatternStrength {
@@ -269,12 +267,27 @@ mod tests {
     fn event_kind_parses_wire_types() {
         assert_eq!(EventKind::from_wire_type("TEXT").unwrap(), EventKind::Msg);
         assert_eq!(EventKind::from_wire_type("text").unwrap(), EventKind::Msg);
-        assert_eq!(EventKind::from_wire_type("FILE_CHUNK").unwrap(), EventKind::File);
-        assert_eq!(EventKind::from_wire_type("FILE_OFFER").unwrap(), EventKind::File);
+        assert_eq!(
+            EventKind::from_wire_type("FILE_CHUNK").unwrap(),
+            EventKind::File
+        );
+        assert_eq!(
+            EventKind::from_wire_type("FILE_OFFER").unwrap(),
+            EventKind::File
+        );
         assert_eq!(EventKind::from_wire_type("ACK").unwrap(), EventKind::Sync);
-        assert_eq!(EventKind::from_wire_type("PING").unwrap(), EventKind::Heartbeat);
-        assert_eq!(EventKind::from_wire_type("PONG").unwrap(), EventKind::Heartbeat);
-        assert_eq!(EventKind::from_wire_type("PAIR_INVITE").unwrap(), EventKind::Pair);
+        assert_eq!(
+            EventKind::from_wire_type("PING").unwrap(),
+            EventKind::Heartbeat
+        );
+        assert_eq!(
+            EventKind::from_wire_type("PONG").unwrap(),
+            EventKind::Heartbeat
+        );
+        assert_eq!(
+            EventKind::from_wire_type("PAIR_INVITE").unwrap(),
+            EventKind::Pair
+        );
         assert!(EventKind::from_wire_type("UNKNOWN_TYPE").is_err());
     }
 
@@ -309,14 +322,23 @@ mod tests {
         assert_eq!(Urgency::from_kind(EventKind::Msg), Urgency::Foreground);
         assert_eq!(Urgency::from_kind(EventKind::File), Urgency::Foreground);
         assert_eq!(Urgency::from_kind(EventKind::Pair), Urgency::Foreground);
-        assert_eq!(Urgency::from_kind(EventKind::Heartbeat), Urgency::Background);
+        assert_eq!(
+            Urgency::from_kind(EventKind::Heartbeat),
+            Urgency::Background
+        );
         assert_eq!(Urgency::from_kind(EventKind::Sync), Urgency::Background);
     }
 
     #[test]
     fn user_mode_parses_with_safe_default() {
-        assert_eq!(UserMode::from_label_or_default("paranoid"), UserMode::Paranoid);
-        assert_eq!(UserMode::from_label_or_default("PARANOID"), UserMode::Paranoid);
+        assert_eq!(
+            UserMode::from_label_or_default("paranoid"),
+            UserMode::Paranoid
+        );
+        assert_eq!(
+            UserMode::from_label_or_default("PARANOID"),
+            UserMode::Paranoid
+        );
         assert_eq!(
             UserMode::from_label_or_default("battery_save"),
             UserMode::BatterySave

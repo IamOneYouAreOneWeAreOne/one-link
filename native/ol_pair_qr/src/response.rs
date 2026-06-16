@@ -17,12 +17,14 @@
 //! scanned, so a network attacker cannot pair the scanner's reply
 //! with a different invite (cross-protocol replay).
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH};
+use ed25519_dalek::{
+    Signature, Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH,
+};
 use zeroize::Zeroize;
 
 use crate::canon::{Reader, Writer};
 use crate::errors::{PairError, PairResult};
-use crate::invite::{X25519_PUBKEY_LEN, INVITE_MAX_BYTES};
+use crate::invite::{INVITE_MAX_BYTES, X25519_PUBKEY_LEN};
 
 /// Pair-by-QR response version on the wire.
 pub const RESPONSE_VERSION: u8 = 1;
@@ -66,7 +68,11 @@ impl PairResponse {
         transcript_bind: &[u8],
     ) -> Self {
         let id_pubkey = signer.verifying_key().to_bytes();
-        let sig = signer.sign(&signing_payload(transcript_bind, &nonce, &ephemeral_x25519_pk));
+        let sig = signer.sign(&signing_payload(
+            transcript_bind,
+            &nonce,
+            &ephemeral_x25519_pk,
+        ));
         Self {
             id_pubkey,
             ephemeral_x25519_pk,
@@ -100,8 +106,7 @@ impl PairResponse {
             });
         }
         let resp = Self::decode_raw(bytes)?;
-        let vk = VerifyingKey::from_bytes(&resp.id_pubkey)
-            .map_err(|_| PairError::BadSignature)?;
+        let vk = VerifyingKey::from_bytes(&resp.id_pubkey).map_err(|_| PairError::BadSignature)?;
         let sig = Signature::from_bytes(&resp.signature);
         vk.verify(
             &signing_payload(transcript_bind, &resp.nonce, &resp.ephemeral_x25519_pk),

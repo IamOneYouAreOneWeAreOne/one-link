@@ -86,8 +86,8 @@ fn refresh_stale_buckets_marks_buckets_fresh() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs()
-        + 10;  // future timestamp so existing last_refresh_unix counts as stale
-    // First call: stale buckets should exist + get refreshed.
+        + 10; // future timestamp so existing last_refresh_unix counts as stale
+              // First call: stale buckets should exist + get refreshed.
     let refreshed = peers[2].node.refresh_stale_buckets(now, 0);
     assert!(refreshed > 0, "expected at least one bucket to refresh");
 

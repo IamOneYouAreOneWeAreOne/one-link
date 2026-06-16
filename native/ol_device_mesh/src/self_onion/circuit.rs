@@ -9,8 +9,8 @@
 
 use curve25519_dalek::ristretto::CompressedRistretto;
 use ol_onion::sphinx::core::{
-    build_sphinx_onion, generate_static_keypair, peel_sphinx_layer, SphinxHop,
-    SphinxPacket, SphinxPeelOutcome, SPHINX_MAX_USER_PAYLOAD,
+    build_sphinx_onion, generate_static_keypair, peel_sphinx_layer, SphinxHop, SphinxPacket,
+    SphinxPeelOutcome, SPHINX_MAX_USER_PAYLOAD,
 };
 use ol_onion::HopId;
 use rand_core::{CryptoRng, RngCore};
@@ -87,10 +87,11 @@ pub fn build_self_onion_circuit<R: RngCore + CryptoRng>(
         // just need it to be unique + recoverable.
         let mut slot_id = [0u8; 32];
         slot_id[16..].copy_from_slice(device_id);
-        let hop = SphinxHop::new(slot_id, pk_bytes)
-            .map_err(|_| DeviceMeshError::SelfOnionBadHopPubkey {
+        let hop = SphinxHop::new(slot_id, pk_bytes).map_err(|_| {
+            DeviceMeshError::SelfOnionBadHopPubkey {
                 device_id: *device_id,
-            })?;
+            }
+        })?;
         sphinx_circuit.push(hop);
     }
 
@@ -106,10 +107,8 @@ pub fn build_self_onion_circuit<R: RngCore + CryptoRng>(
     }
 
     let (eph_sk, _eph_pk) = generate_static_keypair(rng);
-    let packet =
-        build_sphinx_onion(&eph_sk, &sphinx_circuit, &wrapped, rng).map_err(|e| {
-            DeviceMeshError::SelfOnionSphinxBuildFailed(format!("{e}"))
-        })?;
+    let packet = build_sphinx_onion(&eph_sk, &sphinx_circuit, &wrapped, rng)
+        .map_err(|e| DeviceMeshError::SelfOnionSphinxBuildFailed(format!("{e}")))?;
     Ok(packet)
 }
 
@@ -123,7 +122,10 @@ pub fn peel_self_onion_layer(
     let outcome = peel_sphinx_layer(&scalar, packet)
         .map_err(|e| DeviceMeshError::SelfOnionSphinxPeelFailed(format!("{e}")))?;
     match outcome {
-        SphinxPeelOutcome::Forward { next_hop, next_packet } => {
+        SphinxPeelOutcome::Forward {
+            next_hop,
+            next_packet,
+        } => {
             // The Sphinx hop id is the SLOT_ID_LEN-padded device id.
             // Recover the trailing DEVICE_ID_LEN bytes.
             let slot_bytes = *next_hop.as_bytes();
@@ -187,14 +189,7 @@ mod tests {
         for i in 1u8..=(n as u8) {
             let id = [i; DEVICE_ID_LEN];
             let identity = derive_onion_identity(&master, &id);
-            let att = sign_onion_attestation(
-                &master,
-                id,
-                identity.public_bytes(),
-                0,
-                365,
-            )
-            .unwrap();
+            let att = sign_onion_attestation(&master, id, identity.public_bytes(), 0, 365).unwrap();
             reg.ingest(att, &master.verifying_key()).unwrap();
             ids.push(id);
             identities.push(identity);
@@ -204,21 +199,13 @@ mod tests {
 
     #[test]
     fn round_trip_two_hop_circuit() {
-        let (_master, ids, identities, reg) =
-            build_registry_and_identities(2);
+        let (_master, ids, identities, reg) = build_registry_and_identities(2);
         let route = Route {
             hops: vec![ids[0], ids[1]],
             bottleneck_tau: 100,
             min_last_seen_unix: 1,
         };
-        let packet = build_self_onion_circuit(
-            &route,
-            &reg,
-            0,
-            b"hello world",
-            &mut OsRng,
-        )
-        .unwrap();
+        let packet = build_self_onion_circuit(&route, &reg, 0, b"hello world", &mut OsRng).unwrap();
         // Destination is ids[1]; peeling with its identity should
         // yield Deliver.
         let outcome = peel_self_onion_layer(&identities[1], &packet).unwrap();
@@ -233,25 +220,20 @@ mod tests {
 
     #[test]
     fn round_trip_three_hop_circuit() {
-        let (_master, ids, identities, reg) =
-            build_registry_and_identities(4);
+        let (_master, ids, identities, reg) = build_registry_and_identities(4);
         let route = Route {
             hops: vec![ids[0], ids[1], ids[2], ids[3]],
             bottleneck_tau: 100,
             min_last_seen_unix: 1,
         };
-        let packet = build_self_onion_circuit(
-            &route,
-            &reg,
-            0,
-            b"hello",
-            &mut OsRng,
-        )
-        .unwrap();
+        let packet = build_self_onion_circuit(&route, &reg, 0, b"hello", &mut OsRng).unwrap();
         // hops[0] is src (sender); circuit is [hops[1], hops[2], hops[3]].
         let outcome_1 = peel_self_onion_layer(&identities[1], &packet).unwrap();
         let next_packet = match outcome_1 {
-            SelfOnionPeelOutcome::Forward { next_hop_device_id, next_packet } => {
+            SelfOnionPeelOutcome::Forward {
+                next_hop_device_id,
+                next_packet,
+            } => {
                 let next_packet = *next_packet;
                 assert_eq!(next_hop_device_id, ids[2]);
                 next_packet
@@ -260,7 +242,10 @@ mod tests {
         };
         let outcome_2 = peel_self_onion_layer(&identities[2], &next_packet).unwrap();
         let next_packet_2 = match outcome_2 {
-            SelfOnionPeelOutcome::Forward { next_hop_device_id, next_packet } => {
+            SelfOnionPeelOutcome::Forward {
+                next_hop_device_id,
+                next_packet,
+            } => {
                 let next_packet = *next_packet;
                 assert_eq!(next_hop_device_id, ids[3]);
                 next_packet
@@ -278,21 +263,13 @@ mod tests {
 
     #[test]
     fn route_too_short_rejected() {
-        let (_master, ids, _identities, reg) =
-            build_registry_and_identities(1);
+        let (_master, ids, _identities, reg) = build_registry_and_identities(1);
         let route = Route {
             hops: vec![ids[0]],
             bottleneck_tau: 100,
             min_last_seen_unix: 1,
         };
-        let err = build_self_onion_circuit(
-            &route,
-            &reg,
-            0,
-            b"hi",
-            &mut OsRng,
-        )
-        .unwrap_err();
+        let err = build_self_onion_circuit(&route, &reg, 0, b"hi", &mut OsRng).unwrap_err();
         assert!(matches!(
             err,
             DeviceMeshError::SelfOnionRouteTooShort { .. }
@@ -301,22 +278,14 @@ mod tests {
 
     #[test]
     fn payload_oversize_rejected() {
-        let (_master, ids, _identities, reg) =
-            build_registry_and_identities(2);
+        let (_master, ids, _identities, reg) = build_registry_and_identities(2);
         let route = Route {
             hops: vec![ids[0], ids[1]],
             bottleneck_tau: 100,
             min_last_seen_unix: 1,
         };
         let big = vec![0xCDu8; SPHINX_MAX_USER_PAYLOAD + 1];
-        let err = build_self_onion_circuit(
-            &route,
-            &reg,
-            0,
-            &big,
-            &mut OsRng,
-        )
-        .unwrap_err();
+        let err = build_self_onion_circuit(&route, &reg, 0, &big, &mut OsRng).unwrap_err();
         assert!(matches!(
             err,
             DeviceMeshError::SelfOnionPayloadOversize { .. }
@@ -328,25 +297,15 @@ mod tests {
         // Standard Sphinx: an unintended peer's peel succeeds in
         // bytes but the MAC verify fails. We treat this as a
         // Sphinx-level peel error.
-        let (_master, ids, identities, reg) =
-            build_registry_and_identities(3);
+        let (_master, ids, identities, reg) = build_registry_and_identities(3);
         let route = Route {
             hops: vec![ids[0], ids[1]],
             bottleneck_tau: 100,
             min_last_seen_unix: 1,
         };
-        let packet = build_self_onion_circuit(
-            &route,
-            &reg,
-            0,
-            b"intended for ids[1]",
-            &mut OsRng,
-        )
-        .unwrap();
+        let packet =
+            build_self_onion_circuit(&route, &reg, 0, b"intended for ids[1]", &mut OsRng).unwrap();
         let err = peel_self_onion_layer(&identities[2], &packet).unwrap_err();
-        assert!(matches!(
-            err,
-            DeviceMeshError::SelfOnionSphinxPeelFailed(_)
-        ));
+        assert!(matches!(err, DeviceMeshError::SelfOnionSphinxPeelFailed(_)));
     }
 }

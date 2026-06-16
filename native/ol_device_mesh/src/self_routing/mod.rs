@@ -71,8 +71,8 @@ pub mod route;
 pub mod table;
 
 pub use announcement::{
-    sign_route_announcement, PeerLink, RouteAnnouncement,
-    ROUTE_ANNOUNCEMENT_DOMAIN, MAX_LINKS_PER_ANNOUNCEMENT,
+    sign_route_announcement, PeerLink, RouteAnnouncement, MAX_LINKS_PER_ANNOUNCEMENT,
+    ROUTE_ANNOUNCEMENT_DOMAIN,
 };
 pub use dtn::{dtn_couriers, CourierObservation};
 pub use route::{pick_best_route, Route, TauScore};

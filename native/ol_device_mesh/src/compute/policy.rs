@@ -31,7 +31,9 @@ impl TaskClass {
                 max: MAX_TASK_CLASS_LEN,
             });
         }
-        Ok(Self { bytes: bytes.to_vec() })
+        Ok(Self {
+            bytes: bytes.to_vec(),
+        })
     }
 
     /// Borrow the raw byte representation.
@@ -62,7 +64,7 @@ pub struct TaskPolicy {
 
 impl TaskPolicy {
     /// Conservative default for general-purpose tasks.
-    #[must_use] 
+    #[must_use]
     pub const fn general(class: TaskClass) -> Self {
         Self {
             class,
@@ -75,7 +77,7 @@ impl TaskPolicy {
 
     /// Hardened policy for high-stakes ops (touches master, dumps
     /// >10 MB, contacts external service). Requires K-of-N + TEE.
-    #[must_use] 
+    #[must_use]
     pub const fn high_stakes(class: TaskClass) -> Self {
         Self {
             class,

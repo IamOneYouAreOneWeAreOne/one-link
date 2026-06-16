@@ -16,9 +16,7 @@ fn map_err(e: PqSigError) -> PyErr {
 
 /// Generate a fresh hybrid keypair. Returns (sk_64, vk_1984).
 #[pyfunction]
-fn generate_keypair<'py>(
-    py: Python<'py>,
-) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+fn generate_keypair<'py>(py: Python<'py>) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
     let (sk, vk) = HybridSigningKey::generate(&mut OsRng);
     Ok((
         PyBytes::new_bound(py, &sk.to_bytes()),
@@ -36,11 +34,7 @@ fn derive_vk<'py>(py: Python<'py>, sk_bytes: &[u8]) -> PyResult<Bound<'py, PyByt
 /// Sign `message` with the 64-byte hybrid signing key. Returns the
 /// 3373-byte hybrid signature.
 #[pyfunction]
-fn sign<'py>(
-    py: Python<'py>,
-    sk_bytes: &[u8],
-    message: &[u8],
-) -> PyResult<Bound<'py, PyBytes>> {
+fn sign<'py>(py: Python<'py>, sk_bytes: &[u8], message: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     let sk = HybridSigningKey::from_bytes(sk_bytes).map_err(map_err)?;
     let sig = sk.sign(message).map_err(map_err)?;
     Ok(PyBytes::new_bound(py, &sig))

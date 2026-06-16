@@ -42,7 +42,7 @@ impl MasterIdentity {
 
     /// Construct from an existing seed. Use this on a paired device
     /// recovering from threshold-recovery shares.
-    #[must_use] 
+    #[must_use]
     pub const fn from_seed(seed: [u8; MASTER_SEED_LEN]) -> Self {
         Self { seed }
     }
@@ -62,7 +62,7 @@ impl MasterIdentity {
 
     /// Borrow the raw seed. Callers who hold this for any non-trivial
     /// duration MUST zeroize it themselves.
-    #[must_use] 
+    #[must_use]
     pub const fn seed(&self) -> &[u8; MASTER_SEED_LEN] {
         &self.seed
     }
@@ -70,14 +70,13 @@ impl MasterIdentity {
     /// Materialize the underlying [`HybridSigningKey`]. Called rarely
     /// (only when the master itself signs an attestation); per-device
     /// signing always goes through `DeviceSubkey`.
-    #[must_use] 
+    #[must_use]
     pub fn signing_key(&self) -> HybridSigningKey {
-        HybridSigningKey::from_bytes(&self.seed)
-            .expect("master seed length is invariant-checked")
+        HybridSigningKey::from_bytes(&self.seed).expect("master seed length is invariant-checked")
     }
 
     /// Borrow the public verifying key — the byte string friends pin.
-    #[must_use] 
+    #[must_use]
     pub fn verifying_key(&self) -> HybridVerifyingKey {
         self.signing_key().verifying_key()
     }

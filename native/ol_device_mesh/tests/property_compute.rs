@@ -4,15 +4,12 @@ use proptest::prelude::*;
 use rand::rngs::OsRng;
 
 use ol_device_mesh::compute::{
-    pick_executor, sign_capability_attestation, sign_task_request,
-    sign_task_result, CapabilityAttestation, CapabilityRegistry, DeviceCapability,
-    TaskClass, TaskRequest,
+    pick_executor, sign_capability_attestation, sign_task_request, sign_task_result,
+    CapabilityAttestation, CapabilityRegistry, DeviceCapability, TaskClass, TaskRequest,
 };
 use ol_device_mesh::distributed_fs::FILE_ID_LEN;
 use ol_device_mesh::fan_out::SourceCapacity;
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN};
 
 fn cheap_cases() -> u32 {
     if std::env::var("ONE_LINK_F1_GATE").as_deref() == Ok("1") {

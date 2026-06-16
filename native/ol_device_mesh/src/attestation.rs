@@ -69,12 +69,7 @@ impl LivenessProof {
         state_root: &[u8; 32],
     ) -> Vec<u8> {
         let mut out = Vec::with_capacity(
-            LIVENESS_DOMAIN.len()
-                + DEVICE_ID_LEN
-                + DEVICE_CLASS_TAG_LEN
-                + 8
-                + 8
-                + 32,
+            LIVENESS_DOMAIN.len() + DEVICE_ID_LEN + DEVICE_CLASS_TAG_LEN + 8 + 8 + 32,
         );
         out.extend_from_slice(LIVENESS_DOMAIN);
         out.extend_from_slice(device_id);
@@ -124,7 +119,7 @@ pub struct SiblingWitness {
 }
 
 /// Build a sibling-witness record from a verified subkey VK.
-#[must_use] 
+#[must_use]
 pub const fn sibling_witness(subkey_vk: HybridVerifyingKey, max_skew_secs: u64) -> SiblingWitness {
     SiblingWitness {
         subkey_vk,
@@ -212,8 +207,7 @@ mod tests {
         let master = MasterIdentity::generate(&mut OsRng);
         let sk = mint(&master, DeviceClass::Phone);
         let now: u64 = 1_700_000_000;
-        let mut proof =
-            LivenessProof::issue(&sk, now, state_root(b"state")).unwrap();
+        let mut proof = LivenessProof::issue(&sk, now, state_root(b"state")).unwrap();
         proof.state_root[0] ^= 0x01;
         let witness = sibling_witness(sk.verifying_key(), DEFAULT_LIVENESS_SKEW_SECS);
         let err = verify_liveness(&proof, &witness, now).unwrap_err();
@@ -225,15 +219,11 @@ mod tests {
         let master = MasterIdentity::generate(&mut OsRng);
         let sk = mint(&master, DeviceClass::Phone);
         let issued_at: u64 = 1_700_000_000;
-        let proof =
-            LivenessProof::issue(&sk, issued_at, state_root(b"state")).unwrap();
+        let proof = LivenessProof::issue(&sk, issued_at, state_root(b"state")).unwrap();
         let witness = sibling_witness(sk.verifying_key(), 60);
         let later = issued_at + 120; // 60 seconds past skew
         let err = verify_liveness(&proof, &witness, later).unwrap_err();
-        assert!(matches!(
-            err,
-            DeviceMeshError::LivenessOutOfWindow { .. }
-        ));
+        assert!(matches!(err, DeviceMeshError::LivenessOutOfWindow { .. }));
     }
 
     #[test]
@@ -242,8 +232,7 @@ mod tests {
         let sk_a = mint(&master, DeviceClass::Phone);
         let sk_b = mint(&master, DeviceClass::Laptop);
         let now: u64 = 1_700_000_000;
-        let proof_a =
-            LivenessProof::issue(&sk_a, now, state_root(b"state")).unwrap();
+        let proof_a = LivenessProof::issue(&sk_a, now, state_root(b"state")).unwrap();
         // Verify under B's subkey VK — must fail.
         let witness_b = sibling_witness(sk_b.verifying_key(), DEFAULT_LIVENESS_SKEW_SECS);
         let err = verify_liveness(&proof_a, &witness_b, now).unwrap_err();

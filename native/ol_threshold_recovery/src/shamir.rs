@@ -72,12 +72,7 @@ pub const fn params_valid(k: u32, n: u32) -> bool {
 ///
 /// # Errors
 /// Returns [`ShareError::InvalidParams`] when (k, n) violate the bounds.
-pub fn share_byte(
-    s: u8,
-    k: u32,
-    n: u32,
-    state: &mut PrngState,
-) -> Result<Vec<Share>, ShareError> {
+pub fn share_byte(s: u8, k: u32, n: u32, state: &mut PrngState) -> Result<Vec<Share>, ShareError> {
     if !params_valid(k, n) {
         return Err(ShareError::InvalidParams { k, n });
     }
@@ -126,8 +121,7 @@ pub fn share_bytes(
     if !params_valid(k, n) {
         return Err(ShareError::InvalidParams { k, n });
     }
-    let mut streams: Vec<Vec<u8>> =
-        (0..n).map(|_| Vec::with_capacity(secret.len())).collect();
+    let mut streams: Vec<Vec<u8>> = (0..n).map(|_| Vec::with_capacity(secret.len())).collect();
     for &s_byte in secret {
         let shares = share_byte(s_byte, k, n, state)?;
         for (i, sh) in shares.iter().enumerate() {
@@ -221,11 +215,7 @@ fn lagrange_basis_at_zero(shares: &[Share]) -> Vec<u8> {
 ///
 /// # Errors
 /// Same as [`reconstruct_byte`], plus length-mismatch errors.
-pub fn reconstruct_bytes(
-    xs: &[u8],
-    streams: &[&[u8]],
-    k: u32,
-) -> Result<Vec<u8>, ShareError> {
+pub fn reconstruct_bytes(xs: &[u8], streams: &[&[u8]], k: u32) -> Result<Vec<u8>, ShareError> {
     if xs.len() != streams.len() {
         return Err(ShareError::NotEnoughShares {
             have: xs.len().min(streams.len()),
@@ -255,8 +245,7 @@ pub fn reconstruct_bytes(
     // secrets like the 32-byte identity master key (typical case).
     let kk = k as usize;
     // Reuse validation + basis-prep logic from the single-byte path.
-    let zero_b_shares: Vec<Share> =
-        xs[..kk].iter().map(|&x| Share::new(x, 0)).collect();
+    let zero_b_shares: Vec<Share> = xs[..kk].iter().map(|&x| Share::new(x, 0)).collect();
     // Validate share x-values once.
     for sh in &zero_b_shares {
         if sh.x == 0 {
@@ -281,7 +270,6 @@ pub fn reconstruct_bytes(
     }
     Ok(out)
 }
-
 
 /// Horner's method polynomial evaluation in GF(2^8).
 /// `coeffs[0] + coeffs[1]*x + coeffs[2]*x^2 + ...`
@@ -357,8 +345,11 @@ mod tests {
         assert_eq!(streams.len(), 5);
         // Reconstruct from shares 1, 3, 5 (indices 0, 2, 4).
         let xs = vec![1u8, 3, 5];
-        let refs: Vec<&[u8]> =
-            vec![streams[0].as_slice(), streams[2].as_slice(), streams[4].as_slice()];
+        let refs: Vec<&[u8]> = vec![
+            streams[0].as_slice(),
+            streams[2].as_slice(),
+            streams[4].as_slice(),
+        ];
         let recovered = reconstruct_bytes(&xs, &refs, 3).unwrap();
         assert_eq!(recovered, secret);
     }

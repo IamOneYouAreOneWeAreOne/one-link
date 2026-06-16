@@ -73,9 +73,12 @@ fn transcript_hash_ct_eq_constant_time() {
 
     // Warm-up
     for cand in &buckets {
-        let _ = measure(|| {
-            let _ = base.ct_eq(cand);
-        }, 10_000);
+        let _ = measure(
+            || {
+                let _ = base.ct_eq(cand);
+            },
+            10_000,
+        );
     }
 
     let mut totals: Vec<f64> = Vec::with_capacity(buckets.len());
@@ -89,9 +92,7 @@ fn transcript_hash_ct_eq_constant_time() {
         totals.push(ns);
     }
     let rel = relative_stddev(&totals);
-    eprintln!(
-        "transcript ct_eq totals (ns) = {totals:?}, rel_stddev = {rel:.4}"
-    );
+    eprintln!("transcript ct_eq totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
     assert!(
         rel < 0.05,
         "transcript ct_eq relative stddev {rel:.4} exceeds 5% gate"
@@ -115,9 +116,12 @@ fn sas_ct_eq_constant_time() {
         .collect();
 
     for cand in &candidates {
-        let _ = measure(|| {
-            let _ = reference.ct_eq(cand);
-        }, 10_000);
+        let _ = measure(
+            || {
+                let _ = reference.ct_eq(cand);
+            },
+            10_000,
+        );
     }
 
     let mut totals: Vec<f64> = Vec::with_capacity(candidates.len());
@@ -164,9 +168,12 @@ fn chain_key_eq_constant_time() {
     ];
 
     for cand in &candidates {
-        let _ = measure(|| {
-            let _ = base == *cand;
-        }, 10_000);
+        let _ = measure(
+            || {
+                let _ = base == *cand;
+            },
+            10_000,
+        );
     }
 
     let mut totals: Vec<f64> = Vec::with_capacity(candidates.len());
@@ -234,9 +241,7 @@ fn pair_confirm_decode_and_verify_constant_time_on_mismatched_pubkey() {
         totals.push(ns);
     }
     let rel = relative_stddev(&totals);
-    eprintln!(
-        "pair_confirm pubkey-fail totals (ns) = {totals:?}, rel_stddev = {rel:.4}"
-    );
+    eprintln!("pair_confirm pubkey-fail totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
     // Looser gate (10%) — decode_raw allocates and the underlying
     // ed25519-dalek pubkey-from-bytes does a subgroup check that adds
     // variance unrelated to the ct-eq path. The point of this test

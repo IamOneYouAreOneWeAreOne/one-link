@@ -135,8 +135,7 @@ fn adversarial_empty_payload_works() {
 #[test]
 fn adversarial_max_circuit_round_trip() {
     // MAX_HOPS = 5. Build the max-length circuit.
-    let pairs: Vec<(StaticSecret, HopDescriptor)> =
-        (1..=5).map(make_hop_pair).collect();
+    let pairs: Vec<(StaticSecret, HopDescriptor)> = (1..=5).map(make_hop_pair).collect();
     let descs: Vec<HopDescriptor> = pairs.iter().map(|(_, h)| h.clone()).collect();
     let circuit = Circuit::new(descs).unwrap();
     let mut packet = build_onion(&circuit, b"max-hops", &mut OsRng).unwrap();

@@ -192,7 +192,11 @@ impl SoftwareProvider {
         let mut h = Hasher::new();
         h.update(CHILD_KEY_DOMAIN);
         h.update(master_seed);
-        h.update(&u32::try_from(context_tag.len()).unwrap_or(u32::MAX).to_be_bytes());
+        h.update(
+            &u32::try_from(context_tag.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
         h.update(context_tag);
         let out = h.finalize();
         let mut child = [0u8; 32];
@@ -274,11 +278,7 @@ impl ConfidentialProvider for SoftwareProvider {
         Ok(SealedKey::new(ProviderTag::Software, sealed_child_bytes))
     }
 
-    fn sealed_sign(
-        &self,
-        sealed: &SealedKey,
-        transcript: &[u8],
-    ) -> ConfidentialResult<Vec<u8>> {
+    fn sealed_sign(&self, sealed: &SealedKey, transcript: &[u8]) -> ConfidentialResult<Vec<u8>> {
         let mut unsealed = self.unseal(sealed, MASTER_PT_LEN)?;
         let seed: &[u8; 32] = unsealed
             .as_slice()

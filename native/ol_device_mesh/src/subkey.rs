@@ -23,9 +23,7 @@ use ol_pqsig::{HybridSigningKey, HybridVerifyingKey, HYBRID_SIG_LEN, HYBRID_VK_L
 use rand_core::{CryptoRng, RngCore};
 use zeroize::ZeroizeOnDrop;
 
-use crate::derivation::{
-    derive_field_bound_subkey_seed, derive_subkey_seed, SUBKEY_SEED_LEN,
-};
+use crate::derivation::{derive_field_bound_subkey_seed, derive_subkey_seed, SUBKEY_SEED_LEN};
 use crate::device_class::{DeviceClass, DEVICE_CLASS_TAG_LEN};
 use crate::errors::{DeviceMeshError, DeviceMeshResult};
 use crate::master::MasterIdentity;
@@ -51,7 +49,7 @@ impl DeviceSubkey {
     /// Construct directly from a derived seed. Caller is responsible
     /// for using one of the [`mint_subkey`] / [`mint_subkey_field_bound`]
     /// entry points; this is mostly useful in tests + recovery flows.
-    #[must_use] 
+    #[must_use]
     pub const fn from_seed(
         seed: [u8; SUBKEY_SEED_LEN],
         class: DeviceClass,
@@ -86,14 +84,13 @@ impl DeviceSubkey {
 
     /// Materialize the underlying signing key (and zeroize the
     /// scratch buffer on drop).
-    #[must_use] 
+    #[must_use]
     pub fn signing_key(&self) -> HybridSigningKey {
-        HybridSigningKey::from_bytes(&self.seed)
-            .expect("subkey seed length is invariant-checked")
+        HybridSigningKey::from_bytes(&self.seed).expect("subkey seed length is invariant-checked")
     }
 
     /// Subkey's verifying key — what the attestation binds.
-    #[must_use] 
+    #[must_use]
     pub fn verifying_key(&self) -> HybridVerifyingKey {
         self.signing_key().verifying_key()
     }
@@ -112,7 +109,7 @@ impl DeviceSubkey {
 
     /// Borrow the raw seed (DANGEROUS — only for serialization to
     /// the hardware wrapper).
-    #[must_use] 
+    #[must_use]
     pub const fn raw_seed(&self) -> &[u8; SUBKEY_SEED_LEN] {
         &self.seed
     }
@@ -285,7 +282,7 @@ fn build_attestation(
 ///
 /// This is the master-only path; ordinary device operation uses
 /// `step_one_day` to advance forward.
-#[must_use] 
+#[must_use]
 pub fn redrive_subkey_at_day(
     master: &MasterIdentity,
     class: DeviceClass,
@@ -322,25 +319,20 @@ mod tests {
     fn mint_round_trip_verifies() {
         let master = MasterIdentity::generate(&mut OsRng);
         let id = fresh_device_id(&mut OsRng);
-        let (sk, att) =
-            mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+        let (sk, att) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
         att.verify(&master.verifying_key()).unwrap();
         assert!(att.covers_day(0));
         assert!(att.covers_day(365));
         assert!(!att.covers_day(366));
         // Subkey's vk in the attestation matches what the subkey produces.
-        assert_eq!(
-            &att.subkey_vk_bytes[..],
-            &sk.verifying_key().to_bytes()[..]
-        );
+        assert_eq!(&att.subkey_vk_bytes[..], &sk.verifying_key().to_bytes()[..]);
     }
 
     #[test]
     fn attestation_tampered_field_rejected() {
         let master = MasterIdentity::generate(&mut OsRng);
         let id = fresh_device_id(&mut OsRng);
-        let (_sk, mut att) =
-            mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+        let (_sk, mut att) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
         // Flip a byte in the subkey VK — signature must reject.
         att.subkey_vk_bytes[7] ^= 0x01;
         let err = att.verify(&master.verifying_key()).unwrap_err();
@@ -352,8 +344,7 @@ mod tests {
         let master_a = MasterIdentity::generate(&mut OsRng);
         let master_b = MasterIdentity::generate(&mut OsRng);
         let id = fresh_device_id(&mut OsRng);
-        let (_sk, att) =
-            mint_subkey(&master_a, DeviceClass::Phone, id, 0, 365).unwrap();
+        let (_sk, att) = mint_subkey(&master_a, DeviceClass::Phone, id, 0, 365).unwrap();
         // master_b can't validate master_a's attestation.
         let err = att.verify(&master_b.verifying_key()).unwrap_err();
         assert!(matches!(err, DeviceMeshError::AttestationVerifyFail));
@@ -363,8 +354,7 @@ mod tests {
     fn ratchet_step_advances_day_and_changes_signing() {
         let master = MasterIdentity::generate(&mut OsRng);
         let id = fresh_device_id(&mut OsRng);
-        let (mut sk, _att) =
-            mint_subkey(&master, DeviceClass::Laptop, id, 0, 365).unwrap();
+        let (mut sk, _att) = mint_subkey(&master, DeviceClass::Laptop, id, 0, 365).unwrap();
         let day0_vk = sk.verifying_key().to_bytes();
         sk.step_one_day();
         assert_eq!(sk.day_index(), 1);
@@ -376,10 +366,8 @@ mod tests {
     fn redrive_recovers_original_day_seed() {
         let master = MasterIdentity::generate(&mut OsRng);
         let id = fresh_device_id(&mut OsRng);
-        let (sk_mint, _att) =
-            mint_subkey(&master, DeviceClass::Desktop, id, 7, 365).unwrap();
-        let sk_redrive =
-            redrive_subkey_at_day(&master, DeviceClass::Desktop, id, 7);
+        let (sk_mint, _att) = mint_subkey(&master, DeviceClass::Desktop, id, 7, 365).unwrap();
+        let sk_redrive = redrive_subkey_at_day(&master, DeviceClass::Desktop, id, 7);
         assert_eq!(sk_mint.raw_seed(), sk_redrive.raw_seed());
     }
 
@@ -387,17 +375,9 @@ mod tests {
     fn field_bound_subkey_differs_from_plain() {
         let master = MasterIdentity::generate(&mut OsRng);
         let id = fresh_device_id(&mut OsRng);
-        let (plain, _) =
-            mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
-        let (bound, _) = mint_subkey_field_bound(
-            &master,
-            DeviceClass::Phone,
-            id,
-            0,
-            365,
-            &[0xCC; 32],
-        )
-        .unwrap();
+        let (plain, _) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+        let (bound, _) =
+            mint_subkey_field_bound(&master, DeviceClass::Phone, id, 0, 365, &[0xCC; 32]).unwrap();
         assert_ne!(plain.raw_seed(), bound.raw_seed());
     }
 

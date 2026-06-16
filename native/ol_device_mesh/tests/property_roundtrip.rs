@@ -9,10 +9,10 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 use ol_device_mesh::{
-    derive_subkey_seed, master_pin_handle, mint_subkey, mint_subkey_field_bound,
-    ratchet_one_day, sibling_witness, state_root, verify_liveness, DeviceClass,
-    DeviceMeshError, HardwareWrapper, LivenessProof, MasterIdentity, SoftwareWrapper,
-    DEVICE_ID_LEN, MASTER_SEED_LEN, SUBKEY_SEED_LEN, WRAPPED_KEY_OVERHEAD,
+    derive_subkey_seed, master_pin_handle, mint_subkey, mint_subkey_field_bound, ratchet_one_day,
+    sibling_witness, state_root, verify_liveness, DeviceClass, DeviceMeshError, HardwareWrapper,
+    LivenessProof, MasterIdentity, SoftwareWrapper, DEVICE_ID_LEN, MASTER_SEED_LEN,
+    SUBKEY_SEED_LEN, WRAPPED_KEY_OVERHEAD,
 };
 
 fn cases() -> u32 {
@@ -274,8 +274,7 @@ fn deterministic_keypair_via_chacha_rng() {
     let mut rng = ChaCha20Rng::from_seed([0xA1; 32]);
     let master = MasterIdentity::generate(&mut rng);
     let id = [0xBB; DEVICE_ID_LEN];
-    let (sk, att) =
-        mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+    let (sk, att) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
     att.verify(&master.verifying_key()).unwrap();
     let _ = sk;
 }

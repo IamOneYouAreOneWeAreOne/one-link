@@ -12,8 +12,7 @@
 use std::time::Instant;
 
 use ol_onion::transport_obfs::handshake::{
-    BridgeKeypair, ClientHandshake, ServerHandshake, BRIDGE_PUBKEY_LEN,
-    HANDSHAKE_LEN,
+    BridgeKeypair, ClientHandshake, ServerHandshake, BRIDGE_PUBKEY_LEN, HANDSHAKE_LEN,
 };
 use rand::rngs::OsRng;
 
@@ -66,8 +65,7 @@ fn handshake_mac_verify_constant_time_across_tamper_positions() {
     for msg in &tampered {
         let _ = measure(
             || {
-                let _ =
-                    ServerHandshake::accept(&mut OsRng, &bridge, msg, now);
+                let _ = ServerHandshake::accept(&mut OsRng, &bridge, msg, now);
             },
             10,
         );
@@ -89,9 +87,7 @@ fn handshake_mac_verify_constant_time_across_tamper_positions() {
         totals.push(ns);
     }
     let rel = relative_stddev(&totals);
-    eprintln!(
-        "handshake-MAC timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}"
-    );
+    eprintln!("handshake-MAC timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
     // The MAC compare itself is constant-time via `subtle::ct_eq`.
     // Residual variance comes from the always-run "try current AND
     // previous epoch" path (two MAC recomputes) plus general OS noise.

@@ -9,8 +9,7 @@ use crate::subkey::DEVICE_ID_LEN;
 use super::capability::{DeviceCapability, MAX_CAPABILITIES_PER_DEVICE};
 
 /// Domain-separation tag for capability-attestation signing.
-pub const CAPABILITY_ATTESTATION_DOMAIN: &[u8] =
-    b"OL-mesh-capability-attestation-v1";
+pub const CAPABILITY_ATTESTATION_DOMAIN: &[u8] = b"OL-mesh-capability-attestation-v1";
 
 /// One master-signed capability binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +28,7 @@ pub struct CapabilityAttestation {
 
 impl CapabilityAttestation {
     /// Canonical bytes the master signs.
-    #[must_use] 
+    #[must_use]
     pub fn canonical_transcript(
         device_id: &[u8; DEVICE_ID_LEN],
         capabilities: &[DeviceCapability],

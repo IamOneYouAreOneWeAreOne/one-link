@@ -28,9 +28,7 @@ impl PySmartRules {
     /// Construct. Stateless; one instance is fine for the whole daemon.
     #[new]
     fn new() -> Self {
-        Self {
-            inner: SmartRules,
-        }
+        Self { inner: SmartRules }
     }
 
     /// Decide for one event.
@@ -126,8 +124,8 @@ fn build_context_or_err(
     observed_loss: f32,
     pattern_strength: f32,
 ) -> PyResult<Context> {
-    let k = EventKind::from_wire_type(kind)
-        .map_err(|e| PyValueError::new_err(format!("kind: {e}")))?;
+    let k =
+        EventKind::from_wire_type(kind).map_err(|e| PyValueError::new_err(format!("kind: {e}")))?;
     let p = PeerRelationship::from_label(peer)
         .map_err(|e| PyValueError::new_err(format!("peer: {e}")))?;
     let u = match urgency {
@@ -265,17 +263,39 @@ impl PyUnifiedMin {
         dark_cover: Option<f32>,
     ) -> Self {
         let mut w = Weights::defaults();
-        if let Some(v) = alpha_coherence { w.alpha_coherence = v; }
-        if let Some(v) = privacy_weight { w.privacy_weight = v; }
-        if let Some(v) = cover_penalty { w.cover_penalty = v; }
-        if let Some(v) = anchor_cost { w.anchor_cost = v; }
-        if let Some(v) = batch_latency_cost { w.batch_latency_cost = v; }
-        if let Some(v) = onion_hop_cost { w.onion_hop_cost = v; }
-        if let Some(v) = relay_rtt_multiplier { w.relay_rtt_multiplier = v; }
-        if let Some(v) = lambda_dynamic { w.lambda_dynamic = v; }
-        if let Some(v) = dark_base { w.dark_base = v; }
-        if let Some(v) = dark_coherence { w.dark_coherence = v; }
-        if let Some(v) = dark_cover { w.dark_cover = v; }
+        if let Some(v) = alpha_coherence {
+            w.alpha_coherence = v;
+        }
+        if let Some(v) = privacy_weight {
+            w.privacy_weight = v;
+        }
+        if let Some(v) = cover_penalty {
+            w.cover_penalty = v;
+        }
+        if let Some(v) = anchor_cost {
+            w.anchor_cost = v;
+        }
+        if let Some(v) = batch_latency_cost {
+            w.batch_latency_cost = v;
+        }
+        if let Some(v) = onion_hop_cost {
+            w.onion_hop_cost = v;
+        }
+        if let Some(v) = relay_rtt_multiplier {
+            w.relay_rtt_multiplier = v;
+        }
+        if let Some(v) = lambda_dynamic {
+            w.lambda_dynamic = v;
+        }
+        if let Some(v) = dark_base {
+            w.dark_base = v;
+        }
+        if let Some(v) = dark_coherence {
+            w.dark_coherence = v;
+        }
+        if let Some(v) = dark_cover {
+            w.dark_cover = v;
+        }
         Self {
             inner: UnifiedMin::with_weights(w),
         }
@@ -381,11 +401,7 @@ impl PyOnlineLearner {
         regularization = 0.01,
         weight_bound_multiplier = 10.0,
     ))]
-    fn new(
-        learning_rate: f32,
-        regularization: f32,
-        weight_bound_multiplier: f32,
-    ) -> Self {
+    fn new(learning_rate: f32, regularization: f32, weight_bound_multiplier: f32) -> Self {
         Self {
             inner: OnlineLearner::with_config(
                 Weights::defaults(),

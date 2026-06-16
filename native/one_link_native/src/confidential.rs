@@ -165,7 +165,10 @@ impl PySoftwareProvider {
             provider_tag: tag,
             bytes: sealed_bytes.to_vec(),
         };
-        let sig = self.inner.sealed_sign(&sealed, transcript).map_err(map_err)?;
+        let sig = self
+            .inner
+            .sealed_sign(&sealed, transcript)
+            .map_err(map_err)?;
         Ok(PyBytes::new_bound(py, &sig))
     }
 
@@ -247,7 +250,9 @@ impl PySoftwareProvider {
                 sdp,
             )
             .map_err(map_err)?;
-        let cmt = doc.field_witness_commitment.map(|c| PyBytes::new_bound(py, &c));
+        let cmt = doc
+            .field_witness_commitment
+            .map(|c| PyBytes::new_bound(py, &c));
         Ok((
             doc.provider_tag.as_u8(),
             PyBytes::new_bound(py, &doc.master_vk.to_bytes()),
@@ -508,7 +513,10 @@ impl PyWindowsHardenedProvider {
             provider_tag: tag,
             bytes: sealed_bytes.to_vec(),
         };
-        let sig = self.inner.sealed_sign(&sealed, transcript).map_err(map_err)?;
+        let sig = self
+            .inner
+            .sealed_sign(&sealed, transcript)
+            .map_err(map_err)?;
         Ok(PyBytes::new_bound(py, &sig))
     }
 
@@ -609,9 +617,8 @@ impl PyWindowsHardenedProvider {
 #[cfg(feature = "windows-tpm")]
 #[pyfunction]
 fn fresh_windows_hardened_provider(tpm_key_name: &str) -> PyResult<PyWindowsHardenedProvider> {
-    let provider =
-        ol_confidential::WindowsHardenedProvider::create(&mut OsRng, tpm_key_name)
-            .map_err(map_err)?;
+    let provider = ol_confidential::WindowsHardenedProvider::create(&mut OsRng, tpm_key_name)
+        .map_err(map_err)?;
     Ok(PyWindowsHardenedProvider { inner: provider })
 }
 
@@ -658,6 +665,9 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add("PROVIDER_TAG_INTEL_SGX", ProviderTag::IntelSgx.as_u8())?;
     m.add("PROVIDER_TAG_AMD_SEV_SNP", ProviderTag::AmdSevSnp.as_u8())?;
-    m.add("PROVIDER_TAG_ARM_TRUSTZONE", ProviderTag::ArmTrustZone.as_u8())?;
+    m.add(
+        "PROVIDER_TAG_ARM_TRUSTZONE",
+        ProviderTag::ArmTrustZone.as_u8(),
+    )?;
     Ok(())
 }

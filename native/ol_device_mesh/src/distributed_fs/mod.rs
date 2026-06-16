@@ -114,13 +114,12 @@ pub mod policy;
 pub mod repair;
 
 pub use attest::{
-    sign_storage_attestation, StorageAttestation, ATTEST_DOMAIN,
-    MAX_CHUNKS_PER_ATTESTATION,
+    sign_storage_attestation, StorageAttestation, ATTEST_DOMAIN, MAX_CHUNKS_PER_ATTESTATION,
 };
 pub use manifest::{
-    file_id, FileId, FileManifest, ChunkHash, CHUNK_HASH_LEN,
-    FILE_ID_LEN, MAX_CHUNKS_PER_FILE, MAX_MIME_LEN, MANIFEST_DOMAIN,
+    file_id, ChunkHash, FileId, FileManifest, CHUNK_HASH_LEN, FILE_ID_LEN, MANIFEST_DOMAIN,
+    MAX_CHUNKS_PER_FILE, MAX_MIME_LEN,
 };
-pub use placement::{ChunkPlacement, under_replicated};
+pub use placement::{under_replicated, ChunkPlacement};
 pub use policy::{ErasurePolicy, MAX_K_PLUS_M};
 pub use repair::{repair_plan, RepairAssignment};

@@ -46,7 +46,7 @@ pub struct QuorumPolicy {
 
 impl QuorumPolicy {
     /// Canonical bytes the master signs over.
-    #[must_use] 
+    #[must_use]
     pub fn canonical_transcript(
         policy_id: &QuorumPolicyId,
         label: &[u8],

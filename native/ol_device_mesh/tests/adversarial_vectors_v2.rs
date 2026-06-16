@@ -12,21 +12,13 @@ use ol_device_mesh::active_routing::{DeviceActionRecord, RoutingContext};
 use ol_device_mesh::compute::{
     pick_executor, sign_capability_attestation, CapabilityRegistry, DeviceCapability,
 };
-use ol_device_mesh::distributed_fs::{
-    sign_storage_attestation, ErasurePolicy, FileManifest,
-};
+use ol_device_mesh::distributed_fs::{sign_storage_attestation, ErasurePolicy, FileManifest};
 use ol_device_mesh::duress::{
     create_duress_envelope, sign_duress_alert, PairingChannel, PairingCommitment,
 };
-use ol_device_mesh::fan_out::{
-    fan_out_plan, sign_fetch_request, SourceCapacity, FETCH_NONCE_LEN,
-};
-use ol_device_mesh::mesh_state::{
-    LwwRegister, MeshState, OrSet, PnCounter, SubtreePolicyKind,
-};
-use ol_device_mesh::quorum::{
-    mint_policy, propose_operation, sign_approval, QuorumCertificate,
-};
+use ol_device_mesh::fan_out::{fan_out_plan, sign_fetch_request, SourceCapacity, FETCH_NONCE_LEN};
+use ol_device_mesh::mesh_state::{LwwRegister, MeshState, OrSet, PnCounter, SubtreePolicyKind};
+use ol_device_mesh::quorum::{mint_policy, propose_operation, sign_approval, QuorumCertificate};
 use ol_device_mesh::self_routing::{sign_route_announcement, PeerLink};
 use ol_device_mesh::subkey::{fresh_device_id, mint_subkey};
 use ol_device_mesh::{DeviceClass, MasterIdentity, DEVICE_ID_LEN};
@@ -54,8 +46,7 @@ fn adversarial_v2_subkey_minted_for_future_day() {
     // index is just an integer), but covers_day(today) is false.
     let master = MasterIdentity::generate(&mut OsRng);
     let id = fresh_device_id(&mut OsRng);
-    let (_sk, att) =
-        mint_subkey(&master, DeviceClass::Phone, id, 100_000, 100_365).unwrap();
+    let (_sk, att) = mint_subkey(&master, DeviceClass::Phone, id, 100_000, 100_365).unwrap();
     att.verify(&master.verifying_key()).unwrap();
     assert!(!att.covers_day(0));
     assert!(att.covers_day(100_000));
@@ -84,8 +75,7 @@ fn adversarial_v2_empty_approver_sig_rejected() {
     let (sk1, a1) = mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
     let (sk2, a2) = mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
     let policy = mint_policy(&master, [0x42; 16], b"x", 1, vec![id1, id2]).unwrap();
-    let proposal =
-        propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], 100, 2000).unwrap();
+    let proposal = propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], 100, 2000).unwrap();
     let mut approval = sign_approval(&sk2, &proposal, 110).unwrap();
     approval.approver_sig.clear();
     let cert = QuorumCertificate {
@@ -300,8 +290,7 @@ fn adversarial_v2_executor_pick_returns_none_when_no_capacity_profile() {
     let id = [0xD1; DEVICE_ID_LEN];
     let mut reg = CapabilityRegistry::empty();
     reg.ingest(
-        sign_capability_attestation(&master, id, vec![DeviceCapability::Gpu], 0, 365)
-            .unwrap(),
+        sign_capability_attestation(&master, id, vec![DeviceCapability::Gpu], 0, 365).unwrap(),
         &master.verifying_key(),
     )
     .unwrap();
@@ -318,14 +307,12 @@ fn adversarial_v2_executor_pick_ignores_load_loaded_device() {
     let slow_id = [0xD2; DEVICE_ID_LEN];
     let mut reg = CapabilityRegistry::empty();
     reg.ingest(
-        sign_capability_attestation(&master, fast_id, vec![DeviceCapability::Gpu], 0, 365)
-            .unwrap(),
+        sign_capability_attestation(&master, fast_id, vec![DeviceCapability::Gpu], 0, 365).unwrap(),
         &master.verifying_key(),
     )
     .unwrap();
     reg.ingest(
-        sign_capability_attestation(&master, slow_id, vec![DeviceCapability::Gpu], 0, 365)
-            .unwrap(),
+        sign_capability_attestation(&master, slow_id, vec![DeviceCapability::Gpu], 0, 365).unwrap(),
         &master.verifying_key(),
     )
     .unwrap();
@@ -374,7 +361,7 @@ fn adversarial_v2_observe_with_clock_skew_doesnt_panic() {
         last_updated_unix: 1_000_000,
     };
     r.observe(true, 0); // now < last_updated
-    // Decay path should be similarly resilient.
+                        // Decay path should be similarly resilient.
     r.decay(0, 3600);
     assert!(r.alpha >= 1 && r.beta >= 1);
 }
@@ -415,14 +402,7 @@ fn adversarial_v2_context_hash_changes_with_every_field() {
 #[test]
 fn adversarial_v2_duress_envelope_real_equals_decoy_rejected() {
     let mut rng = OsRng;
-    let r = create_duress_envelope(
-        b"real",
-        b"decoy",
-        b"same",
-        b"same",
-        &[0u8; 32],
-        &mut rng,
-    );
+    let r = create_duress_envelope(b"real", b"decoy", b"same", b"same", &[0u8; 32], &mut rng);
     assert!(r.is_err(), "real_code == decoy_code must reject");
 }
 
@@ -466,8 +446,7 @@ fn adversarial_v2_quorum_approval_sig_cannot_be_reused_for_route_announce() {
     let (sk1, _a1) = mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
     let (sk2, _a2) = mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
     let policy = mint_policy(&master, [0x42; 16], b"x", 1, vec![id1, id2]).unwrap();
-    let proposal =
-        propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], 100, 2000).unwrap();
+    let proposal = propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], 100, 2000).unwrap();
     let approval = sign_approval(&sk2, &proposal, 110).unwrap();
     // Now build a route announcement structurally with the approval
     // sig grafted onto it. Verify must fail (different transcript).

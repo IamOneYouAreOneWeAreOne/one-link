@@ -58,5 +58,10 @@ fn bench_sas_derive(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_full_pair, bench_invite_decode_verify, bench_sas_derive);
+criterion_group!(
+    benches,
+    bench_full_pair,
+    bench_invite_decode_verify,
+    bench_sas_derive
+);
 criterion_main!(benches);

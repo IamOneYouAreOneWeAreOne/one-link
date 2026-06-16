@@ -21,14 +21,13 @@
 /// - None on the minimal English-language deny list.
 /// - No triple-letter runs (easy to pronounce).
 pub const SAS_WORDS: [&str; 64] = [
-    "agile", "amuse", "apple", "basil", "blaze", "brick", "cargo", "cedar",
-    "chess", "climb", "copper", "crane", "daisy", "decoy", "drift", "eagle",
-    "ember", "exile", "fable", "flame", "frost", "globe", "gravy", "gusto",
-    "happy", "hover", "igloo", "indigo", "ivory", "jolly", "juice", "kindly",
-    "koala", "lemon", "lunar", "mango", "melon", "motor", "north", "nudge",
-    "ocean", "olive", "panda", "plume", "quiet", "rebel", "ridge", "saber",
-    "sleek", "sushi", "tiger", "trove", "ultra", "umbra", "vapor", "vivid",
-    "wagon", "winter", "xenon", "xylo", "yacht", "yodel", "zebra", "zinc",
+    "agile", "amuse", "apple", "basil", "blaze", "brick", "cargo", "cedar", "chess", "climb",
+    "copper", "crane", "daisy", "decoy", "drift", "eagle", "ember", "exile", "fable", "flame",
+    "frost", "globe", "gravy", "gusto", "happy", "hover", "igloo", "indigo", "ivory", "jolly",
+    "juice", "kindly", "koala", "lemon", "lunar", "mango", "melon", "motor", "north", "nudge",
+    "ocean", "olive", "panda", "plume", "quiet", "rebel", "ridge", "saber", "sleek", "sushi",
+    "tiger", "trove", "ultra", "umbra", "vapor", "vivid", "wagon", "winter", "xenon", "xylo",
+    "yacht", "yodel", "zebra", "zinc",
 ];
 
 #[cfg(test)]
@@ -91,9 +90,7 @@ mod tests {
             curr[0] = i;
             for j in 1..=lb {
                 let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-                curr[j] = (curr[j - 1] + 1)
-                    .min(prev[j] + 1)
-                    .min(prev[j - 1] + cost);
+                curr[j] = (curr[j - 1] + 1).min(prev[j] + 1).min(prev[j - 1] + cost);
             }
             std::mem::swap(&mut prev, &mut curr);
         }
@@ -129,9 +126,8 @@ mod tests {
     fn dictionary_words_pass_minimal_deny_list() {
         const DENY: &[&str] = &[
             // Curse / vulgar
-            "fuck", "shit", "damn", "cunt", "bitch", "crap", "piss",
-            "ass", "asshole", "bastard", "dick", "cock", "pussy",
-            // Drug / violence
+            "fuck", "shit", "damn", "cunt", "bitch", "crap", "piss", "ass", "asshole", "bastard",
+            "dick", "cock", "pussy", // Drug / violence
             "kill", "rape", "drugs", "meth", "coke", "heroin",
             // Slurs (only common explicit; broader audit happens
             // out-of-band)

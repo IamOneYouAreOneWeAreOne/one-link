@@ -91,12 +91,13 @@ impl Delta {
     pub const fn validate_size(&self) -> DeviceMeshResult<()> {
         match self {
             Self::LwwSet { value, .. } | Self::MapPut { value, .. }
-                if value.len() > MAX_DELTA_VALUE_LEN => {
-                    return Err(DeviceMeshError::DeltaValueTooLong {
-                        got: value.len(),
-                        max: MAX_DELTA_VALUE_LEN,
-                    });
-                }
+                if value.len() > MAX_DELTA_VALUE_LEN =>
+            {
+                return Err(DeviceMeshError::DeltaValueTooLong {
+                    got: value.len(),
+                    max: MAX_DELTA_VALUE_LEN,
+                });
+            }
             _ => {}
         }
         Ok(())
@@ -159,7 +160,7 @@ pub struct AuthenticatedOp {
 
 impl AuthenticatedOp {
     /// Canonical bytes the subkey signs over.
-    #[must_use] 
+    #[must_use]
     pub fn canonical_transcript(
         subtree: &[u8],
         delta: &Delta,
@@ -256,8 +257,7 @@ mod tests {
     fn make() -> DeviceSubkey {
         let master = MasterIdentity::generate(&mut OsRng);
         let id = fresh_device_id(&mut OsRng);
-        let (sk, _att) =
-            mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+        let (sk, _att) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
         sk
     }
 
@@ -285,7 +285,10 @@ mod tests {
         let op = AuthenticatedOp::sign(
             &sk_a,
             b"x".to_vec(),
-            Delta::LwwSet { value: b"v".to_vec(), ts: 1 },
+            Delta::LwwSet {
+                value: b"v".to_vec(),
+                ts: 1,
+            },
             1,
             1,
         )
@@ -300,7 +303,10 @@ mod tests {
         let mut op = AuthenticatedOp::sign(
             &sk,
             b"x".to_vec(),
-            Delta::LwwSet { value: b"v".to_vec(), ts: 1 },
+            Delta::LwwSet {
+                value: b"v".to_vec(),
+                ts: 1,
+            },
             1,
             1,
         )
@@ -317,7 +323,10 @@ mod tests {
         let err = AuthenticatedOp::sign(
             &sk,
             big,
-            Delta::LwwSet { value: b"v".to_vec(), ts: 1 },
+            Delta::LwwSet {
+                value: b"v".to_vec(),
+                ts: 1,
+            },
             1,
             1,
         )

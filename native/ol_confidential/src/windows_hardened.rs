@@ -109,7 +109,10 @@ impl ConfidentialProvider for WindowsHardenedProvider {
         // provider's identity (the verifying-key path checks the
         // tag and refuses cross-provider unseals).
         let sw_sealed = self.sw.seal_master(seed)?;
-        Ok(SealedKey::new(ProviderTag::WindowsTpm, sw_sealed.bytes.clone()))
+        Ok(SealedKey::new(
+            ProviderTag::WindowsTpm,
+            sw_sealed.bytes.clone(),
+        ))
     }
 
     fn derive_child(
@@ -121,14 +124,13 @@ impl ConfidentialProvider for WindowsHardenedProvider {
         // re-tag the output back to WindowsTpm.
         let sw_in = SealedKey::new(ProviderTag::Software, sealed_master.bytes.clone());
         let sw_out = self.sw.derive_child(&sw_in, context_tag)?;
-        Ok(SealedKey::new(ProviderTag::WindowsTpm, sw_out.bytes.clone()))
+        Ok(SealedKey::new(
+            ProviderTag::WindowsTpm,
+            sw_out.bytes.clone(),
+        ))
     }
 
-    fn sealed_sign(
-        &self,
-        sealed: &SealedKey,
-        transcript: &[u8],
-    ) -> ConfidentialResult<Vec<u8>> {
+    fn sealed_sign(&self, sealed: &SealedKey, transcript: &[u8]) -> ConfidentialResult<Vec<u8>> {
         let sw_sealed = SealedKey::new(ProviderTag::Software, sealed.bytes.clone());
         self.sw.sealed_sign(&sw_sealed, transcript)
     }
@@ -171,11 +173,9 @@ mod tests {
     #[test]
     #[ignore = "requires hardware TPM access"]
     fn hardened_tier_is_hardware_bound() {
-        let p = WindowsHardenedProvider::create(
-            &mut OsRng,
-            "OL-confidential-test-hardened-tier-v1",
-        )
-        .expect("provider create");
+        let p =
+            WindowsHardenedProvider::create(&mut OsRng, "OL-confidential-test-hardened-tier-v1")
+                .expect("provider create");
         assert_eq!(p.tier(), ConfidentialTier::HardwareBound);
         assert!(p.tier().meets(ConfidentialTier::Software));
         assert!(!p.tier().meets(ConfidentialTier::HardwareAttested));
@@ -184,11 +184,8 @@ mod tests {
     #[test]
     #[ignore = "requires hardware TPM access"]
     fn hardened_seal_sign_verify_round_trip() {
-        let p = WindowsHardenedProvider::create(
-            &mut OsRng,
-            "OL-confidential-test-hardened-rt-v1",
-        )
-        .expect("provider create");
+        let p = WindowsHardenedProvider::create(&mut OsRng, "OL-confidential-test-hardened-rt-v1")
+            .expect("provider create");
         let seed = [0x42; 32];
         let sealed = p.seal_master(&seed).expect("seal");
         assert_eq!(sealed.provider_tag, ProviderTag::WindowsTpm);
@@ -200,14 +197,14 @@ mod tests {
     #[test]
     #[ignore = "requires hardware TPM access"]
     fn hardened_child_diverges_from_master() {
-        let p = WindowsHardenedProvider::create(
-            &mut OsRng,
-            "OL-confidential-test-hardened-child-v1",
-        )
-        .expect("provider create");
+        let p =
+            WindowsHardenedProvider::create(&mut OsRng, "OL-confidential-test-hardened-child-v1")
+                .expect("provider create");
         let seed = [0x55; 32];
         let master = p.seal_master(&seed).expect("seal master");
-        let child = p.derive_child(&master, b"phone-day-1").expect("derive child");
+        let child = p
+            .derive_child(&master, b"phone-day-1")
+            .expect("derive child");
         let vk_m = p.verifying_key(&master).expect("vk m");
         let vk_c = p.verifying_key(&child).expect("vk c");
         assert_ne!(vk_m.to_bytes(), vk_c.to_bytes());
@@ -216,15 +213,10 @@ mod tests {
     #[test]
     #[ignore = "requires hardware TPM access"]
     fn hardened_attest_is_tpm_rooted() {
-        use crate::{
-            fresh_attestation_nonce,
-            windows_tpm::verify_attestation_with_tpm,
-        };
-        let p = WindowsHardenedProvider::create(
-            &mut OsRng,
-            "OL-confidential-test-hardened-attest-v1",
-        )
-        .expect("provider create");
+        use crate::{fresh_attestation_nonce, windows_tpm::verify_attestation_with_tpm};
+        let p =
+            WindowsHardenedProvider::create(&mut OsRng, "OL-confidential-test-hardened-attest-v1")
+                .expect("provider create");
         let seed = [0x77; 32];
         let sealed = p.seal_master(&seed).expect("seal");
         let nonce = fresh_attestation_nonce(&mut OsRng);
@@ -239,8 +231,7 @@ mod tests {
             )
             .expect("attest");
         assert!(!doc.platform_quote.is_empty(), "must carry TPM quote");
-        let tpm_pub = verify_attestation_with_tpm(&doc, &nonce, None, 1_010)
-            .expect("verify");
+        let tpm_pub = verify_attestation_with_tpm(&doc, &nonce, None, 1_010).expect("verify");
         assert!(!tpm_pub.is_empty());
     }
 }

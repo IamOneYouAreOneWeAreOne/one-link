@@ -105,13 +105,18 @@ impl FileManifest {
     /// chunk_count_be     (4  bytes)
     /// chunk_hashes       (CHUNK_HASH_LEN * chunk_count bytes)
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(
             MANIFEST_DOMAIN.len()
-                + 8 + 4 + 3 + 8
-                + 2 + self.mime.len()
-                + 4 + self.chunks.len() * CHUNK_HASH_LEN,
+                + 8
+                + 4
+                + 3
+                + 8
+                + 2
+                + self.mime.len()
+                + 4
+                + self.chunks.len() * CHUNK_HASH_LEN,
         );
         out.extend_from_slice(MANIFEST_DOMAIN);
         out.extend_from_slice(&self.file_size.to_be_bytes());
@@ -123,8 +128,7 @@ impl FileManifest {
         let mime_len = u16::try_from(self.mime.len()).unwrap_or(u16::MAX);
         out.extend_from_slice(&mime_len.to_be_bytes());
         out.extend_from_slice(&self.mime[..mime_len as usize]);
-        let chunk_count =
-            u32::try_from(self.chunks.len()).unwrap_or(u32::MAX);
+        let chunk_count = u32::try_from(self.chunks.len()).unwrap_or(u32::MAX);
         out.extend_from_slice(&chunk_count.to_be_bytes());
         for c in &self.chunks {
             out.extend_from_slice(c);
@@ -242,7 +246,10 @@ mod tests {
             policy: p,
         };
         let err = m.shape_check().unwrap_err();
-        assert!(matches!(err, DeviceMeshError::FileManifestMimeTooLong { .. }));
+        assert!(matches!(
+            err,
+            DeviceMeshError::FileManifestMimeTooLong { .. }
+        ));
     }
 
     #[test]

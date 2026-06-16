@@ -12,24 +12,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use ol_device_mesh::active_routing::{
     pick_device_for_context, CohortPrior, RoutingContext, RoutingHistory,
 };
-use ol_device_mesh::compute::{
-    pick_executor, sign_capability_attestation, sign_task_request,
-    CapabilityRegistry, DeviceCapability, TaskClass,
-};
 use ol_device_mesh::compute::task::TASK_NONCE_LEN;
+use ol_device_mesh::compute::{
+    pick_executor, sign_capability_attestation, sign_task_request, CapabilityRegistry,
+    DeviceCapability, TaskClass,
+};
 use ol_device_mesh::distributed_fs::{
     ChunkHash, ChunkPlacement, ErasurePolicy, FileManifest, FILE_ID_LEN,
 };
 use ol_device_mesh::fan_out::{
-    fan_out_plan, sign_chunk_ack, sign_fetch_request, SourceCapacity,
-    FETCH_NONCE_LEN,
+    fan_out_plan, sign_chunk_ack, sign_fetch_request, SourceCapacity, FETCH_NONCE_LEN,
 };
-use ol_device_mesh::mesh_state::{
-    AuthenticatedOp, Delta, MeshState, SubtreePolicyKind, SyncState,
-};
-use ol_device_mesh::quorum::{
-    mint_policy, propose_operation, sign_approval, QuorumCertificate,
-};
+use ol_device_mesh::mesh_state::{AuthenticatedOp, Delta, MeshState, SubtreePolicyKind, SyncState};
+use ol_device_mesh::quorum::{mint_policy, propose_operation, sign_approval, QuorumCertificate};
 use ol_device_mesh::self_routing::{
     pick_best_route, sign_route_announcement, PeerLink, RouteTable,
 };
@@ -52,7 +47,11 @@ impl ThreeDeviceMesh {
         let mut device_ids = [[0u8; DEVICE_ID_LEN]; 3];
         let mut subkeys = Vec::new();
         let mut attestations = Vec::new();
-        let classes = [DeviceClass::Phone, DeviceClass::Laptop, DeviceClass::Desktop];
+        let classes = [
+            DeviceClass::Phone,
+            DeviceClass::Laptop,
+            DeviceClass::Desktop,
+        ];
         for (i, class) in classes.into_iter().enumerate() {
             let id = fresh_device_id(&mut OsRng);
             device_ids[i] = id;
@@ -87,15 +86,8 @@ fn layer1_to_layer2_quorum_certificate_round_trips() {
         mesh.device_ids.to_vec(),
     )
     .unwrap();
-    let proposal = propose_operation(
-        &mesh.subkeys[0],
-        &policy,
-        [0xAA; 32],
-        [0x33; 16],
-        100,
-        2000,
-    )
-    .unwrap();
+    let proposal =
+        propose_operation(&mesh.subkeys[0], &policy, [0xAA; 32], [0x33; 16], 100, 2000).unwrap();
     let approval_b = sign_approval(&mesh.subkeys[1], &proposal, 110).unwrap();
     let approval_c = sign_approval(&mesh.subkeys[2], &proposal, 120).unwrap();
     let cert = QuorumCertificate {
@@ -200,7 +192,10 @@ fn layer4_to_layer5_manifest_drives_fan_out_plan() {
     // Two stripes of (k=2, m=1) = 3 shards each; only k=2 per stripe
     // needs fetching → 4 chunks total assigned across the 2 sources.
     let total: usize = counts.values().sum();
-    assert_eq!(total, 4, "expected 4 (k=2 per stripe × 2 stripes), got {total}");
+    assert_eq!(
+        total, 4,
+        "expected 4 (k=2 per stripe × 2 stripes), got {total}"
+    );
     // Both sources should get some work given equal capacity.
     assert!(
         counts.values().all(|&n| n > 0),
@@ -279,10 +274,7 @@ fn layer6_self_routing_then_layer9_records_observation() {
     for _ in 0..40 {
         history.observe(ctx_hash, c_id, true, 1, 1, 1);
     }
-    let candidates = vec![
-        (b_id, DeviceClass::Laptop),
-        (c_id, DeviceClass::Desktop),
-    ];
+    let candidates = vec![(b_id, DeviceClass::Laptop), (c_id, DeviceClass::Desktop)];
     let cohort = CohortPrior::uniform();
     let mut c_count = 0;
     for _ in 0..200 {
@@ -396,15 +388,7 @@ fn fan_out_then_chunk_ack_signed_by_source() {
     let chunk = [0xAA; 32];
     let receiver_id = mesh.device_ids[0];
 
-    let ack = sign_chunk_ack(
-        source,
-        [0xFE; FILE_ID_LEN],
-        chunk,
-        receiver_id,
-        500,
-        1024,
-    )
-    .unwrap();
+    let ack = sign_chunk_ack(source, [0xFE; FILE_ID_LEN], chunk, receiver_id, 500, 1024).unwrap();
     ack.verify(&source_vk).unwrap();
     let mut tampered = ack.clone();
     tampered.receiver_device_id = mesh.device_ids[2];

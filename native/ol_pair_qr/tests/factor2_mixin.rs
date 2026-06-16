@@ -38,7 +38,9 @@ fn factor2_same_key_produces_matching_chain_keys() {
     let (mut inviter, mut scanner, _) = make_pair();
     let f2 = [0xA5u8; 32];
     let (confirm_bytes, k_inviter) = inviter.confirm_with_factor2(&f2).unwrap();
-    let k_scanner = scanner.receive_confirm_with_factor2(&confirm_bytes, &f2).unwrap();
+    let k_scanner = scanner
+        .receive_confirm_with_factor2(&confirm_bytes, &f2)
+        .unwrap();
     assert_eq!(k_inviter, k_scanner);
 }
 
@@ -49,7 +51,9 @@ fn factor2_different_keys_produce_divergent_chain_keys() {
     let mut f2b = [0xA5u8; 32];
     f2b[0] ^= 0x01;
     let (confirm_bytes, k_inviter) = inviter.confirm_with_factor2(&f2a).unwrap();
-    let k_scanner = scanner.receive_confirm_with_factor2(&confirm_bytes, &f2b).unwrap();
+    let k_scanner = scanner
+        .receive_confirm_with_factor2(&confirm_bytes, &f2b)
+        .unwrap();
     assert_ne!(k_inviter, k_scanner);
 }
 
@@ -65,7 +69,9 @@ fn factor2_mix_differs_from_plain_path() {
     let (mut inviter_f2, mut scanner_f2, _) = make_pair();
     let f2 = [0xA5u8; 32];
     let (cb_f2, k_f2_inviter) = inviter_f2.confirm_with_factor2(&f2).unwrap();
-    let k_f2_scanner = scanner_f2.receive_confirm_with_factor2(&cb_f2, &f2).unwrap();
+    let k_f2_scanner = scanner_f2
+        .receive_confirm_with_factor2(&cb_f2, &f2)
+        .unwrap();
     assert_eq!(k_f2_inviter, k_f2_scanner);
 
     // The two chain keys differ (different transcripts AND F2 mix-in).

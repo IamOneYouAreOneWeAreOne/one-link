@@ -89,11 +89,10 @@ pub mod request;
 
 pub use ack::{sign_chunk_ack, ChunkAck, ACK_DOMAIN};
 pub use plan::{
-    fan_out_plan, replan_after_source_failure, FanOutAssignment, FanOutPlan,
-    SourceCapacity,
+    fan_out_plan, replan_after_source_failure, FanOutAssignment, FanOutPlan, SourceCapacity,
 };
 pub use progress::TransferProgress;
 pub use request::{
-    sign_fetch_request, FetchRequest, FetchNonce, FETCH_NONCE_LEN, FETCH_REQUEST_DOMAIN,
+    sign_fetch_request, FetchNonce, FetchRequest, FETCH_NONCE_LEN, FETCH_REQUEST_DOMAIN,
     MAX_CHUNKS_PER_FETCH,
 };

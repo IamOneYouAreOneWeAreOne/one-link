@@ -41,8 +41,7 @@ pub fn pick_executor(
         match best {
             None => best = Some((*id, score)),
             Some((cur_id, cur_score)) => {
-                let better = score > cur_score
-                    || (score == cur_score && *id < cur_id);
+                let better = score > cur_score || (score == cur_score && *id < cur_id);
                 if better {
                     best = Some((*id, score));
                 }
@@ -121,9 +120,21 @@ mod tests {
     fn picks_desktop_for_gpu_task() {
         let (_m, reg) = make_reg();
         let caps = vec![
-            SourceCapacity { device_id: d(1), estimated_bps: 50_000, current_load_bytes: 0 },
-            SourceCapacity { device_id: d(2), estimated_bps: 100_000, current_load_bytes: 0 },
-            SourceCapacity { device_id: d(3), estimated_bps: 1_000_000_000, current_load_bytes: 0 },
+            SourceCapacity {
+                device_id: d(1),
+                estimated_bps: 50_000,
+                current_load_bytes: 0,
+            },
+            SourceCapacity {
+                device_id: d(2),
+                estimated_bps: 100_000,
+                current_load_bytes: 0,
+            },
+            SourceCapacity {
+                device_id: d(3),
+                estimated_bps: 1_000_000_000,
+                current_load_bytes: 0,
+            },
         ];
         let pick = pick_executor(&[DeviceCapability::Gpu], &reg, &caps, 100);
         assert_eq!(pick, Some(d(3)));
@@ -133,8 +144,7 @@ mod tests {
     fn no_eligible_returns_none() {
         let (_m, reg) = make_reg();
         let caps: Vec<SourceCapacity> = Vec::new();
-        let pick =
-            pick_executor(&[DeviceCapability::Tee], &reg, &caps, 100);
+        let pick = pick_executor(&[DeviceCapability::Tee], &reg, &caps, 100);
         assert!(pick.is_none());
     }
 
@@ -143,8 +153,16 @@ mod tests {
         let (_m, reg) = make_reg();
         // Both laptop + desktop have CpuHeavy. Desktop has more load.
         let caps = vec![
-            SourceCapacity { device_id: d(2), estimated_bps: 100, current_load_bytes: 0 },
-            SourceCapacity { device_id: d(3), estimated_bps: 100, current_load_bytes: 1_000 },
+            SourceCapacity {
+                device_id: d(2),
+                estimated_bps: 100,
+                current_load_bytes: 0,
+            },
+            SourceCapacity {
+                device_id: d(3),
+                estimated_bps: 100,
+                current_load_bytes: 1_000,
+            },
         ];
         let pick = pick_executor(&[DeviceCapability::CpuHeavy], &reg, &caps, 100);
         assert_eq!(pick, Some(d(2)));
@@ -153,12 +171,7 @@ mod tests {
     #[test]
     fn empty_capacity_returns_none() {
         let (_m, reg) = make_reg();
-        let pick = pick_executor(
-            &[DeviceCapability::Gpu],
-            &reg,
-            &[],
-            100,
-        );
+        let pick = pick_executor(&[DeviceCapability::Gpu], &reg, &[], 100);
         assert!(pick.is_none());
     }
 }

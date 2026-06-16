@@ -35,8 +35,8 @@ use crate::circuit::Circuit;
 use crate::errors::{OnionError, OnionResult};
 use crate::keyderiv::derive_layer_key_sender;
 use crate::packet::{
-    onion_packet_size, OnionPacket, AEAD_NONCE_LEN, HOP_ID_LEN,
-    MAX_USER_PAYLOAD, ONION_PACKET_VERSION,
+    onion_packet_size, OnionPacket, AEAD_NONCE_LEN, HOP_ID_LEN, MAX_USER_PAYLOAD,
+    ONION_PACKET_VERSION,
 };
 
 /// Build an onion packet wrapping `payload` for delivery along
@@ -143,9 +143,8 @@ pub fn build_onion<R: RngCore + CryptoRng>(
         // becomes: this hop's id (so the previous relay knows where
         // to forward) || this layer's encoded packet.
         if i > 0 {
-            let mut next_plain = Vec::with_capacity(
-                HOP_ID_LEN + onion_packet_size(packet.ciphertext.len()),
-            );
+            let mut next_plain =
+                Vec::with_capacity(HOP_ID_LEN + onion_packet_size(packet.ciphertext.len()));
             next_plain.extend_from_slice(hop.id.as_bytes());
             next_plain.extend_from_slice(&packet.encode());
             current_plaintext = next_plain;

@@ -140,11 +140,7 @@ impl RoutingTable {
     ///   pings the head; if head replies, the new peer is discarded;
     ///   if head times out, caller invokes
     ///   [`Self::replace_head_on_timeout`].
-    pub fn insert(
-        &mut self,
-        id: NodeId,
-        last_seen_unix: u64,
-    ) -> InsertOutcome {
+    pub fn insert(&mut self, id: NodeId, last_seen_unix: u64) -> InsertOutcome {
         let Some(idx) = self.own_id.bucket_index(&id) else {
             return InsertOutcome::SelfInsertIgnored;
         };
@@ -159,7 +155,9 @@ impl RoutingTable {
         }
         // New peer; bucket has room?
         if bucket.entries.len() < self.k {
-            bucket.entries.push_back(BucketEntry::new(id, last_seen_unix));
+            bucket
+                .entries
+                .push_back(BucketEntry::new(id, last_seen_unix));
             bucket.last_refresh_unix = last_seen_unix;
             return InsertOutcome::Inserted;
         }
@@ -189,10 +187,9 @@ impl RoutingTable {
         match bucket.entries.front() {
             Some(head) if head.id == timed_out_head => {
                 bucket.entries.pop_front();
-                bucket.entries.push_back(BucketEntry::new(
-                    new_peer,
-                    last_seen_unix,
-                ));
+                bucket
+                    .entries
+                    .push_back(BucketEntry::new(new_peer, last_seen_unix));
                 bucket.last_refresh_unix = last_seen_unix;
                 true
             }
@@ -221,11 +218,7 @@ impl RoutingTable {
     /// rather than K. Useful when a lookup needs α candidates to
     /// query in parallel where α < K.
     #[must_use]
-    pub fn closest_n_to(
-        &self,
-        target: &NodeId,
-        n: usize,
-    ) -> Vec<BucketEntry> {
+    pub fn closest_n_to(&self, target: &NodeId, n: usize) -> Vec<BucketEntry> {
         let mut all: Vec<BucketEntry> = self
             .buckets
             .iter()
@@ -244,11 +237,7 @@ impl RoutingTable {
     /// distance range, which has the effect of populating + refreshing
     /// the bucket.
     #[must_use]
-    pub fn stale_buckets(
-        &self,
-        now_unix: u64,
-        max_age_secs: u64,
-    ) -> Vec<usize> {
+    pub fn stale_buckets(&self, now_unix: u64, max_age_secs: u64) -> Vec<usize> {
         let threshold = now_unix.saturating_sub(max_age_secs);
         let mut out = Vec::new();
         for (i, b) in self.buckets.iter().enumerate() {
@@ -459,7 +448,7 @@ mod tests {
         t.insert(p1, 1);
         t.insert(p2, 2);
         let _ = t.insert(p3, 3); // BucketFull
-        // Simulate head PING timeout — caller invokes replacement.
+                                 // Simulate head PING timeout — caller invokes replacement.
         assert!(t.replace_head_on_timeout(p1, p3, 4));
         assert!(!t.contains(&p1)); // evicted
         assert!(t.contains(&p3));

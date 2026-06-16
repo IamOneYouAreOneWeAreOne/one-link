@@ -10,8 +10,8 @@ use ol_threshold_recovery::field_bound::{
 };
 use ol_threshold_recovery::prng::PrngState;
 use ol_threshold_recovery::shamir::{
-    max_participants, params_valid, reconstruct_byte, reconstruct_bytes,
-    share_byte, share_bytes, Share, ShareError,
+    max_participants, params_valid, reconstruct_byte, reconstruct_bytes, share_byte, share_bytes,
+    Share, ShareError,
 };
 
 // ── Adversarial: malformed share inputs ───────────────────────────
@@ -32,11 +32,7 @@ fn adversarial_all_zero_shares() {
     // If an attacker supplies all-zero shares, reconstruct should
     // not crash. Returns whatever Lagrange gives at x = 0 over a
     // constant-0 polynomial (which is 0). Either way: no panic.
-    let s = vec![
-        Share::new(1, 0),
-        Share::new(2, 0),
-        Share::new(3, 0),
-    ];
+    let s = vec![Share::new(1, 0), Share::new(2, 0), Share::new(3, 0)];
     let r = reconstruct_byte(&s, 3);
     assert!(r.is_ok());
     // Polynomial through (1,0), (2,0), (3,0) is identically 0.
@@ -116,12 +112,16 @@ fn adversarial_all_ff_secret_64b() {
 #[test]
 fn adversarial_high_entropy_secret_typical_master_key() {
     // 32 bytes of high-entropy "master Ed25519 seed" shape input.
-    let secret: Vec<u8> = (0..32u8).map(|i| i.wrapping_mul(13).wrapping_add(7)).collect();
+    let secret: Vec<u8> = (0..32u8)
+        .map(|i| i.wrapping_mul(13).wrapping_add(7))
+        .collect();
     let mut st = PrngState::new(0xDEAD_BEEF_CAFE_F00D);
     let streams = share_bytes(&secret, 3, 5, &mut st).unwrap();
     let xs = vec![1u8, 3, 5];
-    let refs: Vec<&[u8]> =
-        [&streams[0], &streams[2], &streams[4]].iter().map(|v| v.as_slice()).collect();
+    let refs: Vec<&[u8]> = [&streams[0], &streams[2], &streams[4]]
+        .iter()
+        .map(|v| v.as_slice())
+        .collect();
     assert_eq!(reconstruct_bytes(&xs, &refs, 3).unwrap(), secret);
 }
 
@@ -189,12 +189,18 @@ fn adversarial_field_bound_score_out_of_range_caught() {
     witness.holder_scores[2] = -0.01;
     let mut st = PrngState::new(0);
     let err = field_bound_split(b"x", 3, 5, &mut st, &witness).unwrap_err();
-    assert!(matches!(err, FieldBindingError::FieldScoreOutOfRange { .. }));
+    assert!(matches!(
+        err,
+        FieldBindingError::FieldScoreOutOfRange { .. }
+    ));
 
     // Above 1.
     witness.holder_scores[2] = 1.01;
     let err = field_bound_split(b"x", 3, 5, &mut st, &witness).unwrap_err();
-    assert!(matches!(err, FieldBindingError::FieldScoreOutOfRange { .. }));
+    assert!(matches!(
+        err,
+        FieldBindingError::FieldScoreOutOfRange { .. }
+    ));
 }
 
 #[test]
@@ -208,7 +214,10 @@ fn adversarial_field_bound_score_count_mismatch() {
     let err = field_bound_split(b"x", 2, 5, &mut st, &witness).unwrap_err();
     assert!(matches!(
         err,
-        FieldBindingError::ScoreCountMismatch { expected: 5, got: 3 }
+        FieldBindingError::ScoreCountMismatch {
+            expected: 5,
+            got: 3
+        }
     ));
 }
 
@@ -231,11 +240,9 @@ fn adversarial_field_bound_replay_with_different_epoch_fails() {
     let mut st = PrngState::new(0);
     let masked_old = field_bound_split(secret, 3, 5, &mut st, &w_old).unwrap();
     let xs = vec![1u8, 2, 3];
-    let supplied: Vec<&[u8]> =
-        masked_old[..3].iter().map(Vec::as_slice).collect();
+    let supplied: Vec<&[u8]> = masked_old[..3].iter().map(Vec::as_slice).collect();
     let indices = vec![0usize, 1, 2];
-    let r =
-        field_bound_reconstruct(&xs, &supplied, &indices, 3, &w_new).unwrap();
+    let r = field_bound_reconstruct(&xs, &supplied, &indices, 3, &w_new).unwrap();
     assert_ne!(r, secret);
 }
 

@@ -21,12 +21,12 @@ use ol_aead::{
     key::{ChunkAeadKey, FRAME_KEY_LEN as RUST_FRAME_KEY_LEN},
     AEAD_TAG_LEN as RUST_AEAD_TAG_LEN,
 };
-use pyo3::types::{PyList, PyTupleMethods};
 use ol_chunk::AEAD_FRAME_PLAINTEXT_LEN as RUST_AEAD_FRAME_PLAINTEXT_LEN;
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyTuple};
+use pyo3::types::{PyList, PyTupleMethods};
 
 use crate::errors::aead_error_to_pyerr;
 
@@ -267,10 +267,8 @@ impl PyAeadCipher {
         let cipher = self.inner.clone();
         let ciphertexts = py
             .allow_threads(|| -> Result<Vec<Vec<u8>>, _> {
-                let borrowed: Vec<(&[u8; 32], &[u8])> = owned
-                    .iter()
-                    .map(|(id, pt)| (id, pt.as_slice()))
-                    .collect();
+                let borrowed: Vec<(&[u8; 32], &[u8])> =
+                    owned.iter().map(|(id, pt)| (id, pt.as_slice())).collect();
                 rust_encrypt_chunks_par(&cipher, &borrowed)
             })
             .map_err(aead_error_to_pyerr)?;
@@ -294,8 +292,7 @@ impl PyAeadCipher {
         py: Python<'py>,
         chunks: &Bound<'py, PyList>,
     ) -> PyResult<Bound<'py, PyList>> {
-        let mut owned: Vec<([u8; 32], usize, Vec<u8>)> =
-            Vec::with_capacity(chunks.len());
+        let mut owned: Vec<([u8; 32], usize, Vec<u8>)> = Vec::with_capacity(chunks.len());
         for item in chunks.iter() {
             let tup = item.downcast::<PyTuple>().map_err(|_| {
                 PyValueError::new_err(

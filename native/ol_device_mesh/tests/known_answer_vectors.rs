@@ -16,24 +16,19 @@
 
 use ol_device_mesh::derivation::{derive_field_bound_subkey_seed, HKDF_DOMAIN};
 use ol_device_mesh::{
-    derive_subkey_seed, master_pin_handle, DeviceClass, MasterIdentity,
-    DEVICE_ID_LEN, MASTER_SEED_LEN, SUBKEY_SEED_LEN,
+    derive_subkey_seed, master_pin_handle, DeviceClass, MasterIdentity, DEVICE_ID_LEN,
+    MASTER_SEED_LEN, SUBKEY_SEED_LEN,
 };
 
 const MASTER_FIXED: [u8; MASTER_SEED_LEN] = [
-    0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
-    0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
-    0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57,
-    0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f,
-    0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67,
-    0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f,
-    0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77,
-    0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f,
+    0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
+    0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f,
+    0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f,
+    0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f,
 ];
 
 const DEVICE_ID_FIXED: [u8; DEVICE_ID_LEN] = [
-    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
-    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
 ];
 
 const FIELD_SEED_FIXED: [u8; 32] = [0xEE; 32];
@@ -71,7 +66,10 @@ fn kat_device_class_tags_pinned() {
         (DeviceClass::Tablet, "4f4c2d5441424c54"),
         (DeviceClass::Desktop, "4f4c2d4445534b54"),
         (DeviceClass::Server, "4f4c2d5345525652"),
-        (DeviceClass::Wearable, "4f4c2d57454152" /* OL-WEAR... */ ),
+        (
+            DeviceClass::Wearable,
+            "4f4c2d57454152", /* OL-WEAR... */
+        ),
         (DeviceClass::Appliance, "4f4c2d4150504c49"),
         (DeviceClass::Generic, "4f4c2d47454e5243"),
     ];
@@ -91,12 +89,14 @@ fn kat_device_class_tags_pinned() {
 
 #[test]
 fn kat_subkey_seed_pinned() {
-    let seed =
-        derive_subkey_seed(&MASTER_FIXED, DeviceClass::Phone, &DEVICE_ID_FIXED, 0);
+    let seed = derive_subkey_seed(&MASTER_FIXED, DeviceClass::Phone, &DEVICE_ID_FIXED, 0);
     let hex = to_hex(&seed);
-    check_regen("Subkey seed (MASTER_FIXED, Phone, DEVICE_ID_FIXED, day=0)", || {
-        eprintln!("    EXPECTED_SUBKEY_SEED_HEX = \"{hex}\"");
-    });
+    check_regen(
+        "Subkey seed (MASTER_FIXED, Phone, DEVICE_ID_FIXED, day=0)",
+        || {
+            eprintln!("    EXPECTED_SUBKEY_SEED_HEX = \"{hex}\"");
+        },
+    );
     assert_eq!(hex, EXPECTED_SUBKEY_SEED_HEX, "subkey-seed drift");
 }
 
@@ -112,9 +112,12 @@ fn kat_field_bound_seed_pinned() {
         &FIELD_SEED_FIXED,
     );
     let hex = to_hex(&seed);
-    check_regen("Field-bound seed (MASTER_FIXED, Phone, day=0, FIELD_SEED_FIXED)", || {
-        eprintln!("    EXPECTED_FIELD_BOUND_SEED_HEX = \"{hex}\"");
-    });
+    check_regen(
+        "Field-bound seed (MASTER_FIXED, Phone, day=0, FIELD_SEED_FIXED)",
+        || {
+            eprintln!("    EXPECTED_FIELD_BOUND_SEED_HEX = \"{hex}\"");
+        },
+    );
     assert_eq!(hex, EXPECTED_FIELD_BOUND_SEED_HEX, "field-bound seed drift");
 }
 

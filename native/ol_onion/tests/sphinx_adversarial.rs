@@ -91,7 +91,10 @@ fn adversarial_payload_region_flips_change_user_payload() {
         SphinxPeelOutcome::Deliver { payload } => {
             // The payload was modified by the flip — Sphinx itself
             // does NOT detect this; the caller's AEAD would.
-            assert_ne!(payload, user_payload, "payload byte flip didn't propagate to decrypt");
+            assert_ne!(
+                payload, user_payload,
+                "payload byte flip didn't propagate to decrypt"
+            );
         }
         _ => panic!(),
     }
@@ -105,7 +108,10 @@ fn adversarial_truncated_packet_rejected() {
     let bytes = packet.as_bytes();
     for len in 0..SPHINX_PACKET_LEN {
         let err = SphinxPacket::from_bytes(&bytes[..len]).unwrap_err();
-        assert!(matches!(err, OnionError::BadFrameSize { .. } | OnionError::Truncated { .. }));
+        assert!(matches!(
+            err,
+            OnionError::BadFrameSize { .. } | OnionError::Truncated { .. }
+        ));
     }
 }
 
@@ -118,10 +124,7 @@ fn adversarial_wrong_version_byte_rejected() {
         let mut bytes = *packet.as_bytes();
         bytes[0] = bad_version;
         let err = SphinxPacket::from_bytes(&bytes).unwrap_err();
-        assert!(matches!(
-            err,
-            OnionError::UnsupportedVersion { .. }
-        ));
+        assert!(matches!(err, OnionError::UnsupportedVersion { .. }));
     }
 }
 
@@ -166,10 +169,8 @@ fn adversarial_cross_circuit_alpha_swap_rejected() {
     let (dest_sk, dest) = make_relay();
     let (eph_a, _) = generate_static_keypair(&mut OsRng);
     let (eph_b, _) = generate_static_keypair(&mut OsRng);
-    let packet_a =
-        build_sphinx_onion(&eph_a, &[dest.clone()], b"a", &mut OsRng).unwrap();
-    let packet_b =
-        build_sphinx_onion(&eph_b, &[dest.clone()], b"b", &mut OsRng).unwrap();
+    let packet_a = build_sphinx_onion(&eph_a, &[dest.clone()], b"a", &mut OsRng).unwrap();
+    let packet_b = build_sphinx_onion(&eph_b, &[dest.clone()], b"b", &mut OsRng).unwrap();
 
     let mut spliced = *packet_a.as_bytes();
     spliced[1..33].copy_from_slice(&packet_b.as_bytes()[1..33]);
@@ -241,8 +242,7 @@ fn adversarial_pq_wrong_pq_dk_at_entry_rejected() {
     let (entry_x_sk, _entry_pq_dk, entry) = make_pq_entry();
     let (wrong_pq_dk, _) = generate_pq_keypair(&mut OsRng);
     let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-    let packet =
-        build_pq_sphinx_onion(&eph_sk, &[entry.clone()], b"x", &mut OsRng).unwrap();
+    let packet = build_pq_sphinx_onion(&eph_sk, &[entry.clone()], b"x", &mut OsRng).unwrap();
     let err = peel_pq_sphinx_entry(&entry_x_sk, &wrong_pq_dk, &packet).unwrap_err();
     assert_eq!(err, OnionError::AeadFail);
 }
@@ -264,8 +264,7 @@ fn adversarial_pq_intermediate_attempts_entry_peel_rejected() {
         static_pq_pk: None, // intermediate hops don't have PQ pubkeys in this design
     };
     let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-    let packet =
-        build_pq_sphinx_onion(&eph_sk, &[entry, mid], b"x", &mut OsRng).unwrap();
+    let packet = build_pq_sphinx_onion(&eph_sk, &[entry, mid], b"x", &mut OsRng).unwrap();
 
     // Entry peels with hybrid.
     let outcome = peel_pq_sphinx_entry(&entry_x_sk, &entry_pq_dk, &packet).unwrap();
@@ -283,8 +282,8 @@ fn adversarial_pq_intermediate_attempts_entry_peel_rejected() {
 
 #[test]
 fn adversarial_pq_header_region_byte_flips_rejected() {
-    use ol_onion::sphinx::primitives::HEADER_LEN;
     use ol_onion::sphinx::pq::ML_KEM_CT_LEN;
+    use ol_onion::sphinx::primitives::HEADER_LEN;
     let (entry_x_sk, entry_pq_dk, entry) = make_pq_entry();
     let (eph_sk, _) = generate_static_keypair(&mut OsRng);
     let packet = build_pq_sphinx_onion(&eph_sk, &[entry], b"adv", &mut OsRng).unwrap();
@@ -342,8 +341,7 @@ fn adversarial_max_hops_round_trip() {
     let pairs: Vec<_> = (0..MAX_HOPS).map(|_| make_relay()).collect();
     let circuit: Vec<SphinxHop> = pairs.iter().map(|(_, h)| h.clone()).collect();
     let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-    let mut packet =
-        build_sphinx_onion(&eph_sk, &circuit, b"max-hop adv", &mut OsRng).unwrap();
+    let mut packet = build_sphinx_onion(&eph_sk, &circuit, b"max-hop adv", &mut OsRng).unwrap();
     for (i, (sk, _)) in pairs.iter().enumerate() {
         match peel_sphinx_layer(sk, &packet).unwrap() {
             SphinxPeelOutcome::Forward { next_packet, .. } => {

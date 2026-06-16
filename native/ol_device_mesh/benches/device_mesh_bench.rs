@@ -5,27 +5,21 @@ use rand::rngs::OsRng;
 
 use ol_device_mesh::derivation::derive_field_bound_subkey_seed;
 use ol_device_mesh::distributed_fs::{
-    repair_plan, sign_storage_attestation, ChunkHash, ChunkPlacement,
-    ErasurePolicy, FileManifest, FILE_ID_LEN,
+    repair_plan, sign_storage_attestation, ChunkHash, ChunkPlacement, ErasurePolicy, FileManifest,
+    FILE_ID_LEN,
 };
 use ol_device_mesh::fan_out::{
-    fan_out_plan, sign_chunk_ack, sign_fetch_request, SourceCapacity,
-    FETCH_NONCE_LEN,
+    fan_out_plan, sign_chunk_ack, sign_fetch_request, SourceCapacity, FETCH_NONCE_LEN,
 };
-use ol_device_mesh::mesh_state::{
-    AuthenticatedOp, Delta, MeshState, SubtreePolicyKind, SyncState,
-};
-use ol_device_mesh::quorum::{
-    mint_policy, propose_operation, sign_approval, QuorumCertificate,
+use ol_device_mesh::mesh_state::{AuthenticatedOp, Delta, MeshState, SubtreePolicyKind, SyncState};
+use ol_device_mesh::quorum::{mint_policy, propose_operation, sign_approval, QuorumCertificate};
+use ol_device_mesh::{
+    derive_subkey_seed, master_pin_handle, mint_subkey, ratchet_one_day, sibling_witness,
+    state_root, verify_liveness, DeviceClass, HardwareWrapper, LivenessProof, MasterIdentity,
+    SoftwareWrapper, DEFAULT_LIVENESS_SKEW_SECS, DEVICE_ID_LEN, MASTER_SEED_LEN, SUBKEY_SEED_LEN,
 };
 use ol_pqsig::HybridVerifyingKey;
 use std::collections::BTreeSet;
-use ol_device_mesh::{
-    derive_subkey_seed, master_pin_handle, mint_subkey, ratchet_one_day,
-    sibling_witness, state_root, verify_liveness, DeviceClass, HardwareWrapper,
-    LivenessProof, MasterIdentity, SoftwareWrapper, DEFAULT_LIVENESS_SKEW_SECS,
-    DEVICE_ID_LEN, MASTER_SEED_LEN, SUBKEY_SEED_LEN,
-};
 
 fn bench_derive_subkey_seed(c: &mut Criterion) {
     let master = [0x42; MASTER_SEED_LEN];
@@ -92,20 +86,13 @@ fn bench_mint_subkey(c: &mut Criterion) {
 
 fn bench_liveness_issue(c: &mut Criterion) {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk, _att) = mint_subkey(
-        &master,
-        DeviceClass::Phone,
-        [0xAA; DEVICE_ID_LEN],
-        0,
-        365,
-    )
-    .unwrap();
+    let (sk, _att) =
+        mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
     let now = 1_700_000_000u64;
     let sr = state_root(b"bench state");
     c.bench_function("device_mesh::liveness_proof_issue", |b| {
         b.iter(|| {
-            let p = LivenessProof::issue(black_box(&sk), black_box(now), black_box(sr))
-                .unwrap();
+            let p = LivenessProof::issue(black_box(&sk), black_box(now), black_box(sr)).unwrap();
             black_box(p);
         });
     });
@@ -113,14 +100,8 @@ fn bench_liveness_issue(c: &mut Criterion) {
 
 fn bench_liveness_verify(c: &mut Criterion) {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk, _att) = mint_subkey(
-        &master,
-        DeviceClass::Phone,
-        [0xAA; DEVICE_ID_LEN],
-        0,
-        365,
-    )
-    .unwrap();
+    let (sk, _att) =
+        mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
     let now = 1_700_000_000u64;
     let sr = state_root(b"bench state");
     let proof = LivenessProof::issue(&sk, now, sr).unwrap();
@@ -163,8 +144,7 @@ fn bench_master_pin_handle(c: &mut Criterion) {
 
 fn bench_quorum_mint_policy(c: &mut Criterion) {
     let master = MasterIdentity::generate(&mut OsRng);
-    let devices: Vec<[u8; DEVICE_ID_LEN]> =
-        (0..5).map(|i| [i as u8; DEVICE_ID_LEN]).collect();
+    let devices: Vec<[u8; DEVICE_ID_LEN]> = (0..5).map(|i| [i as u8; DEVICE_ID_LEN]).collect();
     c.bench_function("device_mesh::quorum_mint_policy_3_of_5", |b| {
         b.iter(|| {
             let p = mint_policy(
@@ -184,10 +164,8 @@ fn bench_quorum_propose_and_approve(c: &mut Criterion) {
     let master = MasterIdentity::generate(&mut OsRng);
     let id1 = [0x11; DEVICE_ID_LEN];
     let id2 = [0x22; DEVICE_ID_LEN];
-    let (sk1, _a1) =
-        mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
-    let (sk2, _a2) =
-        mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
+    let (sk1, _a1) = mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
+    let (sk2, _a2) = mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
     let policy = mint_policy(&master, [0x42; 16], b"p", 2, vec![id1, id2]).unwrap();
     let now: u64 = 1_700_000_000;
     c.bench_function("device_mesh::quorum_propose_operation", |b| {
@@ -204,14 +182,11 @@ fn bench_quorum_propose_and_approve(c: &mut Criterion) {
             black_box(p);
         });
     });
-    let proposal = propose_operation(
-        &sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600,
-    )
-    .unwrap();
+    let proposal =
+        propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600).unwrap();
     c.bench_function("device_mesh::quorum_sign_approval", |b| {
         b.iter(|| {
-            let a = sign_approval(black_box(&sk2), black_box(&proposal), now + 1)
-                .unwrap();
+            let a = sign_approval(black_box(&sk2), black_box(&proposal), now + 1).unwrap();
             black_box(a);
         });
     });
@@ -222,19 +197,13 @@ fn bench_quorum_certificate_verify_2_of_3(c: &mut Criterion) {
     let id1 = [0x11; DEVICE_ID_LEN];
     let id2 = [0x22; DEVICE_ID_LEN];
     let id3 = [0x33; DEVICE_ID_LEN];
-    let (sk1, a1) =
-        mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
-    let (sk2, a2) =
-        mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
-    let (sk3, a3) =
-        mint_subkey(&master, DeviceClass::Desktop, id3, 0, 365).unwrap();
-    let policy =
-        mint_policy(&master, [0x42; 16], b"p", 2, vec![id1, id2, id3]).unwrap();
+    let (sk1, a1) = mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
+    let (sk2, a2) = mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
+    let (sk3, a3) = mint_subkey(&master, DeviceClass::Desktop, id3, 0, 365).unwrap();
+    let policy = mint_policy(&master, [0x42; 16], b"p", 2, vec![id1, id2, id3]).unwrap();
     let now: u64 = 1_700_000_000;
-    let proposal = propose_operation(
-        &sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600,
-    )
-    .unwrap();
+    let proposal =
+        propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600).unwrap();
     let ap2 = sign_approval(&sk2, &proposal, now + 1).unwrap();
     let ap3 = sign_approval(&sk3, &proposal, now + 2).unwrap();
     let cert = QuorumCertificate {
@@ -260,7 +229,10 @@ fn bench_mesh_state_auth_op_sign(c: &mut Criterion) {
             let op = AuthenticatedOp::sign(
                 black_box(&sk),
                 black_box(b"contacts".to_vec()),
-                black_box(Delta::OrAdd { element: b"alice".to_vec(), tag: [0x77; 16] }),
+                black_box(Delta::OrAdd {
+                    element: b"alice".to_vec(),
+                    tag: [0x77; 16],
+                }),
                 1,
                 1,
             )
@@ -278,7 +250,10 @@ fn bench_mesh_state_auth_op_verify(c: &mut Criterion) {
     let op = AuthenticatedOp::sign(
         &sk,
         b"contacts".to_vec(),
-        Delta::OrAdd { element: b"alice".to_vec(), tag: [0x77; 16] },
+        Delta::OrAdd {
+            element: b"alice".to_vec(),
+            tag: [0x77; 16],
+        },
         1,
         1,
     )
@@ -295,18 +270,21 @@ fn bench_mesh_state_root(c: &mut Criterion) {
     let mut state = MeshState::empty();
     for i in 0..16u8 {
         let label = vec![b's', i];
-        state.ensure_subtree(label.clone(), SubtreePolicyKind::LwwMap).unwrap();
-        for k in 0..8u8 {
-            state.apply_delta(
-                &label,
-                &Delta::MapPut {
-                    key: vec![k],
-                    value: vec![k, k],
-                    ts: u64::from(k),
-                },
-                &w,
-            )
+        state
+            .ensure_subtree(label.clone(), SubtreePolicyKind::LwwMap)
             .unwrap();
+        for k in 0..8u8 {
+            state
+                .apply_delta(
+                    &label,
+                    &Delta::MapPut {
+                        key: vec![k],
+                        value: vec![k, k],
+                        ts: u64::from(k),
+                    },
+                    &w,
+                )
+                .unwrap();
         }
     }
     c.bench_function("device_mesh::mesh_state_root_16_subtrees_8_keys", |b| {
@@ -326,7 +304,9 @@ fn bench_mesh_state_sync_ingest(c: &mut Criterion) {
         b.iter_with_setup(
             || {
                 let mut state = MeshState::empty();
-                state.ensure_subtree(b"x".to_vec(), SubtreePolicyKind::LwwRegister).unwrap();
+                state
+                    .ensure_subtree(b"x".to_vec(), SubtreePolicyKind::LwwRegister)
+                    .unwrap();
                 let sync = SyncState::empty();
                 (state, sync)
             },
@@ -334,7 +314,10 @@ fn bench_mesh_state_sync_ingest(c: &mut Criterion) {
                 let op = AuthenticatedOp::sign(
                     &sk,
                     b"x".to_vec(),
-                    Delta::LwwSet { value: b"v".to_vec(), ts: 1 },
+                    Delta::LwwSet {
+                        value: b"v".to_vec(),
+                        ts: 1,
+                    },
                     1,
                     1,
                 )
@@ -390,12 +373,8 @@ fn bench_dfs_storage_attest_sign(c: &mut Criterion) {
         .collect();
     c.bench_function("device_mesh::dfs_storage_attest_sign_256", |b| {
         b.iter(|| {
-            let att = sign_storage_attestation(
-                black_box(&sk),
-                1,
-                black_box(chunks.clone()),
-            )
-            .unwrap();
+            let att =
+                sign_storage_attestation(black_box(&sk), 1, black_box(chunks.clone())).unwrap();
             black_box(att);
         });
     });
@@ -423,8 +402,7 @@ fn bench_dfs_storage_attest_verify(c: &mut Criterion) {
 
 fn bench_dfs_repair_plan(c: &mut Criterion) {
     let policy = ErasurePolicy::new(10, 4, 2).unwrap();
-    let mesh: BTreeSet<[u8; DEVICE_ID_LEN]> =
-        (1u8..=4).map(|i| [i; DEVICE_ID_LEN]).collect();
+    let mesh: BTreeSet<[u8; DEVICE_ID_LEN]> = (1u8..=4).map(|i| [i; DEVICE_ID_LEN]).collect();
     let placements: Vec<ChunkPlacement> = (0u8..64)
         .map(|i| {
             let mut h = [0u8; 32];
@@ -486,17 +464,16 @@ fn bench_fan_out_plan(c: &mut Criterion) {
 
 fn bench_fan_out_fetch_request(c: &mut Criterion) {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk, _) = mint_subkey(
-        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk, _) = mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
     c.bench_function("device_mesh::fan_out_fetch_request_sign_8", |b| {
         b.iter(|| {
             let req = sign_fetch_request(
                 black_box(&sk),
                 [0xBB; DEVICE_ID_LEN],
                 [0xCC; FILE_ID_LEN],
-                vec![[1; 32], [2; 32], [3; 32], [4; 32], [5; 32], [6; 32], [7; 32], [8; 32]],
+                vec![
+                    [1; 32], [2; 32], [3; 32], [4; 32], [5; 32], [6; 32], [7; 32], [8; 32],
+                ],
                 1_000_000,
                 1,
                 10,
@@ -510,10 +487,7 @@ fn bench_fan_out_fetch_request(c: &mut Criterion) {
 
 fn bench_fan_out_chunk_ack(c: &mut Criterion) {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk, _) = mint_subkey(
-        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk, _) = mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
     c.bench_function("device_mesh::fan_out_chunk_ack_sign", |b| {
         b.iter(|| {
             let ack = sign_chunk_ack(
@@ -533,8 +507,7 @@ fn bench_fan_out_chunk_ack(c: &mut Criterion) {
 fn bench_self_routing_announcement_sign(c: &mut Criterion) {
     use ol_device_mesh::self_routing::{sign_route_announcement, PeerLink};
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk, _) =
-        mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
+    let (sk, _) = mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
     let links: Vec<PeerLink> = (1u8..=8)
         .map(|i| PeerLink {
             peer_device_id: [i; DEVICE_ID_LEN],
@@ -545,12 +518,9 @@ fn bench_self_routing_announcement_sign(c: &mut Criterion) {
         .collect();
     c.bench_function("device_mesh::self_routing_announcement_sign_8", |b| {
         b.iter(|| {
-            let ann = sign_route_announcement(
-                black_box(&sk),
-                1_700_000_000,
-                black_box(links.clone()),
-            )
-            .unwrap();
+            let ann =
+                sign_route_announcement(black_box(&sk), 1_700_000_000, black_box(links.clone()))
+                    .unwrap();
             black_box(ann);
         });
     });
@@ -566,8 +536,7 @@ fn bench_self_routing_pick_best_route(c: &mut Criterion) {
     let mut atts = Vec::new();
     for i in 1u8..=6 {
         let id = [i; DEVICE_ID_LEN];
-        let (sk, a) =
-            mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+        let (sk, a) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
         ids.push(id);
         sks.push(sk);
         atts.push(a);
@@ -589,12 +558,15 @@ fn bench_self_routing_pick_best_route(c: &mut Criterion) {
     }
     let src = ids[0];
     let dst = ids[ids.len() - 1];
-    c.bench_function("device_mesh::self_routing_pick_best_route_6_node_clique", |b| {
-        b.iter(|| {
-            let r = pick_best_route(black_box(&table), black_box(&src), black_box(&dst));
-            black_box(r);
-        });
-    });
+    c.bench_function(
+        "device_mesh::self_routing_pick_best_route_6_node_clique",
+        |b| {
+            b.iter(|| {
+                let r = pick_best_route(black_box(&table), black_box(&src), black_box(&dst));
+                black_box(r);
+            });
+        },
+    );
 }
 
 fn bench_self_onion_derive_identity(c: &mut Criterion) {
@@ -611,8 +583,7 @@ fn bench_self_onion_derive_identity(c: &mut Criterion) {
 
 fn bench_self_onion_build_2_hop(c: &mut Criterion) {
     use ol_device_mesh::self_onion::{
-        build_self_onion_circuit, derive_onion_identity, sign_onion_attestation,
-        OnionKeyRegistry,
+        build_self_onion_circuit, derive_onion_identity, sign_onion_attestation, OnionKeyRegistry,
     };
     use ol_device_mesh::self_routing::Route;
     let master = MasterIdentity::generate(&mut OsRng);
@@ -621,10 +592,7 @@ fn bench_self_onion_build_2_hop(c: &mut Criterion) {
     let mut reg = OnionKeyRegistry::empty();
     for id in &[src, dst] {
         let identity = derive_onion_identity(&master, id);
-        let att = sign_onion_attestation(
-            &master, *id, identity.public_bytes(), 0, 365,
-        )
-        .unwrap();
+        let att = sign_onion_attestation(&master, *id, identity.public_bytes(), 0, 365).unwrap();
         reg.ingest(att, &master.verifying_key()).unwrap();
     }
     let route = Route {
@@ -660,10 +628,7 @@ fn bench_self_onion_peel(c: &mut Criterion) {
     let mut reg = OnionKeyRegistry::empty();
     for id in &[src, dst] {
         let identity = derive_onion_identity(&master, id);
-        let att = sign_onion_attestation(
-            &master, *id, identity.public_bytes(), 0, 365,
-        )
-        .unwrap();
+        let att = sign_onion_attestation(&master, *id, identity.public_bytes(), 0, 365).unwrap();
         reg.ingest(att, &master.verifying_key()).unwrap();
     }
     let route = Route {
@@ -671,17 +636,11 @@ fn bench_self_onion_peel(c: &mut Criterion) {
         bottleneck_tau: 100,
         min_last_seen_unix: 1,
     };
-    let packet = build_self_onion_circuit(
-        &route, &reg, 0, b"bench payload", &mut OsRng,
-    )
-    .unwrap();
+    let packet = build_self_onion_circuit(&route, &reg, 0, b"bench payload", &mut OsRng).unwrap();
     c.bench_function("device_mesh::self_onion_peel_layer", |b| {
         b.iter(|| {
-            let outcome = peel_self_onion_layer(
-                black_box(&dst_identity),
-                black_box(&packet),
-            )
-            .unwrap();
+            let outcome =
+                peel_self_onion_layer(black_box(&dst_identity), black_box(&packet)).unwrap();
             black_box(outcome);
         });
     });
@@ -773,10 +732,7 @@ fn bench_compute_task_request_sign(c: &mut Criterion) {
     use ol_device_mesh::compute::{sign_task_request, DeviceCapability, TaskClass};
     use ol_device_mesh::distributed_fs::FILE_ID_LEN;
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk, _) = mint_subkey(
-        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk, _) = mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
     c.bench_function("device_mesh::compute_task_request_sign", |b| {
         b.iter(|| {
             let req = sign_task_request(
@@ -798,8 +754,7 @@ fn bench_compute_task_request_sign(c: &mut Criterion) {
 
 fn bench_compute_pick_executor(c: &mut Criterion) {
     use ol_device_mesh::compute::{
-        pick_executor, sign_capability_attestation, CapabilityRegistry,
-        DeviceCapability,
+        pick_executor, sign_capability_attestation, CapabilityRegistry, DeviceCapability,
     };
     use ol_device_mesh::fan_out::SourceCapacity;
     let master = MasterIdentity::generate(&mut OsRng);

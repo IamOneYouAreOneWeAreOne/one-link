@@ -107,7 +107,11 @@ mod tests {
             sign_capability_attestation(
                 &master,
                 desktop,
-                vec![DeviceCapability::Gpu, DeviceCapability::CpuHeavy, DeviceCapability::AlwaysOn],
+                vec![
+                    DeviceCapability::Gpu,
+                    DeviceCapability::CpuHeavy,
+                    DeviceCapability::AlwaysOn,
+                ],
                 0,
                 365,
             )
@@ -115,11 +119,9 @@ mod tests {
             &master.verifying_key(),
         )
         .unwrap();
-        let gpu_devices =
-            reg.devices_with(&[DeviceCapability::Gpu], 100);
+        let gpu_devices = reg.devices_with(&[DeviceCapability::Gpu], 100);
         assert_eq!(gpu_devices, vec![desktop]);
-        let mic_devices =
-            reg.devices_with(&[DeviceCapability::Microphone], 100);
+        let mic_devices = reg.devices_with(&[DeviceCapability::Microphone], 100);
         assert_eq!(mic_devices, vec![phone]);
     }
 
@@ -129,22 +131,12 @@ mod tests {
         let id = [0x33; DEVICE_ID_LEN];
         let mut reg = CapabilityRegistry::empty();
         reg.ingest(
-            sign_capability_attestation(
-                &master,
-                id,
-                vec![DeviceCapability::Gpu],
-                10,
-                100,
-            )
-            .unwrap(),
+            sign_capability_attestation(&master, id, vec![DeviceCapability::Gpu], 10, 100).unwrap(),
             &master.verifying_key(),
         )
         .unwrap();
         assert!(reg.devices_with(&[DeviceCapability::Gpu], 5).is_empty());
-        assert_eq!(
-            reg.devices_with(&[DeviceCapability::Gpu], 50),
-            vec![id]
-        );
+        assert_eq!(reg.devices_with(&[DeviceCapability::Gpu], 50), vec![id]);
         assert!(reg.devices_with(&[DeviceCapability::Gpu], 200).is_empty());
     }
 

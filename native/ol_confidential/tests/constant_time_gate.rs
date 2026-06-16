@@ -92,12 +92,7 @@ fn ct_attest_verify_uniform_over_invalid_sigs() {
         let (mean, _, _) = ct_summary(&samples);
         bucket_means.push(mean);
     }
-    let (_, _, rel) = ct_summary(
-        &bucket_means
-            .iter()
-            .map(|x| *x as u64)
-            .collect::<Vec<_>>(),
-    );
+    let (_, _, rel) = ct_summary(&bucket_means.iter().map(|x| *x as u64).collect::<Vec<_>>());
     assert!(
         rel < REL_STDDEV_MAX,
         "verify_attestation rel-stddev across tamper-position buckets {rel:.4} ≥ {REL_STDDEV_MAX}"
@@ -125,12 +120,7 @@ fn ct_unseal_uniform_over_tamper_position() {
         let (mean, _, _) = ct_summary(&samples);
         bucket_means.push(mean);
     }
-    let (_, _, rel) = ct_summary(
-        &bucket_means
-            .iter()
-            .map(|x| *x as u64)
-            .collect::<Vec<_>>(),
-    );
+    let (_, _, rel) = ct_summary(&bucket_means.iter().map(|x| *x as u64).collect::<Vec<_>>());
     assert!(
         rel < REL_STDDEV_MAX,
         "unseal rel-stddev across tamper-position buckets {rel:.4} ≥ {REL_STDDEV_MAX}"

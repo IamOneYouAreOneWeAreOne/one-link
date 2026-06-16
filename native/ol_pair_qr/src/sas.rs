@@ -66,8 +66,8 @@ impl Sas {
         let digest = h.finalize();
         let bytes = digest.as_bytes();
         // Take 30 bits from the first 4 bytes; mask to 30 bits.
-        let raw_bits = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
-            & ((1u32 << SAS_BITS) - 1);
+        let raw_bits =
+            u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) & ((1u32 << SAS_BITS) - 1);
         let mut words = [""; SAS_WORD_COUNT];
         for i in 0..SAS_WORD_COUNT {
             // Most significant 6 bits first → reads naturally

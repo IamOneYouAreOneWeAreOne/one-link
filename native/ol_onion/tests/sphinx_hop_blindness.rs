@@ -84,7 +84,10 @@ fn alpha_bytes_at_each_hop_look_uniform() {
     );
     // df=255 critical at p=0.001 is ~340. Ristretto255 compressed
     // points should sit well under this.
-    assert!(chi < 400.0, "alpha bytes deviate from uniform: chi-sq = {chi}");
+    assert!(
+        chi < 400.0,
+        "alpha bytes deviate from uniform: chi-sq = {chi}"
+    );
 }
 
 #[test]

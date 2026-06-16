@@ -65,8 +65,8 @@ use blake3::Hasher;
 use ed25519_dalek::{Signer as _, SigningKey, Verifier as _, VerifyingKey};
 use ml_dsa::{
     signature::{Keypair as _, Signer as _},
-    B32, EncodedSignature, EncodedVerifyingKey, MlDsa65,
-    SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
+    EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey as MlDsaSigningKey,
+    VerifyingKey as MlDsaVerifyingKey, B32,
 };
 use rand_core::{CryptoRng, RngCore};
 use std::sync::OnceLock;
@@ -198,14 +198,14 @@ impl HybridVerifyingKey {
         }
         let mut ed_bytes = [0u8; ED25519_VK_LEN];
         ed_bytes.copy_from_slice(&bytes[..ED25519_VK_LEN]);
-        let ed25519 = VerifyingKey::from_bytes(&ed_bytes)
-            .map_err(|_| PqSigError::InvalidPubkey)?;
+        let ed25519 = VerifyingKey::from_bytes(&ed_bytes).map_err(|_| PqSigError::InvalidPubkey)?;
         let ml_dsa_slice: &[u8] = &bytes[ED25519_VK_LEN..];
-        let ml_dsa_arr = EncodedVerifyingKey::<MlDsa65>::try_from(ml_dsa_slice)
-            .map_err(|_| PqSigError::BadLength {
+        let ml_dsa_arr = EncodedVerifyingKey::<MlDsa65>::try_from(ml_dsa_slice).map_err(|_| {
+            PqSigError::BadLength {
                 expected: ML_DSA_65_VK_LEN,
                 got: ml_dsa_slice.len(),
-            })?;
+            }
+        })?;
         let ml_dsa = MlDsaVerifyingKey::<MlDsa65>::decode(&ml_dsa_arr);
         Ok(Self { ed25519, ml_dsa })
     }
@@ -235,11 +235,12 @@ impl HybridVerifyingKey {
 
         // ML-DSA-65 half — ALWAYS run, no short-circuit.
         let ml_sig_slice: &[u8] = &sig[ED25519_SIG_LEN..];
-        let ml_sig_arr = EncodedSignature::<MlDsa65>::try_from(ml_sig_slice)
-            .map_err(|_| PqSigError::BadLength {
+        let ml_sig_arr = EncodedSignature::<MlDsa65>::try_from(ml_sig_slice).map_err(|_| {
+            PqSigError::BadLength {
                 expected: ML_DSA_65_SIG_LEN,
                 got: ml_sig_slice.len(),
-            })?;
+            }
+        })?;
         let ml_sig_decoded = ml_dsa::Signature::<MlDsa65>::decode(&ml_sig_arr);
         use ml_dsa::signature::Verifier as _;
         let ml_ok = if let Some(ml_sig) = ml_sig_decoded {
@@ -250,9 +251,7 @@ impl HybridVerifyingKey {
                 .expect("dummy ML-DSA signature length is fixed");
             let dummy_sig = ml_dsa::Signature::<MlDsa65>::decode(&dummy_arr)
                 .expect("dummy ML-DSA signature must decode");
-            let _ = std::hint::black_box(
-                self.ml_dsa.verify(&transcript, &dummy_sig).is_ok(),
-            );
+            let _ = std::hint::black_box(self.ml_dsa.verify(&transcript, &dummy_sig).is_ok());
             false
         };
 

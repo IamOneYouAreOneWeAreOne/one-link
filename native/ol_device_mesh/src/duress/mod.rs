@@ -70,16 +70,14 @@ pub mod envelope;
 pub mod pair;
 pub mod policy;
 
-pub use alert::{
-    sign_duress_alert, DuressAlert, DUR_ALERT_DOMAIN,
-};
+pub use alert::{sign_duress_alert, DuressAlert, DUR_ALERT_DOMAIN};
 pub use code::{derive_duress_key, DuressCode, ARGON2_M_COST_KIB, ARGON2_T_COST};
 pub use envelope::{
     create_duress_envelope, unlock_duress_envelope, DuressEnvelope, UnlockOutcome,
     DUR_ENVELOPE_DOMAIN, DUR_SALT_LEN,
 };
 pub use pair::{
-    verify_pairing_cross_channel, PairingChannel, PairingCommitment,
-    PAIR_COMMITMENT_DOMAIN, REQUIRED_PAIR_CHANNELS,
+    verify_pairing_cross_channel, PairingChannel, PairingCommitment, PAIR_COMMITMENT_DOMAIN,
+    REQUIRED_PAIR_CHANNELS,
 };
 pub use policy::{DuressPolicy, DURESS_DEFAULT_QUARANTINE_SECS};

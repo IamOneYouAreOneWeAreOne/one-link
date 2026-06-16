@@ -5,9 +5,7 @@
 //! daemon enqueues `(peer_fp, outer_frame, priority)` and drains on
 //! the 20s `_prune_loop` tick (daemon.py:16964-16986).
 
-use ol_radio_batcher::{
-    Batcher, BatcherError, BatcherStats, DrainOutcome, Priority, RadioState,
-};
+use ol_radio_batcher::{Batcher, BatcherError, BatcherStats, DrainOutcome, Priority, RadioState};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
@@ -176,10 +174,7 @@ fn batcher_err_to_py(err: BatcherError) -> PyErr {
     }
 }
 
-fn drain_outcome_to_dict<'py>(
-    py: Python<'py>,
-    o: DrainOutcome,
-) -> PyResult<Bound<'py, PyDict>> {
+fn drain_outcome_to_dict<'py>(py: Python<'py>, o: DrainOutcome) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new_bound(py);
     d.set_item("drained", o.drained)?;
     d.set_item("remaining", o.remaining)?;
@@ -199,8 +194,14 @@ fn stats_to_dict<'py>(py: Python<'py>, s: BatcherStats) -> PyResult<Bound<'py, P
 /// Register the `radio_batcher` submodule.
 pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", ol_radio_batcher::VERSION)?;
-    m.add("DEFAULT_DRX_WINDOW_MS", ol_radio_batcher::DEFAULT_DRX_WINDOW_MS)?;
-    m.add("DEFAULT_MAX_QUEUE_SIZE", ol_radio_batcher::DEFAULT_MAX_QUEUE_SIZE)?;
+    m.add(
+        "DEFAULT_DRX_WINDOW_MS",
+        ol_radio_batcher::DEFAULT_DRX_WINDOW_MS,
+    )?;
+    m.add(
+        "DEFAULT_MAX_QUEUE_SIZE",
+        ol_radio_batcher::DEFAULT_MAX_QUEUE_SIZE,
+    )?;
     m.add("DEFAULT_MAX_AGE_MS", ol_radio_batcher::DEFAULT_MAX_AGE_MS)?;
     m.add_class::<PyRadioBatcher>()?;
     Ok(())

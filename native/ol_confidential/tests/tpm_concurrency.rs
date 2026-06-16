@@ -44,9 +44,7 @@ fn sign_with_retry(key: &TpmAttestationKey, digest: &[u8; 32]) -> Vec<u8> {
 #[test]
 #[ignore = "requires hardware TPM access"]
 fn tpm_4_threads_concurrent_sign() {
-    let key = Arc::new(
-        TpmAttestationKey::acquire_or_create(KEY_NAME).expect("acquire"),
-    );
+    let key = Arc::new(TpmAttestationKey::acquire_or_create(KEY_NAME).expect("acquire"));
     let mut handles = Vec::new();
     for thread_idx in 0..4 {
         let k = Arc::clone(&key);
@@ -76,15 +74,16 @@ fn tpm_4_threads_concurrent_sign() {
             some_differ = true;
         }
     }
-    assert!(some_differ, "concurrent sigs over different digests must differ");
+    assert!(
+        some_differ,
+        "concurrent sigs over different digests must differ"
+    );
 }
 
 #[test]
 #[ignore = "requires hardware TPM access"]
 fn tpm_concurrent_attestation_quotes_all_verify() {
-    let key = Arc::new(
-        TpmAttestationKey::acquire_or_create(KEY_NAME).expect("acquire"),
-    );
+    let key = Arc::new(TpmAttestationKey::acquire_or_create(KEY_NAME).expect("acquire"));
     let mut handles = Vec::new();
     for thread_idx in 0..4 {
         let k = Arc::clone(&key);

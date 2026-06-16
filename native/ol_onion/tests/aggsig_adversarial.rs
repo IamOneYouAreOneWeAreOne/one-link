@@ -210,7 +210,9 @@ fn many_signers_batch() {
     for i in 0..32u8 {
         sks.push(SchnorrSigningKey::from_seed(&[i; 32]));
     }
-    let msgs: Vec<Vec<u8>> = (0..32u8).map(|i| vec![i, i ^ 0x55, i.wrapping_mul(7)]).collect();
+    let msgs: Vec<Vec<u8>> = (0..32u8)
+        .map(|i| vec![i, i ^ 0x55, i.wrapping_mul(7)])
+        .collect();
     let sigs: Vec<SchnorrSignature> = sks
         .iter()
         .zip(msgs.iter())

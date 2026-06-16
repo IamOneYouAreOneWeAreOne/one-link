@@ -5,9 +5,9 @@
 //! adversarial-vector pattern.
 
 use ol_proximity_pair::{
-    block_syndrome, hamming_reconcile, parity_bits_for_block,
-    parity_bits_for_string, permutation_for_pass, privacy_amplify,
-    quantize_observations, QuantizeConfig, HAMMING_DATA_BITS,
+    block_syndrome, hamming_reconcile, parity_bits_for_block, parity_bits_for_string,
+    permutation_for_pass, privacy_amplify, quantize_observations, QuantizeConfig,
+    HAMMING_DATA_BITS,
 };
 
 // ── Quantization: pathological observation inputs ─────────────────
@@ -156,7 +156,7 @@ fn adversarial_hamming_two_errors_one_block_miscorrect_but_no_panic() {
     let mut my_bits = bits.clone();
     my_bits[10] ^= 1;
     my_bits[20] ^= 1; // 2 errors
-    // Build a buffer that hamming_reconcile can use.
+                      // Build a buffer that hamming_reconcile can use.
     let mut my_padded = vec![0u8; HAMMING_DATA_BITS];
     my_padded.copy_from_slice(&my_bits);
     let _r = hamming_reconcile(&my_padded, &parity);
@@ -248,8 +248,9 @@ fn adversarial_pipeline_random_high_entropy() {
         min_bytes: 256,
         guard_band: 0.1,
     };
-    let obs: Vec<u8> =
-        (0..512u32).map(|i| ((i.wrapping_mul(0x9E3779B9)) & 0xFF) as u8).collect();
+    let obs: Vec<u8> = (0..512u32)
+        .map(|i| ((i.wrapping_mul(0x9E3779B9)) & 0xFF) as u8)
+        .collect();
     let bits = quantize_observations(&obs, &cfg).unwrap();
     let parity = parity_bits_for_string(&bits);
     let r = hamming_reconcile(&bits, &parity);

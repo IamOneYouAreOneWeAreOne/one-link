@@ -1,13 +1,10 @@
 //! Adversarial vectors for Row 8 Layer 6 self-routing.
 
 use ol_device_mesh::self_routing::{
-    dtn_couriers, multi_path_plan, pick_best_route, sign_route_announcement,
-    PeerLink, RouteAnnouncement, RouteTable, TauScore,
-    MAX_LINKS_PER_ANNOUNCEMENT,
+    dtn_couriers, multi_path_plan, pick_best_route, sign_route_announcement, PeerLink,
+    RouteAnnouncement, RouteTable, TauScore, MAX_LINKS_PER_ANNOUNCEMENT,
 };
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN};
 use ol_pqsig::HybridVerifyingKey;
 use rand::rngs::OsRng;
 
@@ -40,10 +37,7 @@ fn adversarial_announcement_cross_subkey_rejected() {
     let vk_b = HybridVerifyingKey::from_bytes(&att_b.subkey_vk_bytes).unwrap();
     let ann = sign_route_announcement(&sk_a, 1, vec![link([0xCC; 16], 100, 1)]).unwrap();
     let err = ann.verify(&vk_b).unwrap_err();
-    assert!(matches!(
-        err,
-        DeviceMeshError::RouteAnnouncementVerifyFail
-    ));
+    assert!(matches!(err, DeviceMeshError::RouteAnnouncementVerifyFail));
 }
 
 #[test]
@@ -70,7 +64,11 @@ fn adversarial_announcement_manual_unsort_rejected() {
     let mut ann = sign_route_announcement(
         &sk,
         1,
-        vec![link([0x11; 16], 1, 1), link([0x22; 16], 1, 1), link([0x33; 16], 1, 1)],
+        vec![
+            link([0x11; 16], 1, 1),
+            link([0x22; 16], 1, 1),
+            link([0x33; 16], 1, 1),
+        ],
     )
     .unwrap();
     ann.links.swap(0, 2);
@@ -85,34 +83,22 @@ fn adversarial_announcement_manual_unsort_rejected() {
 fn adversarial_announcement_manual_self_loop_rejected() {
     let (sk, vk) = make_subkey();
     let own = *sk.device_id();
-    let mut ann = sign_route_announcement(
-        &sk, 1, vec![link([0x11; 16], 1, 1)],
-    )
-    .unwrap();
+    let mut ann = sign_route_announcement(&sk, 1, vec![link([0x11; 16], 1, 1)]).unwrap();
     // Manually inject a self-loop entry post-sign.
     ann.links.insert(0, link(own, 1, 1));
     // Need to re-sort by peer_device_id for sort check to pass.
     ann.links.sort_by_key(|l| l.peer_device_id);
     let err = ann.verify(&vk).unwrap_err();
-    assert!(matches!(
-        err,
-        DeviceMeshError::RouteAnnouncementSelfLoop
-    ));
+    assert!(matches!(err, DeviceMeshError::RouteAnnouncementSelfLoop));
 }
 
 #[test]
 fn adversarial_announcement_tampered_tau_score_rejected() {
     let (sk, vk) = make_subkey();
-    let mut ann = sign_route_announcement(
-        &sk, 1, vec![link([0x11; 16], 100, 1)],
-    )
-    .unwrap();
+    let mut ann = sign_route_announcement(&sk, 1, vec![link([0x11; 16], 100, 1)]).unwrap();
     ann.links[0].tau_score = 1;
     let err = ann.verify(&vk).unwrap_err();
-    assert!(matches!(
-        err,
-        DeviceMeshError::RouteAnnouncementVerifyFail
-    ));
+    assert!(matches!(err, DeviceMeshError::RouteAnnouncementVerifyFail));
 }
 
 // ── Route picker adversarial ──────────────────────────────────────
@@ -154,8 +140,7 @@ fn adversarial_indirect_link_skipped_for_routing() {
         announcer_sig: vec![],
     };
     // Sign it properly.
-    let real_ann =
-        sign_route_announcement(&sks[0], 1, ann.links.clone()).unwrap();
+    let real_ann = sign_route_announcement(&sks[0], 1, ann.links.clone()).unwrap();
     table.ingest(real_ann, &vks[0]).unwrap();
     let r = pick_best_route(&table, &ids[0], &ids[1]);
     assert!(r.is_none(), "indirect-only path must not be usable");
@@ -177,10 +162,7 @@ fn adversarial_dtn_no_courier_if_only_one_endpoint_seen() {
     let (ids, sks, vks) = make_three();
     let mut table = RouteTable::empty();
     // src announces seeing courier; nothing about dst.
-    let ann = sign_route_announcement(
-        &sks[0], 100, vec![link(ids[2], 50, 100)],
-    )
-    .unwrap();
+    let ann = sign_route_announcement(&sks[0], 100, vec![link(ids[2], 50, 100)]).unwrap();
     table.ingest(ann, &vks[0]).unwrap();
     let c = dtn_couriers(&table, &ids[0], &ids[1], 1_000_000);
     assert!(c.is_empty());

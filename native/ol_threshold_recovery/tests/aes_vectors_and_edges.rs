@@ -4,8 +4,7 @@
 use ol_threshold_recovery::gf256::{gf_inv, gf_mul, gf_pow};
 use ol_threshold_recovery::prng::PrngState;
 use ol_threshold_recovery::shamir::{
-    max_participants, reconstruct_byte, reconstruct_bytes, share_byte,
-    share_bytes, Share,
+    max_participants, reconstruct_byte, reconstruct_bytes, share_byte, share_bytes, Share,
 };
 
 // ── AES test vectors (FIPS 197 GF(2^8) multiplication) ────────────
@@ -108,8 +107,9 @@ fn all_ff_secret_roundtrips() {
 
 #[test]
 fn alternating_secret_roundtrips() {
-    let secret: Vec<u8> =
-        (0..64u8).map(|i| if i % 2 == 0 { 0xAA } else { 0x55 }).collect();
+    let secret: Vec<u8> = (0..64u8)
+        .map(|i| if i % 2 == 0 { 0xAA } else { 0x55 })
+        .collect();
     let mut st = PrngState::new(0x1234_5678);
     let streams = share_bytes(&secret, 4, 7, &mut st).unwrap();
     let xs = vec![1u8, 3, 5, 7];
@@ -127,8 +127,10 @@ fn single_byte_secret() {
         let mut st = PrngState::new(u64::from(b) * 31);
         let streams = share_bytes(&[b], 2, 3, &mut st).unwrap();
         let xs = vec![1u8, 2];
-        let refs: Vec<&[u8]> =
-            [&streams[0], &streams[1]].iter().map(|v| v.as_slice()).collect();
+        let refs: Vec<&[u8]> = [&streams[0], &streams[1]]
+            .iter()
+            .map(|v| v.as_slice())
+            .collect();
         let recovered = reconstruct_bytes(&xs, &refs, 2).unwrap();
         assert_eq!(recovered, &[b]);
     }
@@ -145,8 +147,7 @@ fn n_equals_max_participants_255() {
     assert_eq!(streams.len(), n as usize);
     // Pick K random-ish shares and reconstruct.
     let xs: Vec<u8> = (1..=k as u8).collect();
-    let refs: Vec<&[u8]> =
-        streams[..k as usize].iter().map(Vec::as_slice).collect();
+    let refs: Vec<&[u8]> = streams[..k as usize].iter().map(Vec::as_slice).collect();
     let recovered = reconstruct_bytes(&xs, &refs, k).unwrap();
     assert_eq!(recovered, secret);
 }
@@ -178,8 +179,10 @@ fn empty_secret_handled() {
         assert!(s.is_empty());
     }
     let xs = vec![1u8, 2];
-    let refs: Vec<&[u8]> =
-        [&streams[0], &streams[1]].iter().map(|v| v.as_slice()).collect();
+    let refs: Vec<&[u8]> = [&streams[0], &streams[1]]
+        .iter()
+        .map(|v| v.as_slice())
+        .collect();
     let recovered = reconstruct_bytes(&xs, &refs, 2).unwrap();
     assert!(recovered.is_empty());
 }

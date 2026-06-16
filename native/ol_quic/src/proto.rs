@@ -137,9 +137,7 @@ impl FrameKind {
             // a serialised FILE_CDC_CHUNK / FILE_NATIVE_CHUNK envelope
             // (base64 payload + JSON header), which exceeds the 64 KiB
             // control cap for any non-trivial chunk size.
-            Self::ChunkRequest
-            | Self::ChunkResponse
-            | Self::ManifestRecord => MAX_BULK_FRAME_BYTES,
+            Self::ChunkRequest | Self::ChunkResponse | Self::ManifestRecord => MAX_BULK_FRAME_BYTES,
             // Bloom filters and fountain bursts can be moderately large.
             // ADR-0011 caps bloom at 1 MiB; FountainBurst is one
             // symbol (typically ≤1 KiB) + 44 B header. ScopedBloomFilter

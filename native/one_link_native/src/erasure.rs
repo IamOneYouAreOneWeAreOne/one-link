@@ -96,9 +96,10 @@ impl PyShard {
         bytes: &[u8],
     ) -> PyResult<Self> {
         if stripe_id.len() != 32 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("stripe_id must be 32 bytes; got {}", stripe_id.len()),
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "stripe_id must be 32 bytes; got {}",
+                stripe_id.len()
+            )));
         }
         let mut sid = [0u8; 32];
         sid.copy_from_slice(stripe_id);
@@ -106,9 +107,9 @@ impl PyShard {
             "data" => ShardRole::Data,
             "parity" => ShardRole::Parity,
             other => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    format!("role must be 'data' or 'parity'; got {other:?}"),
-                ))
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "role must be 'data' or 'parity'; got {other:?}"
+                )))
             }
         };
         Ok(Self {

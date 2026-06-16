@@ -112,13 +112,10 @@ pub mod policy;
 pub mod state;
 pub mod sync;
 
-pub use ops::{
-    Delta, AuthenticatedOp, AUTH_OP_DOMAIN, MAX_DELTA_VALUE_LEN,
-    MAX_SUBTREE_LABEL_LEN,
-};
+pub use ops::{AuthenticatedOp, Delta, AUTH_OP_DOMAIN, MAX_DELTA_VALUE_LEN, MAX_SUBTREE_LABEL_LEN};
 pub use policy::{SubtreePolicy, SubtreePolicyKind};
 pub use state::{
-    LwwRegister, LwwMap, MeshState, OrSet, OrSetTag, PnCounter,
-    Subtree, SubtreeLabel, SubtreeRoot, StateRoot,
+    LwwMap, LwwRegister, MeshState, OrSet, OrSetTag, PnCounter, StateRoot, Subtree, SubtreeLabel,
+    SubtreeRoot,
 };
 pub use sync::{SyncState, SyncSummary, MAX_OPS_PER_SYNC};

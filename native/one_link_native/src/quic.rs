@@ -1,4 +1,4 @@
-﻿//! `one_link_native.quic` â€” Python binding for the `ol_quic` crate.
+//! `one_link_native.quic` â€” Python binding for the `ol_quic` crate.
 //!
 //! Surfaces identity-bound QUIC transport to Python with a synchronous
 //! call shape that hides the underlying tokio runtime.
@@ -845,12 +845,9 @@ impl PyConnection {
                         send.finish().map_err(|e| {
                             ol_quic::QuicError::Io(std::io::Error::other(e.to_string()))
                         })?;
-                        let bytes = read_expected_stream_payload_bytes_chunks(
-                            &mut recv,
-                            expected,
-                            total,
-                        )
-                        .await?;
+                        let bytes =
+                            read_expected_stream_payload_bytes_chunks(&mut recv, expected, total)
+                                .await?;
                         Ok::<_, ol_quic::QuicError>(bytes)
                     });
                 }

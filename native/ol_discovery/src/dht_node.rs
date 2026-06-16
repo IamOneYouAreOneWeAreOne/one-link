@@ -43,13 +43,8 @@ use crate::lookup::{Lookup, LookupError, LookupResult};
 use crate::node_id::NodeId;
 use crate::record::SignedRecord;
 use crate::routing::RoutingTable;
-use crate::rpc::{
-    FindValueOutcome, Header, Nonce, Request, Response, RpcEnvelope,
-    StoreOutcome,
-};
-use crate::udp_transport::{
-    EndpointResolver, RequestHandler, UdpTransport,
-};
+use crate::rpc::{FindValueOutcome, Header, Nonce, Request, Response, RpcEnvelope, StoreOutcome};
+use crate::udp_transport::{EndpointResolver, RequestHandler, UdpTransport};
 
 /// Default record TTL for outbound republish (24h). Republish cadence
 /// is 1 hour by default, well below TTL.
@@ -146,23 +141,18 @@ impl RequestHandler for InnerHandler {
             }
             match env.body {
                 Request::Ping => Response::Pong,
-                Request::Store(rec) => {
-                    match rec.verify() {
-                        Err(_) => {
-                            Response::StoreResult(StoreOutcome::BadSignature)
-                        }
-                        Ok(()) => {
-                            if !rec.record.is_fresh(Inner::now_unix()) {
-                                Response::StoreResult(StoreOutcome::Expired)
-                            } else {
-                                let mut recs =
-                                    self.inner.records.lock().unwrap();
-                                recs.insert(rec.node_id(), rec);
-                                Response::StoreResult(StoreOutcome::Accepted)
-                            }
+                Request::Store(rec) => match rec.verify() {
+                    Err(_) => Response::StoreResult(StoreOutcome::BadSignature),
+                    Ok(()) => {
+                        if !rec.record.is_fresh(Inner::now_unix()) {
+                            Response::StoreResult(StoreOutcome::Expired)
+                        } else {
+                            let mut recs = self.inner.records.lock().unwrap();
+                            recs.insert(rec.node_id(), rec);
+                            Response::StoreResult(StoreOutcome::Accepted)
                         }
                     }
-                }
+                },
                 Request::FindNode { target } => {
                     let routing = self.inner.routing.lock().unwrap();
                     let closest = routing
@@ -176,9 +166,7 @@ impl RequestHandler for InnerHandler {
                     let records = self.inner.records.lock().unwrap();
                     if let Some(rec) = records.get(&target).cloned() {
                         drop(records);
-                        Response::FindValueResult(FindValueOutcome::Found(
-                            rec,
-                        ))
+                        Response::FindValueResult(FindValueOutcome::Found(rec))
                     } else {
                         drop(records);
                         let routing = self.inner.routing.lock().unwrap();
@@ -187,9 +175,7 @@ impl RequestHandler for InnerHandler {
                             .into_iter()
                             .map(|b| b.id)
                             .collect();
-                        Response::FindValueResult(FindValueOutcome::Closer(
-                            closer,
-                        ))
+                        Response::FindValueResult(FindValueOutcome::Closer(closer))
                     }
                 }
             }
@@ -219,9 +205,7 @@ impl DhtNode {
         seed_peers: Vec<(NodeId, SocketAddr)>,
     ) -> Result<Self, DhtError> {
         let runtime = Runtime::new().map_err(|e| DhtError::Runtime(e.to_string()))?;
-        let socket = runtime.block_on(async {
-            UdpSocket::bind(bind_addr).await
-        })?;
+        let socket = runtime.block_on(async { UdpSocket::bind(bind_addr).await })?;
         let bound_addr = socket.local_addr()?;
         let socket = Arc::new(socket);
         let routing = RoutingTable::new(own_id);
@@ -232,13 +216,10 @@ impl DhtNode {
         // resolver via Arc::new_cyclic.
         let inner = Arc::new_cyclic(|weak_inner: &std::sync::Weak<Inner>| {
             let weak_for_resolver = weak_inner.clone();
-            let resolver: Arc<dyn EndpointResolver> =
-                Arc::new(WeakResolver { weak: weak_for_resolver });
-            let transport = Arc::new(UdpTransport::new(
-                socket.clone(),
-                own_id,
-                resolver,
-            ));
+            let resolver: Arc<dyn EndpointResolver> = Arc::new(WeakResolver {
+                weak: weak_for_resolver,
+            });
+            let transport = Arc::new(UdpTransport::new(socket.clone(), own_id, resolver));
             Inner {
                 own_id,
                 socket: socket.clone(),
@@ -259,10 +240,10 @@ impl DhtNode {
         }
         // Spawn the receiver on the SHARED transport so responses
         // route back to lookup callers via that same pending-map.
-        let handler: Arc<dyn RequestHandler> =
-            Arc::new(InnerHandler { inner: inner.clone() });
-        let recv_handle =
-            runtime.block_on(async { inner.transport.spawn_receiver(handler) });
+        let handler: Arc<dyn RequestHandler> = Arc::new(InnerHandler {
+            inner: inner.clone(),
+        });
+        let recv_handle = runtime.block_on(async { inner.transport.spawn_receiver(handler) });
         Ok(Self {
             runtime,
             inner,
@@ -338,10 +319,7 @@ impl DhtNode {
 
     /// Iterative FIND_VALUE lookup. Returns the record if found;
     /// `None` if convergence didn't find it.
-    pub fn lookup_record(
-        &self,
-        target: NodeId,
-    ) -> Result<Option<SignedRecord>, DhtError> {
+    pub fn lookup_record(&self, target: NodeId) -> Result<Option<SignedRecord>, DhtError> {
         // Try local first.
         if let Some(rec) = self
             .runtime
@@ -374,11 +352,7 @@ impl DhtNode {
 
     /// Send a STORE to a specific peer (synchronous). The peer's
     /// response (Accepted / BadSignature / ...) is returned.
-    pub fn store_at(
-        &self,
-        peer: NodeId,
-        record: SignedRecord,
-    ) -> Result<StoreOutcome, DhtError> {
+    pub fn store_at(&self, peer: NodeId, record: SignedRecord) -> Result<StoreOutcome, DhtError> {
         use crate::wire::encode_request;
         let inner = self.inner.clone();
         self.runtime.block_on(async move {
@@ -398,8 +372,7 @@ impl DhtNode {
                     })
                 }
             };
-            let addr = addr_opt
-                .ok_or(DhtError::Lookup(LookupError::NoBootstrap))?;
+            let addr = addr_opt.ok_or(DhtError::Lookup(LookupError::NoBootstrap))?;
             let mut nonce: Nonce = [0u8; 16];
             let ns = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -410,10 +383,12 @@ impl DhtNode {
                 header: Header::new(inner.own_id, nonce, Inner::now_unix()),
                 body: Request::Store(record),
             };
-            let bytes = encode_request(&env).map_err(|_| {
-                DhtError::Lookup(LookupError::NoBootstrap)
-            })?;
-            inner.socket.send_to(&bytes, addr).await
+            let bytes =
+                encode_request(&env).map_err(|_| DhtError::Lookup(LookupError::NoBootstrap))?;
+            inner
+                .socket
+                .send_to(&bytes, addr)
+                .await
                 .map_err(DhtError::Bind)?;
             // Wait briefly for the response. Receiver task routes
             // it via the wire decode; we listen on a private recv
@@ -432,9 +407,8 @@ impl DhtNode {
     /// Snapshot of the current routing table size (for telemetry).
     #[must_use]
     pub fn routing_table_len(&self) -> usize {
-        self.runtime.block_on(async {
-            self.inner.routing.lock().unwrap().len()
-        })
+        self.runtime
+            .block_on(async { self.inner.routing.lock().unwrap().len() })
     }
 
     /// Row 3 maintenance: issue a FIND_NODE refresh lookup for every
@@ -488,9 +462,7 @@ impl DhtNode {
             let records = self.inner.records.lock().unwrap();
             records
                 .iter()
-                .filter(|(_id, rec)| {
-                    rec.record.publish_time_unix <= threshold_unix
-                })
+                .filter(|(_id, rec)| rec.record.publish_time_unix <= threshold_unix)
                 .map(|(id, rec)| (*id, rec.clone()))
                 .collect()
         };
@@ -532,9 +504,8 @@ impl DhtNode {
     /// Snapshot of how many records this node currently stores.
     #[must_use]
     pub fn records_len(&self) -> usize {
-        self.runtime.block_on(async {
-            self.inner.records.lock().unwrap().len()
-        })
+        self.runtime
+            .block_on(async { self.inner.records.lock().unwrap().len() })
     }
 
     /// Graceful shutdown. Cancels background tasks; runtime drops

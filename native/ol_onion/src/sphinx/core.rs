@@ -16,12 +16,10 @@ use zeroize::Zeroize;
 
 use crate::errors::{OnionError, OnionResult};
 use crate::hop::HopId;
-use crate::sphinx::header::{
-    build_header, peel_header, HeaderPeelOutcome, DESTINATION_MARKER,
-};
+use crate::sphinx::header::{build_header, peel_header, HeaderPeelOutcome, DESTINATION_MARKER};
 use crate::sphinx::primitives::{
-    chacha20_xor_in_place, derive_hop_keys, HopKeys, HEADER_LEN, MAX_HOPS, PAYLOAD_LEN, SLOT_ID_LEN,
-    SLOT_LEN, SLOT_MAC_LEN,
+    chacha20_xor_in_place, derive_hop_keys, HopKeys, HEADER_LEN, MAX_HOPS, PAYLOAD_LEN,
+    SLOT_ID_LEN, SLOT_LEN, SLOT_MAC_LEN,
 };
 
 /// Sphinx wire protocol version.
@@ -32,7 +30,8 @@ pub const RISTRETTO_POINT_LEN: usize = 32;
 
 /// Total fixed packet size:
 /// version(1) + alpha(32) + mac(16) + header(HEADER_LEN) + payload(PAYLOAD_LEN).
-pub const SPHINX_PACKET_LEN: usize = 1 + RISTRETTO_POINT_LEN + SLOT_MAC_LEN + HEADER_LEN + PAYLOAD_LEN;
+pub const SPHINX_PACKET_LEN: usize =
+    1 + RISTRETTO_POINT_LEN + SLOT_MAC_LEN + HEADER_LEN + PAYLOAD_LEN;
 
 /// Maximum user payload length. Two bytes reserved for length prefix.
 pub const SPHINX_MAX_USER_PAYLOAD: usize = PAYLOAD_LEN - 2;
@@ -247,11 +246,8 @@ pub fn build_sphinx_onion<R: RngCore + CryptoRng>(
     // would receive — unused (no next hop after destination).
 
     // ── Step 2: build the routing-info header.
-    let mut next_hop_ids: Vec<[u8; SLOT_ID_LEN]> = circuit
-        .iter()
-        .skip(1)
-        .map(|h| *h.id.as_bytes())
-        .collect();
+    let mut next_hop_ids: Vec<[u8; SLOT_ID_LEN]> =
+        circuit.iter().skip(1).map(|h| *h.id.as_bytes()).collect();
     next_hop_ids.push(DESTINATION_MARKER);
     debug_assert_eq!(next_hop_ids.len(), n);
 
@@ -340,7 +336,9 @@ pub fn compute_final_hop_shared_key(
         alpha_i = b_i * alpha_i;
     }
     // Unreachable: empty-circuit caught above; last_idx always reached.
-    Err(OnionError::Internal("compute_final_hop_shared_key: chain walk did not terminate"))
+    Err(OnionError::Internal(
+        "compute_final_hop_shared_key: chain walk did not terminate",
+    ))
 }
 
 /// Peel one layer of a Sphinx Coherence packet at this relay.
@@ -416,10 +414,7 @@ pub fn peel_sphinx_layer(
             // the payload to forge cover status can't compute a valid
             // tag without the shared key, so a forged "cover" status
             // is rejected at probability 1 - 2^-128.
-            if crate::sphinx::cover::is_cover_payload_authenticated(
-                &shared_bytes,
-                user_payload,
-            ) {
+            if crate::sphinx::cover::is_cover_payload_authenticated(&shared_bytes, user_payload) {
                 return Ok(SphinxPeelOutcome::Cover);
             }
             let mut user_payload_owned = vec![0u8; plen];
@@ -474,8 +469,7 @@ mod tests {
     fn one_hop_round_trip() {
         let (dest_sk, dest) = make_relay();
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-        let packet =
-            build_sphinx_onion(&eph_sk, &[dest.clone()], b"hello", &mut OsRng).unwrap();
+        let packet = build_sphinx_onion(&eph_sk, &[dest.clone()], b"hello", &mut OsRng).unwrap();
         let outcome = peel_sphinx_layer(&dest_sk, &packet).unwrap();
         match outcome {
             SphinxPeelOutcome::Deliver { payload } => assert_eq!(payload, b"hello"),
@@ -488,13 +482,9 @@ mod tests {
         let (r0_sk, r0) = make_relay();
         let (dest_sk, dest) = make_relay();
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-        let packet = build_sphinx_onion(
-            &eph_sk,
-            &[r0.clone(), dest.clone()],
-            b"two-hop",
-            &mut OsRng,
-        )
-        .unwrap();
+        let packet =
+            build_sphinx_onion(&eph_sk, &[r0.clone(), dest.clone()], b"two-hop", &mut OsRng)
+                .unwrap();
         let outcome = peel_sphinx_layer(&r0_sk, &packet).unwrap();
         let next_packet = match outcome {
             SphinxPeelOutcome::Forward {
@@ -584,8 +574,7 @@ mod tests {
         let (_, dest) = make_relay();
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
         let packet =
-            build_sphinx_onion(&eph_sk, &[r0.clone(), r1.clone(), dest], b"x", &mut OsRng)
-                .unwrap();
+            build_sphinx_onion(&eph_sk, &[r0.clone(), r1.clone(), dest], b"x", &mut OsRng).unwrap();
         assert_eq!(packet.as_bytes().len(), SPHINX_PACKET_LEN);
         let next = match peel_sphinx_layer(&r0_sk, &packet).unwrap() {
             SphinxPeelOutcome::Forward { next_packet, .. } => next_packet,

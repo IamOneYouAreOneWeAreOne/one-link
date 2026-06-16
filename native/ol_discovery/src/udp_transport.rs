@@ -182,10 +182,7 @@ impl UdpTransport {
     /// requests to the provided handler.
     ///
     /// Caller (daemon) drops the returned handle to terminate.
-    pub fn spawn_receiver(
-        &self,
-        handler: Arc<dyn RequestHandler>,
-    ) -> tokio::task::JoinHandle<()> {
+    pub fn spawn_receiver(&self, handler: Arc<dyn RequestHandler>) -> tokio::task::JoinHandle<()> {
         let socket = self.socket.clone();
         let pending = self.pending.clone();
         let own_id = self.own_id;
@@ -220,9 +217,7 @@ impl UdpTransport {
                             ),
                             body,
                         };
-                        if let Ok(resp_bytes) =
-                            crate::wire::encode_response(&response_env)
-                        {
+                        if let Ok(resp_bytes) = crate::wire::encode_response(&response_env) {
                             let _ = socket.send_to(&resp_bytes, src).await;
                         }
                     }
@@ -264,16 +259,10 @@ fn map_response(body: Response) -> LookupQueryResult {
             // Treat as failure rather than mis-interpreting.
             LookupQueryResult::Failed
         }
-        Response::FindNodeResult { closest } => {
-            LookupQueryResult::CloserPeers(closest)
-        }
+        Response::FindNodeResult { closest } => LookupQueryResult::CloserPeers(closest),
         Response::FindValueResult(outcome) => match outcome {
-            crate::rpc::FindValueOutcome::Found(rec) => {
-                LookupQueryResult::Found(rec)
-            }
-            crate::rpc::FindValueOutcome::Closer(closer) => {
-                LookupQueryResult::CloserPeers(closer)
-            }
+            crate::rpc::FindValueOutcome::Found(rec) => LookupQueryResult::Found(rec),
+            crate::rpc::FindValueOutcome::Closer(closer) => LookupQueryResult::CloserPeers(closer),
         },
     }
 }

@@ -39,7 +39,7 @@ pub struct ChunkAck {
 
 impl ChunkAck {
     /// Canonical bytes the source's subkey signs over.
-    #[must_use] 
+    #[must_use]
     pub fn canonical_transcript(
         file_id: &FileId,
         chunk_hash: &ChunkHash,

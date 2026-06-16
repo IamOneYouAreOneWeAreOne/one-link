@@ -36,23 +36,13 @@ fn two_nodes_lookup_each_other() {
     let (sk_a, id_a) = make_keypair();
     let (sk_b, id_b) = make_keypair();
     // Bind A first (so we know its addr to seed B with).
-    let node_a = DhtNode::new(
-        "127.0.0.1:0".parse().unwrap(),
-        id_a,
-        vec![],
-    )
-    .unwrap();
+    let node_a = DhtNode::new("127.0.0.1:0".parse().unwrap(), id_a, vec![]).unwrap();
     let addr_a = node_a.local_addr();
     let rec_a = make_self_record(&sk_a, addr_a);
     node_a.publish_self_record(rec_a.clone());
 
     // Bind B, seed it with A's (id, addr).
-    let node_b = DhtNode::new(
-        "127.0.0.1:0".parse().unwrap(),
-        id_b,
-        vec![(id_a, addr_a)],
-    )
-    .unwrap();
+    let node_b = DhtNode::new("127.0.0.1:0".parse().unwrap(), id_b, vec![(id_a, addr_a)]).unwrap();
     let addr_b = node_b.local_addr();
     let rec_b = make_self_record(&sk_b, addr_b);
     node_b.publish_self_record(rec_b.clone());
@@ -84,8 +74,7 @@ fn two_nodes_lookup_each_other() {
 #[test]
 fn dht_node_local_addr_reports_bound_port() {
     let (_, id) = make_keypair();
-    let node =
-        DhtNode::new("127.0.0.1:0".parse().unwrap(), id, vec![]).unwrap();
+    let node = DhtNode::new("127.0.0.1:0".parse().unwrap(), id, vec![]).unwrap();
     let addr = node.local_addr();
     assert_eq!(addr.ip().to_string(), "127.0.0.1");
     assert!(addr.port() > 0);
@@ -96,8 +85,7 @@ fn dht_node_local_addr_reports_bound_port() {
 fn dht_node_routing_table_grows_after_seed_add() {
     let (_, id_a) = make_keypair();
     let (_, id_b) = make_keypair();
-    let node =
-        DhtNode::new("127.0.0.1:0".parse().unwrap(), id_a, vec![]).unwrap();
+    let node = DhtNode::new("127.0.0.1:0".parse().unwrap(), id_a, vec![]).unwrap();
     assert_eq!(node.routing_table_len(), 0);
     node.add_seed_peer(id_b, "127.0.0.1:12345".parse().unwrap());
     assert_eq!(node.routing_table_len(), 1);
@@ -107,8 +95,7 @@ fn dht_node_routing_table_grows_after_seed_add() {
 #[test]
 fn dht_node_publish_self_record_increases_records_count() {
     let (sk, id) = make_keypair();
-    let node =
-        DhtNode::new("127.0.0.1:0".parse().unwrap(), id, vec![]).unwrap();
+    let node = DhtNode::new("127.0.0.1:0".parse().unwrap(), id, vec![]).unwrap();
     assert_eq!(node.records_len(), 0);
     let rec = make_self_record(&sk, node.local_addr());
     node.publish_self_record(rec);
@@ -120,22 +107,12 @@ fn dht_node_publish_self_record_increases_records_count() {
 fn dht_node_find_value_returns_stored_record() {
     let (sk_a, id_a) = make_keypair();
     let (sk_b, id_b) = make_keypair();
-    let node_a = DhtNode::new(
-        "127.0.0.1:0".parse().unwrap(),
-        id_a,
-        vec![],
-    )
-    .unwrap();
+    let node_a = DhtNode::new("127.0.0.1:0".parse().unwrap(), id_a, vec![]).unwrap();
     let addr_a = node_a.local_addr();
     let rec_a = make_self_record(&sk_a, addr_a);
     node_a.publish_self_record(rec_a.clone());
 
-    let node_b = DhtNode::new(
-        "127.0.0.1:0".parse().unwrap(),
-        id_b,
-        vec![(id_a, addr_a)],
-    )
-    .unwrap();
+    let node_b = DhtNode::new("127.0.0.1:0".parse().unwrap(), id_b, vec![(id_a, addr_a)]).unwrap();
     let _ = make_self_record(&sk_b, node_b.local_addr());
     std::thread::sleep(Duration::from_millis(50));
 

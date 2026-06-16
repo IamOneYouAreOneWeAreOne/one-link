@@ -69,11 +69,7 @@ pub enum ObfsError {
 /// per packet (e.g., a per-connection counter + random per-conn
 /// salt). Reusing a (key, nonce) pair leaks the XOR of two
 /// plaintexts.
-pub fn obfuscate(
-    key: &[u8; OBFS_KEY_LEN],
-    nonce: &[u8; OBFS_NONCE_LEN],
-    bytes: &[u8],
-) -> Vec<u8> {
+pub fn obfuscate(key: &[u8; OBFS_KEY_LEN], nonce: &[u8; OBFS_NONCE_LEN], bytes: &[u8]) -> Vec<u8> {
     let mut out = bytes.to_vec();
     let mut cipher = ChaCha20::new(key.into(), nonce.into());
     cipher.apply_keystream(&mut out);

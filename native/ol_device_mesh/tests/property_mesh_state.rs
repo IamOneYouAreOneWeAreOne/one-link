@@ -9,12 +9,10 @@ use proptest::prelude::*;
 use rand::rngs::OsRng;
 
 use ol_device_mesh::mesh_state::{
-    AuthenticatedOp, Delta, LwwMap, LwwRegister, MeshState, OrSet,
-    PnCounter, SubtreePolicyKind, SyncState,
+    AuthenticatedOp, Delta, LwwMap, LwwRegister, MeshState, OrSet, PnCounter, SubtreePolicyKind,
+    SyncState,
 };
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN};
 use ol_pqsig::HybridVerifyingKey;
 use ol_pqsig::HYBRID_VK_LEN;
 

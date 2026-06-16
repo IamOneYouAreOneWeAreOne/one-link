@@ -46,23 +46,22 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_lossless)]
 
+pub mod field_bound;
 pub mod gf256;
 pub mod prng;
-pub mod shamir;
 pub mod refresh;
-pub mod field_bound;
+pub mod shamir;
 
+pub use field_bound::{
+    field_bound_reconstruct, field_bound_split, FieldBindingError, FieldWitness,
+};
 pub use gf256::{
-    gf_add, gf_div, gf_div_fast, gf_inv, gf_inv_fast, gf_mul, gf_mul_fast,
-    gf_pow, gf_sub, GF_PRIMITIVE,
+    gf_add, gf_div, gf_div_fast, gf_inv, gf_inv_fast, gf_mul, gf_mul_fast, gf_pow, gf_sub,
+    GF_PRIMITIVE,
 };
 pub use prng::{PrngState, SplitMix64};
-pub use shamir::{
-    max_participants, params_valid, reconstruct_byte, reconstruct_bytes,
-    share_byte, share_bytes, Share, ShareError,
-};
 pub use refresh::{refresh_byte, refresh_bytes, zero_polynomial_byte};
-pub use field_bound::{
-    field_bound_reconstruct, field_bound_split, FieldWitness,
-    FieldBindingError,
+pub use shamir::{
+    max_participants, params_valid, reconstruct_byte, reconstruct_bytes, share_byte, share_bytes,
+    Share, ShareError,
 };

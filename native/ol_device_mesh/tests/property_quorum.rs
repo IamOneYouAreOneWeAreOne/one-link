@@ -9,12 +9,10 @@ use proptest::prelude::*;
 use rand::rngs::OsRng;
 
 use ol_device_mesh::quorum::{
-    mint_policy, propose_operation, sign_approval, QuorumCertificate,
-    OPERATION_DIGEST_LEN, PROPOSAL_NONCE_LEN,
+    mint_policy, propose_operation, sign_approval, QuorumCertificate, OPERATION_DIGEST_LEN,
+    PROPOSAL_NONCE_LEN,
 };
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, DeviceMeshError, MasterIdentity, DEVICE_ID_LEN};
 
 fn cheap_cases() -> u32 {
     if std::env::var("ONE_LINK_F1_GATE").as_deref() == Ok("1") {

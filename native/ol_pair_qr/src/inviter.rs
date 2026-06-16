@@ -156,10 +156,7 @@ impl Inviter {
         self.confirm_inner(Some(factor2_key))
     }
 
-    fn confirm_inner(
-        &mut self,
-        factor2_key: Option<&[u8; 32]>,
-    ) -> PairResult<(Vec<u8>, ChainKey)> {
+    fn confirm_inner(&mut self, factor2_key: Option<&[u8; 32]>) -> PairResult<(Vec<u8>, ChainKey)> {
         if self.state != InviterState::AwaitingUserConfirm {
             return Err(PairError::WrongState);
         }
@@ -234,12 +231,7 @@ mod tests {
     #[test]
     fn receive_response_before_init_state_check() {
         let sk = SigningKey::generate(&mut OsRng);
-        let mut inv = Inviter::new(
-            sk,
-            &mut OsRng,
-            1_900_000_000,
-            CapabilityScope::empty(),
-        );
+        let mut inv = Inviter::new(sk, &mut OsRng, 1_900_000_000, CapabilityScope::empty());
         // Call confirm before receive_response → WrongState
         let err = inv.confirm().unwrap_err();
         assert_eq!(err, PairError::WrongState);
@@ -248,12 +240,7 @@ mod tests {
     #[test]
     fn abort_zeroizes_state() {
         let sk = SigningKey::generate(&mut OsRng);
-        let mut inv = Inviter::new(
-            sk,
-            &mut OsRng,
-            1_900_000_000,
-            CapabilityScope::empty(),
-        );
+        let mut inv = Inviter::new(sk, &mut OsRng, 1_900_000_000, CapabilityScope::empty());
         inv.abort();
         assert_eq!(inv.state(), InviterState::Aborted);
         assert!(inv.ephemeral_secret.is_none());

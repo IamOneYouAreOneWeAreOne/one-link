@@ -24,8 +24,7 @@ struct Peer {
 fn make_peer(seed_peers: Vec<(NodeId, std::net::SocketAddr)>) -> Peer {
     let sk = SigningKey::generate(&mut OsRng);
     let id = NodeId::from_pubkey(&sk.verifying_key().to_bytes());
-    let node =
-        DhtNode::new("127.0.0.1:0".parse().unwrap(), id, seed_peers).unwrap();
+    let node = DhtNode::new("127.0.0.1:0".parse().unwrap(), id, seed_peers).unwrap();
     let addr = node.local_addr();
     let rec = PeerRecord {
         publisher_pubkey: sk.verifying_key().to_bytes(),
@@ -112,8 +111,7 @@ fn five_nodes_lookup_in_all_directions() {
             if src_idx == tgt_idx {
                 continue;
             }
-            let r =
-                peers[src_idx].node.lookup_record(peers[tgt_idx].id);
+            let r = peers[src_idx].node.lookup_record(peers[tgt_idx].id);
             // Either Ok(Some|None) or Err(NoBootstrap) — both valid.
             match r {
                 Ok(_) => {}

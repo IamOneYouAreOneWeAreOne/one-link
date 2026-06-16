@@ -54,8 +54,8 @@
 //! - History replication across the mesh — Layer-3 CRDT mirror
 //!   pattern handles it; the daemon owns the wiring.
 
-pub mod context;
 pub mod cohort;
+pub mod context;
 pub mod history;
 pub mod picker;
 pub mod policy;

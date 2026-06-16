@@ -13,9 +13,9 @@ use rand_core_06::OsRng;
 use ol_onion::transport_obfs::{
     deobfuscate as core_deobfuscate, derive_nonce as core_derive_nonce,
     obfuscate as core_obfuscate, BridgeKeypair, ClientHandshake as RustClientHandshake,
-    HandshakeError, ServerHandshake as RustServerHandshake, Session as RustSession,
-    BRIDGE_ID_LEN, BRIDGE_PUBKEY_LEN, BRIDGE_SECRET_LEN, HANDSHAKE_EPOCH_SECS, HANDSHAKE_LEN,
-    HANDSHAKE_MAC_LEN, OBFS_KEY_LEN, OBFS_NONCE_LEN, SESSION_KEY_LEN,
+    HandshakeError, ServerHandshake as RustServerHandshake, Session as RustSession, BRIDGE_ID_LEN,
+    BRIDGE_PUBKEY_LEN, BRIDGE_SECRET_LEN, HANDSHAKE_EPOCH_SECS, HANDSHAKE_LEN, HANDSHAKE_MAC_LEN,
+    OBFS_KEY_LEN, OBFS_NONCE_LEN, SESSION_KEY_LEN,
 };
 
 fn check_key_nonce(key: &[u8], nonce: &[u8]) -> PyResult<()> {
@@ -73,11 +73,7 @@ fn deobfuscate<'py>(
 }
 
 #[pyfunction]
-fn derive_nonce<'py>(
-    py: Python<'py>,
-    conn_id: u32,
-    packet_counter: u64,
-) -> Bound<'py, PyBytes> {
+fn derive_nonce<'py>(py: Python<'py>, conn_id: u32, packet_counter: u64) -> Bound<'py, PyBytes> {
     let n = core_derive_nonce(conn_id, packet_counter);
     PyBytes::new_bound(py, &n)
 }

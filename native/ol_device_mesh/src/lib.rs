@@ -125,9 +125,7 @@ pub use attestation::{
     sibling_witness, state_root, verify_liveness, LivenessProof, SiblingWitness,
     DEFAULT_LIVENESS_SKEW_SECS, LIVENESS_DOMAIN,
 };
-pub use derivation::{
-    derive_subkey_seed, HKDF_DOMAIN, SUBKEY_SEED_LEN,
-};
+pub use derivation::{derive_subkey_seed, HKDF_DOMAIN, SUBKEY_SEED_LEN};
 pub use device_class::{DeviceClass, DEVICE_CLASS_TAG_LEN};
 pub use errors::{DeviceMeshError, DeviceMeshResult};
 pub use hardware::{HardwareWrapper, SoftwareWrapper, WRAPPED_KEY_OVERHEAD};

@@ -59,11 +59,7 @@ pub fn block_syndrome(bits: &[u8], block_bits: usize) -> Vec<u8> {
 /// Bits leaked to an eavesdropper: `peer_syndrome.len()` bits (one
 /// per syndrome byte). Privacy amplification removes these.
 #[must_use]
-pub fn reconcile_with_syndrome(
-    my_bits: &[u8],
-    peer_syndrome: &[u8],
-    block_bits: usize,
-) -> Vec<u8> {
+pub fn reconcile_with_syndrome(my_bits: &[u8], peer_syndrome: &[u8], block_bits: usize) -> Vec<u8> {
     if block_bits == 0 || my_bits.is_empty() {
         return my_bits.to_vec();
     }
@@ -142,9 +138,7 @@ mod tests {
     fn reconcile_converges_for_small_error_rate() {
         // Simulation: Alice + Bob have 256-bit strings with ~3% error rate.
         // After reconciliation, syndromes match (parity-recovered).
-        let alice: Vec<u8> = (0..256u32)
-            .map(|i| ((i * 7 + 3) % 7 < 3) as u8)
-            .collect();
+        let alice: Vec<u8> = (0..256u32).map(|i| ((i * 7 + 3) % 7 < 3) as u8).collect();
         let mut bob = alice.clone();
         // Flip 3 bits — small error rate.
         bob[10] ^= 1;

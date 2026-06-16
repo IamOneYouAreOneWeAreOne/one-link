@@ -94,8 +94,7 @@ pub const ISSUER_SDP_PUBKEY_LEN: usize = 32;
 pub type IssuerSdpPubkey = [u8; ISSUER_SDP_PUBKEY_LEN];
 
 /// Domain prefix for the field-witness commitment leaf inside the doc.
-pub const ATTESTATION_FIELD_WITNESS_DOMAIN: &[u8] =
-    b"OL-confidential-field-witness-commitment-v1";
+pub const ATTESTATION_FIELD_WITNESS_DOMAIN: &[u8] = b"OL-confidential-field-witness-commitment-v1";
 
 /// Signed attestation envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,9 +311,7 @@ pub fn verify_attestation(
     //      forward-skewed issuer could mint a doc claiming
     //      issued=now+1day, deadline=issued+30s, and the verifier
     //      would refuse to reject for ~24h.
-    if doc.issued_unix > now_unix
-        && doc.issued_unix - now_unix > ATTESTATION_MAX_CLOCK_SKEW_SECS
-    {
+    if doc.issued_unix > now_unix && doc.issued_unix - now_unix > ATTESTATION_MAX_CLOCK_SKEW_SECS {
         return Err(ConfidentialError::AttestationIssuerClockSkew {
             issued_unix: doc.issued_unix,
             now_unix,
@@ -325,9 +322,7 @@ pub fn verify_attestation(
     //      `deadline_unix`. Defends against an adversary who crafts a
     //      backward-issued / forward-deadlined doc that survives the
     //      window check but is actually weeks old.
-    if doc.issued_unix < now_unix
-        && now_unix - doc.issued_unix > ATTESTATION_MAX_AGE_SECS
-    {
+    if doc.issued_unix < now_unix && now_unix - doc.issued_unix > ATTESTATION_MAX_AGE_SECS {
         return Err(ConfidentialError::AttestationTooOld {
             issued_unix: doc.issued_unix,
             now_unix,
@@ -468,7 +463,15 @@ mod tests {
             TEST_SDP_PUBKEY,
         )
         .unwrap();
-        verify_attestation(&doc, &nonce, Some(&witness), 110, TIER_ANY, &TEST_SDP_PUBKEY).unwrap();
+        verify_attestation(
+            &doc,
+            &nonce,
+            Some(&witness),
+            110,
+            TIER_ANY,
+            &TEST_SDP_PUBKEY,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -477,11 +480,21 @@ mod tests {
         let nonce_a = fresh_attestation_nonce(&mut OsRng);
         let nonce_b = fresh_attestation_nonce(&mut OsRng);
         let doc = sign_attestation(
-            &sk, ProviderTag::Software, nonce_a, 100, 120, None, Vec::new(), TEST_SDP_PUBKEY,
+            &sk,
+            ProviderTag::Software,
+            nonce_a,
+            100,
+            120,
+            None,
+            Vec::new(),
+            TEST_SDP_PUBKEY,
         )
         .unwrap();
         let r = verify_attestation(&doc, &nonce_b, None, 110, TIER_ANY, &TEST_SDP_PUBKEY);
-        assert!(matches!(r, Err(ConfidentialError::AttestationPeerNonceMismatch)));
+        assert!(matches!(
+            r,
+            Err(ConfidentialError::AttestationPeerNonceMismatch)
+        ));
     }
 
     #[test]
@@ -489,11 +502,21 @@ mod tests {
         let sk = fresh_key();
         let nonce = fresh_attestation_nonce(&mut OsRng);
         let doc = sign_attestation(
-            &sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new(), TEST_SDP_PUBKEY,
+            &sk,
+            ProviderTag::Software,
+            nonce,
+            100,
+            120,
+            None,
+            Vec::new(),
+            TEST_SDP_PUBKEY,
         )
         .unwrap();
         let r = verify_attestation(&doc, &nonce, None, 130, TIER_ANY, &TEST_SDP_PUBKEY);
-        assert!(matches!(r, Err(ConfidentialError::AttestationExpired { .. })));
+        assert!(matches!(
+            r,
+            Err(ConfidentialError::AttestationExpired { .. })
+        ));
     }
 
     #[test]
@@ -501,7 +524,14 @@ mod tests {
         let sk = fresh_key();
         let nonce = fresh_attestation_nonce(&mut OsRng);
         let r = sign_attestation(
-            &sk, ProviderTag::Software, nonce, 100, 100 + 31, None, Vec::new(), TEST_SDP_PUBKEY,
+            &sk,
+            ProviderTag::Software,
+            nonce,
+            100,
+            100 + 31,
+            None,
+            Vec::new(),
+            TEST_SDP_PUBKEY,
         );
         assert!(matches!(
             r,
@@ -514,7 +544,14 @@ mod tests {
         let sk = fresh_key();
         let nonce = fresh_attestation_nonce(&mut OsRng);
         let r = sign_attestation(
-            &sk, ProviderTag::Software, nonce, 100, 100, None, Vec::new(), TEST_SDP_PUBKEY,
+            &sk,
+            ProviderTag::Software,
+            nonce,
+            100,
+            100,
+            None,
+            Vec::new(),
+            TEST_SDP_PUBKEY,
         );
         assert!(matches!(
             r,
@@ -527,12 +564,22 @@ mod tests {
         let sk = fresh_key();
         let nonce = fresh_attestation_nonce(&mut OsRng);
         let mut doc = sign_attestation(
-            &sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new(), TEST_SDP_PUBKEY,
+            &sk,
+            ProviderTag::Software,
+            nonce,
+            100,
+            120,
+            None,
+            Vec::new(),
+            TEST_SDP_PUBKEY,
         )
         .unwrap();
         doc.master_sig[0] ^= 0x01;
         let r = verify_attestation(&doc, &nonce, None, 110, TIER_ANY, &TEST_SDP_PUBKEY);
-        assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
+        assert!(matches!(
+            r,
+            Err(ConfidentialError::AttestationMasterSigFail)
+        ));
     }
 
     #[test]
@@ -552,7 +599,14 @@ mod tests {
             TEST_SDP_PUBKEY,
         )
         .unwrap();
-        let r = verify_attestation(&doc, &nonce, Some(&witness_b), 110, TIER_ANY, &TEST_SDP_PUBKEY);
+        let r = verify_attestation(
+            &doc,
+            &nonce,
+            Some(&witness_b),
+            110,
+            TIER_ANY,
+            &TEST_SDP_PUBKEY,
+        );
         assert!(matches!(
             r,
             Err(ConfidentialError::AttestationFieldWitnessMismatch)
@@ -564,11 +618,25 @@ mod tests {
         let sk = fresh_key();
         let nonce = fresh_attestation_nonce(&mut OsRng);
         let doc = sign_attestation(
-            &sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new(), TEST_SDP_PUBKEY,
+            &sk,
+            ProviderTag::Software,
+            nonce,
+            100,
+            120,
+            None,
+            Vec::new(),
+            TEST_SDP_PUBKEY,
         )
         .unwrap();
         let witness = [0xCC; 32];
-        let r = verify_attestation(&doc, &nonce, Some(&witness), 110, TIER_ANY, &TEST_SDP_PUBKEY);
+        let r = verify_attestation(
+            &doc,
+            &nonce,
+            Some(&witness),
+            110,
+            TIER_ANY,
+            &TEST_SDP_PUBKEY,
+        );
         assert!(matches!(
             r,
             Err(ConfidentialError::AttestationFieldWitnessMismatch)
@@ -586,7 +654,14 @@ mod tests {
         let sk = fresh_key();
         let nonce = fresh_attestation_nonce(&mut OsRng);
         let doc = sign_attestation(
-            &sk, ProviderTag::Software, nonce, 100, 120, None, Vec::new(), TEST_SDP_PUBKEY,
+            &sk,
+            ProviderTag::Software,
+            nonce,
+            100,
+            120,
+            None,
+            Vec::new(),
+            TEST_SDP_PUBKEY,
         )
         .unwrap();
         let r = verify_attestation(
@@ -654,14 +729,7 @@ mod tests {
         .unwrap();
         // Issuer signed under AA-pubkey, verifier's channel is BB-pubkey
         let verifier_channel_pubkey: IssuerSdpPubkey = [0xBBu8; ISSUER_SDP_PUBKEY_LEN];
-        let r = verify_attestation(
-            &doc,
-            &nonce,
-            None,
-            110,
-            TIER_ANY,
-            &verifier_channel_pubkey,
-        );
+        let r = verify_attestation(&doc, &nonce, None, 110, TIER_ANY, &verifier_channel_pubkey);
         assert!(matches!(
             r,
             Err(ConfidentialError::AttestationIssuerSdpPubkeyMismatch)
@@ -695,6 +763,9 @@ mod tests {
         let tampered_sdp: IssuerSdpPubkey = [0xBBu8; ISSUER_SDP_PUBKEY_LEN];
         doc.issuer_sdp_pubkey = tampered_sdp;
         let r = verify_attestation(&doc, &nonce, None, 110, TIER_ANY, &tampered_sdp);
-        assert!(matches!(r, Err(ConfidentialError::AttestationMasterSigFail)));
+        assert!(matches!(
+            r,
+            Err(ConfidentialError::AttestationMasterSigFail)
+        ));
     }
 }

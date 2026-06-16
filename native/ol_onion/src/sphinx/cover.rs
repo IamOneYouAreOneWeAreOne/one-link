@@ -155,10 +155,7 @@ pub(crate) fn compute_cover_trailer(
 /// the trailer compare uses `subtle::ConstantTimeEq` so leaking
 /// fine-grained body content via tag comparison timing is not
 /// possible.
-pub fn is_cover_payload_authenticated(
-    shared_key: &[u8; 32],
-    payload: &[u8],
-) -> bool {
+pub fn is_cover_payload_authenticated(shared_key: &[u8; 32], payload: &[u8]) -> bool {
     if payload.len() < COVER_SENTINEL.len() + COVER_TRAILER_LEN {
         return false;
     }
@@ -190,8 +187,7 @@ pub fn is_cover_payload_authenticated(
     note = "audit M4 — use is_cover_payload_authenticated; the plaintext-prefix check is forgeable"
 )]
 pub fn is_cover_payload(payload: &[u8]) -> bool {
-    payload.len() >= COVER_SENTINEL.len()
-        && &payload[..COVER_SENTINEL.len()] == COVER_SENTINEL
+    payload.len() >= COVER_SENTINEL.len() && &payload[..COVER_SENTINEL.len()] == COVER_SENTINEL
 }
 
 /// Build a cover Sphinx packet bound for `circuit` (typically a
@@ -220,9 +216,7 @@ pub fn build_cover_packet<R: RngCore + CryptoRng>(
     rng: &mut R,
 ) -> OnionResult<SphinxPacket> {
     if cover_size < COVER_PAYLOAD_MIN {
-        return Err(OnionError::Internal(
-            "cover payload below minimum size",
-        ));
+        return Err(OnionError::Internal("cover payload below minimum size"));
     }
     if circuit.is_empty() {
         return Err(OnionError::EmptyCircuit);
@@ -410,8 +404,7 @@ impl RateEqualizer {
         // EWMA weight from half-life: alpha = 1 - 0.5^(dt / half_life)
         let alpha = 1.0 - 0.5f64.powf(dt_sec / self.half_life_sec);
         let alpha = alpha.clamp(0.0, 1.0);
-        self.observed_real_rate =
-            (1.0 - alpha) * self.observed_real_rate + alpha * instant_rate;
+        self.observed_real_rate = (1.0 - alpha) * self.observed_real_rate + alpha * instant_rate;
         self.last_emit_ms = now_ms;
     }
 
@@ -514,8 +507,7 @@ mod tests {
     fn build_cover_packet_round_trip() {
         let (dest_sk, dest) = make_relay();
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-        let packet =
-            build_cover_packet(&eph_sk, &[dest.clone()], 128, &mut OsRng).unwrap();
+        let packet = build_cover_packet(&eph_sk, &[dest.clone()], 128, &mut OsRng).unwrap();
         let outcome = peel_sphinx_layer(&dest_sk, &packet).unwrap();
         // Audit M4: peel returns the authenticated Cover variant for
         // a packet built via the cover-traffic path. The payload is
@@ -530,8 +522,7 @@ mod tests {
         let (r2_sk, r2) = make_relay();
         let (dest_sk, dest) = make_relay();
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-        let mut packet =
-            build_cover_packet(&eph_sk, &[r1, r2, dest], 256, &mut OsRng).unwrap();
+        let mut packet = build_cover_packet(&eph_sk, &[r1, r2, dest], 256, &mut OsRng).unwrap();
 
         // Cover packets are indistinguishable from real packets at
         // every relay (same size, same blinding, Forward at intermediates).
@@ -709,7 +700,10 @@ mod tests {
         eq.observe_idle_tick(60_000);
         let after_idle = eq.observed_real_rate();
         assert!(after_idle < after_emissions);
-        assert!(after_idle < 0.01, "after long idle, observed = {after_idle}");
+        assert!(
+            after_idle < 0.01,
+            "after long idle, observed = {after_idle}"
+        );
         // Cover fills back to full target.
         assert!((eq.current_cover_rate() - 5.0).abs() < 0.01);
     }

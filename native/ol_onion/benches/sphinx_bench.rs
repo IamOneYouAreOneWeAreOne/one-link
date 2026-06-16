@@ -7,7 +7,9 @@ use rand::Rng;
 use ol_onion::sphinx::core::{
     build_sphinx_onion, generate_static_keypair, peel_sphinx_layer, SphinxHop, SphinxPeelOutcome,
 };
-use ol_onion::sphinx::primitives::{build_filler, chacha20_keystream, derive_hop_keys, header_mac, HEADER_LEN, MAX_HOPS};
+use ol_onion::sphinx::primitives::{
+    build_filler, chacha20_keystream, derive_hop_keys, header_mac, HEADER_LEN, MAX_HOPS,
+};
 use ol_onion::HopId;
 
 fn make_relay() -> (curve25519_dalek::scalar::Scalar, SphinxHop) {
@@ -81,9 +83,13 @@ fn bench_build_1_hop(c: &mut Criterion) {
     c.bench_function("sphinx::build_onion_1_hop", |b| {
         b.iter(|| {
             let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-            let p =
-                build_sphinx_onion(black_box(&eph_sk), black_box(&circuit), b"payload", &mut OsRng)
-                    .unwrap();
+            let p = build_sphinx_onion(
+                black_box(&eph_sk),
+                black_box(&circuit),
+                b"payload",
+                &mut OsRng,
+            )
+            .unwrap();
             black_box(p);
         });
     });
@@ -97,9 +103,13 @@ fn bench_build_3_hop(c: &mut Criterion) {
     c.bench_function("sphinx::build_onion_3_hop", |b| {
         b.iter(|| {
             let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-            let p =
-                build_sphinx_onion(black_box(&eph_sk), black_box(&circuit), b"payload", &mut OsRng)
-                    .unwrap();
+            let p = build_sphinx_onion(
+                black_box(&eph_sk),
+                black_box(&circuit),
+                b"payload",
+                &mut OsRng,
+            )
+            .unwrap();
             black_box(p);
         });
     });
@@ -111,9 +121,13 @@ fn bench_build_5_hop(c: &mut Criterion) {
     c.bench_function("sphinx::build_onion_5_hop", |b| {
         b.iter(|| {
             let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-            let p =
-                build_sphinx_onion(black_box(&eph_sk), black_box(&circuit), b"payload", &mut OsRng)
-                    .unwrap();
+            let p = build_sphinx_onion(
+                black_box(&eph_sk),
+                black_box(&circuit),
+                b"payload",
+                &mut OsRng,
+            )
+            .unwrap();
             black_box(p);
         });
     });

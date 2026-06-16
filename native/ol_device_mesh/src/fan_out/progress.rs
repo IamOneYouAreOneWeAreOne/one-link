@@ -53,11 +53,7 @@ impl TransferProgress {
     }
 
     /// Begin tracking a chunk as in-flight from `source`.
-    pub fn mark_in_flight(
-        &mut self,
-        chunk: ChunkHash,
-        source: [u8; DEVICE_ID_LEN],
-    ) {
+    pub fn mark_in_flight(&mut self, chunk: ChunkHash, source: [u8; DEVICE_ID_LEN]) {
         if !self.completed_chunks.contains(&chunk) {
             self.in_flight_chunks.insert(chunk, source);
         }
@@ -76,10 +72,7 @@ impl TransferProgress {
     /// Mark a source as failed. Returns the list of in-flight chunks
     /// previously assigned to it, which the higher layer should
     /// `replan_after_source_failure` against the surviving sources.
-    pub fn mark_source_failed(
-        &mut self,
-        source: [u8; DEVICE_ID_LEN],
-    ) -> Vec<ChunkHash> {
+    pub fn mark_source_failed(&mut self, source: [u8; DEVICE_ID_LEN]) -> Vec<ChunkHash> {
         self.failed_sources.insert(source);
         let mut released = Vec::new();
         let still_in_flight: BTreeMap<ChunkHash, [u8; DEVICE_ID_LEN]> = self

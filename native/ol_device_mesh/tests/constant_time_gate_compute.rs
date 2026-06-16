@@ -4,17 +4,14 @@ use std::time::Instant;
 
 use ol_device_mesh::compute::{sign_task_request, TaskClass, TaskRequest};
 use ol_device_mesh::distributed_fs::FILE_ID_LEN;
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN};
 use rand::rngs::OsRng;
 
 const SAMPLES_PER_BUCKET: usize = 200;
 
 fn relative_stddev(samples: &[f64]) -> f64 {
     let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
-    let var: f64 =
-        samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+    let var: f64 = samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64;
     var.sqrt() / mean
 }
 
@@ -29,10 +26,7 @@ fn measure<F: FnMut()>(mut work: F, iters: usize) -> u128 {
 #[test]
 fn task_request_verify_constant_time_across_tamper_positions() {
     let master = MasterIdentity::generate(&mut OsRng);
-    let (sk, _) = mint_subkey(
-        &master, DeviceClass::Phone, [0x55; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk, _) = mint_subkey(&master, DeviceClass::Phone, [0x55; DEVICE_ID_LEN], 0, 365).unwrap();
     let real = sign_task_request(
         &sk,
         TaskClass::new(b"transcribe-audio").unwrap(),
@@ -76,9 +70,7 @@ fn task_request_verify_constant_time_across_tamper_positions() {
         totals.push(ns);
     }
     let rel = relative_stddev(&totals);
-    eprintln!(
-        "task-req verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}"
-    );
+    eprintln!("task-req verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
     assert!(
         rel < 0.30,
         "task-req verify relative stddev {rel:.4} exceeds 30% gate"

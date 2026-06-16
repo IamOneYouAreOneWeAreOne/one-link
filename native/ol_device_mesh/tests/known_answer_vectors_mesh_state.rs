@@ -15,8 +15,8 @@
 //! ```
 
 use ol_device_mesh::mesh_state::{
-    AuthenticatedOp, Delta, MeshState, SubtreePolicyKind, AUTH_OP_DOMAIN,
-    MAX_DELTA_VALUE_LEN, MAX_OPS_PER_SYNC, MAX_SUBTREE_LABEL_LEN,
+    AuthenticatedOp, Delta, MeshState, SubtreePolicyKind, AUTH_OP_DOMAIN, MAX_DELTA_VALUE_LEN,
+    MAX_OPS_PER_SYNC, MAX_SUBTREE_LABEL_LEN,
 };
 
 fn check_regen<F: FnOnce()>(label: &str, dump: F) {
@@ -77,13 +77,20 @@ fn kat_state_root_after_seq_is_deterministic() {
             .unwrap();
         st.apply_delta(
             b"counters",
-            &Delta::Counter { device_id: w, delta: 7 },
+            &Delta::Counter {
+                device_id: w,
+                delta: 7,
+            },
             &w,
         )
         .unwrap();
         st.apply_delta(
             b"settings",
-            &Delta::MapPut { key: b"theme".to_vec(), value: b"dark".to_vec(), ts: 1 },
+            &Delta::MapPut {
+                key: b"theme".to_vec(),
+                value: b"dark".to_vec(),
+                ts: 1,
+            },
             &w,
         )
         .unwrap();
@@ -102,7 +109,10 @@ fn kat_state_root_after_seq_is_deterministic() {
 fn kat_auth_op_canonical_transcript_pinned() {
     let bytes = AuthenticatedOp::canonical_transcript(
         b"contacts",
-        &Delta::OrAdd { element: b"alice".to_vec(), tag: [0x55; 16] },
+        &Delta::OrAdd {
+            element: b"alice".to_vec(),
+            tag: [0x55; 16],
+        },
         &[0x11; 16],
         3,
         7,
@@ -114,16 +124,19 @@ fn kat_auth_op_canonical_transcript_pinned() {
     });
     const EXPECTED_AUTH_OP_TRANSCRIPT_HEX: &str = concat!(
         "4f4c2d6d6573682d617574682d6f702d7631", // "OL-mesh-auth-op-v1"
-        "00000008",                              // subtree length = 8
-        "636f6e7461637473",                      // "contacts"
-        "02",                                    // OrAdd kind tag
-        "00000005",                              // element length = 5
-        "616c696365",                            // "alice"
-        "55555555555555555555555555555555",      // tag = [0x55; 16]
-        "11111111111111111111111111111111",      // device_id = [0x11; 16]
-        "0000000000000003",                      // day_index = 3
-        "0000000000000007",                      // seq = 7
-        "000000006553f100",                      // wall_unix = 1_700_000_000
+        "00000008",                             // subtree length = 8
+        "636f6e7461637473",                     // "contacts"
+        "02",                                   // OrAdd kind tag
+        "00000005",                             // element length = 5
+        "616c696365",                           // "alice"
+        "55555555555555555555555555555555",     // tag = [0x55; 16]
+        "11111111111111111111111111111111",     // device_id = [0x11; 16]
+        "0000000000000003",                     // day_index = 3
+        "0000000000000007",                     // seq = 7
+        "000000006553f100",                     // wall_unix = 1_700_000_000
     );
-    assert_eq!(hex, EXPECTED_AUTH_OP_TRANSCRIPT_HEX, "auth-op transcript drift");
+    assert_eq!(
+        hex, EXPECTED_AUTH_OP_TRANSCRIPT_HEX,
+        "auth-op transcript drift"
+    );
 }

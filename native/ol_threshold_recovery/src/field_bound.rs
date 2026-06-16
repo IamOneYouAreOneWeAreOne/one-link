@@ -48,8 +48,7 @@ use thiserror::Error;
 
 use crate::prng::{PrngState, SplitMix64};
 use crate::shamir::{
-    reconstruct_bytes as plain_reconstruct_bytes, share_bytes as plain_share_bytes,
-    ShareError,
+    reconstruct_bytes as plain_reconstruct_bytes, share_bytes as plain_share_bytes, ShareError,
 };
 
 /// Errors from field-bound operations.
@@ -277,8 +276,7 @@ mod tests {
         let secret = b"this is the master identity seed";
         let witness = make_witness(5, 0x42);
         let mut st = PrngState::new(0xCAFE_F00D_DEAD_BEEF);
-        let masked =
-            field_bound_split(secret, 3, 5, &mut st, &witness).unwrap();
+        let masked = field_bound_split(secret, 3, 5, &mut st, &witness).unwrap();
         // Reconstruct from shares 0, 2, 4 (x = 1, 3, 5).
         let xs = vec![1u8, 3, 5];
         let supplied: Vec<&[u8]> = vec![
@@ -287,9 +285,7 @@ mod tests {
             masked[4].as_slice(),
         ];
         let indices = vec![0usize, 2, 4];
-        let recovered =
-            field_bound_reconstruct(&xs, &supplied, &indices, 3, &witness)
-                .unwrap();
+        let recovered = field_bound_reconstruct(&xs, &supplied, &indices, 3, &witness).unwrap();
         assert_eq!(recovered, secret);
     }
 
@@ -302,8 +298,7 @@ mod tests {
         let witness = FieldWitness::placeholder(5);
         assert!(witness.is_placeholder());
         let mut st = PrngState::new(0xBEEF_0000_0000_0001);
-        let masked =
-            field_bound_split(secret, 3, 5, &mut st, &witness).unwrap();
+        let masked = field_bound_split(secret, 3, 5, &mut st, &witness).unwrap();
         let xs = vec![1u8, 2, 3];
         let supplied: Vec<&[u8]> = vec![
             masked[0].as_slice(),
@@ -311,9 +306,7 @@ mod tests {
             masked[2].as_slice(),
         ];
         let indices = vec![0usize, 1, 2];
-        let recovered =
-            field_bound_reconstruct(&xs, &supplied, &indices, 3, &witness)
-                .unwrap();
+        let recovered = field_bound_reconstruct(&xs, &supplied, &indices, 3, &witness).unwrap();
         assert_eq!(recovered, secret);
     }
 
@@ -324,8 +317,7 @@ mod tests {
         let secret = b"sensitive identity material";
         let real_witness = make_witness(5, 0x42);
         let mut st = PrngState::new(0xCAFE_F00D_DEAD_BEEF);
-        let masked = field_bound_split(secret, 3, 5, &mut st, &real_witness)
-            .unwrap();
+        let masked = field_bound_split(secret, 3, 5, &mut st, &real_witness).unwrap();
         // Build a different witness — same shape, different field seed.
         let fake_witness = make_witness(5, 0x99);
         let xs = vec![1u8, 2, 3];
@@ -335,14 +327,8 @@ mod tests {
             masked[2].as_slice(),
         ];
         let indices = vec![0usize, 1, 2];
-        let recovered = field_bound_reconstruct(
-            &xs,
-            &supplied,
-            &indices,
-            3,
-            &fake_witness,
-        )
-        .unwrap();
+        let recovered =
+            field_bound_reconstruct(&xs, &supplied, &indices, 3, &fake_witness).unwrap();
         // The recovered bytes are statistically random vs the true
         // secret. ~almost certainly different — the OTP differs in
         // every byte position.
@@ -356,8 +342,7 @@ mod tests {
         let secret = b"defense in depth, identity-bound";
         let real_witness = make_witness(5, 0x42);
         let mut st = PrngState::new(0x1111_2222_3333_4444);
-        let masked = field_bound_split(secret, 3, 5, &mut st, &real_witness)
-            .unwrap();
+        let masked = field_bound_split(secret, 3, 5, &mut st, &real_witness).unwrap();
         let mut fake_witness = real_witness.clone();
         // Perturb one holder's score by 0.01 — enough to change the
         // f64 bit pattern and re-key the entire OTP stream.
@@ -369,14 +354,8 @@ mod tests {
             masked[2].as_slice(),
         ];
         let indices = vec![0usize, 1, 2];
-        let recovered = field_bound_reconstruct(
-            &xs,
-            &supplied,
-            &indices,
-            3,
-            &fake_witness,
-        )
-        .unwrap();
+        let recovered =
+            field_bound_reconstruct(&xs, &supplied, &indices, 3, &fake_witness).unwrap();
         assert_ne!(recovered, secret);
     }
 
@@ -385,8 +364,7 @@ mod tests {
         let secret = b"x";
         let witness = make_witness(3, 0x42); // 3 scores
         let mut st = PrngState::new(0);
-        let err =
-            field_bound_split(secret, 2, 5, &mut st, &witness).unwrap_err();
+        let err = field_bound_split(secret, 2, 5, &mut st, &witness).unwrap_err();
         match err {
             FieldBindingError::ScoreCountMismatch { expected, got } => {
                 assert_eq!(expected, 5);
@@ -402,8 +380,7 @@ mod tests {
         let mut witness = make_witness(5, 0x42);
         witness.holder_scores[2] = 1.5; // > 1.0
         let mut st = PrngState::new(0);
-        let err =
-            field_bound_split(secret, 3, 5, &mut st, &witness).unwrap_err();
+        let err = field_bound_split(secret, 3, 5, &mut st, &witness).unwrap_err();
         assert!(matches!(
             err,
             FieldBindingError::FieldScoreOutOfRange { .. }

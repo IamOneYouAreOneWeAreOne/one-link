@@ -35,15 +35,16 @@ impl RoutingHistory {
         prior_beta: u32,
     ) {
         let key = (context_hash, device_id);
-        let rec = self.records.entry(key).or_insert_with(|| {
-            DeviceActionRecord {
+        let rec = self
+            .records
+            .entry(key)
+            .or_insert_with(|| DeviceActionRecord {
                 context_hash,
                 device_id,
                 alpha: prior_alpha.max(1),
                 beta: prior_beta.max(1),
                 last_updated_unix: now_unix,
-            }
-        });
+            });
         rec.observe(acted, now_unix);
     }
 
@@ -82,8 +83,7 @@ impl RoutingHistory {
     /// order.
     pub fn iter(
         &self,
-    ) -> impl Iterator<Item = (&[u8; 32], &[u8; DEVICE_ID_LEN], &DeviceActionRecord)>
-    {
+    ) -> impl Iterator<Item = (&[u8; 32], &[u8; DEVICE_ID_LEN], &DeviceActionRecord)> {
         self.records.iter().map(|((ctx, dev), rec)| (ctx, dev, rec))
     }
 }

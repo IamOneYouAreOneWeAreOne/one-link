@@ -205,11 +205,12 @@ impl Capability {
         // converts to a worker-thread crash (or in pyo3, a measurable
         // latency spike under flood). Replace with explicit `?` so the
         // decoder fail-fast path is uniform.
-        let count_bytes: [u8; 4] = bytes[CAP_ID_LEN..CAP_ID_LEN + 4]
-            .try_into()
-            .map_err(|_| CapError::Malformed {
-                reason: "count field not 4 bytes (bounds-check invariant violated)",
-            })?;
+        let count_bytes: [u8; 4] =
+            bytes[CAP_ID_LEN..CAP_ID_LEN + 4]
+                .try_into()
+                .map_err(|_| CapError::Malformed {
+                    reason: "count field not 4 bytes (bounds-check invariant violated)",
+                })?;
         let count = u32::from_le_bytes(count_bytes) as usize;
         if count > MAX_CAVEATS {
             return Err(CapError::Malformed {

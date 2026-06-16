@@ -145,10 +145,9 @@ pub mod proposal;
 pub use approval::{sign_approval, QuorumApproval, APPROVAL_DOMAIN};
 pub use certificate::{QuorumCertificate, MAX_APPROVALS, MAX_ELIGIBLE_DEVICES};
 pub use policy::{
-    mint_policy, QuorumPolicy, QuorumPolicyId, POLICY_DOMAIN, POLICY_ID_LEN,
-    POLICY_LABEL_MAX,
+    mint_policy, QuorumPolicy, QuorumPolicyId, POLICY_DOMAIN, POLICY_ID_LEN, POLICY_LABEL_MAX,
 };
 pub use proposal::{
-    propose_operation, QuorumProposal, ProposalId, ProposalNonce, OPERATION_DIGEST_LEN,
+    propose_operation, ProposalId, ProposalNonce, QuorumProposal, OPERATION_DIGEST_LEN,
     PROPOSAL_DOMAIN, PROPOSAL_NONCE_LEN,
 };

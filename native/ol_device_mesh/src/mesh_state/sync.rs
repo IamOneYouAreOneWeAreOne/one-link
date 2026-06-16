@@ -52,7 +52,7 @@ impl SyncState {
     }
 
     /// Borrow the op log in chronological-emit order.
-    #[must_use] 
+    #[must_use]
     pub fn op_log(&self) -> &[AuthenticatedOp] {
         &self.op_log
     }
@@ -136,10 +136,7 @@ impl SyncState {
     /// Emit (sign + record + append to log) the next op for this
     /// device. Caller supplies the next `seq`; bookkeeping enforces
     /// strict monotonicity per device.
-    pub fn record_local_emit(
-        &mut self,
-        op: AuthenticatedOp,
-    ) -> DeviceMeshResult<()> {
+    pub fn record_local_emit(&mut self, op: AuthenticatedOp) -> DeviceMeshResult<()> {
         let prior = self.last_seen(&op.device_id);
         if op.seq <= prior {
             return Err(DeviceMeshError::OpSeqNotMonotonic {
@@ -183,8 +180,7 @@ mod tests {
     fn ingest_round_trips_then_replays_no_op() {
         let master = MasterIdentity::generate(&mut OsRng);
         let id = fresh_device_id(&mut OsRng);
-        let (sk, att) =
-            mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+        let (sk, att) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
         let mut state = MeshState::empty();
         state
             .ensure_subtree(b"x".to_vec(), SubtreePolicyKind::LwwRegister)
@@ -194,7 +190,10 @@ mod tests {
         let op = AuthenticatedOp::sign(
             &sk,
             b"x".to_vec(),
-            Delta::LwwSet { value: b"v".to_vec(), ts: 1 },
+            Delta::LwwSet {
+                value: b"v".to_vec(),
+                ts: 1,
+            },
             1,
             1_700_000_000,
         )
@@ -214,14 +213,16 @@ mod tests {
     fn diff_returns_ops_peer_is_missing() {
         let master = MasterIdentity::generate(&mut OsRng);
         let id = fresh_device_id(&mut OsRng);
-        let (sk, _att) =
-            mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+        let (sk, _att) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
         let mut sync = SyncState::empty();
         for seq in 1..=5u64 {
             let op = AuthenticatedOp::sign(
                 &sk,
                 b"x".to_vec(),
-                Delta::LwwSet { value: vec![seq as u8], ts: seq },
+                Delta::LwwSet {
+                    value: vec![seq as u8],
+                    ts: seq,
+                },
                 seq,
                 seq,
             )
@@ -246,7 +247,10 @@ mod tests {
         let op_a = AuthenticatedOp::sign(
             &sk,
             b"x".to_vec(),
-            Delta::LwwSet { value: b"a".to_vec(), ts: 1 },
+            Delta::LwwSet {
+                value: b"a".to_vec(),
+                ts: 1,
+            },
             5,
             1,
         )
@@ -255,7 +259,10 @@ mod tests {
         let op_b = AuthenticatedOp::sign(
             &sk,
             b"x".to_vec(),
-            Delta::LwwSet { value: b"b".to_vec(), ts: 2 },
+            Delta::LwwSet {
+                value: b"b".to_vec(),
+                ts: 2,
+            },
             5, // same seq
             2,
         )
@@ -271,10 +278,8 @@ mod tests {
         let master = MasterIdentity::generate(&mut OsRng);
         let id_a = fresh_device_id(&mut OsRng);
         let id_b = fresh_device_id(&mut OsRng);
-        let (sk_a, att_a) =
-            mint_subkey(&master, DeviceClass::Phone, id_a, 0, 365).unwrap();
-        let (sk_b, att_b) =
-            mint_subkey(&master, DeviceClass::Laptop, id_b, 0, 365).unwrap();
+        let (sk_a, att_a) = mint_subkey(&master, DeviceClass::Phone, id_a, 0, 365).unwrap();
+        let (sk_b, att_b) = mint_subkey(&master, DeviceClass::Laptop, id_b, 0, 365).unwrap();
         let vk_a = vk_from_attestation(&att_a);
         let vk_b = vk_from_attestation(&att_b);
         let lookup = |id: &[u8; 16], _day: u64| -> DeviceMeshResult<HybridVerifyingKey> {
@@ -304,7 +309,11 @@ mod tests {
         let op_a = AuthenticatedOp::sign(
             &sk_a,
             b"x".to_vec(),
-            Delta::MapPut { key: b"k1".to_vec(), value: b"a".to_vec(), ts: 1 },
+            Delta::MapPut {
+                key: b"k1".to_vec(),
+                value: b"a".to_vec(),
+                ts: 1,
+            },
             1,
             1,
         )
@@ -313,7 +322,11 @@ mod tests {
         let op_b = AuthenticatedOp::sign(
             &sk_b,
             b"x".to_vec(),
-            Delta::MapPut { key: b"k2".to_vec(), value: b"b".to_vec(), ts: 2 },
+            Delta::MapPut {
+                key: b"k2".to_vec(),
+                value: b"b".to_vec(),
+                ts: 2,
+            },
             1,
             2,
         )

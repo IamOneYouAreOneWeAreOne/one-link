@@ -70,7 +70,7 @@ impl std::fmt::Debug for SoftwareWrapper {
 
 impl SoftwareWrapper {
     /// Construct from a raw 32-byte KEK.
-    #[must_use] 
+    #[must_use]
     pub const fn new(kek: [u8; 32]) -> Self {
         Self { kek }
     }

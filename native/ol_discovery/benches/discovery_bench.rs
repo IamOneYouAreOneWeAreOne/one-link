@@ -113,10 +113,7 @@ fn bench_canonical_bytes(c: &mut Criterion) {
     let sk = SigningKey::generate(&mut OsRng);
     let rec = PeerRecord {
         publisher_pubkey: sk.verifying_key().to_bytes(),
-        endpoints: vec![
-            "udp://1.2.3.4:5678".into(),
-            "quic://5.6.7.8:9012".into(),
-        ],
+        endpoints: vec!["udp://1.2.3.4:5678".into(), "quic://5.6.7.8:9012".into()],
         publish_time_unix: 1_700_000_000,
         ttl_secs: 86_400,
     };

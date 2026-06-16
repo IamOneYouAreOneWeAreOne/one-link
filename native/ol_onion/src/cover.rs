@@ -183,8 +183,7 @@ mod tests {
             let peel = peel_one_layer(sk, &current).unwrap();
             match peel {
                 crate::peel::PeelOutcome::Forward {
-                    inner_packet_bytes,
-                    ..
+                    inner_packet_bytes, ..
                 } => {
                     assert!(i < secrets.len() - 1, "Forward at destination hop");
                     current = crate::packet::OnionPacket::decode(&inner_packet_bytes).unwrap();

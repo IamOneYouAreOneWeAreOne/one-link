@@ -37,10 +37,7 @@ impl RouteTable {
 
     /// Borrow the latest announcement for a given announcer.
     #[must_use]
-    pub fn announcement_for(
-        &self,
-        announcer: &[u8; DEVICE_ID_LEN],
-    ) -> Option<&RouteAnnouncement> {
+    pub fn announcement_for(&self, announcer: &[u8; DEVICE_ID_LEN]) -> Option<&RouteAnnouncement> {
         self.announcements.get(announcer)
     }
 
@@ -68,9 +65,7 @@ impl RouteTable {
             Some(old) => match ann.announced_at_unix.cmp(&old.announced_at_unix) {
                 std::cmp::Ordering::Greater => true,
                 std::cmp::Ordering::Less => false,
-                std::cmp::Ordering::Equal => {
-                    ann.announcer_day_index > old.announcer_day_index
-                }
+                std::cmp::Ordering::Equal => ann.announcer_day_index > old.announcer_day_index,
             },
         };
         if !dominates {
@@ -139,14 +134,12 @@ fn find_bottleneck_edge(
     for w in r.hops.windows(2) {
         let u = w[0];
         let v = w[1];
-        let edge_tau = table
-            .announcement_for(&u)
-            .map_or(TAU_UNKNOWN, |a| {
-                a.links
-                    .iter()
-                    .find(|l| l.peer_device_id == v && l.direct)
-                    .map_or(TAU_UNKNOWN, |l| l.tau_score)
-            });
+        let edge_tau = table.announcement_for(&u).map_or(TAU_UNKNOWN, |a| {
+            a.links
+                .iter()
+                .find(|l| l.peer_device_id == v && l.direct)
+                .map_or(TAU_UNKNOWN, |l| l.tau_score)
+        });
         match worst {
             None => worst = Some((edge_tau, u, v)),
             Some((cur, _, _)) if edge_tau < cur => worst = Some((edge_tau, u, v)),
@@ -156,17 +149,12 @@ fn find_bottleneck_edge(
     worst.map(|(_, u, v)| (u, v))
 }
 
-fn redact_edge(
-    table: &mut RouteTable,
-    u: &[u8; DEVICE_ID_LEN],
-    v: &[u8; DEVICE_ID_LEN],
-) {
+fn redact_edge(table: &mut RouteTable, u: &[u8; DEVICE_ID_LEN], v: &[u8; DEVICE_ID_LEN]) {
     // Remove the (u→v) edge from u's announcement. The bidirectional
     // counterpart (v→u) stays; this just blocks the chosen edge in
     // the FORWARD direction for subsequent multi-path picks.
     if let Some(a) = table.announcements.get_mut(u) {
-        a.links
-            .retain(|l| !(l.peer_device_id == *v && l.direct));
+        a.links.retain(|l| !(l.peer_device_id == *v && l.direct));
     }
 }
 
@@ -179,7 +167,9 @@ mod tests {
     use crate::DeviceClass;
     use rand::rngs::OsRng;
 
-    fn setup(n: usize) -> (
+    fn setup(
+        n: usize,
+    ) -> (
         Vec<[u8; DEVICE_ID_LEN]>,
         Vec<crate::subkey::DeviceSubkey>,
         Vec<SubkeyAttestation>,
@@ -190,8 +180,7 @@ mod tests {
         let mut atts = Vec::new();
         for _ in 0..n {
             let id = fresh_device_id(&mut OsRng);
-            let (sk, a) =
-                mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+            let (sk, a) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
             ids.push(id);
             sks.push(sk);
             atts.push(a);
@@ -259,31 +248,31 @@ mod tests {
         let via_a = ids[2];
         let via_b = ids[3];
         let mut table = RouteTable::empty();
-        table.ingest(
-            sign_route_announcement(
-                &sks[0],
-                1,
-                vec![link(via_a, 100, 1), link(via_b, 100, 1)],
+        table
+            .ingest(
+                sign_route_announcement(&sks[0], 1, vec![link(via_a, 100, 1), link(via_b, 100, 1)])
+                    .unwrap(),
+                &vk(&atts[0]),
             )
-            .unwrap(),
-            &vk(&atts[0]),
-        )
-        .unwrap();
-        table.ingest(
-            sign_route_announcement(&sks[2], 1, vec![link(dst, 100, 1)]).unwrap(),
-            &vk(&atts[2]),
-        )
-        .unwrap();
-        table.ingest(
-            sign_route_announcement(&sks[3], 1, vec![link(dst, 100, 1)]).unwrap(),
-            &vk(&atts[3]),
-        )
-        .unwrap();
-        table.ingest(
-            sign_route_announcement(&sks[1], 1, vec![]).unwrap(),
-            &vk(&atts[1]),
-        )
-        .unwrap();
+            .unwrap();
+        table
+            .ingest(
+                sign_route_announcement(&sks[2], 1, vec![link(dst, 100, 1)]).unwrap(),
+                &vk(&atts[2]),
+            )
+            .unwrap();
+        table
+            .ingest(
+                sign_route_announcement(&sks[3], 1, vec![link(dst, 100, 1)]).unwrap(),
+                &vk(&atts[3]),
+            )
+            .unwrap();
+        table
+            .ingest(
+                sign_route_announcement(&sks[1], 1, vec![]).unwrap(),
+                &vk(&atts[1]),
+            )
+            .unwrap();
         let paths = multi_path_plan(&table, &src, &dst, 2);
         assert!(paths.len() >= 1);
         // Verify each path is end-to-end correct.

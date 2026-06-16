@@ -43,6 +43,9 @@ impl SealedKey {
     /// [`SealedKey`] only via [`crate::ConfidentialProvider::seal_master`]
     /// or [`crate::ConfidentialProvider::derive_child`].
     pub(crate) fn new(provider_tag: ProviderTag, bytes: Vec<u8>) -> Self {
-        Self { provider_tag, bytes }
+        Self {
+            provider_tag,
+            bytes,
+        }
     }
 }

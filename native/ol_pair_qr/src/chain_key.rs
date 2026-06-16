@@ -57,10 +57,7 @@ impl Eq for ChainKey {}
 
 /// Derive the chain key from the transcript and the 32-byte X25519
 /// ECDH shared secret. Both sides compute the same value.
-pub fn derive_chain_key(
-    transcript: &TranscriptHash,
-    x25519_ss: &[u8; 32],
-) -> ChainKey {
+pub fn derive_chain_key(transcript: &TranscriptHash, x25519_ss: &[u8; 32]) -> ChainKey {
     let mut h = Hasher::new();
     h.update(PROTOCOL_DOMAIN);
     h.update(b"-chain-key-v1");
@@ -79,10 +76,7 @@ pub fn derive_chain_key(
 ///
 /// `factor2_key` should be the 32-byte output of
 /// `ol_proximity_pair::privacy_amplify`.
-pub fn mix_factor2_recip(
-    chain_key: &ChainKey,
-    factor2_key: &[u8; 32],
-) -> ChainKey {
+pub fn mix_factor2_recip(chain_key: &ChainKey, factor2_key: &[u8; 32]) -> ChainKey {
     let mut h = Hasher::new();
     h.update(PROTOCOL_DOMAIN);
     h.update(b"-chain-key-f2-mix-v1");

@@ -11,12 +11,10 @@ use rand::rngs::OsRng;
 use std::collections::BTreeSet;
 
 use ol_device_mesh::distributed_fs::{
-    repair_plan, sign_storage_attestation, under_replicated, ChunkHash,
-    ChunkPlacement, ErasurePolicy, FileManifest,
+    repair_plan, sign_storage_attestation, under_replicated, ChunkHash, ChunkPlacement,
+    ErasurePolicy, FileManifest,
 };
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN};
 
 fn cheap_cases() -> u32 {
     if std::env::var("ONE_LINK_F1_GATE").as_deref() == Ok("1") {

@@ -47,8 +47,7 @@ pub const HAMMING_PARITY_BITS: usize = 7;
 pub const HAMMING_DATA_BITS: usize = 120;
 
 /// Codeword positions of the 7 parity bits (1-indexed).
-const PARITY_POSITIONS: [usize; HAMMING_PARITY_BITS] =
-    [1, 2, 4, 8, 16, 32, 64];
+const PARITY_POSITIONS: [usize; HAMMING_PARITY_BITS] = [1, 2, 4, 8, 16, 32, 64];
 
 /// Map data-index `0..120` to its codeword position `1..=127`.
 /// Skips the 7 parity positions (powers of 2 in 1..=64).
@@ -134,17 +133,12 @@ pub fn parity_bits_for_string(data: &[u8]) -> Vec<u8> {
 ///     parity, no data correction needed) OR the syndrome is
 ///     outside the valid range (could indicate >1 errors).
 #[must_use]
-pub fn decode_syndrome_to_data_index(
-    my_parity: &[u8],
-    peer_parity: &[u8],
-) -> Option<usize> {
+pub fn decode_syndrome_to_data_index(my_parity: &[u8], peer_parity: &[u8]) -> Option<usize> {
     debug_assert_eq!(my_parity.len(), HAMMING_PARITY_BITS);
     debug_assert_eq!(peer_parity.len(), HAMMING_PARITY_BITS);
     // Syndrome interpreted as 7-bit integer; bit i is parity[i].
     let mut s: usize = 0;
-    for (i, (&mine, &peer)) in
-        my_parity.iter().zip(peer_parity.iter()).enumerate()
-    {
+    for (i, (&mine, &peer)) in my_parity.iter().zip(peer_parity.iter()).enumerate() {
         if (mine ^ peer) & 1 != 0 {
             s |= 1 << i;
         }
@@ -161,10 +155,7 @@ pub fn decode_syndrome_to_data_index(
 /// Returns the corrected bit string (same length as `my_bits`,
 /// trailing partial block zero-padded then truncated back).
 #[must_use]
-pub fn hamming_reconcile(
-    my_bits: &[u8],
-    peer_parity: &[u8],
-) -> Vec<u8> {
+pub fn hamming_reconcile(my_bits: &[u8], peer_parity: &[u8]) -> Vec<u8> {
     let n_blocks = my_bits.len().div_ceil(HAMMING_DATA_BITS);
     let mut padded = vec![0u8; n_blocks * HAMMING_DATA_BITS];
     padded[..my_bits.len()].copy_from_slice(my_bits);
@@ -245,10 +236,7 @@ mod tests {
             let mut corrupted = base.clone();
             corrupted[err_pos] ^= 1;
             let corrupted_parity = parity_bits_for_block(&corrupted);
-            let located = decode_syndrome_to_data_index(
-                &corrupted_parity,
-                &base_parity,
-            );
+            let located = decode_syndrome_to_data_index(&corrupted_parity, &base_parity);
             assert_eq!(
                 located,
                 Some(err_pos),
@@ -260,8 +248,7 @@ mod tests {
     #[test]
     fn hamming_reconcile_corrects_single_error_per_block() {
         // 256 bits of data = 3 blocks (2 full + 1 partial).
-        let peer_bits: Vec<u8> =
-            (0..256).map(|i| ((i * 7) & 1) as u8).collect();
+        let peer_bits: Vec<u8> = (0..256).map(|i| ((i * 7) & 1) as u8).collect();
         let mut my_bits = peer_bits.clone();
         // Inject one error in each block:
         my_bits[50] ^= 1; // block 0 (data positions 0..120)
@@ -277,8 +264,7 @@ mod tests {
 
     #[test]
     fn hamming_reconcile_with_no_errors_is_identity() {
-        let peer_bits: Vec<u8> =
-            (0..256).map(|i| ((i * 13) & 1) as u8).collect();
+        let peer_bits: Vec<u8> = (0..256).map(|i| ((i * 13) & 1) as u8).collect();
         let my_bits = peer_bits.clone();
         let peer_parity = parity_bits_for_string(&peer_bits);
         let corrected = hamming_reconcile(&my_bits, &peer_parity);

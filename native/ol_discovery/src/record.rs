@@ -66,13 +66,11 @@ impl PeerRecord {
         out.extend_from_slice(&self.publisher_pubkey);
         out.extend_from_slice(&self.publish_time_unix.to_be_bytes());
         out.extend_from_slice(&self.ttl_secs.to_be_bytes());
-        let n = u16::try_from(self.endpoints.len().min(u16::MAX as usize))
-            .unwrap_or(u16::MAX);
+        let n = u16::try_from(self.endpoints.len().min(u16::MAX as usize)).unwrap_or(u16::MAX);
         out.extend_from_slice(&n.to_be_bytes());
         for ep in &self.endpoints {
             let bytes = ep.as_bytes();
-            let len = u16::try_from(bytes.len().min(u16::MAX as usize))
-                .unwrap_or(u16::MAX);
+            let len = u16::try_from(bytes.len().min(u16::MAX as usize)).unwrap_or(u16::MAX);
             out.extend_from_slice(&len.to_be_bytes());
             out.extend_from_slice(&bytes[..len as usize]);
         }
@@ -166,10 +164,7 @@ impl SignedRecord {
     ///   public component doesn't match `record.publisher_pubkey`.
     /// - [`RecordError::TooManyEndpoints`] / [`RecordError::EndpointTooLong`]
     ///   on shape violations.
-    pub fn sign(
-        record: PeerRecord,
-        signing_key: &SigningKey,
-    ) -> Result<Self, RecordError> {
+    pub fn sign(record: PeerRecord, signing_key: &SigningKey) -> Result<Self, RecordError> {
         record.shape_check()?;
         let derived_pub: VerifyingKey = signing_key.verifying_key();
         if derived_pub.to_bytes() != record.publisher_pubkey {
@@ -205,10 +200,7 @@ impl SignedRecord {
     /// # Errors
     /// Same as [`Self::verify`], plus returns `Ok(false)` (not an
     /// error) when the record is expired but the signature is valid.
-    pub fn verify_and_check_freshness(
-        &self,
-        now_unix: u64,
-    ) -> Result<bool, RecordError> {
+    pub fn verify_and_check_freshness(&self, now_unix: u64) -> Result<bool, RecordError> {
         self.verify()?;
         Ok(self.record.is_fresh(now_unix))
     }
@@ -298,13 +290,9 @@ mod tests {
         rec.ttl_secs = 100;
         let signed = SignedRecord::sign(rec, &sk).unwrap();
         // Within TTL.
-        assert!(signed
-            .verify_and_check_freshness(1050)
-            .unwrap());
+        assert!(signed.verify_and_check_freshness(1050).unwrap());
         // Expired.
-        assert!(!signed
-            .verify_and_check_freshness(1101)
-            .unwrap());
+        assert!(!signed.verify_and_check_freshness(1101).unwrap());
     }
 
     #[test]

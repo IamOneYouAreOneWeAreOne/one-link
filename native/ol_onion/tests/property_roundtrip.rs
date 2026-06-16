@@ -6,8 +6,8 @@ use rand::rngs::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use ol_onion::{
-    build_onion, peel_one_layer, Circuit, HopDescriptor, HopId, OnionPacket,
-    PeelOutcome, HOP_ID_LEN, MAX_HOPS, MAX_USER_PAYLOAD,
+    build_onion, peel_one_layer, Circuit, HopDescriptor, HopId, OnionPacket, PeelOutcome,
+    HOP_ID_LEN, MAX_HOPS, MAX_USER_PAYLOAD,
 };
 
 fn cases() -> u32 {

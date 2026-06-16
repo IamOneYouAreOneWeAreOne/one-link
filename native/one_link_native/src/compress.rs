@@ -55,7 +55,10 @@ impl PyCompressor {
         payload: &[u8],
     ) -> PyResult<Bound<'py, PyBytes>> {
         let a = parse_algo(algo)?;
-        let out = self.inner.compress(a, payload).map_err(compress_err_to_py)?;
+        let out = self
+            .inner
+            .compress(a, payload)
+            .map_err(compress_err_to_py)?;
         Ok(PyBytes::new_bound(py, &out))
     }
 

@@ -95,8 +95,7 @@ pub fn create_duress_envelope<R: RngCore + CryptoRng>(
     if real_plaintext.is_empty() || decoy_plaintext.is_empty() {
         return Err(DeviceMeshError::DuressEnvelopePlaintextEmpty);
     }
-    if real_plaintext.len() > DUR_MAX_PLAINTEXT_LEN
-        || decoy_plaintext.len() > DUR_MAX_PLAINTEXT_LEN
+    if real_plaintext.len() > DUR_MAX_PLAINTEXT_LEN || decoy_plaintext.len() > DUR_MAX_PLAINTEXT_LEN
     {
         return Err(DeviceMeshError::DuressEnvelopePlaintextTooLong {
             max: DUR_MAX_PLAINTEXT_LEN,
@@ -152,15 +151,12 @@ pub fn unlock_duress_envelope(
 ) -> DeviceMeshResult<UnlockOutcome> {
     // Decoy path always runs.
     let decoy_key = derive_duress_key(user_code, &env.decoy_salt)?;
-    let decoy_attempt =
-        aead_decrypt(decoy_key.key_bytes(), &env.decoy_nonce, &env.decoy_ct);
+    let decoy_attempt = aead_decrypt(decoy_key.key_bytes(), &env.decoy_nonce, &env.decoy_ct);
 
     // Real path always runs (when a witness is supplied).
     let real_attempt = if let Some(witness) = field_witness {
         let real_key = make_real_key(user_code, &env.real_salt, witness).ok();
-        real_key.and_then(|k| {
-            aead_decrypt(&k, &env.real_nonce, &env.real_ct).ok()
-        })
+        real_key.and_then(|k| aead_decrypt(&k, &env.real_nonce, &env.real_ct).ok())
     } else {
         None
     };
@@ -233,8 +229,7 @@ mod tests {
             &mut OsRng,
         )
         .unwrap();
-        let outcome =
-            unlock_duress_envelope(&env, b"real-pass", Some(&witness)).unwrap();
+        let outcome = unlock_duress_envelope(&env, b"real-pass", Some(&witness)).unwrap();
         match outcome {
             UnlockOutcome::Real(pt) => assert_eq!(pt, b"real plaintext"),
             other => panic!("expected Real, got {other:?}"),
@@ -254,8 +249,7 @@ mod tests {
         )
         .unwrap();
         // Captor types the duress code with NO witness.
-        let outcome =
-            unlock_duress_envelope(&env, b"duress-code", None).unwrap();
+        let outcome = unlock_duress_envelope(&env, b"duress-code", None).unwrap();
         match outcome {
             UnlockOutcome::Decoy(pt) => assert_eq!(pt, b"decoy plaintext"),
             other => panic!("expected Decoy, got {other:?}"),
@@ -276,8 +270,7 @@ mod tests {
             &mut OsRng,
         )
         .unwrap();
-        let outcome =
-            unlock_duress_envelope(&env, b"real-pass", None).unwrap();
+        let outcome = unlock_duress_envelope(&env, b"real-pass", None).unwrap();
         match outcome {
             UnlockOutcome::WrongCode => {}
             other => panic!("expected WrongCode, got {other:?}"),
@@ -296,8 +289,7 @@ mod tests {
             &mut OsRng,
         )
         .unwrap();
-        let outcome =
-            unlock_duress_envelope(&env, b"random-garbage", Some(&witness)).unwrap();
+        let outcome = unlock_duress_envelope(&env, b"random-garbage", Some(&witness)).unwrap();
         match outcome {
             UnlockOutcome::WrongCode => {}
             other => panic!("expected WrongCode, got {other:?}"),
@@ -322,19 +314,9 @@ mod tests {
     #[test]
     fn empty_plaintext_rejected() {
         let witness = [0x42; 32];
-        let err = create_duress_envelope(
-            b"",
-            b"decoy",
-            b"real",
-            b"duress",
-            &witness,
-            &mut OsRng,
-        )
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            DeviceMeshError::DuressEnvelopePlaintextEmpty
-        ));
+        let err = create_duress_envelope(b"", b"decoy", b"real", b"duress", &witness, &mut OsRng)
+            .unwrap_err();
+        assert!(matches!(err, DeviceMeshError::DuressEnvelopePlaintextEmpty));
     }
 
     #[test]
@@ -352,8 +334,7 @@ mod tests {
         .unwrap();
         // Real code + wrong witness → can't unlock real; falls back
         // to decoy path which also fails for "real-pass".
-        let outcome =
-            unlock_duress_envelope(&env, b"real-pass", Some(&witness_wrong)).unwrap();
+        let outcome = unlock_duress_envelope(&env, b"real-pass", Some(&witness_wrong)).unwrap();
         match outcome {
             UnlockOutcome::WrongCode => {}
             other => panic!("expected WrongCode, got {other:?}"),

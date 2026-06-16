@@ -16,7 +16,9 @@
 //! inviter possesses the master key, not that the user actually
 //! intended to pair this particular scanner.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH};
+use ed25519_dalek::{
+    Signature, Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH,
+};
 
 use crate::canon::{Reader, Writer};
 use crate::errors::{PairError, PairResult};
@@ -95,8 +97,7 @@ impl PairConfirm {
         if !conf.transcript.ct_eq(expected_transcript) {
             return Err(PairError::TranscriptMismatch);
         }
-        let vk = VerifyingKey::from_bytes(&conf.id_pubkey)
-            .map_err(|_| PairError::BadSignature)?;
+        let vk = VerifyingKey::from_bytes(&conf.id_pubkey).map_err(|_| PairError::BadSignature)?;
         let sig = Signature::from_bytes(&conf.signature);
         vk.verify(&signing_payload(&conf.transcript), &sig)
             .map_err(|_| PairError::BadSignature)?;

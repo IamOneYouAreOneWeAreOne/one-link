@@ -34,16 +34,14 @@ pub struct DuressAlert {
 
 impl DuressAlert {
     /// Canonical bytes the subkey signs over.
-    #[must_use] 
+    #[must_use]
     pub fn canonical_transcript(
         triggered_device_id: &[u8; DEVICE_ID_LEN],
         triggered_day_index: u64,
         triggered_unix: u64,
         nonce: &[u8; 16],
     ) -> Vec<u8> {
-        let mut out = Vec::with_capacity(
-            DUR_ALERT_DOMAIN.len() + DEVICE_ID_LEN + 8 + 8 + 16,
-        );
+        let mut out = Vec::with_capacity(DUR_ALERT_DOMAIN.len() + DEVICE_ID_LEN + 8 + 8 + 16);
         out.extend_from_slice(DUR_ALERT_DOMAIN);
         out.extend_from_slice(triggered_device_id);
         out.extend_from_slice(&triggered_day_index.to_be_bytes());
@@ -120,8 +118,7 @@ mod tests {
     #[test]
     fn tampered_nonce_breaks_verify() {
         let sk = make_sk();
-        let mut alert =
-            sign_duress_alert(&sk, 1_700_000_000, [0xAA; 16]).unwrap();
+        let mut alert = sign_duress_alert(&sk, 1_700_000_000, [0xAA; 16]).unwrap();
         alert.nonce[0] ^= 0xFF;
         let err = alert.verify(&sk.verifying_key()).unwrap_err();
         assert!(matches!(err, DeviceMeshError::DuressAlertVerifyFail));
@@ -131,8 +128,7 @@ mod tests {
     fn cross_subkey_rejected() {
         let sk_a = make_sk();
         let sk_b = make_sk();
-        let alert =
-            sign_duress_alert(&sk_a, 1_700_000_000, [0xAA; 16]).unwrap();
+        let alert = sign_duress_alert(&sk_a, 1_700_000_000, [0xAA; 16]).unwrap();
         let err = alert.verify(&sk_b.verifying_key()).unwrap_err();
         assert!(matches!(err, DeviceMeshError::DuressAlertVerifyFail));
     }

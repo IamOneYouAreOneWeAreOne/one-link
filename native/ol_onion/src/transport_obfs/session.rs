@@ -8,9 +8,7 @@
 //! `derive_nonce(direction_tag, packet_counter)` to produce unique
 //! per-packet ChaCha20 nonces; (key, nonce) pairs never repeat.
 
-use crate::transport_obfs::primitive::{
-    deobfuscate, derive_nonce, obfuscate, OBFS_KEY_LEN,
-};
+use crate::transport_obfs::primitive::{deobfuscate, derive_nonce, obfuscate, OBFS_KEY_LEN};
 use zeroize::Zeroize;
 
 /// Length of a session key (= ChaCha20 key length).
@@ -77,7 +75,6 @@ impl Session {
         let nonce = derive_nonce(OUTBOUND_DIRECTION_TAG, counter);
         Ok(deobfuscate(&self.inbound_key, &nonce, ciphertext))
     }
-
 }
 
 impl std::fmt::Debug for Session {

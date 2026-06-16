@@ -116,13 +116,11 @@ fn adversarial_response_cross_invite_replay_blocked() {
 
     // Scanner scans A.
     let scanner_sk = SigningKey::generate(&mut OsRng);
-    let (_, response_for_a) =
-        Scanner::scan(scanner_sk, &bytes_a, 100, &mut OsRng).unwrap();
+    let (_, response_for_a) = Scanner::scan(scanner_sk, &bytes_a, 100, &mut OsRng).unwrap();
 
     // Attacker forwards the same response to inviter_b.
     let invite_b = Invite::decode_and_verify(&bytes_b).unwrap();
-    let err = PairResponse::decode_and_verify(&response_for_a, &invite_b.body_bytes())
-        .unwrap_err();
+    let err = PairResponse::decode_and_verify(&response_for_a, &invite_b.body_bytes()).unwrap_err();
     assert_eq!(err, PairError::BadSignature);
 
     // Sanity: also try receive_response on inviter_b (which calls
@@ -154,14 +152,12 @@ fn adversarial_confirm_attacker_swaps_inviter_key_rejected() {
     // transcript value.
     let attacker_sk = SigningKey::generate(&mut OsRng);
     let invite = Invite::decode_and_verify(&invite_bytes).unwrap();
-    let response = PairResponse::decode_and_verify(
-        &response_bytes,
-        &invite.body_bytes(),
-    )
-    .unwrap();
+    let response = PairResponse::decode_and_verify(&response_bytes, &invite.body_bytes()).unwrap();
     let real_t = transcript_hash(&invite, &response);
     let bogus_confirm = PairConfirm::sign(&attacker_sk, real_t);
-    let err = scanner.receive_confirm(&bogus_confirm.encode()).unwrap_err();
+    let err = scanner
+        .receive_confirm(&bogus_confirm.encode())
+        .unwrap_err();
     assert_eq!(err, PairError::BadSignature);
 }
 
@@ -187,7 +183,9 @@ fn adversarial_confirm_attacker_swaps_transcript_rejected() {
     let inviter_other_sk = SigningKey::generate(&mut OsRng);
     let fake_t = TranscriptHash::from_bytes([0xCDu8; TRANSCRIPT_LEN]);
     let bogus_confirm = PairConfirm::sign(&inviter_other_sk, fake_t);
-    let err = scanner.receive_confirm(&bogus_confirm.encode()).unwrap_err();
+    let err = scanner
+        .receive_confirm(&bogus_confirm.encode())
+        .unwrap_err();
     // Either BadSignature (wrong pubkey pinned) or TranscriptMismatch.
     assert!(
         matches!(err, PairError::BadSignature | PairError::TranscriptMismatch),

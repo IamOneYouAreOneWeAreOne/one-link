@@ -138,14 +138,22 @@ fn kat_invite_bytes_pinned() {
 #[test]
 fn kat_response_bytes_pinned() {
     let (_, response, _) = build_kat_pair();
-    assert_or_regen("RESPONSE_HEX", EXPECTED_RESPONSE_HEX, &hex(&response.encode()));
+    assert_or_regen(
+        "RESPONSE_HEX",
+        EXPECTED_RESPONSE_HEX,
+        &hex(&response.encode()),
+    );
 }
 
 #[test]
 fn kat_transcript_hash_pinned() {
     let (invite, response, _) = build_kat_pair();
     let t = transcript_hash(&invite, &response);
-    assert_or_regen("TRANSCRIPT_HEX", EXPECTED_TRANSCRIPT_HEX, &hex(t.as_bytes()));
+    assert_or_regen(
+        "TRANSCRIPT_HEX",
+        EXPECTED_TRANSCRIPT_HEX,
+        &hex(t.as_bytes()),
+    );
 }
 
 #[test]
@@ -189,12 +197,11 @@ fn kat_full_roundtrip_decodes_and_verifies() {
     let decoded = Invite::decode_and_verify(&invite.encode()).unwrap();
     assert_eq!(decoded, invite);
     // Response roundtrip
-    let decoded = PairResponse::decode_and_verify(&response.encode(), &invite.body_bytes())
-        .unwrap();
+    let decoded =
+        PairResponse::decode_and_verify(&response.encode(), &invite.body_bytes()).unwrap();
     assert_eq!(decoded, response);
     // Confirm roundtrip
     let t = transcript_hash(&invite, &response);
-    let decoded = PairConfirm::decode_and_verify(&confirm.encode(), &invite.id_pubkey, &t)
-        .unwrap();
+    let decoded = PairConfirm::decode_and_verify(&confirm.encode(), &invite.id_pubkey, &t).unwrap();
     assert_eq!(decoded, confirm);
 }

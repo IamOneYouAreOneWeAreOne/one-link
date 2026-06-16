@@ -33,12 +33,18 @@ impl SubtreePolicy {
     /// A plain (non-quorum-gated) policy of the given kind.
     #[must_use]
     pub const fn plain(kind: SubtreePolicyKind) -> Self {
-        Self { kind, quorum_gated: false }
+        Self {
+            kind,
+            quorum_gated: false,
+        }
     }
     /// A quorum-gated policy of the given kind.
     #[must_use]
     pub const fn quorum_gated(kind: SubtreePolicyKind) -> Self {
-        Self { kind, quorum_gated: true }
+        Self {
+            kind,
+            quorum_gated: true,
+        }
     }
 }
 

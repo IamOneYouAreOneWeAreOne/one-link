@@ -51,12 +51,10 @@ use zeroize::Zeroize;
 
 use crate::errors::{OnionError, OnionResult};
 use crate::hop::HopId;
-use crate::sphinx::core::RISTRETTO_POINT_LEN;
 #[cfg(test)]
 use crate::sphinx::core::generate_static_keypair;
-use crate::sphinx::header::{
-    build_header, peel_header, HeaderPeelOutcome, DESTINATION_MARKER,
-};
+use crate::sphinx::core::RISTRETTO_POINT_LEN;
+use crate::sphinx::header::{build_header, peel_header, HeaderPeelOutcome, DESTINATION_MARKER};
 use crate::sphinx::primitives::{
     chacha20_xor_in_place, derive_hop_keys, HopKeys, HEADER_LEN, MAX_HOPS, PAYLOAD_LEN,
     SLOT_ID_LEN, SLOT_LEN, SLOT_MAC_LEN,
@@ -246,9 +244,7 @@ pub fn build_pq_sphinx_onion<R: RngCore + CryptoRng>(
     let entry_pq_pk = circuit[0]
         .static_pq_pk
         .as_ref()
-        .ok_or(OnionError::Internal(
-            "first hop must have an ML-KEM pubkey",
-        ))?;
+        .ok_or(OnionError::Internal("first hop must have an ML-KEM pubkey"))?;
 
     // ── Step 1: ML-KEM encapsulation to entry hop.
     let (pq_ct, pq_shared) = entry_pq_pk
@@ -270,8 +266,7 @@ pub fn build_pq_sphinx_onion<R: RngCore + CryptoRng>(
 
     for (i, hop) in circuit.iter().enumerate() {
         let alpha_bytes = alpha_i.compress().to_bytes();
-        let classical_shared_point =
-            (sender_eph_sk * cumulative_blind) * hop.static_x_pk;
+        let classical_shared_point = (sender_eph_sk * cumulative_blind) * hop.static_x_pk;
         let classical_shared = classical_shared_point.compress().to_bytes();
         if classical_shared.iter().all(|&b| b == 0) {
             return Err(OnionError::SmallOrderPubkey);
@@ -291,11 +286,8 @@ pub fn build_pq_sphinx_onion<R: RngCore + CryptoRng>(
     }
 
     // ── Step 3: build header.
-    let mut next_hop_ids: Vec<[u8; SLOT_ID_LEN]> = circuit
-        .iter()
-        .skip(1)
-        .map(|h| *h.id.as_bytes())
-        .collect();
+    let mut next_hop_ids: Vec<[u8; SLOT_ID_LEN]> =
+        circuit.iter().skip(1).map(|h| *h.id.as_bytes()).collect();
     next_hop_ids.push(DESTINATION_MARKER);
 
     let n_relays = n - 1;
@@ -371,8 +363,8 @@ pub fn peel_pq_sphinx_entry(
     }
     // PQ decapsulation.
     let pq_ct_slice = packet.pq_ct();
-    let ct_arr: Array<u8, MlKemCtSize> = Array::try_from(pq_ct_slice)
-        .map_err(|_| OnionError::Internal("ML-KEM ciphertext size"))?;
+    let ct_arr: Array<u8, MlKemCtSize> =
+        Array::try_from(pq_ct_slice).map_err(|_| OnionError::Internal("ML-KEM ciphertext size"))?;
     let pq_shared = relay_pq_sk
         .decapsulate(&ct_arr)
         .map_err(|_| OnionError::AeadFail)?;
@@ -503,8 +495,8 @@ mod tests {
     fn one_hop_pq_hybrid_round_trip() {
         let (entry_sk, entry_pq_sk, entry) = make_entry_relay();
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-        let packet = build_pq_sphinx_onion(&eph_sk, &[entry.clone()], b"pq-hybrid", &mut OsRng)
-            .unwrap();
+        let packet =
+            build_pq_sphinx_onion(&eph_sk, &[entry.clone()], b"pq-hybrid", &mut OsRng).unwrap();
         // The entry IS the destination here (1-hop circuit).
         let outcome = peel_pq_sphinx_entry(&entry_sk, &entry_pq_sk, &packet).unwrap();
         match outcome {
@@ -520,8 +512,7 @@ mod tests {
         let (dest_sk, dest) = make_intermediate_relay();
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
         let circuit = vec![entry.clone(), mid.clone(), dest.clone()];
-        let packet =
-            build_pq_sphinx_onion(&eph_sk, &circuit, b"three-hop pq", &mut OsRng).unwrap();
+        let packet = build_pq_sphinx_onion(&eph_sk, &circuit, b"three-hop pq", &mut OsRng).unwrap();
 
         // Entry peels with hybrid.
         let outcome = peel_pq_sphinx_entry(&entry_sk, &entry_pq_sk, &packet).unwrap();
@@ -562,8 +553,7 @@ mod tests {
         let (entry_sk, _, entry) = make_entry_relay();
         let (wrong_pq_dk, _wrong_pq_ek) = generate_pq_keypair(&mut OsRng);
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-        let packet =
-            build_pq_sphinx_onion(&eph_sk, &[entry.clone()], b"x", &mut OsRng).unwrap();
+        let packet = build_pq_sphinx_onion(&eph_sk, &[entry.clone()], b"x", &mut OsRng).unwrap();
         // Wrong PQ decap key — ML-KEM has implicit rejection, so
         // decap succeeds but with a DIFFERENT shared, breaking
         // the hybrid derivation → MAC fails.
@@ -576,8 +566,7 @@ mod tests {
         let (_, entry_pq_sk, entry) = make_entry_relay();
         let (wrong_x_sk, _) = generate_static_keypair(&mut OsRng);
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-        let packet =
-            build_pq_sphinx_onion(&eph_sk, &[entry.clone()], b"x", &mut OsRng).unwrap();
+        let packet = build_pq_sphinx_onion(&eph_sk, &[entry.clone()], b"x", &mut OsRng).unwrap();
         let err = peel_pq_sphinx_entry(&wrong_x_sk, &entry_pq_sk, &packet).unwrap_err();
         assert_eq!(err, OnionError::AeadFail);
     }
@@ -588,8 +577,7 @@ mod tests {
         let (_, mid) = make_intermediate_relay();
         let (_, dest) = make_intermediate_relay();
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-        let packet =
-            build_pq_sphinx_onion(&eph_sk, &[entry, mid, dest], b"x", &mut OsRng).unwrap();
+        let packet = build_pq_sphinx_onion(&eph_sk, &[entry, mid, dest], b"x", &mut OsRng).unwrap();
         assert_eq!(packet.as_bytes().len(), PQ_SPHINX_PACKET_LEN);
         let next = match peel_pq_sphinx_entry(&entry_sk, &entry_pq_sk, &packet).unwrap() {
             PqSphinxPeelOutcome::Forward { next_packet, .. } => next_packet,

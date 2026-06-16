@@ -40,8 +40,7 @@ pub const HEARTBEAT_ID_DOMAIN: &[u8] = b"OL-confidential-heartbeat-id-v1";
 /// Domain-separation prefix for the heartbeat-specific transcript
 /// the master signs over (carries counter + `prev_id` + the embedded
 /// attestation doc transcript bytes).
-pub const HEARTBEAT_TRANSCRIPT_DOMAIN: &[u8] =
-    b"OL-confidential-heartbeat-transcript-v1";
+pub const HEARTBEAT_TRANSCRIPT_DOMAIN: &[u8] = b"OL-confidential-heartbeat-transcript-v1";
 
 /// Heartbeat-id: a 32-byte BLAKE3 commitment to a doc's canonical
 /// form.
@@ -190,11 +189,7 @@ mod tests {
 
     const TEST_SDP_PUBKEY: IssuerSdpPubkey = [0x77u8; ISSUER_SDP_PUBKEY_LEN];
 
-    fn make_doc(
-        sk: &HybridSigningKey,
-        nonce: AttestationNonce,
-        issued: u64,
-    ) -> AttestationDoc {
+    fn make_doc(sk: &HybridSigningKey, nonce: AttestationNonce, issued: u64) -> AttestationDoc {
         sign_attestation(
             sk,
             ProviderTag::Software,
@@ -230,8 +225,26 @@ mod tests {
         };
 
         let mut state = HeartbeatVerifierState::fresh();
-        state.ingest(&hb_a, &nonce_a, None, 110, crate::tier::ConfidentialTier::Software, &TEST_SDP_PUBKEY).unwrap();
-        state.ingest(&hb_b, &nonce_b, None, 210, crate::tier::ConfidentialTier::Software, &TEST_SDP_PUBKEY).unwrap();
+        state
+            .ingest(
+                &hb_a,
+                &nonce_a,
+                None,
+                110,
+                crate::tier::ConfidentialTier::Software,
+                &TEST_SDP_PUBKEY,
+            )
+            .unwrap();
+        state
+            .ingest(
+                &hb_b,
+                &nonce_b,
+                None,
+                210,
+                crate::tier::ConfidentialTier::Software,
+                &TEST_SDP_PUBKEY,
+            )
+            .unwrap();
         assert!(state.initialised);
         assert_eq!(state.last_counter, 2);
     }
@@ -247,7 +260,16 @@ mod tests {
             prev_heartbeat_id: [0u8; 32],
         };
         let mut state = HeartbeatVerifierState::fresh();
-        state.ingest(&hb_a, &nonce, None, 110, crate::tier::ConfidentialTier::Software, &TEST_SDP_PUBKEY).unwrap();
+        state
+            .ingest(
+                &hb_a,
+                &nonce,
+                None,
+                110,
+                crate::tier::ConfidentialTier::Software,
+                &TEST_SDP_PUBKEY,
+            )
+            .unwrap();
 
         // Same counter again — must reject.
         let hb_replay = HeartbeatAttestation {
@@ -255,7 +277,14 @@ mod tests {
             monotonic_counter: 5,
             prev_heartbeat_id: heartbeat_id(&doc),
         };
-        let r = state.ingest(&hb_replay, &nonce, None, 110, crate::tier::ConfidentialTier::Software, &TEST_SDP_PUBKEY);
+        let r = state.ingest(
+            &hb_replay,
+            &nonce,
+            None,
+            110,
+            crate::tier::ConfidentialTier::Software,
+            &TEST_SDP_PUBKEY,
+        );
         assert!(r.is_err());
     }
 
@@ -281,8 +310,24 @@ mod tests {
         };
 
         let mut state = HeartbeatVerifierState::fresh();
-        state.ingest(&hb_a, &nonce_a, None, 110, crate::tier::ConfidentialTier::Software, &TEST_SDP_PUBKEY).unwrap();
-        let r = state.ingest(&hb_b, &nonce_b, None, 210, crate::tier::ConfidentialTier::Software, &TEST_SDP_PUBKEY);
+        state
+            .ingest(
+                &hb_a,
+                &nonce_a,
+                None,
+                110,
+                crate::tier::ConfidentialTier::Software,
+                &TEST_SDP_PUBKEY,
+            )
+            .unwrap();
+        let r = state.ingest(
+            &hb_b,
+            &nonce_b,
+            None,
+            210,
+            crate::tier::ConfidentialTier::Software,
+            &TEST_SDP_PUBKEY,
+        );
         assert!(r.is_err(), "chain break must be detected");
     }
 
@@ -321,9 +366,34 @@ mod tests {
         };
 
         let mut state = HeartbeatVerifierState::fresh();
-        state.ingest(&hb_a, &nonce_a, None, 110, crate::tier::ConfidentialTier::Software, &TEST_SDP_PUBKEY).unwrap();
-        state.ingest(&hb_b1, &nonce_b, None, 210, crate::tier::ConfidentialTier::Software, &TEST_SDP_PUBKEY).unwrap();
-        let r = state.ingest(&hb_b2, &hb_b2.attestation.peer_nonce, None, 210, crate::tier::ConfidentialTier::Software, &TEST_SDP_PUBKEY);
+        state
+            .ingest(
+                &hb_a,
+                &nonce_a,
+                None,
+                110,
+                crate::tier::ConfidentialTier::Software,
+                &TEST_SDP_PUBKEY,
+            )
+            .unwrap();
+        state
+            .ingest(
+                &hb_b1,
+                &nonce_b,
+                None,
+                210,
+                crate::tier::ConfidentialTier::Software,
+                &TEST_SDP_PUBKEY,
+            )
+            .unwrap();
+        let r = state.ingest(
+            &hb_b2,
+            &hb_b2.attestation.peer_nonce,
+            None,
+            210,
+            crate::tier::ConfidentialTier::Software,
+            &TEST_SDP_PUBKEY,
+        );
         assert!(r.is_err(), "second branch of the fork must be rejected");
     }
 

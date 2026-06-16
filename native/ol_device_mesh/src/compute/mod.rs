@@ -60,16 +60,13 @@ pub mod registry;
 pub mod task;
 
 pub use attestation::{
-    sign_capability_attestation, CapabilityAttestation,
-    CAPABILITY_ATTESTATION_DOMAIN,
+    sign_capability_attestation, CapabilityAttestation, CAPABILITY_ATTESTATION_DOMAIN,
 };
 pub use capability::{DeviceCapability, MAX_CAPABILITIES_PER_DEVICE};
 pub use picker::pick_executor;
-pub use policy::{
-    TaskClass, TaskPolicy, MAX_TASK_CLASS_LEN, TASK_CLASS_DOMAIN,
-};
+pub use policy::{TaskClass, TaskPolicy, MAX_TASK_CLASS_LEN, TASK_CLASS_DOMAIN};
 pub use registry::CapabilityRegistry;
 pub use task::{
-    sign_task_request, sign_task_result, task_request_id, TaskRequest,
-    TaskRequestId, TaskResult, TASK_REQUEST_DOMAIN, TASK_RESULT_DOMAIN,
+    sign_task_request, sign_task_result, task_request_id, TaskRequest, TaskRequestId, TaskResult,
+    TASK_REQUEST_DOMAIN, TASK_RESULT_DOMAIN,
 };

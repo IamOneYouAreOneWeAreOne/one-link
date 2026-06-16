@@ -19,7 +19,9 @@
 //! signature is verified before any field is trusted.
 
 use blake3::Hasher;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH};
+use ed25519_dalek::{
+    Signature, Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH,
+};
 use zeroize::Zeroize;
 
 use crate::canon::{Reader, Writer, MAX_FIELD_BYTES};
@@ -180,10 +182,10 @@ impl Invite {
             inv.expiry_unix,
             &inv.scope,
         );
-        let vk = VerifyingKey::from_bytes(&inv.id_pubkey)
-            .map_err(|_| PairError::BadSignature)?;
+        let vk = VerifyingKey::from_bytes(&inv.id_pubkey).map_err(|_| PairError::BadSignature)?;
         let sig = Signature::from_bytes(&inv.signature);
-        vk.verify(&body, &sig).map_err(|_| PairError::BadSignature)?;
+        vk.verify(&body, &sig)
+            .map_err(|_| PairError::BadSignature)?;
         Ok(inv)
     }
 
@@ -393,7 +395,10 @@ mod tests {
         let err = Invite::decode_raw(&encoded).unwrap_err();
         assert!(matches!(
             err,
-            PairError::UnsupportedVersion { got: 0xFF, supported: 1 }
+            PairError::UnsupportedVersion {
+                got: 0xFF,
+                supported: 1
+            }
         ));
     }
 
@@ -404,7 +409,10 @@ mod tests {
         let err = Invite::decode_raw(&encoded).unwrap_err();
         assert!(matches!(
             err,
-            PairError::BadTag { expected: 0x01, got: 0x99 }
+            PairError::BadTag {
+                expected: 0x01,
+                got: 0x99
+            }
         ));
     }
 

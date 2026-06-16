@@ -7,9 +7,7 @@ use ol_device_mesh::self_routing::{
     dtn_couriers, multi_path_plan, pick_best_route, sign_route_announcement, PeerLink,
     RouteAnnouncement, RouteTable, TauScore,
 };
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, DeviceSubkey, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, DeviceSubkey, MasterIdentity, DEVICE_ID_LEN};
 use ol_pqsig::HybridVerifyingKey;
 
 fn cheap_cases() -> u32 {
@@ -125,15 +123,20 @@ proptest! {
 
 // ── DTN courier sanity (no proptest, just deterministic) ─────────
 
-fn make_devices(n: usize) -> (Vec<[u8; DEVICE_ID_LEN]>, Vec<DeviceSubkey>, Vec<HybridVerifyingKey>) {
+fn make_devices(
+    n: usize,
+) -> (
+    Vec<[u8; DEVICE_ID_LEN]>,
+    Vec<DeviceSubkey>,
+    Vec<HybridVerifyingKey>,
+) {
     let master = MasterIdentity::generate(&mut OsRng);
     let mut ids = Vec::new();
     let mut sks = Vec::new();
     let mut vks = Vec::new();
     for _ in 0..n {
         let id = [(ids.len() + 1) as u8; DEVICE_ID_LEN];
-        let (sk, att) =
-            mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+        let (sk, att) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
         let vk = HybridVerifyingKey::from_bytes(&att.subkey_vk_bytes).unwrap();
         ids.push(id);
         sks.push(sk);

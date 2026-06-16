@@ -5,9 +5,8 @@
 //! This is the end-to-end acceptance gate for the alien-tech primitive.
 
 use ol_proximity_pair::{
-    block_syndrome, derive_factor2_secret, privacy_amplify,
-    quantize_observations, reconcile_with_syndrome, PipelineConfig,
-    QuantizeConfig,
+    block_syndrome, derive_factor2_secret, privacy_amplify, quantize_observations,
+    reconcile_with_syndrome, PipelineConfig, QuantizeConfig,
 };
 
 /// Simulate two devices that see the same physical environment with
@@ -16,7 +15,7 @@ fn co_located_observations(seed: u64) -> (Vec<u8>, Vec<u8>) {
     // 512 observations so syndrome bits + key bits both fit within
     // residual entropy after one-pass reconciliation.
     let base: Vec<u8> = (0..512u32)
-        .map(|i| (((i.wrapping_mul(seed as u32 + 7919))) % 256) as u8)
+        .map(|i| ((i.wrapping_mul(seed as u32 + 7919)) % 256) as u8)
         .collect();
     // Alice + Bob each add ~2% noise independently.
     let mut rng_a = seed.wrapping_mul(31);
@@ -24,11 +23,13 @@ fn co_located_observations(seed: u64) -> (Vec<u8>, Vec<u8>) {
     // Small signed noise via i16 arithmetic, then saturate to u8.
     // 95% probability noise = 0; 5% probability noise = +/- 1.
     let perturb = |v: u8, rng: u64| -> u8 {
-        let r = (rng >> 32) & 0xFF;  // uniform byte
+        let r = (rng >> 32) & 0xFF; // uniform byte
         let signed_v = v as i16;
-        let noisy = if r < 6 {  // ~2.3%: -1
+        let noisy = if r < 6 {
+            // ~2.3%: -1
             signed_v - 1
-        } else if r > 250 {  // ~2.0%: +1
+        } else if r > 250 {
+            // ~2.0%: +1
             signed_v + 1
         } else {
             signed_v
@@ -55,7 +56,7 @@ fn co_located_observations(seed: u64) -> (Vec<u8>, Vec<u8>) {
 /// Simulate a distant attacker observing UNRELATED environment.
 fn distant_attacker_observations(seed: u64) -> Vec<u8> {
     (0..512u32)
-        .map(|i| (((i.wrapping_mul(seed as u32 + 17389))) % 256) as u8)
+        .map(|i| ((i.wrapping_mul(seed as u32 + 17389)) % 256) as u8)
         .collect()
 }
 
@@ -66,19 +67,15 @@ fn co_located_devices_derive_same_secret() {
     let cfg = PipelineConfig::default();
 
     // Both sides quantize.
-    let alice_bits =
-        quantize_observations(&alice_obs, &cfg.quantize).unwrap();
+    let alice_bits = quantize_observations(&alice_obs, &cfg.quantize).unwrap();
     let bob_bits = quantize_observations(&bob_obs, &cfg.quantize).unwrap();
 
     // Bob computes its syndrome and ships to Alice.
     let bob_syndrome = block_syndrome(&bob_bits, cfg.syndrome_block_bits);
 
     // Alice reconciles to match Bob's bits.
-    let alice_reconciled = reconcile_with_syndrome(
-        &alice_bits,
-        &bob_syndrome,
-        cfg.syndrome_block_bits,
-    );
+    let alice_reconciled =
+        reconcile_with_syndrome(&alice_bits, &bob_syndrome, cfg.syndrome_block_bits);
     // Bob uses its own bits as-is (it's the syndrome-publisher in this
     // 1-way reconciliation).
     let bob_reconciled = bob_bits.clone();
@@ -93,7 +90,11 @@ fn co_located_devices_derive_same_secret() {
     // F1.4-polish) gets this to >99%. For the MVP acceptance gate
     // we require >= 85% — proves the primitive works; multi-pass
     // protocol layer above gets us to byte-identical keys.
-    let agreement = alice_t.iter().zip(bob_t.iter()).filter(|(a, b)| a == b).count();
+    let agreement = alice_t
+        .iter()
+        .zip(bob_t.iter())
+        .filter(|(a, b)| a == b)
+        .count();
     let agreement_rate = agreement as f64 / n as f64;
     assert!(
         agreement_rate >= 0.85,
@@ -112,8 +113,11 @@ fn co_located_devices_derive_same_secret() {
     // reconciliation rounds. The cryptographic primitive itself is
     // correct; the protocol layer above (which this crate doesn't
     // own) chooses how many rounds.
-    let n_matching_bytes =
-        alice_key.iter().zip(bob_key.iter()).filter(|(a, b)| a == b).count();
+    let n_matching_bytes = alice_key
+        .iter()
+        .zip(bob_key.iter())
+        .filter(|(a, b)| a == b)
+        .count();
     // After ONE reconciliation pass with 2% raw error rate, agreement
     // is high but the BLAKE3 amplification step amplifies any
     // remaining disagreements. So we test the underlying bit-level
@@ -137,22 +141,15 @@ fn distant_attacker_cannot_derive_same_secret() {
 
     // Hypothetical: attacker captured Alice's syndrome (sent in the
     // clear over the bootstrap channel) and tries to derive the key.
-    let alice_bits =
-        quantize_observations(&alice_obs, &cfg.quantize).unwrap();
-    let alice_syndrome =
-        block_syndrome(&alice_bits, cfg.syndrome_block_bits);
+    let alice_bits = quantize_observations(&alice_obs, &cfg.quantize).unwrap();
+    let alice_syndrome = block_syndrome(&alice_bits, cfg.syndrome_block_bits);
 
-    let attacker_bits =
-        quantize_observations(&attacker_obs, &cfg.quantize).unwrap();
-    let attacker_reconciled = reconcile_with_syndrome(
-        &attacker_bits,
-        &alice_syndrome,
-        cfg.syndrome_block_bits,
-    );
+    let attacker_bits = quantize_observations(&attacker_obs, &cfg.quantize).unwrap();
+    let attacker_reconciled =
+        reconcile_with_syndrome(&attacker_bits, &alice_syndrome, cfg.syndrome_block_bits);
 
     let alice_key = privacy_amplify(&alice_bits, &cfg.amplify_salt);
-    let attacker_key =
-        privacy_amplify(&attacker_reconciled, &cfg.amplify_salt);
+    let attacker_key = privacy_amplify(&attacker_reconciled, &cfg.amplify_salt);
 
     // With overwhelming probability, attacker_key != alice_key.
     assert_ne!(
@@ -166,11 +163,9 @@ fn full_pipeline_one_call() {
     // Convenience wrapper test.
     let (alice_obs, bob_obs) = co_located_observations(0x12345678);
     let cfg = PipelineConfig::default();
-    let bob_bits =
-        quantize_observations(&bob_obs, &cfg.quantize).unwrap();
+    let bob_bits = quantize_observations(&bob_obs, &cfg.quantize).unwrap();
     let bob_syndrome = block_syndrome(&bob_bits, cfg.syndrome_block_bits);
-    let alice_key =
-        derive_factor2_secret(&alice_obs, &bob_syndrome, &cfg).unwrap();
+    let alice_key = derive_factor2_secret(&alice_obs, &bob_syndrome, &cfg).unwrap();
     assert_eq!(alice_key.len(), 32);
 }
 

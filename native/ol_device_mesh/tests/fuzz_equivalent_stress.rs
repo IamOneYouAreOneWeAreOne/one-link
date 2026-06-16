@@ -18,8 +18,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 use ol_device_mesh::active_routing::{
-    pick_device_for_context, CohortPrior, DeviceActionRecord, RoutingContext,
-    RoutingHistory,
+    pick_device_for_context, CohortPrior, DeviceActionRecord, RoutingContext, RoutingHistory,
 };
 use ol_device_mesh::compute::{
     pick_executor, sign_capability_attestation, CapabilityRegistry, DeviceCapability,
@@ -30,20 +29,14 @@ use ol_device_mesh::distributed_fs::{
 use ol_device_mesh::duress::{
     sign_duress_alert, verify_pairing_cross_channel, PairingChannel, PairingCommitment,
 };
-use ol_device_mesh::fan_out::{
-    fan_out_plan, sign_fetch_request, SourceCapacity, FETCH_NONCE_LEN,
-};
+use ol_device_mesh::fan_out::{fan_out_plan, sign_fetch_request, SourceCapacity, FETCH_NONCE_LEN};
 use ol_device_mesh::mesh_state::{AuthenticatedOp, Delta, MeshState, SyncState};
-use ol_device_mesh::quorum::{
-    mint_policy, propose_operation, sign_approval, QuorumCertificate,
-};
+use ol_device_mesh::quorum::{mint_policy, propose_operation, sign_approval, QuorumCertificate};
 use ol_device_mesh::self_onion::{
-    build_self_onion_circuit, derive_onion_identity, peel_self_onion_layer,
-    sign_onion_attestation, OnionKeyRegistry,
+    build_self_onion_circuit, derive_onion_identity, peel_self_onion_layer, sign_onion_attestation,
+    OnionKeyRegistry,
 };
-use ol_device_mesh::self_routing::{
-    sign_route_announcement, PeerLink, RouteTable,
-};
+use ol_device_mesh::self_routing::{sign_route_announcement, PeerLink, RouteTable};
 use ol_device_mesh::subkey::{fresh_device_id, mint_subkey};
 use ol_device_mesh::{DeviceClass, MasterIdentity, DEVICE_ID_LEN};
 use ol_pqsig::HybridVerifyingKey;
@@ -62,8 +55,7 @@ fn stress_cases() -> u32 {
 fn fuzz_attestation_body(data: &[u8]) {
     let mut rng = ChaCha20Rng::from_seed([0xA1u8; 32]);
     let master = MasterIdentity::generate(&mut rng);
-    let (_sk, mut att) =
-        mint_subkey(&master, DeviceClass::Phone, [0x55; 16], 0, 365).unwrap();
+    let (_sk, mut att) = mint_subkey(&master, DeviceClass::Phone, [0x55; 16], 0, 365).unwrap();
     if !data.is_empty() {
         let pick = data[0] % 5;
         let body = &data[1..];
@@ -104,19 +96,13 @@ fn fuzz_quorum_body(data: &[u8]) {
     let id1 = [0x11u8; 16];
     let id2 = [0x22u8; 16];
     let id3 = [0x33u8; 16];
-    let (sk1, a1) =
-        mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
-    let (sk2, a2) =
-        mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
-    let (sk3, a3) =
-        mint_subkey(&master, DeviceClass::Desktop, id3, 0, 365).unwrap();
-    let policy =
-        mint_policy(&master, [0x42; 16], b"fuzz", 2, vec![id1, id2, id3]).unwrap();
+    let (sk1, a1) = mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
+    let (sk2, a2) = mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
+    let (sk3, a3) = mint_subkey(&master, DeviceClass::Desktop, id3, 0, 365).unwrap();
+    let policy = mint_policy(&master, [0x42; 16], b"fuzz", 2, vec![id1, id2, id3]).unwrap();
     let now: u64 = 1_700_000_000;
-    let proposal = propose_operation(
-        &sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600,
-    )
-    .unwrap();
+    let proposal =
+        propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600).unwrap();
     let ap2 = sign_approval(&sk2, &proposal, now + 1).unwrap();
     let ap3 = sign_approval(&sk3, &proposal, now + 2).unwrap();
     let mut cert = QuorumCertificate {
@@ -161,13 +147,15 @@ fn fuzz_state_body(data: &[u8]) {
     let mut rng = ChaCha20Rng::from_seed([0xA3u8; 32]);
     let master = MasterIdentity::generate(&mut rng);
     let id = [0xAB; 16];
-    let (sk, att) =
-        mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+    let (sk, att) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
     let vk = HybridVerifyingKey::from_bytes(&att.subkey_vk_bytes).unwrap();
     let mut op = AuthenticatedOp::sign(
         &sk,
         b"x".to_vec(),
-        Delta::LwwSet { value: b"baseline".to_vec(), ts: 1 },
+        Delta::LwwSet {
+            value: b"baseline".to_vec(),
+            ts: 1,
+        },
         1,
         1,
     )
@@ -208,10 +196,8 @@ fn fuzz_state_body(data: &[u8]) {
 fn fuzz_dfs_body(data: &[u8]) {
     let mut rng = ChaCha20Rng::from_seed([0xA4u8; 32]);
     let master = MasterIdentity::generate(&mut rng);
-    let (sk, _att) = mint_subkey(
-        &master, DeviceClass::Phone, [0x77; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk, _att) =
+        mint_subkey(&master, DeviceClass::Phone, [0x77; DEVICE_ID_LEN], 0, 365).unwrap();
     let n_chunks = (data.len() / 32).clamp(1, 8) * 3; // multiple of (k=2,m=1)
     let mut chunks: Vec<ChunkHash> = Vec::with_capacity(n_chunks);
     for i in 0..n_chunks {
@@ -241,7 +227,11 @@ fn fuzz_fan_out_body(data: &[u8]) {
     let mut rng = ChaCha20Rng::from_seed([0xA5u8; 32]);
     let master = MasterIdentity::generate(&mut rng);
     let (sk, _att) = mint_subkey(
-        &master, DeviceClass::Phone, fresh_device_id(&mut rng), 0, 365,
+        &master,
+        DeviceClass::Phone,
+        fresh_device_id(&mut rng),
+        0,
+        365,
     )
     .unwrap();
     let mut nonce = [0u8; FETCH_NONCE_LEN];
@@ -274,10 +264,8 @@ fn fuzz_fan_out_body(data: &[u8]) {
 fn fuzz_self_routing_body(data: &[u8]) {
     let mut rng = ChaCha20Rng::from_seed([0xA6u8; 32]);
     let master = MasterIdentity::generate(&mut rng);
-    let (sk, _att) = mint_subkey(
-        &master, DeviceClass::Phone, [0x88; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk, _att) =
+        mint_subkey(&master, DeviceClass::Phone, [0x88; DEVICE_ID_LEN], 0, 365).unwrap();
     let links: Vec<PeerLink> = (0..(data.len() / 4).min(8))
         .map(|i| PeerLink {
             peer_device_id: [data.get(i).copied().unwrap_or(0) ^ 0x55; DEVICE_ID_LEN],
@@ -315,9 +303,11 @@ fn fuzz_compute_body(data: &[u8]) {
     let master_vk = master.verifying_key();
     reg.ingest(
         sign_capability_attestation(
-            &master, id1,
+            &master,
+            id1,
             vec![DeviceCapability::Microphone, DeviceCapability::Camera],
-            0, 365,
+            0,
+            365,
         )
         .unwrap(),
         &master_vk,
@@ -325,9 +315,11 @@ fn fuzz_compute_body(data: &[u8]) {
     .unwrap();
     reg.ingest(
         sign_capability_attestation(
-            &master, id2,
+            &master,
+            id2,
             vec![DeviceCapability::Gpu, DeviceCapability::CpuHeavy],
-            0, 365,
+            0,
+            365,
         )
         .unwrap(),
         &master_vk,
@@ -335,9 +327,11 @@ fn fuzz_compute_body(data: &[u8]) {
     .unwrap();
     reg.ingest(
         sign_capability_attestation(
-            &master, id3,
+            &master,
+            id3,
             vec![DeviceCapability::LargeDisk, DeviceCapability::AlwaysOn],
-            0, 365,
+            0,
+            365,
         )
         .unwrap(),
         &master_vk,
@@ -379,7 +373,14 @@ fn fuzz_active_routing_body(data: &[u8]) {
     let mut history = RoutingHistory::empty();
     let ctx_hash = ctx.canonical_hash();
     for &b in data.iter().take(16) {
-        history.observe(ctx_hash, [b; DEVICE_ID_LEN], (b & 1) == 1, u64::from(b), 1, 1);
+        history.observe(
+            ctx_hash,
+            [b; DEVICE_ID_LEN],
+            (b & 1) == 1,
+            u64::from(b),
+            1,
+            1,
+        );
     }
     let candidates: Vec<([u8; DEVICE_ID_LEN], DeviceClass)> = data
         .iter()
@@ -387,7 +388,11 @@ fn fuzz_active_routing_body(data: &[u8]) {
         .map(|b| ([*b; DEVICE_ID_LEN], DeviceClass::Phone))
         .collect();
     let _ = pick_device_for_context(
-        &ctx, &candidates, &history, &CohortPrior::uniform(), &mut rng,
+        &ctx,
+        &candidates,
+        &history,
+        &CohortPrior::uniform(),
+        &mut rng,
     );
 }
 
@@ -415,14 +420,10 @@ fn fuzz_duress_body(data: &[u8]) {
             [data.get(20).copied().unwrap_or(0); 16],
             u64::from(data.get(21).copied().unwrap_or(0)),
         );
-        let _ =
-            verify_pairing_cross_channel(&[qr, audio, motion], &secret_bytes, 1_000_000);
+        let _ = verify_pairing_cross_channel(&[qr, audio, motion], &secret_bytes, 1_000_000);
     }
     let master = MasterIdentity::generate(&mut rng);
-    let (sk, _) = mint_subkey(
-        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk, _) = mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
     let mut nonce = [0u8; 16];
     for (i, b) in data.iter().take(16).enumerate() {
         nonce[i] = *b;

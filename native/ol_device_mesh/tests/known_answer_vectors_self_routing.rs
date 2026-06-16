@@ -1,8 +1,7 @@
 //! Pinned KAT vectors for Row 8 Layer 6 self-routing.
 
 use ol_device_mesh::self_routing::{
-    PeerLink, RouteAnnouncement, MAX_LINKS_PER_ANNOUNCEMENT,
-    ROUTE_ANNOUNCEMENT_DOMAIN,
+    PeerLink, RouteAnnouncement, MAX_LINKS_PER_ANNOUNCEMENT, ROUTE_ANNOUNCEMENT_DOMAIN,
 };
 use ol_device_mesh::DEVICE_ID_LEN;
 
@@ -46,8 +45,7 @@ fn kat_announcement_canonical_transcript_pinned() {
             direct: false,
         },
     ];
-    let bytes =
-        RouteAnnouncement::canonical_transcript(&announcer, day, announced_at, &links);
+    let bytes = RouteAnnouncement::canonical_transcript(&announcer, day, announced_at, &links);
     let hex = to_hex(&bytes);
     let domain_hex = to_hex(ROUTE_ANNOUNCEMENT_DOMAIN);
     assert!(hex.starts_with(&domain_hex));
@@ -56,20 +54,20 @@ fn kat_announcement_canonical_transcript_pinned() {
     });
     const EXPECTED_HEX: &str = concat!(
         "4f4c2d6d6573682d726f7574652d616e6e6f756e63656d656e742d7631", // "OL-mesh-route-announcement-v1"
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",  // announcer
-        "0000000000000003",                  // day
-        "000000006553f100",                  // announced_at
-        "00000002",                          // link count = 2
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",                           // announcer
+        "0000000000000003",                                           // day
+        "000000006553f100",                                           // announced_at
+        "00000002",                                                   // link count = 2
         // link 1: peer, tau, seen, direct
         "11111111111111111111111111111111",
-        "00000064",                          // tau = 100
-        "000000006553f100",                  // last_seen
-        "01",                                // direct
+        "00000064",         // tau = 100
+        "000000006553f100", // last_seen
+        "01",               // direct
         // link 2
         "22222222222222222222222222222222",
-        "00000032",                          // tau = 50
-        "000000006553f09c",                  // last_seen
-        "00",                                // direct = false
+        "00000032",         // tau = 50
+        "000000006553f09c", // last_seen
+        "00",               // direct = false
     );
     assert_eq!(hex, EXPECTED_HEX, "route-announcement transcript drift");
 }
@@ -79,12 +77,7 @@ fn kat_per_link_byte_overhead_pinned() {
     // Each PeerLink contributes 16 (peer) + 4 (tau) + 8 (seen) + 1
     // (direct) = 29 bytes. Pinned so a future wire-format change
     // (e.g., bumping tau to u64) is a deliberate decision.
-    let bytes_zero = RouteAnnouncement::canonical_transcript(
-        &[0; DEVICE_ID_LEN],
-        0,
-        0,
-        &[],
-    );
+    let bytes_zero = RouteAnnouncement::canonical_transcript(&[0; DEVICE_ID_LEN], 0, 0, &[]);
     let bytes_one = RouteAnnouncement::canonical_transcript(
         &[0; DEVICE_ID_LEN],
         0,

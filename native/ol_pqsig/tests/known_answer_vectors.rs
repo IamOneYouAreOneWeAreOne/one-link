@@ -4,7 +4,9 @@
 //! crate updates. Regenerate via `OL_PQSIG_KAT_REGEN=1` when the
 //! wire format intentionally changes.
 
-use ol_pqsig::{HybridSigningKey, HybridVerifyingKey, HYBRID_SIG_LEN, HYBRID_SK_LEN, HYBRID_VK_LEN};
+use ol_pqsig::{
+    HybridSigningKey, HybridVerifyingKey, HYBRID_SIG_LEN, HYBRID_SK_LEN, HYBRID_VK_LEN,
+};
 use rand::SeedableRng;
 
 const KAT_RNG_SEED: [u8; 32] = [0xA1u8; 32];
@@ -31,9 +33,7 @@ fn assert_or_regen(name: &str, expected: &str, actual_bytes: &[u8]) {
     if expected.is_empty() || maybe_regen() {
         eprintln!("KAT regen: const EXPECTED_{name} = \"{actual}\";");
         if expected.is_empty() && !maybe_regen() {
-            panic!(
-                "EXPECTED_{name} is empty; run with OL_PQSIG_KAT_REGEN=1 to populate"
-            );
+            panic!("EXPECTED_{name} is empty; run with OL_PQSIG_KAT_REGEN=1 to populate");
         }
         return;
     }
@@ -78,11 +78,7 @@ fn kat_sig_first_bytes_pinned() {
     let sig = sk.sign(b"OL-pqsig-kat-message").unwrap();
     assert_eq!(sig.len(), HYBRID_SIG_LEN);
     // First 64 bytes = the Ed25519 half. Pin those.
-    assert_or_regen(
-        "SIG_FIRST_64_HEX",
-        EXPECTED_SIG_FIRST_64_HEX,
-        &sig[..64],
-    );
+    assert_or_regen("SIG_FIRST_64_HEX", EXPECTED_SIG_FIRST_64_HEX, &sig[..64]);
 }
 
 #[test]

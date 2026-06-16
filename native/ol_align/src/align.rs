@@ -146,7 +146,10 @@ mod tests {
         let five_days = 5.0 * 86_400.0;
         let paired = trust_score(1.0, five_days, DEFAULT_L_PAIRED).unwrap();
         let stranger = trust_score(1.0, five_days, DEFAULT_L_STRANGER).unwrap();
-        assert!(paired > 0.5, "paired should still be > 0.5 at 5d, got {paired}");
+        assert!(
+            paired > 0.5,
+            "paired should still be > 0.5 at 5d, got {paired}"
+        );
         assert!(
             stranger < 0.01,
             "stranger should be < 0.01 at 5d, got {stranger}"

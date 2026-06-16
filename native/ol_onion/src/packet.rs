@@ -67,11 +67,8 @@ pub const HOP_ID_LEN: usize = 32;
 /// version (1) + hops_remaining (1) + ephem_pubkey (32) +
 /// aead_nonce (12) + ciphertext_len (2) + AEAD tag (16) +
 /// hop_id pointing to next hop (32, for relay layers).
-pub const PER_LAYER_OVERHEAD: usize = 1 + 1 + EPHEM_PUBKEY_LEN
-    + AEAD_NONCE_LEN
-    + 2
-    + AEAD_TAG_LEN
-    + HOP_ID_LEN;
+pub const PER_LAYER_OVERHEAD: usize =
+    1 + 1 + EPHEM_PUBKEY_LEN + AEAD_NONCE_LEN + 2 + AEAD_TAG_LEN + HOP_ID_LEN;
 
 /// Maximum supported circuit length (destination + relays). 5 covers
 /// 1-hop ("pinned-contact") + 3-hop ("paranoid") + 1 hop of headroom.
@@ -212,10 +209,7 @@ impl OnionPacket {
 /// information via repeated identical pad bytes.
 ///
 /// Refuses if the input is already larger than [`TRANSPORT_PAD_HINT`].
-pub fn pad_packet_to_transport(
-    encoded: &[u8],
-    pad_seed: &[u8; 32],
-) -> OnionResult<Vec<u8>> {
+pub fn pad_packet_to_transport(encoded: &[u8], pad_seed: &[u8; 32]) -> OnionResult<Vec<u8>> {
     if encoded.len() > TRANSPORT_PAD_HINT {
         return Err(OnionError::BadFrameSize {
             got: encoded.len(),
@@ -299,7 +293,10 @@ mod tests {
         let mut bytes = fixture().encode();
         bytes[0] = 0xFE;
         let err = OnionPacket::decode(&bytes).unwrap_err();
-        assert!(matches!(err, OnionError::UnsupportedVersion { got: 0xFE, .. }));
+        assert!(matches!(
+            err,
+            OnionError::UnsupportedVersion { got: 0xFE, .. }
+        ));
     }
 
     #[test]
@@ -385,7 +382,10 @@ mod tests {
         let mut bytes = vec![0u8; TRANSPORT_PAD_HINT];
         bytes[0] = 0xFE;
         let err = unpad_packet_from_transport(&bytes).unwrap_err();
-        assert!(matches!(err, OnionError::UnsupportedVersion { got: 0xFE, .. }));
+        assert!(matches!(
+            err,
+            OnionError::UnsupportedVersion { got: 0xFE, .. }
+        ));
     }
 
     #[test]

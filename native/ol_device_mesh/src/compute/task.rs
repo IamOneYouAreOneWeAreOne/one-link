@@ -76,11 +76,13 @@ impl TaskRequest {
     ) -> Vec<u8> {
         let mut out = Vec::with_capacity(
             TASK_REQUEST_DOMAIN.len()
-                + 2 + task_class.bytes().len()
+                + 2
+                + task_class.bytes().len()
                 + DEVICE_ID_LEN
                 + 8
                 + FILE_ID_LEN
-                + 2 + required_capabilities.len() * 8
+                + 2
+                + required_capabilities.len() * 8
                 + 4
                 + 8
                 + 8
@@ -109,7 +111,7 @@ impl TaskRequest {
     }
 
     /// Compute the content-addressed [`TaskRequestId`].
-    #[must_use] 
+    #[must_use]
     pub fn request_id(&self) -> TaskRequestId {
         task_request_id(&self.canonical_transcript_for_id())
     }
@@ -264,7 +266,7 @@ pub struct TaskResult {
 
 impl TaskResult {
     /// Canonical bytes the executor signs.
-    #[must_use] 
+    #[must_use]
     pub fn canonical_transcript(
         task_request_id: &TaskRequestId,
         executor_device_id: &[u8; DEVICE_ID_LEN],
@@ -274,13 +276,7 @@ impl TaskResult {
         completed_unix: u64,
     ) -> Vec<u8> {
         let mut out = Vec::with_capacity(
-            TASK_RESULT_DOMAIN.len()
-                + 32
-                + DEVICE_ID_LEN
-                + 8
-                + FILE_ID_LEN
-                + 8
-                + 8,
+            TASK_RESULT_DOMAIN.len() + 32 + DEVICE_ID_LEN + 8 + FILE_ID_LEN + 8 + 8,
         );
         out.extend_from_slice(TASK_RESULT_DOMAIN);
         out.extend_from_slice(task_request_id);
@@ -446,28 +442,16 @@ mod tests {
     #[test]
     fn task_result_sign_verify_round_trip() {
         let sk = make_subkey();
-        let result = sign_task_result(
-            &sk,
-            [0xEE; 32],
-            [0xDD; FILE_ID_LEN],
-            10_000,
-            1_700_000_000,
-        )
-        .unwrap();
+        let result =
+            sign_task_result(&sk, [0xEE; 32], [0xDD; FILE_ID_LEN], 10_000, 1_700_000_000).unwrap();
         result.verify(&sk.verifying_key()).unwrap();
     }
 
     #[test]
     fn task_result_tampered_breaks_verify() {
         let sk = make_subkey();
-        let mut result = sign_task_result(
-            &sk,
-            [0xEE; 32],
-            [0xDD; FILE_ID_LEN],
-            10_000,
-            1_700_000_000,
-        )
-        .unwrap();
+        let mut result =
+            sign_task_result(&sk, [0xEE; 32], [0xDD; FILE_ID_LEN], 10_000, 1_700_000_000).unwrap();
         result.output_byte_size = 9_999;
         let err = result.verify(&sk.verifying_key()).unwrap_err();
         assert!(matches!(err, DeviceMeshError::TaskResultVerifyFail));

@@ -13,9 +13,7 @@ use ol_threshold_recovery::field_bound::{
     field_bound_reconstruct, field_bound_split, FieldWitness,
 };
 use ol_threshold_recovery::prng::PrngState;
-use ol_threshold_recovery::shamir::{
-    reconstruct_bytes, share_bytes,
-};
+use ol_threshold_recovery::shamir::{reconstruct_bytes, share_bytes};
 
 fn nightly_gate() -> bool {
     std::env::var("ONE_LINK_F1_GATE")
@@ -25,17 +23,29 @@ fn nightly_gate() -> bool {
 
 fn plain_cases() -> u32 {
     // CI default 100k -> 1M to match Phase C macaroon 1M-delegation gate.
-    if nightly_gate() { 5_000_000 } else { 1_000_000 }
+    if nightly_gate() {
+        5_000_000
+    } else {
+        1_000_000
+    }
 }
 
 fn field_cases() -> u32 {
     // CI default 20k -> 200k (10x field_bound is more expensive per iter).
-    if nightly_gate() { 1_000_000 } else { 200_000 }
+    if nightly_gate() {
+        1_000_000
+    } else {
+        200_000
+    }
 }
 
 fn wrong_witness_cases() -> u32 {
     // CI default 10k -> 100k.
-    if nightly_gate() { 500_000 } else { 100_000 }
+    if nightly_gate() {
+        500_000
+    } else {
+        100_000
+    }
 }
 
 // Plain Shamir round-trip: split (K, N) on a random secret, reconstruct

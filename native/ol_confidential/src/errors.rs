@@ -59,7 +59,9 @@ pub enum ConfidentialError {
     /// from `AttestationExpired` because a clock-skew adversary
     /// could otherwise craft a deadline that hasn't passed despite
     /// the doc being weeks old.
-    #[error("attestation too old: issued_unix={issued_unix} now_unix={now_unix} max_age={max_age_secs}")]
+    #[error(
+        "attestation too old: issued_unix={issued_unix} now_unix={now_unix} max_age={max_age_secs}"
+    )]
     AttestationTooOld {
         /// `doc.issued_unix`.
         issued_unix: u64,

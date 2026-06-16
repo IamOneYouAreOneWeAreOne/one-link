@@ -14,9 +14,7 @@ pub enum CompressError {
     Lz4Decompress(#[from] lz4_flex::block::DecompressError),
 
     /// The decompression output exceeded the caller's max_size cap.
-    #[error(
-        "decompressed output exceeds max ({decompressed} bytes > max {max} bytes)"
-    )]
+    #[error("decompressed output exceeds max ({decompressed} bytes > max {max} bytes)")]
     OutputTooLarge {
         /// Bytes the decoder would have produced.
         decompressed: usize,

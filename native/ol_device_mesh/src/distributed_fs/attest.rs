@@ -40,7 +40,7 @@ pub struct StorageAttestation {
 
 impl StorageAttestation {
     /// Canonical bytes the subkey signs over.
-    #[must_use] 
+    #[must_use]
     pub fn canonical_transcript(
         device_id: &[u8; DEVICE_ID_LEN],
         day_index: u64,
@@ -48,12 +48,7 @@ impl StorageAttestation {
         chunk_hashes: &[ChunkHash],
     ) -> Vec<u8> {
         let mut out = Vec::with_capacity(
-            ATTEST_DOMAIN.len()
-                + DEVICE_ID_LEN
-                + 8
-                + 8
-                + 4
-                + chunk_hashes.len() * CHUNK_HASH_LEN,
+            ATTEST_DOMAIN.len() + DEVICE_ID_LEN + 8 + 8 + 4 + chunk_hashes.len() * CHUNK_HASH_LEN,
         );
         out.extend_from_slice(ATTEST_DOMAIN);
         out.extend_from_slice(device_id);
@@ -167,8 +162,7 @@ mod tests {
     fn make_sk() -> DeviceSubkey {
         let master = MasterIdentity::generate(&mut OsRng);
         let id = fresh_device_id(&mut OsRng);
-        let (sk, _att) =
-            mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+        let (sk, _att) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
         sk
     }
 
@@ -193,8 +187,7 @@ mod tests {
     #[test]
     fn manually_unsorted_attest_rejected_at_verify() {
         let sk = make_sk();
-        let mut att =
-            sign_storage_attestation(&sk, 1, make_chunks(5)).unwrap();
+        let mut att = sign_storage_attestation(&sk, 1, make_chunks(5)).unwrap();
         // Manually scramble: signature won't match either way, but
         // shape_check fires first.
         att.chunk_hashes.reverse();
@@ -220,9 +213,11 @@ mod tests {
                 x
             })
             .collect();
-        let err =
-            sign_storage_attestation(&sk, 1, too_many).unwrap_err();
-        assert!(matches!(err, DeviceMeshError::AttestationTooManyChunks { .. }));
+        let err = sign_storage_attestation(&sk, 1, too_many).unwrap_err();
+        assert!(matches!(
+            err,
+            DeviceMeshError::AttestationTooManyChunks { .. }
+        ));
     }
 
     #[test]

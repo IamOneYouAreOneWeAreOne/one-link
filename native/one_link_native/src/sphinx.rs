@@ -89,17 +89,12 @@ fn hop_id_from_bytes(b: &[u8]) -> PyResult<HopId> {
     Ok(HopId::from_bytes(arr))
 }
 
-fn parse_circuit(
-    circuit: Vec<(Vec<u8>, Vec<u8>)>,
-) -> PyResult<Vec<SphinxHop>> {
+fn parse_circuit(circuit: Vec<(Vec<u8>, Vec<u8>)>) -> PyResult<Vec<SphinxHop>> {
     let mut hops = Vec::with_capacity(circuit.len());
     for (id_bytes, pk_bytes) in circuit {
         let id = hop_id_from_bytes(&id_bytes)?;
         let pk = point_from_bytes(&pk_bytes)?;
-        hops.push(SphinxHop {
-            id,
-            static_pk: pk,
-        });
+        hops.push(SphinxHop { id, static_pk: pk });
     }
     Ok(hops)
 }
@@ -120,10 +115,12 @@ fn parse_pq_circuit(
                     )));
                 }
                 use hybrid_array::Array;
-                type EkSize = <<MlKem768 as KemCore>::EncapsulationKey as EncodedSizeUser>::EncodedSize;
+                type EkSize =
+                    <<MlKem768 as KemCore>::EncapsulationKey as EncodedSizeUser>::EncodedSize;
                 let arr: Array<u8, EkSize> = Array::try_from(b.as_slice())
                     .map_err(|_| PyValueError::new_err("ML-KEM pubkey size mismatch"))?;
-                let ek = <<MlKem768 as KemCore>::EncapsulationKey as EncodedSizeUser>::from_bytes(&arr);
+                let ek =
+                    <<MlKem768 as KemCore>::EncapsulationKey as EncodedSizeUser>::from_bytes(&arr);
                 Some(ek)
             }
             None => None,
@@ -140,8 +137,8 @@ fn parse_pq_circuit(
 fn parse_pq_dk(b: &[u8]) -> PyResult<<MlKem768 as KemCore>::DecapsulationKey> {
     use hybrid_array::Array;
     type DkSize = <<MlKem768 as KemCore>::DecapsulationKey as EncodedSizeUser>::EncodedSize;
-    let arr: Array<u8, DkSize> = Array::try_from(b)
-        .map_err(|_| PyValueError::new_err("ML-KEM decap key size mismatch"))?;
+    let arr: Array<u8, DkSize> =
+        Array::try_from(b).map_err(|_| PyValueError::new_err("ML-KEM decap key size mismatch"))?;
     Ok(<<MlKem768 as KemCore>::DecapsulationKey as EncodedSizeUser>::from_bytes(&arr))
 }
 
@@ -150,9 +147,7 @@ fn parse_pq_dk(b: &[u8]) -> PyResult<<MlKem768 as KemCore>::DecapsulationKey> {
 /// Generate a fresh Ristretto255 keypair. Returns (sk_bytes, pk_bytes)
 /// where sk is a 32-byte scalar and pk is a 32-byte compressed point.
 #[pyfunction]
-fn generate_keypair<'py>(
-    py: Python<'py>,
-) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+fn generate_keypair<'py>(py: Python<'py>) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
     let (sk, pk) = core_keypair(&mut OsRng);
     Ok((
         PyBytes::new_bound(py, sk.as_bytes()),
@@ -496,7 +491,10 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("COVER_PAYLOAD_MIN", COVER_PAYLOAD_MIN)?;
     m.add("COVER_TRAILER_LEN", COVER_TRAILER_LEN)?;
     m.add("COVER_DEFAULT_RATE_HZ", COVER_DEFAULT_RATE_HZ)?;
-    m.add("RATE_EQ_DEFAULT_HALF_LIFE_SEC", RATE_EQ_DEFAULT_HALF_LIFE_SEC)?;
+    m.add(
+        "RATE_EQ_DEFAULT_HALF_LIFE_SEC",
+        RATE_EQ_DEFAULT_HALF_LIFE_SEC,
+    )?;
     m.add("HOP_ID_LEN", HOP_ID_LEN)?;
     m.add("MAX_HOPS", MAX_HOPS)?;
     m.add("SPHINX_MAX_USER_PAYLOAD", SPHINX_MAX_USER_PAYLOAD)?;

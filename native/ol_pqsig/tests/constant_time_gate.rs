@@ -56,28 +56,28 @@ fn verify_constant_time_across_tamper_positions() {
 
     // Warm up.
     for sig in &tampered_sigs {
-        let _ = measure(|| {
-            let _ = vk.verify(msg, sig);
-        }, 5);
+        let _ = measure(
+            || {
+                let _ = vk.verify(msg, sig);
+            },
+            5,
+        );
     }
 
     let mut totals: Vec<f64> = Vec::with_capacity(tampered_sigs.len());
     for sig in &mut tampered_sigs {
         let ns = measure(
             || {
-                let _ = std::hint::black_box(vk.verify(
-                    std::hint::black_box(msg),
-                    std::hint::black_box(sig),
-                ));
+                let _ = std::hint::black_box(
+                    vk.verify(std::hint::black_box(msg), std::hint::black_box(sig)),
+                );
             },
             SAMPLES_PER_BUCKET,
         ) as f64;
         totals.push(ns);
     }
     let rel = relative_stddev(&totals);
-    eprintln!(
-        "verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}"
-    );
+    eprintln!("verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
     // The 30% gate catches the LARGE regressions:
     //   - Ed25519-fail short-circuit (was 43% before we fixed it
     //     in lib.rs::verify to always run both halves).

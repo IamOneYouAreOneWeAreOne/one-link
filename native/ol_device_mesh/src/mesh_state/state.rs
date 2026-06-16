@@ -80,11 +80,7 @@ impl Subtree {
     /// Apply a delta to this subtree. Returns
     /// [`DeviceMeshError::DeltaKindMismatch`] if the delta isn't
     /// applicable to this variant.
-    pub fn apply(
-        &mut self,
-        delta: &Delta,
-        emitter_device_id: &[u8; 16],
-    ) -> DeviceMeshResult<()> {
+    pub fn apply(&mut self, delta: &Delta, emitter_device_id: &[u8; 16]) -> DeviceMeshResult<()> {
         match (self, delta) {
             (Self::LwwRegister(r), Delta::LwwSet { value, ts }) => {
                 r.set(value.clone(), *ts, emitter_device_id);
@@ -154,12 +150,7 @@ impl LwwRegister {
             self.last_writer = *writer;
         }
     }
-    fn is_dominated_by(
-        &self,
-        ts: u64,
-        writer: &[u8; 16],
-        value: Option<&[u8]>,
-    ) -> bool {
+    fn is_dominated_by(&self, ts: u64, writer: &[u8; 16], value: Option<&[u8]>) -> bool {
         match ts.cmp(&self.ts) {
             std::cmp::Ordering::Greater => true,
             std::cmp::Ordering::Less => false,
@@ -217,9 +208,7 @@ impl OrSet {
         let mut out = Vec::new();
         for (elem, adds) in &self.adds {
             let tomb = self.removes.get(elem);
-            let visible = adds
-                .iter()
-                .any(|t| tomb.is_none_or(|r| !r.contains(t)));
+            let visible = adds.iter().any(|t| tomb.is_none_or(|r| !r.contains(t)));
             if visible {
                 out.push(elem.as_slice());
             }
@@ -233,8 +222,7 @@ impl OrSet {
             None => false,
             Some(adds) => {
                 let tomb = self.removes.get(element);
-                adds.iter()
-                    .any(|t| tomb.is_none_or(|r| !r.contains(t)))
+                adds.iter().any(|t| tomb.is_none_or(|r| !r.contains(t)))
             }
         }
     }
@@ -355,7 +343,10 @@ impl LwwMap {
     /// Number of currently-visible (non-tombstoned) entries.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.values().filter(|r| r.value().is_some()).count()
+        self.entries
+            .values()
+            .filter(|r| r.value().is_some())
+            .count()
     }
     /// True iff no entries are currently visible.
     #[must_use]
@@ -373,7 +364,10 @@ impl LwwMap {
     /// put-vs-delete from the same writer at the same timestamp
     /// converges to delete.
     pub fn delete(&mut self, key: &[u8], ts: u64, writer: &[u8; 16]) {
-        let entry = self.entries.entry(key.to_vec()).or_insert_with(LwwRegister::empty);
+        let entry = self
+            .entries
+            .entry(key.to_vec())
+            .or_insert_with(LwwRegister::empty);
         if entry.is_dominated_by(ts, writer, None) {
             entry.value = None;
             entry.ts = ts;
@@ -558,21 +552,31 @@ mod tests {
     fn mesh_state_root_stable_under_distinct_insert_order() {
         let w = [0x01; 16];
         let mut a = MeshState::empty();
-        a.ensure_subtree(b"x".to_vec(), SubtreePolicyKind::LwwRegister).unwrap();
-        a.ensure_subtree(b"y".to_vec(), SubtreePolicyKind::LwwMap).unwrap();
+        a.ensure_subtree(b"x".to_vec(), SubtreePolicyKind::LwwRegister)
+            .unwrap();
+        a.ensure_subtree(b"y".to_vec(), SubtreePolicyKind::LwwMap)
+            .unwrap();
         a.apply_delta(
             b"x",
-            &Delta::LwwSet { value: b"v".to_vec(), ts: 1 },
+            &Delta::LwwSet {
+                value: b"v".to_vec(),
+                ts: 1,
+            },
             &w,
         )
         .unwrap();
 
         let mut b = MeshState::empty();
-        b.ensure_subtree(b"y".to_vec(), SubtreePolicyKind::LwwMap).unwrap();
-        b.ensure_subtree(b"x".to_vec(), SubtreePolicyKind::LwwRegister).unwrap();
+        b.ensure_subtree(b"y".to_vec(), SubtreePolicyKind::LwwMap)
+            .unwrap();
+        b.ensure_subtree(b"x".to_vec(), SubtreePolicyKind::LwwRegister)
+            .unwrap();
         b.apply_delta(
             b"x",
-            &Delta::LwwSet { value: b"v".to_vec(), ts: 1 },
+            &Delta::LwwSet {
+                value: b"v".to_vec(),
+                ts: 1,
+            },
             &w,
         )
         .unwrap();
@@ -583,7 +587,8 @@ mod tests {
     #[test]
     fn subtree_kind_collision_rejected() {
         let mut s = MeshState::empty();
-        s.ensure_subtree(b"x".to_vec(), SubtreePolicyKind::LwwRegister).unwrap();
+        s.ensure_subtree(b"x".to_vec(), SubtreePolicyKind::LwwRegister)
+            .unwrap();
         let err = s
             .ensure_subtree(b"x".to_vec(), SubtreePolicyKind::PnCounter)
             .unwrap_err();

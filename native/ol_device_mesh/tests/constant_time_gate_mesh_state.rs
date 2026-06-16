@@ -15,8 +15,7 @@ const SAMPLES_PER_BUCKET: usize = 200;
 
 fn relative_stddev(samples: &[f64]) -> f64 {
     let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
-    let var: f64 =
-        samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+    let var: f64 = samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64;
     var.sqrt() / mean
 }
 
@@ -32,13 +31,15 @@ fn measure<F: FnMut()>(mut work: F, iters: usize) -> u128 {
 fn auth_op_verify_constant_time_across_tamper_positions() {
     let master = MasterIdentity::generate(&mut OsRng);
     let id = [0x55u8; DEVICE_ID_LEN];
-    let (sk, att) =
-        mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+    let (sk, att) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
     let vk = HybridVerifyingKey::from_bytes(&att.subkey_vk_bytes).unwrap();
     let real = AuthenticatedOp::sign(
         &sk,
         b"contacts".to_vec(),
-        Delta::OrAdd { element: b"alice".to_vec(), tag: [0x77; 16] },
+        Delta::OrAdd {
+            element: b"alice".to_vec(),
+            tag: [0x77; 16],
+        },
         1,
         1_700_000_000,
     )
@@ -76,9 +77,7 @@ fn auth_op_verify_constant_time_across_tamper_positions() {
         totals.push(ns);
     }
     let rel = relative_stddev(&totals);
-    eprintln!(
-        "auth-op verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}"
-    );
+    eprintln!("auth-op verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
     assert!(
         rel < 0.30,
         "auth-op verify relative stddev {rel:.4} exceeds 30% gate"

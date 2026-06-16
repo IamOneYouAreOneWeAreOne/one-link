@@ -26,14 +26,11 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 use ol_discovery::node_id::NodeId;
-use ol_discovery::record::{
-    PeerRecord, SignedRecord, RECORD_DEFAULT_TTL_SECS,
-};
+use ol_discovery::record::{PeerRecord, SignedRecord, RECORD_DEFAULT_TTL_SECS};
 
 const PUBKEY_FIXED: [u8; 32] = [
-    0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
-    0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
-    0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+    0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+    0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
 ];
 
 /// BLAKE3([0x42; 32]) — pinned for cross-build identity.
@@ -44,12 +41,12 @@ const EXPECTED_NODE_ID_HEX: &str =
 /// format drift. Encodes magic / pubkey / pub_time / ttl / endpoint
 /// count / endpoint length-prefixed string in a deterministic layout.
 const EXPECTED_CANONICAL_HEX: &str = concat!(
-    "4f4c5231", // OLR1 magic
+    "4f4c5231",                                                         // OLR1 magic
     "4242424242424242424242424242424242424242424242424242424242424242", // pubkey
-    "0000000000000001", // publish_time_unix = 1 (BE u64)
-    "0000000000015180", // ttl_secs = 86400 = 0x15180 (BE u64)
-    "0001",             // n_endpoints = 1
-    "0012",             // endpoint[0] length = 18 (0x12)
+    "0000000000000001",                     // publish_time_unix = 1 (BE u64)
+    "0000000000015180",                     // ttl_secs = 86400 = 0x15180 (BE u64)
+    "0001",                                 // n_endpoints = 1
+    "0012",                                 // endpoint[0] length = 18 (0x12)
     "7564703a2f2f312e322e332e343a35363738", // "udp://1.2.3.4:5678" (18 bytes)
 );
 
@@ -73,7 +70,11 @@ fn check_regen<F: FnOnce()>(label: &str, dump: F) {
 #[test]
 fn kat_node_id_blake3_pinned() {
     let actual = NodeId::from_pubkey(&PUBKEY_FIXED);
-    let actual_hex: String = actual.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    let actual_hex: String = actual
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     check_regen("NodeId from [0x42; 32]", || {
         eprintln!("    EXPECTED_NODE_ID_HEX = \"{actual_hex}\"");
     });
@@ -94,7 +95,10 @@ fn kat_record_canonical_bytes_pinned() {
     let rec = fixed_record();
     let bytes = rec.canonical_bytes();
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    let expected: String = EXPECTED_CANONICAL_HEX.chars().filter(|c| !c.is_whitespace()).collect();
+    let expected: String = EXPECTED_CANONICAL_HEX
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
     check_regen("Record canonical_bytes() of fixed_record", || {
         eprintln!("    EXPECTED_CANONICAL_HEX = \"{hex}\"");
     });
@@ -123,7 +127,9 @@ fn kat_signed_record_seeded_verify_roundtrip() {
     let signed = SignedRecord::sign(rec, &sk).unwrap();
     // First 32 bytes of the Ed25519 signature (the "R" point) pinned.
     let sig_first_hex: String = signed.signature[..32]
-        .iter().map(|b| format!("{b:02x}")).collect();
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     check_regen("Sig[0..32] of seeded record", || {
         eprintln!("    EXPECTED_SIG_FIRST_32_HEX = \"{sig_first_hex}\"");
     });
@@ -141,8 +147,7 @@ fn kat_constants_match_wire_spec() {
     assert_eq!(ol_discovery::NODE_ID_BYTES, 32, "NodeId byte size pinned");
     assert_eq!(ol_discovery::NODE_ID_BITS, 256, "NodeId bit size pinned");
     assert_eq!(
-        RECORD_DEFAULT_TTL_SECS,
-        86_400,
+        RECORD_DEFAULT_TTL_SECS, 86_400,
         "Default record TTL pinned at 24h"
     );
 }

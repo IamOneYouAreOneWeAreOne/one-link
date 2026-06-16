@@ -5,8 +5,8 @@
 //! designed.
 
 use ol_onion::transport_obfs::handshake::{
-    BridgeKeypair, ClientHandshake, HandshakeError, ServerHandshake,
-    BRIDGE_PUBKEY_LEN, HANDSHAKE_EPOCH_SECS, HANDSHAKE_LEN,
+    BridgeKeypair, ClientHandshake, HandshakeError, ServerHandshake, BRIDGE_PUBKEY_LEN,
+    HANDSHAKE_EPOCH_SECS, HANDSHAKE_LEN,
 };
 use ol_onion::transport_obfs::primitive::{
     deobfuscate, derive_nonce, obfuscate, OBFS_KEY_LEN, OBFS_NONCE_LEN,
@@ -25,11 +25,13 @@ fn adversarial_probe_with_random_bytes_silently_dropped() {
     let now = 1_700_000_000u64;
     for seed in 0u8..16 {
         let probe = [seed.wrapping_mul(3); HANDSHAKE_LEN];
-        let err = ServerHandshake::accept(&mut OsRng, &bridge, &probe, now)
-            .unwrap_err();
+        let err = ServerHandshake::accept(&mut OsRng, &bridge, &probe, now).unwrap_err();
         // Either BadMac (most likely) or SmallOrderPubkey (low-order point).
         assert!(
-            matches!(err, HandshakeError::BadMac | HandshakeError::SmallOrderPubkey),
+            matches!(
+                err,
+                HandshakeError::BadMac | HandshakeError::SmallOrderPubkey
+            ),
             "probe with seed {seed} returned unexpected error: {err:?}"
         );
     }
@@ -39,9 +41,7 @@ fn adversarial_probe_with_random_bytes_silently_dropped() {
 fn adversarial_probe_with_all_zeros_rejected() {
     let bridge = BridgeKeypair::generate(&mut OsRng);
     let probe = [0u8; HANDSHAKE_LEN];
-    let err =
-        ServerHandshake::accept(&mut OsRng, &bridge, &probe, 1_700_000_000)
-            .unwrap_err();
+    let err = ServerHandshake::accept(&mut OsRng, &bridge, &probe, 1_700_000_000).unwrap_err();
     // All-zeros pubkey is a small-order X25519 point; either error path is OK.
     assert!(matches!(
         err,
@@ -62,8 +62,7 @@ fn adversarial_probe_with_correct_pubkey_wrong_mac_rejected() {
     for b in &mut tampered[32..] {
         *b = 0;
     }
-    let err =
-        ServerHandshake::accept(&mut OsRng, &bridge, &tampered, now).unwrap_err();
+    let err = ServerHandshake::accept(&mut OsRng, &bridge, &tampered, now).unwrap_err();
     assert_eq!(err, HandshakeError::BadMac);
 }
 
@@ -77,8 +76,7 @@ fn adversarial_replay_two_epochs_later_rejected() {
     let client = ClientHandshake::start(&mut OsRng, &bridge_pk, &bridge.id, now);
     let captured = *client.first_message();
     let future_now = now + 2 * HANDSHAKE_EPOCH_SECS;
-    let err = ServerHandshake::accept(&mut OsRng, &bridge, &captured, future_now)
-        .unwrap_err();
+    let err = ServerHandshake::accept(&mut OsRng, &bridge, &captured, future_now).unwrap_err();
     assert_eq!(err, HandshakeError::BadMac);
 }
 
@@ -89,8 +87,7 @@ fn adversarial_truncated_handshake_rejected() {
     let bridge = BridgeKeypair::generate(&mut OsRng);
     for len in [0usize, 1, 16, 31, HANDSHAKE_LEN - 1] {
         let bytes = vec![0u8; len];
-        let err =
-            ServerHandshake::accept(&mut OsRng, &bridge, &bytes, 0).unwrap_err();
+        let err = ServerHandshake::accept(&mut OsRng, &bridge, &bytes, 0).unwrap_err();
         assert!(matches!(err, HandshakeError::BadLength { .. }));
     }
 }
@@ -109,8 +106,7 @@ fn adversarial_handshake_for_other_bridge_rejected() {
     let client = ClientHandshake::start(&mut OsRng, &bridge_a_pk, &bridge_a.id, now);
     // Forward client_first → bridge_b.
     let err =
-        ServerHandshake::accept(&mut OsRng, &bridge_b, client.first_message(), now)
-            .unwrap_err();
+        ServerHandshake::accept(&mut OsRng, &bridge_b, client.first_message(), now).unwrap_err();
     assert_eq!(err, HandshakeError::BadMac);
 }
 

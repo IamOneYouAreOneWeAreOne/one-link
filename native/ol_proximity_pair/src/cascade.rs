@@ -81,14 +81,10 @@ pub fn multi_pass_reconcile(
     for pass_idx in 0..passes.min(peer_syndromes.len()) {
         let perm = permutation_for_pass(permutation_seed, pass_idx, n);
         // Apply permutation: build a permuted view of current.
-        let permuted: Vec<u8> =
-            perm.iter().map(|&pos| current[pos]).collect();
+        let permuted: Vec<u8> = perm.iter().map(|&pos| current[pos]).collect();
         // Reconcile in permuted order.
-        let reconciled_permuted = reconcile_with_syndrome(
-            &permuted,
-            &peer_syndromes[pass_idx],
-            block_bits,
-        );
+        let reconciled_permuted =
+            reconcile_with_syndrome(&permuted, &peer_syndromes[pass_idx], block_bits);
         // Un-permute: place each reconciled bit back at its original index.
         let mut un_permuted = vec![0u8; n];
         for (perm_i, &orig_i) in perm.iter().enumerate() {
@@ -183,8 +179,7 @@ mod tests {
         // So we test what we CAN guarantee right now: after multi-
         // pass, the syndrome of the final reconciled bits matches
         // the peer's syndrome block-by-block.
-        let peer_bits: Vec<u8> =
-            (0..512).map(|i| ((i * 7 + 3) & 1) as u8).collect();
+        let peer_bits: Vec<u8> = (0..512).map(|i| ((i * 7 + 3) & 1) as u8).collect();
         let mut my_bits = peer_bits.clone();
         my_bits[7] ^= 1;
         my_bits[42] ^= 1;
@@ -196,8 +191,7 @@ mod tests {
         // last-pass syndrome (block parities aligned).
         let n = reconciled.len();
         let last_pass_perm = permutation_for_pass(seed, 3, n);
-        let permuted_reconciled: Vec<u8> =
-            last_pass_perm.iter().map(|&p| reconciled[p]).collect();
+        let permuted_reconciled: Vec<u8> = last_pass_perm.iter().map(|&p| reconciled[p]).collect();
         let final_syndrome = block_syndrome(&permuted_reconciled, 8);
         assert_eq!(final_syndrome, syndromes[3]);
     }

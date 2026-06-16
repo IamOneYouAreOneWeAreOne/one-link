@@ -90,8 +90,7 @@ pub fn fan_out_plan(
     // Build a lookup: chunk_hash → set of holder device ids (from
     // the placement records). Chunks not in any placement get an
     // empty holder set, which causes the planner to skip them.
-    let mut holders: BTreeMap<ChunkHash, Vec<[u8; DEVICE_ID_LEN]>> =
-        BTreeMap::new();
+    let mut holders: BTreeMap<ChunkHash, Vec<[u8; DEVICE_ID_LEN]>> = BTreeMap::new();
     for p in placements {
         holders.insert(p.chunk_hash, p.device_ids.iter().copied().collect());
     }
@@ -112,14 +111,16 @@ pub fn fan_out_plan(
     let k_total = n_stripes * (manifest.policy.k as usize);
     // k_total ≤ chunks.len() ≤ MAX_CHUNKS_PER_FILE = 2^20, well
     // within f64's 53-bit mantissa.
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     let target = ((k_total as f64) * overrequest_factor).ceil() as usize;
     let target = target.min(manifest.chunks.len());
     // Per-source bucket of assigned chunks.
-    let mut bucket: BTreeMap<[u8; DEVICE_ID_LEN], Vec<ChunkHash>> = sources
-        .iter()
-        .map(|s| (s.device_id, Vec::new()))
-        .collect();
+    let mut bucket: BTreeMap<[u8; DEVICE_ID_LEN], Vec<ChunkHash>> =
+        sources.iter().map(|s| (s.device_id, Vec::new())).collect();
     let mut assigned = 0usize;
     for chunk in &manifest.chunks {
         if assigned >= target {
@@ -166,8 +167,7 @@ pub fn fan_out_plan(
         .filter(|(_, chunks)| !chunks.is_empty())
         .map(|(device_id, mut chunks)| {
             chunks.sort_unstable();
-            let estimated_bytes =
-                (chunks.len() as u64).saturating_mul(manifest.chunk_size as u64);
+            let estimated_bytes = (chunks.len() as u64).saturating_mul(manifest.chunk_size as u64);
             FanOutAssignment {
                 source_device_id: device_id,
                 chunk_hashes: chunks,
@@ -235,7 +235,12 @@ pub fn replan_after_source_failure(
         created_unix: manifest.created_unix,
         policy: manifest.policy,
     };
-    fan_out_plan(&sub_manifest, placements, &surviving_sources, overrequest_factor)
+    fan_out_plan(
+        &sub_manifest,
+        placements,
+        &surviving_sources,
+        overrequest_factor,
+    )
 }
 
 #[cfg(test)]
@@ -289,11 +294,7 @@ mod tests {
             },
         ];
         let plan = fan_out_plan(&m, &placements, &sources, 1.0).unwrap();
-        let total: usize = plan
-            .assignments
-            .iter()
-            .map(|a| a.chunk_hashes.len())
-            .sum();
+        let total: usize = plan.assignments.iter().map(|a| a.chunk_hashes.len()).sum();
         // policy k=2, m=1, 3 chunks = 1 stripe → k_total = 2.
         assert_eq!(total, 2);
     }
@@ -302,10 +303,8 @@ mod tests {
     fn fan_out_with_overrequest_increases_target() {
         let chunks = vec![[0x01; 32], [0x02; 32], [0x03; 32]];
         let m = manifest(chunks.clone());
-        let placements: Vec<ChunkPlacement> = chunks
-            .iter()
-            .map(|c| placement(*c, &[[1; 16]]))
-            .collect();
+        let placements: Vec<ChunkPlacement> =
+            chunks.iter().map(|c| placement(*c, &[[1; 16]])).collect();
         let sources = vec![SourceCapacity {
             device_id: [1; 16],
             estimated_bps: 100_000_000,
@@ -313,11 +312,7 @@ mod tests {
         }];
         let plan = fan_out_plan(&m, &placements, &sources, 1.5).unwrap();
         // 1.5 × k(=2) = 3 chunks ⇒ overrequest brings us to the full set.
-        let total: usize = plan
-            .assignments
-            .iter()
-            .map(|a| a.chunk_hashes.len())
-            .sum();
+        let total: usize = plan.assignments.iter().map(|a| a.chunk_hashes.len()).sum();
         assert_eq!(total, 3);
     }
 
@@ -338,11 +333,7 @@ mod tests {
         }];
         let plan = fan_out_plan(&m, &placements, &sources, 1.0).unwrap();
         // Only 1 chunk had an eligible holder.
-        let total: usize = plan
-            .assignments
-            .iter()
-            .map(|a| a.chunk_hashes.len())
-            .sum();
+        let total: usize = plan.assignments.iter().map(|a| a.chunk_hashes.len()).sum();
         assert_eq!(total, 1);
     }
 
@@ -417,10 +408,8 @@ mod tests {
                 current_load_bytes: 0,
             },
         ];
-        let plan = replan_after_source_failure(
-            &m, &placements, &sources, [2; 16], &chunks, 1.0,
-        )
-        .unwrap();
+        let plan =
+            replan_after_source_failure(&m, &placements, &sources, [2; 16], &chunks, 1.0).unwrap();
         for a in &plan.assignments {
             assert_ne!(a.source_device_id, [2; 16]);
         }
@@ -457,8 +446,16 @@ mod tests {
             .map(|c| placement(*c, &[[1; 16], [2; 16]]))
             .collect();
         let sources = vec![
-            SourceCapacity { device_id: [1; 16], estimated_bps: 50, current_load_bytes: 0 },
-            SourceCapacity { device_id: [2; 16], estimated_bps: 50, current_load_bytes: 0 },
+            SourceCapacity {
+                device_id: [1; 16],
+                estimated_bps: 50,
+                current_load_bytes: 0,
+            },
+            SourceCapacity {
+                device_id: [2; 16],
+                estimated_bps: 50,
+                current_load_bytes: 0,
+            },
         ];
         let p1 = fan_out_plan(&m, &placements, &sources, 1.0).unwrap();
         let p2 = fan_out_plan(&m, &placements, &sources, 1.0).unwrap();

@@ -161,10 +161,8 @@ fn full_attestation_doc_with_tpm_round_trip() {
     let peer_nonce = [0xCC; 32];
 
     let test_sdp = [0x55u8; ol_confidential::ISSUER_SDP_PUBKEY_LEN];
-    let doc = attest_with_tpm(
-        &sw, &sealed, &tpm, peer_nonce, 1_000, 1_020, None, test_sdp,
-    )
-    .unwrap();
+    let doc =
+        attest_with_tpm(&sw, &sealed, &tpm, peer_nonce, 1_000, 1_020, None, test_sdp).unwrap();
     let tpm_pub = verify_attestation_with_tpm(
         &doc,
         &peer_nonce,
@@ -181,8 +179,8 @@ fn full_attestation_doc_with_tpm_round_trip() {
 #[ignore = "requires hardware TPM access"]
 fn full_attestation_doc_rejected_when_software_provider_tries_to_verify() {
     use ol_confidential::windows_tpm::attest_with_tpm;
+    use ol_confidential::ConfidentialProvider;
     use ol_confidential::{verify_attestation, SoftwareProvider};
-    use ol_confidential::{ConfidentialProvider};
     use rand::rngs::OsRng;
 
     let tpm = fresh_key("sw-tries");
@@ -192,10 +190,8 @@ fn full_attestation_doc_rejected_when_software_provider_tries_to_verify() {
     let peer_nonce = [0xEE; 32];
 
     let test_sdp = [0x55u8; ol_confidential::ISSUER_SDP_PUBKEY_LEN];
-    let doc = attest_with_tpm(
-        &sw, &sealed, &tpm, peer_nonce, 1_000, 1_020, None, test_sdp,
-    )
-    .unwrap();
+    let doc =
+        attest_with_tpm(&sw, &sealed, &tpm, peer_nonce, 1_000, 1_020, None, test_sdp).unwrap();
     // The doc has provider_tag = WindowsTpm. Software-only verify
     // (which does NOT validate platform_quote) should still accept
     // the MASTER sig — the master sig commits to the platform_quote
@@ -227,11 +223,25 @@ fn full_attestation_doc_rejects_swapped_platform_quote() {
 
     let test_sdp = [0x55u8; ol_confidential::ISSUER_SDP_PUBKEY_LEN];
     let doc_a = attest_with_tpm(
-        &sw, &sealed, &tpm, peer_nonce_a, 1_000, 1_020, None, test_sdp,
+        &sw,
+        &sealed,
+        &tpm,
+        peer_nonce_a,
+        1_000,
+        1_020,
+        None,
+        test_sdp,
     )
     .unwrap();
     let doc_b = attest_with_tpm(
-        &sw, &sealed, &tpm, peer_nonce_b, 2_000, 2_020, None, test_sdp,
+        &sw,
+        &sealed,
+        &tpm,
+        peer_nonce_b,
+        2_000,
+        2_020,
+        None,
+        test_sdp,
     )
     .unwrap();
     // Swap doc_a's platform_quote for doc_b's. master sig over

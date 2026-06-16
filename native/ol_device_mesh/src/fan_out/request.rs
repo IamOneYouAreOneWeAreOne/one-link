@@ -315,10 +315,7 @@ mod tests {
         .unwrap();
         req.chunk_hashes.swap(0, 2);
         let err = req.verify(&sk.verifying_key()).unwrap_err();
-        assert!(matches!(
-            err,
-            DeviceMeshError::FetchRequestChunksNotSorted
-        ));
+        assert!(matches!(err, DeviceMeshError::FetchRequestChunksNotSorted));
     }
 
     #[test]

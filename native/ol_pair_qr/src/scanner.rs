@@ -198,10 +198,7 @@ impl std::fmt::Debug for Scanner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Scanner")
             .field("state", &self.state)
-            .field(
-                "inviter_pubkey_prefix",
-                &&self.invite.id_pubkey[..4],
-            )
+            .field("inviter_pubkey_prefix", &&self.invite.id_pubkey[..4])
             .finish_non_exhaustive()
     }
 }
@@ -209,8 +206,8 @@ impl std::fmt::Debug for Scanner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::OsRng;
     use crate::invite::CapabilityScope;
+    use rand::rngs::OsRng;
 
     #[test]
     fn scan_then_confirm_succeeds() {

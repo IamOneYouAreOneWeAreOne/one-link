@@ -96,12 +96,7 @@ impl PairingCommitment {
     /// `pairing_secret`.
     #[must_use]
     pub fn matches(&self, pairing_secret: &[u8]) -> bool {
-        let expected = Self::build(
-            self.channel,
-            pairing_secret,
-            self.nonce,
-            self.timestamp_ms,
-        );
+        let expected = Self::build(self.channel, pairing_secret, self.nonce, self.timestamp_ms);
         bool::from(expected.commitment.ct_eq(&self.commitment))
     }
 }
@@ -126,9 +121,7 @@ pub fn verify_pairing_cross_channel(
     let mut max_ts: Option<u64> = None;
     for c in commitments {
         if !c.matches(pairing_secret) {
-            return Err(DeviceMeshError::PairChannelCommitmentMismatch {
-                channel: c.channel,
-            });
+            return Err(DeviceMeshError::PairChannelCommitmentMismatch { channel: c.channel });
         }
         match c.channel {
             PairingChannel::Qr => have_qr = true,

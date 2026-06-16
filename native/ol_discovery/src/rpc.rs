@@ -247,10 +247,8 @@ mod tests {
 
     #[test]
     fn validate_findvalue_closer_size() {
-        let resp = Response::FindValueResult(FindValueOutcome::Closer(vec![
-            id(1);
-            MAX_FIND_RESULTS + 1
-        ]));
+        let resp =
+            Response::FindValueResult(FindValueOutcome::Closer(vec![id(1); MAX_FIND_RESULTS + 1]));
         let err = validate_response_size(&resp).unwrap_err();
         assert!(matches!(err, RpcError::TooManyResults { .. }));
     }

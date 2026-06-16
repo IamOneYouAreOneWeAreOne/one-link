@@ -67,7 +67,9 @@ pub fn dtn_couriers(
     // For each announcement A authored by dst:
     //   - A.links has D → dst saw D at T.
     for announcer in table.announcers() {
-        let Some(ann) = table.announcement_for(announcer) else { continue };
+        let Some(ann) = table.announcement_for(announcer) else {
+            continue;
+        };
         for link in &ann.links {
             // src's announcement of D → D was reachable to src at link.last_seen_unix.
             if announcer == src && link.peer_device_id != *src && link.peer_device_id != *dst {
@@ -119,7 +121,11 @@ pub fn dtn_couriers(
             }
         })
         .collect();
-    out.sort_by(|a, b| a.gap_secs().cmp(&b.gap_secs()).then(a.device_id.cmp(&b.device_id)));
+    out.sort_by(|a, b| {
+        a.gap_secs()
+            .cmp(&b.gap_secs())
+            .then(a.device_id.cmp(&b.device_id))
+    });
     out
 }
 
@@ -134,7 +140,9 @@ mod tests {
     use ol_pqsig::HybridVerifyingKey;
     use rand::rngs::OsRng;
 
-    fn setup(n: usize) -> (
+    fn setup(
+        n: usize,
+    ) -> (
         Vec<[u8; DEVICE_ID_LEN]>,
         Vec<crate::subkey::DeviceSubkey>,
         Vec<SubkeyAttestation>,
@@ -145,8 +153,7 @@ mod tests {
         let mut atts = Vec::new();
         for _ in 0..n {
             let id = fresh_device_id(&mut OsRng);
-            let (sk, a) =
-                mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
+            let (sk, a) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
             ids.push(id);
             sks.push(sk);
             atts.push(a);
@@ -177,16 +184,13 @@ mod tests {
         let courier = ids[2]; // tablet
         let mut table = RouteTable::empty();
         // Courier announces seeing both.
-        table.ingest(
-            sign_route_announcement(
-                &sks[2],
-                120,
-                vec![link(src, 50, 100), link(dst, 50, 120)],
+        table
+            .ingest(
+                sign_route_announcement(&sks[2], 120, vec![link(src, 50, 100), link(dst, 50, 120)])
+                    .unwrap(),
+                &vk(&atts[2]),
             )
-            .unwrap(),
-            &vk(&atts[2]),
-        )
-        .unwrap();
+            .unwrap();
         let couriers = dtn_couriers(&table, &src, &dst, 60);
         assert_eq!(couriers.len(), 1);
         assert_eq!(couriers[0].device_id, courier);
@@ -200,16 +204,13 @@ mod tests {
         let dst = ids[1];
         let mut table = RouteTable::empty();
         // Courier saw src at t=100 and dst at t=300 (gap 200).
-        table.ingest(
-            sign_route_announcement(
-                &sks[2],
-                300,
-                vec![link(src, 50, 100), link(dst, 50, 300)],
+        table
+            .ingest(
+                sign_route_announcement(&sks[2], 300, vec![link(src, 50, 100), link(dst, 50, 300)])
+                    .unwrap(),
+                &vk(&atts[2]),
             )
-            .unwrap(),
-            &vk(&atts[2]),
-        )
-        .unwrap();
+            .unwrap();
         // Gap is 200, max is 60 → no couriers.
         let couriers = dtn_couriers(&table, &src, &dst, 60);
         assert!(couriers.is_empty());
@@ -227,17 +228,19 @@ mod tests {
         let courier = ids[2];
         let mut table = RouteTable::empty();
         // src says "I saw courier at t=100"
-        table.ingest(
-            sign_route_announcement(&sks[0], 100, vec![link(courier, 50, 100)]).unwrap(),
-            &vk(&atts[0]),
-        )
-        .unwrap();
+        table
+            .ingest(
+                sign_route_announcement(&sks[0], 100, vec![link(courier, 50, 100)]).unwrap(),
+                &vk(&atts[0]),
+            )
+            .unwrap();
         // dst says "I saw courier at t=120"
-        table.ingest(
-            sign_route_announcement(&sks[1], 120, vec![link(courier, 50, 120)]).unwrap(),
-            &vk(&atts[1]),
-        )
-        .unwrap();
+        table
+            .ingest(
+                sign_route_announcement(&sks[1], 120, vec![link(courier, 50, 120)]).unwrap(),
+                &vk(&atts[1]),
+            )
+            .unwrap();
         let couriers = dtn_couriers(&table, &src, &dst, 60);
         assert_eq!(couriers.len(), 1);
         assert_eq!(couriers[0].device_id, courier);
@@ -251,11 +254,12 @@ mod tests {
         let courier = ids[2];
         let mut table = RouteTable::empty();
         // src saw courier but dst hasn't.
-        table.ingest(
-            sign_route_announcement(&sks[0], 100, vec![link(courier, 50, 100)]).unwrap(),
-            &vk(&atts[0]),
-        )
-        .unwrap();
+        table
+            .ingest(
+                sign_route_announcement(&sks[0], 100, vec![link(courier, 50, 100)]).unwrap(),
+                &vk(&atts[0]),
+            )
+            .unwrap();
         let couriers = dtn_couriers(&table, &src, &dst, 1_000);
         assert!(couriers.is_empty());
     }

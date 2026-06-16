@@ -43,11 +43,7 @@ impl QuorumCertificate {
     ///
     /// `now_unix` is the verifier's current wall-clock. The proposal
     /// must not yet be past its `deadline_unix`.
-    pub fn verify(
-        &self,
-        master_vk: &HybridVerifyingKey,
-        now_unix: u64,
-    ) -> DeviceMeshResult<()> {
+    pub fn verify(&self, master_vk: &HybridVerifyingKey, now_unix: u64) -> DeviceMeshResult<()> {
         // (0) Shape: bounded approvals + bounded roster.
         if self.approvals.len() > MAX_APPROVALS {
             return Err(DeviceMeshError::CertTooManyApprovals {
@@ -122,8 +118,7 @@ impl QuorumCertificate {
                     device_id: a.approver_device_id,
                 });
             }
-            let approver_vk =
-                self.subkey_vk_for(&a.approver_device_id, a.approver_day_index)?;
+            let approver_vk = self.subkey_vk_for(&a.approver_device_id, a.approver_day_index)?;
             a.verify(&approver_vk)?;
         }
 
@@ -180,21 +175,21 @@ mod tests {
     fn happy_path() -> (
         MasterIdentity,
         QuorumPolicy,
-        DeviceSubkey, DeviceSubkey, DeviceSubkey,
-        SubkeyAttestation, SubkeyAttestation, SubkeyAttestation,
+        DeviceSubkey,
+        DeviceSubkey,
+        DeviceSubkey,
+        SubkeyAttestation,
+        SubkeyAttestation,
+        SubkeyAttestation,
     ) {
         let master = MasterIdentity::generate(&mut OsRng);
         let id1 = fresh_device_id(&mut OsRng);
         let id2 = fresh_device_id(&mut OsRng);
         let id3 = fresh_device_id(&mut OsRng);
-        let (sk1, a1) =
-            mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
-        let (sk2, a2) =
-            mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
-        let (sk3, a3) =
-            mint_subkey(&master, DeviceClass::Desktop, id3, 0, 365).unwrap();
-        let policy =
-            mint_policy(&master, [0x42; 16], b"p", 2, vec![id1, id2, id3]).unwrap();
+        let (sk1, a1) = mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
+        let (sk2, a2) = mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
+        let (sk3, a3) = mint_subkey(&master, DeviceClass::Desktop, id3, 0, 365).unwrap();
+        let policy = mint_policy(&master, [0x42; 16], b"p", 2, vec![id1, id2, id3]).unwrap();
         (master, policy, sk1, sk2, sk3, a1, a2, a3)
     }
 
@@ -203,8 +198,12 @@ mod tests {
         let (master, policy, sk1, sk2, sk3, a1, a2, a3) = happy_path();
         let now: u64 = 1_700_000_000;
         let proposal = propose_operation(
-            &sk1, &policy, [0xEE; OPERATION_DIGEST_LEN], [0xDA; 16],
-            now, now + 3600,
+            &sk1,
+            &policy,
+            [0xEE; OPERATION_DIGEST_LEN],
+            [0xDA; 16],
+            now,
+            now + 3600,
         )
         .unwrap();
         let appr2 = sign_approval(&sk2, &proposal, now + 60).unwrap();
@@ -222,10 +221,8 @@ mod tests {
     fn below_threshold_rejected() {
         let (master, policy, sk1, sk2, _sk3, a1, a2, a3) = happy_path();
         let now: u64 = 1_700_000_000;
-        let proposal = propose_operation(
-            &sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600,
-        )
-        .unwrap();
+        let proposal =
+            propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600).unwrap();
         let only_one = sign_approval(&sk2, &proposal, now + 60).unwrap();
         let cert = QuorumCertificate {
             proposal,
@@ -241,10 +238,8 @@ mod tests {
     fn expired_proposal_rejected() {
         let (master, policy, sk1, sk2, sk3, a1, a2, a3) = happy_path();
         let now: u64 = 1_700_000_000;
-        let proposal = propose_operation(
-            &sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 100,
-        )
-        .unwrap();
+        let proposal =
+            propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 100).unwrap();
         let ap2 = sign_approval(&sk2, &proposal, now + 1).unwrap();
         let ap3 = sign_approval(&sk3, &proposal, now + 2).unwrap();
         let cert = QuorumCertificate {
@@ -264,10 +259,8 @@ mod tests {
     fn duplicate_approver_rejected() {
         let (master, policy, sk1, sk2, _sk3, a1, a2, a3) = happy_path();
         let now: u64 = 1_700_000_000;
-        let proposal = propose_operation(
-            &sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600,
-        )
-        .unwrap();
+        let proposal =
+            propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600).unwrap();
         let ap_a = sign_approval(&sk2, &proposal, now + 1).unwrap();
         let ap_b = sign_approval(&sk2, &proposal, now + 2).unwrap();
         let cert = QuorumCertificate {
@@ -284,14 +277,10 @@ mod tests {
     fn approval_for_other_proposal_rejected() {
         let (master, policy, sk1, sk2, sk3, a1, a2, a3) = happy_path();
         let now: u64 = 1_700_000_000;
-        let real = propose_operation(
-            &sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600,
-        )
-        .unwrap();
-        let other = propose_operation(
-            &sk1, &policy, [0xFF; 32], [0xDB; 16], now, now + 3600,
-        )
-        .unwrap();
+        let real =
+            propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600).unwrap();
+        let other =
+            propose_operation(&sk1, &policy, [0xFF; 32], [0xDB; 16], now, now + 3600).unwrap();
         // Sign approval against "other" but stuff into "real" cert.
         let bad = sign_approval(&sk2, &other, now + 1).unwrap();
         let good = sign_approval(&sk3, &real, now + 2).unwrap();
@@ -309,10 +298,8 @@ mod tests {
     fn missing_attestation_rejected() {
         let (master, policy, sk1, sk2, sk3, a1, _a2, a3) = happy_path();
         let now: u64 = 1_700_000_000;
-        let proposal = propose_operation(
-            &sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600,
-        )
-        .unwrap();
+        let proposal =
+            propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600).unwrap();
         let ap2 = sign_approval(&sk2, &proposal, now + 1).unwrap();
         let ap3 = sign_approval(&sk3, &proposal, now + 2).unwrap();
         let cert = QuorumCertificate {
@@ -331,10 +318,8 @@ mod tests {
         let (master_a, policy, sk1, sk2, sk3, a1, a2, a3) = happy_path();
         let master_b = MasterIdentity::generate(&mut OsRng);
         let now: u64 = 1_700_000_000;
-        let proposal = propose_operation(
-            &sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600,
-        )
-        .unwrap();
+        let proposal =
+            propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600).unwrap();
         let ap2 = sign_approval(&sk2, &proposal, now + 1).unwrap();
         let ap3 = sign_approval(&sk3, &proposal, now + 2).unwrap();
         let cert = QuorumCertificate {

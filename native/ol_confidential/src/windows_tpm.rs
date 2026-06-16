@@ -32,9 +32,9 @@
 
 use windows::core::PCWSTR;
 use windows::Win32::Security::Cryptography::{
-    NCryptCreatePersistedKey, NCryptExportKey, NCryptFinalizeKey, NCryptFreeObject,
-    NCryptOpenKey, NCryptOpenStorageProvider, NCryptSignHash, CERT_KEY_SPEC,
-    NCRYPT_FLAGS, NCRYPT_HANDLE, NCRYPT_KEY_HANDLE, NCRYPT_PROV_HANDLE,
+    NCryptCreatePersistedKey, NCryptExportKey, NCryptFinalizeKey, NCryptFreeObject, NCryptOpenKey,
+    NCryptOpenStorageProvider, NCryptSignHash, CERT_KEY_SPEC, NCRYPT_FLAGS, NCRYPT_HANDLE,
+    NCRYPT_KEY_HANDLE, NCRYPT_PROV_HANDLE,
 };
 
 use crate::errors::{ConfidentialError, ConfidentialResult};
@@ -427,10 +427,9 @@ mod tests {
     #[test]
     #[ignore = "requires hardware TPM access"]
     fn tpm_acquire_export_sign() {
-        let key = TpmAttestationKey::acquire_or_create(
-            "OL-confidential-test-acquire-export-sign-v1",
-        )
-        .expect("TPM key creation");
+        let key =
+            TpmAttestationKey::acquire_or_create("OL-confidential-test-acquire-export-sign-v1")
+                .expect("TPM key creation");
         let pub_blob = key.public_blob().expect("public_blob");
         assert!(!pub_blob.is_empty());
         let digest = [0x42u8; 32];
@@ -441,10 +440,8 @@ mod tests {
     #[test]
     #[ignore = "requires hardware TPM access"]
     fn tpm_platform_quote_round_trip() {
-        let key = TpmAttestationKey::acquire_or_create(
-            "OL-confidential-test-platform-quote-v1",
-        )
-        .expect("TPM key creation");
+        let key = TpmAttestationKey::acquire_or_create("OL-confidential-test-platform-quote-v1")
+            .expect("TPM key creation");
         let digest = [0x77u8; 32];
         let quote = produce_platform_quote(&key, &digest).expect("platform_quote");
         let (pub_blob, sig) = parse_platform_quote(&quote).expect("parse");

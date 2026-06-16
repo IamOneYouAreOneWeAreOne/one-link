@@ -72,11 +72,8 @@ fn gf_mul_constant_time_across_operand_buckets() {
     }
 
     let mean: f64 = totals.iter().sum::<f64>() / totals.len() as f64;
-    let variance: f64 = totals
-        .iter()
-        .map(|t| (t - mean).powi(2))
-        .sum::<f64>()
-        / totals.len() as f64;
+    let variance: f64 =
+        totals.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / totals.len() as f64;
     let stddev = variance.sqrt();
     let rel_stddev = stddev / mean;
 
