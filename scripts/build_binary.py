@@ -102,6 +102,7 @@ def _render_spec(
     macos_bundle: bool = False,
     bundle_identifier: str = "earth.weareone.one-link",
     bundle_version: str = "0.21.0",
+    target_arch: str | None = None,
 ) -> str:
     sep = ";" if platform.system() == "Windows" else ":"
     datas = _split_pyinstaller_pairs(add_data_args, sep)
@@ -184,7 +185,7 @@ def _render_spec(
         f"    console={console!r},",
         "    disable_windowed_traceback=False,",
         "    argv_emulation=False,",
-        "    target_arch=None,",
+        f"    target_arch={target_arch!r},",
         "    codesign_identity=None,",
         "    entitlements_file=None,",
         f"    icon={icon!r}," if icon else "    icon=None,",
@@ -265,6 +266,15 @@ def main(argv: list[str] | None = None) -> int:
              "scanner cannot be rebuilt. Public release builds should not "
              "use this; otherwise a stale locked DLL can be bundled.",
     )
+    parser.add_argument(
+        "--target-arch",
+        default=None,
+        help="PyInstaller target architecture (macOS only): pass "
+             "'universal2' to produce a fat binary that runs natively on "
+             "BOTH Intel and Apple Silicon Macs. Requires a universal2 "
+             "Python interpreter + universal2 wheels for every native dep. "
+             "Default (None) builds for the host arch only.",
+    )
     args = parser.parse_args(list(argv or ()))
 
     repo = Path(__file__).resolve().parent.parent
@@ -305,18 +315,32 @@ def main(argv: list[str] | None = None) -> int:
     # that path.
     (build / name).mkdir(parents=True, exist_ok=True)
 
-    native_cmd = [sys.executable, str(repo / "scripts" / "build_native_cdc.py")]
-    if not args.allow_native_cdc_fallback:
-        native_cmd.append("--required")
-    native_build = subprocess.run(native_cmd, cwd=repo)
-    if native_build.returncode != 0:
-        print(f"[build] native CDC build failed: exit {native_build.returncode}")
+    # 2026-06-04: a universal2 (multi-arch) build must NOT bundle a
+    # single-arch native CDC lib — clang compiles it for the host arch
+    # only, which would either poison the fat binary or fail to load on
+    # the other arch. For target_arch builds we go fully pure-Python
+    # (the documented fallback): correct on BOTH Intel and Apple
+    # Silicon, just without the native CDC speedup. The maturin
+    # one_link_native crate is skipped the same way in the workflow.
+    if args.target_arch:
         print(
-            "[build] refusing to package a possibly stale native CDC DLL. "
-            "Close running one-link daemons or pass "
-            "--allow-native-cdc-fallback for a developer-only fallback build."
+            f"[build] target_arch={args.target_arch}: skipping native CDC "
+            "build — shipping pure-Python so the binary is valid on every "
+            "target architecture."
         )
-        return native_build.returncode
+    else:
+        native_cmd = [sys.executable, str(repo / "scripts" / "build_native_cdc.py")]
+        if not args.allow_native_cdc_fallback:
+            native_cmd.append("--required")
+        native_build = subprocess.run(native_cmd, cwd=repo)
+        if native_build.returncode != 0:
+            print(f"[build] native CDC build failed: exit {native_build.returncode}")
+            print(
+                "[build] refusing to package a possibly stale native CDC DLL. "
+                "Close running one-link daemons or pass "
+                "--allow-native-cdc-fallback for a developer-only fallback build."
+            )
+            return native_build.returncode
 
     # PyInstaller's --add-data uses ';' on Windows, ':' elsewhere.
     sep = ";" if platform.system() == "Windows" else ":"
@@ -329,7 +353,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     native_dir = repo / "src" / "one_link" / "native"
     add_native: list[str] = []
-    if native_dir.is_dir() and any(p.is_file() for p in native_dir.rglob("*")):
+    # Skip bundling host-arch native libs in a universal2 build (see the
+    # native-CDC skip above) — they'd be single-arch and invalid on the
+    # other architecture.
+    if (
+        not args.target_arch
+        and native_dir.is_dir()
+        and any(p.is_file() for p in native_dir.rglob("*"))
+    ):
         add_native = ["--add-binary", f"{native_dir}{sep}one_link/native"]
 
     # Tier ζ/η/θ ML models — bundle every ONNX checkpoint + its
@@ -396,6 +427,9 @@ def main(argv: list[str] | None = None) -> int:
     # log a warning and the resulting exe will fall back to pure-Python
     # paths — same behavior as before this change, no regression.
     try:
+        if args.target_arch:
+            # universal2: never bundle the single-arch Rust extension.
+            raise ImportError("skipped for target_arch build")
         import one_link_native  # noqa: F401
         native_collect = ["--collect-all", "one_link_native"]
         print("[build] one_link_native detected — bundling into exe")
@@ -510,7 +544,11 @@ def main(argv: list[str] | None = None) -> int:
         # to invoke from a terminal anyway.
         macos_bundle=(platform.system() == "Darwin" and args.gui),
         bundle_version=__import__("one_link").__version__,
+        # universal2 (Intel + Apple Silicon in one binary) when requested.
+        target_arch=args.target_arch,
     ), encoding="utf-8")
+    if args.target_arch:
+        print(f"[build] PyInstaller target_arch={args.target_arch}")
 
     # Note: --clean intentionally omitted. PyInstaller's own --clean
     # has a Python 3.14 bug where it deletes localpycs/struct.pyc

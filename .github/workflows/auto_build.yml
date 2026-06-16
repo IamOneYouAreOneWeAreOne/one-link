@@ -86,7 +86,7 @@ jobs:
           # gating the main release.
           # ── arm64 — added to close the coverage gap ───────────
           - os: macos-latest
-            artifact-name: one-link-macos-arm64
+            artifact-name: one-link-macos-universal2
             exe-name: one-link
           # GitHub-hosted Linux ARM64 runner — GA Jan 2025, free
           # for public repos. Covers Raspberry Pi 4/5 (64-bit OS),
@@ -108,6 +108,29 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # 2026-06-04: macOS gets a UNIVERSAL2 Python from python.org.
+      # GitHub's setup-python on Apple-Silicon runners is arm64-only,
+      # and PyInstaller's target_arch=universal2 REQUIRES a universal2
+      # interpreter. Installing the framework build + prepending it to
+      # PATH makes the subsequent pip-install + build steps produce a
+      # fat (Intel + Apple Silicon) binary. One dmg then runs natively
+      # on every Mac. Pinned to a specific patch so the URL is stable.
+      - name: install universal2 Python (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          PYVER=3.12.8
+          curl -fsSL -o /tmp/python-universal2.pkg \
+            "https://www.python.org/ftp/python/${PYVER}/python-${PYVER}-macos11.pkg"
+          sudo installer -pkg /tmp/python-universal2.pkg -target /
+          FWBIN="/Library/Frameworks/Python.framework/Versions/3.12/bin"
+          # Make both `python` and `python3` resolve to the universal2 build.
+          ln -sf "$FWBIN/python3" "$FWBIN/python" || true
+          echo "$FWBIN" >> "$GITHUB_PATH"
+          echo "--- universal2 interpreter check ---"
+          "$FWBIN/python3" --version
+          lipo -archs "$FWBIN/python3.12" || true
 
       - name: cache pip
         uses: actions/cache@v4
@@ -229,6 +252,10 @@ jobs:
             ${{ runner.os }}-cargo-auto-build-
 
       - name: build native crate from source
+        # Skipped on macOS: the universal2 build ships pure-Python so no
+        # single-arch Rust .so contaminates the fat binary (build_binary
+        # also skips native CDC + bundling for target_arch builds).
+        if: runner.os != 'macOS'
         shell: bash
         continue-on-error: true
         # Build one_link_native locally with maturin instead of pulling
@@ -266,7 +293,41 @@ jobs:
           # hard-failed the whole installer build, blocking every
           # download. The fallback ships a working pure-Python
           # installer instead of nothing.
-          python scripts/build_binary.py --gui --allow-native-cdc-fallback
+          #
+          # macOS: --target-arch universal2 produces ONE dmg that runs
+          # natively on both Intel and Apple Silicon. Requires the
+          # universal2 Python installed above + universal2 dep wheels.
+          EXTRA=""
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            EXTRA="--target-arch universal2"
+          fi
+          python scripts/build_binary.py --gui --allow-native-cdc-fallback $EXTRA
+
+      - name: verify macOS binary is universal2
+        # Hard gate: fail the build if the produced binary is NOT a fat
+        # (x86_64 + arm64) Mach-O. Without this we could silently ship a
+        # dmg named "universal2" that only runs on one arch — exactly the
+        # Intel-Mac breakage this whole change is meant to fix.
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          BIN=""
+          for cand in \
+            "dist/one-link.app/Contents/MacOS/one-link" \
+            "dist/one-link/one-link"; do
+            [ -f "$cand" ] && { BIN="$cand"; break; }
+          done
+          if [ -z "$BIN" ]; then
+            BIN="$(find dist -type f -name one-link -perm +111 | head -1)"
+          fi
+          echo "main binary: $BIN"
+          ARCHS="$(lipo -archs "$BIN")"
+          echo "architectures: $ARCHS"
+          echo "$ARCHS" | grep -q x86_64 && echo "$ARCHS" | grep -q arm64 || {
+            echo "::error::macOS binary is NOT universal2 (got: $ARCHS)"
+            exit 1
+          }
+          echo "OK: universal2 (Intel + Apple Silicon)"
 
       - name: stamp build metadata
         shell: bash
