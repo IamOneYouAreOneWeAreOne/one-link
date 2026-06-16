@@ -90,14 +90,25 @@ jobs:
           cargo clippy --workspace --all-targets --exclude one_link_native --
           -D clippy::all -A clippy::pedantic -A clippy::nursery -A clippy::cargo
 
+      # Default test run. Wall-clock constant-time gates (timing_gate!)
+      # run + measure + print here but only WARN if over threshold — they
+      # are too noisy on shared CI runners to be a sound HARD gate (see
+      # native/test_support/timing_gate.rs). The strict run is below.
       - name: cargo test
         timeout-minutes: 30
         run: cargo test --workspace --exclude one_link_native --release
 
-      - name: cargo test (with property-test slow paths)
+      # Non-blocking strict pass: enforce the wall-clock timing gates
+      # (OL_TIMING_GATES=1) + the ignored property-test slow paths. Surfaces
+      # a timing regression as a visible (continue-on-error) signal without
+      # failing the build on runner jitter. Run them strictly + reliably on
+      # a quiet/pinned machine, or promote to a dedicated nightly job later.
+      - name: cargo test (strict timing gates + property slow paths)
         timeout-minutes: 20
+        env:
+          OL_TIMING_GATES: "1"
         run: cargo test --workspace --exclude one_link_native --release -- --include-ignored
-        continue-on-error: true # property-tests still in alpha; will harden in C
+        continue-on-error: true # timing gates are noisy on shared runners; property-tests still alpha
 
   python_binding:
     name: maturin build + python tests

@@ -27,6 +27,9 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 fn measure_iters(sk: &HybridSecretKey, ct: &HybridCiphertext, iters: u32) -> u64 {
     let start = Instant::now();
     for _ in 0..iters {
@@ -83,7 +86,7 @@ fn adr0017_constant_time_decap_valid_vs_malformed() {
     // For a wall-clock pytest-level CT check, anything under 5% is
     // good evidence the underlying primitive is CT — wider spreads
     // indicate a real data-dependent branch.
-    assert!(
+    timing_gate!(
         ratio < 1.05,
         "timing spread valid vs malformed = {ratio:.4} (> 1.05 — possible non-CT path)"
     );

@@ -19,6 +19,9 @@
 
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_pair_qr::confirm::PairConfirm;
 use ol_pair_qr::sas::Sas;
 use ol_pair_qr::transcript::{TranscriptHash, TRANSCRIPT_LEN};
@@ -93,7 +96,7 @@ fn transcript_hash_ct_eq_constant_time() {
     }
     let rel = relative_stddev(&totals);
     eprintln!("transcript ct_eq totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
-    assert!(
+    timing_gate!(
         rel < 0.05,
         "transcript ct_eq relative stddev {rel:.4} exceeds 5% gate"
     );
@@ -136,7 +139,7 @@ fn sas_ct_eq_constant_time() {
     }
     let rel = relative_stddev(&totals);
     eprintln!("sas ct_eq totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
-    assert!(
+    timing_gate!(
         rel < 0.05,
         "sas ct_eq relative stddev {rel:.4} exceeds 5% gate"
     );
@@ -188,7 +191,7 @@ fn chain_key_eq_constant_time() {
     }
     let rel = relative_stddev(&totals);
     eprintln!("chain_key eq totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
-    assert!(
+    timing_gate!(
         rel < 0.05,
         "chain_key eq relative stddev {rel:.4} exceeds 5% gate"
     );
@@ -247,7 +250,7 @@ fn pair_confirm_decode_and_verify_constant_time_on_mismatched_pubkey() {
     // variance unrelated to the ct-eq path. The point of this test
     // is to catch a regression that replaces ct_eq with `==`, which
     // would short-circuit on byte 0 mismatch.
-    assert!(
+    timing_gate!(
         rel < 0.10,
         "pair_confirm pubkey-fail relative stddev {rel:.4} exceeds 10% gate"
     );

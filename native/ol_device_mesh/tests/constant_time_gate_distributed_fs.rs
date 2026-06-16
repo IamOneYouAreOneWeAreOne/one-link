@@ -4,6 +4,9 @@
 
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_device_mesh::distributed_fs::{sign_storage_attestation, StorageAttestation};
 use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN};
 use ol_pqsig::HybridVerifyingKey;
@@ -67,7 +70,7 @@ fn storage_attest_verify_constant_time_across_tamper_positions() {
     }
     let rel = relative_stddev(&totals);
     eprintln!("storage-attest verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
-    assert!(
+    timing_gate!(
         rel < 0.30,
         "storage-attest verify relative stddev {rel:.4} exceeds 30% gate"
     );

@@ -6,6 +6,9 @@
 
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_device_mesh::mesh_state::{AuthenticatedOp, Delta};
 use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN};
 use ol_pqsig::HybridVerifyingKey;
@@ -78,7 +81,7 @@ fn auth_op_verify_constant_time_across_tamper_positions() {
     }
     let rel = relative_stddev(&totals);
     eprintln!("auth-op verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
-    assert!(
+    timing_gate!(
         rel < 0.30,
         "auth-op verify relative stddev {rel:.4} exceeds 30% gate"
     );

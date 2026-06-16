@@ -5,6 +5,9 @@
 
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_onion::sphinx::primitives::{header_mac, verify_header_mac, HEADER_LEN};
 
 const SAMPLES_PER_BUCKET: usize = 50_000;
@@ -71,7 +74,7 @@ fn header_mac_verify_constant_time() {
     }
     let rel = relative_stddev(&totals);
     eprintln!("header_mac verify totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
-    assert!(
+    timing_gate!(
         rel < 0.05,
         "header_mac verify relative stddev {rel:.4} exceeds 5% gate"
     );

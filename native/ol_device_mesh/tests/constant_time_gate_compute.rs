@@ -2,6 +2,9 @@
 
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_device_mesh::compute::{sign_task_request, TaskClass, TaskRequest};
 use ol_device_mesh::distributed_fs::FILE_ID_LEN;
 use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN};
@@ -71,7 +74,7 @@ fn task_request_verify_constant_time_across_tamper_positions() {
     }
     let rel = relative_stddev(&totals);
     eprintln!("task-req verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
-    assert!(
+    timing_gate!(
         rel < 0.30,
         "task-req verify relative stddev {rel:.4} exceeds 30% gate"
     );

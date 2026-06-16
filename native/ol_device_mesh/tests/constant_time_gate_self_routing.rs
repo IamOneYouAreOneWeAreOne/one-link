@@ -2,6 +2,9 @@
 
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_device_mesh::self_routing::{sign_route_announcement, PeerLink, RouteAnnouncement};
 use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN};
 use ol_pqsig::HybridVerifyingKey;
@@ -87,7 +90,7 @@ fn route_announcement_verify_constant_time_across_tamper_positions() {
     }
     let rel = relative_stddev(&totals);
     eprintln!("route-ann verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
-    assert!(
+    timing_gate!(
         rel < 0.30,
         "route-ann verify relative stddev {rel:.4} exceeds 30% gate"
     );

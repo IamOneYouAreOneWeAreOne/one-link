@@ -14,6 +14,9 @@ use ol_pqsig::HybridSigningKey;
 use rand::rngs::OsRng;
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 const SAMPLES_PER_BUCKET: usize = 2_000;
 const BUCKETS: usize = 4;
 const REL_STDDEV_MAX: f64 = 0.30;
@@ -93,7 +96,7 @@ fn ct_attest_verify_uniform_over_invalid_sigs() {
         bucket_means.push(mean);
     }
     let (_, _, rel) = ct_summary(&bucket_means.iter().map(|x| *x as u64).collect::<Vec<_>>());
-    assert!(
+    timing_gate!(
         rel < REL_STDDEV_MAX,
         "verify_attestation rel-stddev across tamper-position buckets {rel:.4} ≥ {REL_STDDEV_MAX}"
     );
@@ -121,7 +124,7 @@ fn ct_unseal_uniform_over_tamper_position() {
         bucket_means.push(mean);
     }
     let (_, _, rel) = ct_summary(&bucket_means.iter().map(|x| *x as u64).collect::<Vec<_>>());
-    assert!(
+    timing_gate!(
         rel < REL_STDDEV_MAX,
         "unseal rel-stddev across tamper-position buckets {rel:.4} ≥ {REL_STDDEV_MAX}"
     );

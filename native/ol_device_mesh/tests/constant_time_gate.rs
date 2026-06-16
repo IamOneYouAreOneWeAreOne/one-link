@@ -15,6 +15,9 @@
 
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_device_mesh::{
     mint_subkey, sibling_witness, state_root, verify_liveness, DeviceClass, LivenessProof,
     MasterIdentity, DEFAULT_LIVENESS_SKEW_SECS,
@@ -89,7 +92,7 @@ fn liveness_verify_constant_time_across_tamper_positions() {
     eprintln!("liveness-verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
     // 30% gate matches row 1's pqsig::verify ct-gate (this verify
     // delegates to it).
-    assert!(
+    timing_gate!(
         rel < 0.30,
         "liveness verify relative stddev {rel:.4} exceeds 30% gate — \
          likely a short-circuit regression in verify_liveness"

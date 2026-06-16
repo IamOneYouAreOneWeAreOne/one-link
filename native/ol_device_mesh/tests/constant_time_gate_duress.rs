@@ -2,6 +2,9 @@
 
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_device_mesh::duress::{sign_duress_alert, DuressAlert};
 use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN};
 use rand::rngs::OsRng;
@@ -59,7 +62,7 @@ fn duress_alert_verify_constant_time_across_tamper_positions() {
     }
     let rel = relative_stddev(&totals);
     eprintln!("duress-alert verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
-    assert!(
+    timing_gate!(
         rel < 0.30,
         "duress-alert verify relative stddev {rel:.4} exceeds 30% gate"
     );

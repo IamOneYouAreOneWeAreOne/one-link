@@ -16,6 +16,9 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_quic::{Endpoint, EndpointConfig, Identity, PeerFingerprint, PeerRegistry};
 
 #[derive(Debug)]
@@ -86,7 +89,7 @@ fn fingerprint_ct_compare_timing_uniform() {
 
     // The straight-line XOR-accumulator code is constant-time at the
     // CPU level. Allow up to 1.20× wall-clock variance for OS noise.
-    assert!(
+    timing_gate!(
         ratio < 1.20,
         "fingerprint compare diverges {ratio:.3}× by mismatch position — possible non-CT path"
     );

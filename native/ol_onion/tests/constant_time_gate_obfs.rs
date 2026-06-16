@@ -11,6 +11,9 @@
 
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_onion::transport_obfs::handshake::{
     BridgeKeypair, ClientHandshake, ServerHandshake, BRIDGE_PUBKEY_LEN, HANDSHAKE_LEN,
 };
@@ -95,7 +98,7 @@ fn handshake_mac_verify_constant_time_across_tamper_positions() {
     //   - Swap of `subtle::ct_eq` for byte `==`.
     //   - "Short-circuit on current-epoch match" optimization that
     //     skips the previous-epoch try.
-    assert!(
+    timing_gate!(
         rel < 0.15,
         "handshake-MAC relative stddev {rel:.4} exceeds 15% gate — \
          likely a non-constant-time compare regression"

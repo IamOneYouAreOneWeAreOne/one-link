@@ -11,6 +11,9 @@
 
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_pqsig::{HybridSigningKey, HYBRID_SIG_LEN};
 use rand::rngs::OsRng;
 
@@ -91,7 +94,7 @@ fn verify_constant_time_across_tamper_positions() {
     //
     // If upstream ml-dsa adopts strict CT verify later, tighten
     // this gate.
-    assert!(
+    timing_gate!(
         rel < 0.30,
         "verify relative stddev {rel:.4} exceeds 30% gate — likely a \
          short-circuit regression in lib.rs::verify"

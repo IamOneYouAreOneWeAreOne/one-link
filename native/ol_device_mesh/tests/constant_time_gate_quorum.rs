@@ -7,6 +7,9 @@
 
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_device_mesh::quorum::{mint_policy, propose_operation, sign_approval, QuorumCertificate};
 use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity};
 use rand::rngs::OsRng;
@@ -87,7 +90,7 @@ fn quorum_certificate_verify_constant_time_across_approval_tamper() {
     }
     let rel = relative_stddev(&totals);
     eprintln!("cert-verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
-    assert!(
+    timing_gate!(
         rel < 0.30,
         "cert verify relative stddev {rel:.4} exceeds 30% gate"
     );

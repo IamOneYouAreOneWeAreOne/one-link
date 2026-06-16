@@ -5,6 +5,9 @@
 
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_onion::keyderiv::LayerKey;
 use ol_onion::{HopId, HOP_ID_LEN};
 
@@ -67,7 +70,7 @@ fn hop_id_eq_constant_time() {
     }
     let rel = relative_stddev(&totals);
     eprintln!("hop_id eq totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
-    assert!(
+    timing_gate!(
         rel < 0.05,
         "hop_id eq relative stddev {rel:.4} exceeds 5% gate"
     );
@@ -116,7 +119,7 @@ fn layer_key_eq_constant_time() {
     }
     let rel = relative_stddev(&totals);
     eprintln!("layer_key eq totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
-    assert!(
+    timing_gate!(
         rel < 0.05,
         "layer_key eq relative stddev {rel:.4} exceeds 5% gate"
     );

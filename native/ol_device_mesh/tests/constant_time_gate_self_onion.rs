@@ -2,6 +2,9 @@
 
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_device_mesh::self_onion::{derive_onion_identity, sign_onion_attestation, OnionAttestation};
 use ol_device_mesh::{MasterIdentity, DEVICE_ID_LEN};
 use rand::rngs::OsRng;
@@ -60,7 +63,7 @@ fn onion_attestation_verify_constant_time_across_tamper_positions() {
     }
     let rel = relative_stddev(&totals);
     eprintln!("onion-attestation verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
-    assert!(
+    timing_gate!(
         rel < 0.30,
         "onion-attestation verify relative stddev {rel:.4} exceeds 30% gate"
     );

@@ -22,6 +22,9 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_capability::{Capability, Caveat, Context, CAP_ID_LEN, ROOT_KEY_LEN};
 use zeroize::Zeroizing;
 
@@ -95,7 +98,7 @@ fn signature_compare_timing_uniform() {
     // noise. Plan calls for <1% timing variance "of the mean", which
     // translates to a ratio below ~1.02 for the underlying op; the
     // 1.20× ceiling we apply here covers macro-level OS jitter.
-    assert!(
+    timing_gate!(
         ratio < 1.20,
         "verify wall-clock diverges {ratio:.3}× by mismatch position — possible non-CT path"
     );

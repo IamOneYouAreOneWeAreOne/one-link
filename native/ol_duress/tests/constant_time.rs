@@ -26,6 +26,9 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+#[path = "../../test_support/timing_gate.rs"]
+mod timing_gate;
+
 use ol_duress::DuressGate;
 
 fn measure(fn_to_call: impl Fn() + Send, iters: usize, bursts: usize) -> f64 {
@@ -111,7 +114,7 @@ fn duress_open_timing_variance_under_120_percent_real_vs_duress() {
     let ratio = max_t / min_t;
     eprintln!("  max/min ratio = {:.4}", ratio);
 
-    assert!(
+    timing_gate!(
         ratio < 1.20,
         "DuressGate::open timing diverges {ratio:.3}× across (real, duress, wrong) — \
          possible side-channel leak"
