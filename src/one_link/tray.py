@@ -139,7 +139,7 @@ class TrayIcon:
     @staticmethod
     def _tinted_icon(status: str):
         try:
-            from PIL import Image, ImageDraw
+            from PIL import ImageDraw
         except Exception:
             return None
         base = _icon_image()

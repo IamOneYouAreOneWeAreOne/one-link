@@ -32,13 +32,10 @@ Companion: docs/LIVING_PRESENCE_ARCHITECTURE.md §4.2 (rung 7) + §6.6 + §6.7
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Optional
 
 from one_link.frame_provenance import (
-    FrameKind,
     FrameProvenance,
     RecordingState,
     make_segment_hash,

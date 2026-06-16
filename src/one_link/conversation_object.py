@@ -32,9 +32,8 @@ Companion: docs/LIVING_PRESENCE_ARCHITECTURE.md §7.3
 from __future__ import annotations
 
 import hashlib
-import os
 import threading
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import IntEnum
 from typing import Optional
 

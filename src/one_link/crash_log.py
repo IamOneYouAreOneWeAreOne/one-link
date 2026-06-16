@@ -26,7 +26,6 @@ import os
 import platform
 import sys
 import threading
-import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,7 +85,7 @@ def dump_crash(
         )[:40] or "unknown"
         path = _crashes_dir() / f"{stamp}-{safe_reason}.txt"
         with open(path, "w", encoding="utf-8") as f:
-            f.write(f"# One Link crash report\n")
+            f.write("# One Link crash report\n")
             f.write(f"version: {__version__}\n")
             f.write(f"reason : {reason}\n")
             f.write(f"utc    : {stamp}\n")

@@ -28,7 +28,6 @@ import sqlite3
 import threading
 import time
 import uuid
-from contextlib import contextmanager
 
 # v0.21.x at-rest encryption: when the DB is opened via SQLCipher
 # (sqlcipher3), runtime errors are raised as ``sqlcipher3.dbapi2.*``

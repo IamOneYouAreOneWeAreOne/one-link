@@ -30,7 +30,7 @@ Companion: docs/LIVING_PRESENCE_ARCHITECTURE.md §4.7
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import IntEnum
 from typing import Callable, Optional, Protocol
 

@@ -49,7 +49,6 @@ all zeros inside the envelope.
 """
 from __future__ import annotations
 
-import secrets
 import struct
 from dataclasses import dataclass
 from typing import Iterable, Optional

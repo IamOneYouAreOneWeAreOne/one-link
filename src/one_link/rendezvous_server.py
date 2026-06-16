@@ -39,7 +39,6 @@ import hmac
 import ipaddress
 import json
 import logging
-import os
 import secrets
 import signal
 import time
@@ -966,8 +965,6 @@ class RendezvousApp:
             FRAME_DATA,
             ListenAuth,
             decode_frame,
-            encode_close_frame,
-            make_session_closed_msg,
             timestamp_within_replay_window,
         )
 
@@ -1116,10 +1113,8 @@ class RendezvousApp:
             FRAME_CLOSE,
             FRAME_DATA,
             decode_frame,
-            encode_close_frame,
             make_incoming_msg,
             make_ready_msg,
-            make_session_closed_msg,
             new_session_id,
         )
         from one_link.rendezvous_proto import _b64d  # type: ignore

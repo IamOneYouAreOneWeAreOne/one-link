@@ -35,7 +35,6 @@ from __future__ import annotations
 import logging
 import secrets
 import threading
-import time
 from typing import Callable, Optional
 
 log = logging.getLogger(__name__)

@@ -32,7 +32,7 @@ Companion: docs/LIVING_PRESENCE_ARCHITECTURE.md §4.2
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from one_link.call_immune import ImmuneAction, ImmuneDecision

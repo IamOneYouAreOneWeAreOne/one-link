@@ -28,12 +28,10 @@ from __future__ import annotations
 import json
 import struct
 from pathlib import Path
-from typing import Optional
 
 from one_link.async_capsule import AsyncCapsule, CapsuleKind
 from one_link.capsule_at_rest import open_from_path, seal_to_path
 from one_link.frame_provenance import (
-    FrameProvenance,
     from_wire_dict,
     to_wire_dict,
 )

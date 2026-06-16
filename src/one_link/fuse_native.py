@@ -28,7 +28,6 @@ import platform
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
 
 log = logging.getLogger(__name__)
 

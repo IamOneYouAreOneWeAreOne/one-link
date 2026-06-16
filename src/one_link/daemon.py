@@ -79,7 +79,6 @@ from typing import (
 import blake3
 
 if TYPE_CHECKING:
-    from one_link import rendezvous_client
     from one_link.server import UIServer
     from one_link_native.prefetch import Predictor as _NativePredictor
 
@@ -103,7 +102,6 @@ from one_link.capabilities import (
     FILE_ACK_BATCH,
     FILE_BINARY_FRAME,
     FILE_CDC_BINARY_FRAME,
-    FILE_OFFER_BATCH_V1,
     FILES,
     FILE_SWARM,
     FILE_COMPRESSION,
@@ -113,7 +111,6 @@ from one_link.capabilities import (
     FOLDER_SYNC_BIDI_V1,
     LOCAL_CAPABILITIES,
     NATIVE_TRANSFER_INDEXED_V1,
-    NATIVE_TRANSFER_V1,
     SELF_MESH_MANIFEST,
     SELF_MESH_SEND,
     normalize_caps,
@@ -12906,10 +12903,7 @@ class Daemon:
         """
         try:
             from one_link import peer_quic
-            from one_link.capabilities import (
-                LOCAL_CAPABILITIES,
-                QUIC_TRANSPORT_V1,
-            )
+            from one_link.capabilities import LOCAL_CAPABILITIES
         except ImportError:  # pragma: no cover
             return "webrtc"
         if not peer_quic.HAS_NATIVE:

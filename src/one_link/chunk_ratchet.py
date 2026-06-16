@@ -46,7 +46,6 @@ Typical chunk-store integration:
 
 from __future__ import annotations
 
-from typing import Optional
 
 from . import ratchet_native
 

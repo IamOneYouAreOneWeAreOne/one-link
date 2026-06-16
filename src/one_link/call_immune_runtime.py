@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 from one_link.call_immune import (
-    GraduationMode,
     ImmuneAction,
     ImmuneDecision,
     ImmuneSystem,

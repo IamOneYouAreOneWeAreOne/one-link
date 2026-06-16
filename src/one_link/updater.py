@@ -32,15 +32,12 @@ server.py is the thin handler that calls into it.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import platform
-import shlex
 import subprocess
 import sys
 import tempfile
-import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass

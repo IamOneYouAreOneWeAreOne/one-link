@@ -43,13 +43,11 @@ Companion: docs/LIVING_PRESENCE_ARCHITECTURE.md §4.3
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field, replace
-from enum import IntEnum
+from dataclasses import dataclass, replace
 from typing import Optional
 
 from one_link.call_session import (
     LWWRegister,
-    ORSet,
     ParticipantState,
 )
 from one_link.call_vitals import DeviceRole, ThermalState

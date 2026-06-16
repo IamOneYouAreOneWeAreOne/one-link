@@ -60,9 +60,7 @@ Wire format
 """
 from __future__ import annotations
 
-import hashlib
 import secrets
-from typing import Iterable
 
 from one_link import vrf as _vrf  # share the curve arithmetic
 

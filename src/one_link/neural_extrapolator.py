@@ -34,12 +34,10 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
 from one_link.predictive_continuity import (
-    Extrapolator,
     MediaFrame,
     MediaKind,
 )

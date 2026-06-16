@@ -23,8 +23,7 @@ Companion: docs/LIVING_PRESENCE_ARCHITECTURE.md §4.7 (predictive continuity)
 from __future__ import annotations
 
 import threading
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from one_link.frame_provenance import FrameKind

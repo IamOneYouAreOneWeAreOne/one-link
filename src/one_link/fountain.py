@@ -34,7 +34,7 @@ the canonical fountain win.
 from __future__ import annotations
 
 import logging
-from typing import Iterable, Iterator
+from typing import Iterator
 
 log = logging.getLogger(__name__)
 

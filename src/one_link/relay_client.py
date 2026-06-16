@@ -34,7 +34,7 @@ import asyncio
 import contextlib
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 import aiohttp
@@ -44,7 +44,6 @@ from one_link.relay_proto import (
     DATA_FRAME_MAX_BYTES,
     FRAME_CLOSE,
     FRAME_DATA,
-    SESSION_ID_BYTES,
     decode_frame,
     encode_close_frame,
     encode_data_frame,
@@ -393,7 +392,6 @@ class RelayListenerClient:
             backoff = min(backoff * 2, 30.0)
 
     async def _connect_once(self) -> None:
-        from one_link.rendezvous_proto import _b64  # type: ignore
 
         ws_base = self._rendezvous_url.replace(
             "https://", "wss://"

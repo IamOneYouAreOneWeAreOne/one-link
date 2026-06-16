@@ -83,7 +83,6 @@ def _build_proxy_connector() -> aiohttp.BaseConnector | None:
 from one_link.rendezvous_proto import (
     Endpoint,
     LookupAck,
-    PROTOCOL_VERSION,
     RegisterAck,
     sign_register,
     sign_revoke,

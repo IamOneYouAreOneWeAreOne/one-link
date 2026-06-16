@@ -25,7 +25,6 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Callable
 
-import os
 import secrets
 import tempfile
 import threading

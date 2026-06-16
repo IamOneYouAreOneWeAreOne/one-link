@@ -38,13 +38,12 @@ Usage
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import pathlib
 import shutil
 from dataclasses import dataclass
-from typing import Iterable, Literal, Optional
+from typing import Literal, Optional
 
 log = logging.getLogger(__name__)
 

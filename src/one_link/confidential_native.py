@@ -17,7 +17,6 @@ the daemon wants HardwareBound tier).
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import Optional
 

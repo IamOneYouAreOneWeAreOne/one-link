@@ -173,6 +173,29 @@ markers = [
 # Single-file stubs that ARE on mypy_path (e.g. ``stubs/pystray.pyi``)
 # resolve cleanly without an override — those don't run into the
 # marker requirement.
+[tool.ruff]
+# 2026-06-16 (external-audit remediation). The audit reported ruff
+# "fails hard" with no enforced config. We adopt a FOCUSED, enforceable
+# rule set rather than the full default firehose: gate on the
+# correctness/bug-class rules (pyflakes F + syntax E9) that catch real
+# defects — undefined names (F821, which caught the REPO_ROOT bugs),
+# unused imports (F401), redefinitions (F811), f-string mistakes,
+# import-* (F403/F405) — and DON'T churn on the stylistic rules this
+# codebase intentionally uses pervasively: one-line compound statements
+# (E701/E702, e.g. `try: ... except: pass`) and deliberate lazy/in-
+# function imports (E402). Line length etc. are likewise not gated.
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E9", "F"]
+# F841 (assigned-but-unused LOCAL): the noisiest pyflakes rule and the
+# most often intentional (debug leftovers, tuple-unpack throwaways,
+# read-for-effect). The ~20 current instances were reviewed and are all
+# benign (no forgotten-result bugs). Not gated, to keep the gate
+# signal-rich; clean up opportunistically.
+ignore = ["F841"]
+
 [tool.mypy]
 mypy_path = "stubs:src"
 explicit_package_bases = true

@@ -53,10 +53,8 @@ from one_link.call_manager import (
     ManagerEventKind,
     ManagerOutput,
     TailEvent,
-    TailEventKind,
 )
 from one_link.call_signaling import CallPhase
-from one_link.recording_consent import ConsentPhase
 
 log = logging.getLogger(__name__)
 

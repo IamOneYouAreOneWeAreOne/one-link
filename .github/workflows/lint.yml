@@ -1,0 +1,47 @@
+name: lint
+
+# 2026-06-16 (external-audit remediation): enforce ruff as a real gate.
+# Config lives in pyproject.toml [tool.ruff] — a focused E9+F rule set
+# that catches correctness/bug-class issues (undefined names, unused
+# imports, redefinitions, f-string mistakes) without churning on the
+# one-line / lazy-import style this codebase intentionally uses.
+#
+# mypy is NOT yet a hard gate (the audit reported ~305 errors; clearing
+# them is a separate, larger effort). It runs here REPORT-ONLY so the
+# error count is visible + trends down, then flips to gating once clean.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  ruff:
+    name: ruff (gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install ruff
+        run: python -m pip install --upgrade pip ruff
+      - name: ruff check (HARD GATE)
+        run: python -m ruff check src/one_link
+
+  mypy:
+    name: mypy (report-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" || pip install mypy
+      - name: mypy (report-only — not yet gating)
+        run: |
+          python -m mypy src/one_link 2>&1 | tail -40 || true
+          echo "::notice::mypy is report-only until the ~305 baseline errors are cleared"

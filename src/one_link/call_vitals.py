@@ -23,7 +23,7 @@ Companion: docs/LIVING_PRESENCE_ARCHITECTURE.md §4.1
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, Optional, Protocol
 

@@ -158,6 +158,26 @@ def test_security_workflow_runs_on_schedule():
     assert "cron:" in text
 
 
-def test_security_workflow_runs_lockfile_drift_check():
+def test_security_workflow_pip_audit_is_a_hard_gate():
+    """2026-06-16 (external-audit remediation): pip-audit must FAIL the
+    build on a known CVE — it was previously report-only (`|| true`),
+    which the audit flagged as 'supply-chain not enforceable'. (The old
+    no-op `lock_deps.py --check` drift step was dropped — a single
+    committed pip-tools lock spuriously drifts across the Win/Mac/Linux
+    legs; the hard re-resolve+audit is the real guarantee.)"""
     text = (_REPO / ".github" / "workflows" / "security.yml").read_text(encoding="utf-8")
-    assert "lock_deps.py --check" in text
+    # The lockfile is still regenerated + audited every run.
+    assert "lock_deps.py" in text
+    assert "pip_audit --requirement requirements.lock" in text
+    # The GATE line (audit on the lock) must NOT be neutered with `|| true`.
+    gate_lines = [
+        ln for ln in text.splitlines()
+        if "pip_audit --requirement requirements.lock" in ln
+        and "--format json" not in ln  # that line is the artifact writer
+    ]
+    assert gate_lines, "expected a pip-audit gate line"
+    for ln in gate_lines:
+        assert "|| true" not in ln, (
+            "pip-audit gate must be HARD (no '|| true') — known CVEs "
+            "must fail the build"
+        )

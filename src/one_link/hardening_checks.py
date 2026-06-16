@@ -148,7 +148,7 @@ def check_cloud_sync_colocation(data_dir: Path) -> list[Finding]:
     else:
         findings.append(Finding(
             "info", "cloud_sync",
-            f"Data directory not inside any known cloud-sync folder — OK.",
+            "Data directory not inside any known cloud-sync folder — OK.",
         ))
     return findings
 

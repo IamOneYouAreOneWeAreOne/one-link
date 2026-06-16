@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
-from typing import Iterator, Optional
+from typing import Optional
 
 
 KIND_COVER = 0

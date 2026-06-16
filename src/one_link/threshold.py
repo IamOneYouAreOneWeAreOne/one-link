@@ -71,7 +71,6 @@ What this module does NOT do:
 """
 from __future__ import annotations
 
-import os
 import secrets
 from dataclasses import dataclass
 from typing import Iterable

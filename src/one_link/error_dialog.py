@@ -101,7 +101,6 @@ def show_startup_failure(
     """
     try:
         import tkinter as tk
-        from tkinter import font as tk_font
     except Exception:
         if os.name == "nt":
             return _windows_messagebox_fallback(

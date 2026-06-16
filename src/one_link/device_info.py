@@ -22,12 +22,10 @@ CAPS frame so a peer can render the rich label.
 """
 from __future__ import annotations
 
-import contextlib
-import os
 import platform
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 

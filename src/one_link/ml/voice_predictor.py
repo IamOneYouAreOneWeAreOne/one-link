@@ -28,8 +28,7 @@ Public:
 from __future__ import annotations
 
 import sys
-from dataclasses import asdict, dataclass
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -42,7 +41,6 @@ except Exception as e:  # noqa: BLE001
     raise
 
 
-from one_link.ml.speech_synth import PHONEME_NAMES  # noqa: E402
 
 
 @dataclass

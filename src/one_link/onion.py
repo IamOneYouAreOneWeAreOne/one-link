@@ -59,7 +59,6 @@ from __future__ import annotations
 import secrets
 import struct
 from dataclasses import dataclass
-from typing import Iterable, Optional
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.x25519 import (

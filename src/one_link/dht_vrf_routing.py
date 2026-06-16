@@ -42,7 +42,6 @@ The transport-side rpc_find_node hook is unchanged.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from one_link import dht, vrf
 

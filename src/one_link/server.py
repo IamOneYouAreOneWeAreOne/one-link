@@ -4480,7 +4480,8 @@ class UIServer:
     _INVITE_CODE_LEN = 6
 
     def _mint_invite_code(self) -> str:
-        import secrets, string
+        import secrets
+        import string
         alphabet = string.ascii_uppercase + string.digits
         # Avoid easily-confused chars.
         alphabet = "".join(c for c in alphabet if c not in "O0I1")
@@ -7389,7 +7390,6 @@ class UIServer:
         """
         from one_link.frame_provenance import PathClass, RecordingState
         from one_link.live_frame_provenance import (
-            LIVE_SCHEMA_V2,
             sign_browser_window,
         )
         from one_link.wire import make_msg
@@ -8830,7 +8830,6 @@ class UIServer:
         # one path". Each track is independent so a user can layer
         # them for defense in depth. Falls back gracefully on a
         # legacy install where only the binary flag was set.
-        from one_link import recovery_api as _recovery_api
         recovery_phrase_ready = setting_ready("one_setup_recovery_phrase_verified_at_ms")
         recovery_bundle_ready = setting_ready("one_setup_recovery_backup_last_export_at_ms")
         recovery_social_ready = setting_ready("one_setup_recovery_social_configured_at_ms")
@@ -10646,7 +10645,7 @@ class UIServer:
         the local root seed. That is the right first-run shape for
         "add my phone/laptop" without fake success.
         """
-        from one_link.self_mesh_enrollment import MeshRoot, b64u, b64u_decode
+        from one_link.self_mesh_enrollment import MeshRoot, b64u
 
         state = self.daemon.state
         if state is None:

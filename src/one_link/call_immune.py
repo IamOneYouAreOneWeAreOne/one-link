@@ -31,16 +31,14 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, IntEnum
 from typing import Callable, Optional
 
 from one_link.call_vitals import (
     CallVitals,
-    DeviceRole,
     ThermalState,
 )
-from one_link.frame_provenance import PathClass
 
 log = logging.getLogger(__name__)
 

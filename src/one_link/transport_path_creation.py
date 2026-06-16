@@ -13,7 +13,6 @@ import os
 import platform
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
 from .hardware_inventory import HardwareInventory, HardwarePath

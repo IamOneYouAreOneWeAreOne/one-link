@@ -30,7 +30,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 log = logging.getLogger("one_link.state_encryption")
 

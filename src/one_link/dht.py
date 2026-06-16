@@ -52,7 +52,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from dataclasses import dataclass, field
-from typing import Iterable, Optional
+from typing import Optional
 
 
 # ── constants ──────────────────────────────────────────────────────

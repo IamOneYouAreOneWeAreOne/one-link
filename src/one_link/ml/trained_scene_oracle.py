@@ -6,7 +6,6 @@ next-regime prediction to video_e2e_sim.
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from typing import Optional
@@ -14,9 +13,8 @@ from typing import Optional
 import numpy as np
 import torch
 
-from one_link.ml.scene_dataset import FEATURE_DIM, REGIME_NAMES  # noqa: E402
 from one_link.ml.scene_predictor import (  # noqa: E402
-    ScenePredictor, ScenePredictorConfig, compute_scene_accuracy,
+    ScenePredictor, ScenePredictorConfig,
 )
 
 
@@ -108,6 +106,11 @@ class TrainedSceneOracle:
 
 
 def _selftest() -> int:
+    from pathlib import Path
+    # REPO_ROOT was undefined here (same selftest NameError bug as
+    # trained_voice_oracle). This file is src/one_link/ml/, repo root
+    # is parents[3].
+    REPO_ROOT = Path(__file__).resolve().parents[3]
     ckpt = REPO_ROOT / "models" / "scene_predictor_v1" / "checkpoint.pt"
     if not ckpt.exists():
         print(f"trained_scene_oracle selftest: SKIP ({ckpt} missing)"); return 0

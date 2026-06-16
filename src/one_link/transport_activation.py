@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable, Mapping
+from typing import Iterable
 
 from .transport_adapters.base import AdapterProbe, RouteScore
 

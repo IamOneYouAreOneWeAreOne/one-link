@@ -38,7 +38,6 @@ the integrity check.
 """
 from __future__ import annotations
 
-import os
 import struct
 from collections import OrderedDict
 from dataclasses import dataclass, field

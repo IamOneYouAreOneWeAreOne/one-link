@@ -15,7 +15,6 @@ from .capabilities import (
     CHAT,
     FILES,
     FILE_CDC,
-    FILE_COMPRESSION,
     FILE_RESUMABLE,
     FILE_SWARM,
     normalize_caps,

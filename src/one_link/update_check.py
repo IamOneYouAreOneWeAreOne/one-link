@@ -29,7 +29,7 @@ import logging
 import re
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Callable, Optional
 
 from one_link.safe_http import validated_urlopen

@@ -42,12 +42,9 @@ import gzip
 import ipaddress
 import logging
 import os
-import platform
 import re
 import socket
-import struct
 import subprocess
-import sys
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
