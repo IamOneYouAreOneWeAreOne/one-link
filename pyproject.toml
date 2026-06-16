@@ -209,6 +209,13 @@ check_untyped_defs = true
 module = ["one_link_native", "one_link_native.*"]
 ignore_missing_imports = true
 
+# Third-party C-extension libraries that ship no type stubs / py.typed
+# marker. Nothing to gain from analyzing them; silence the spurious
+# import-untyped noise so the real type errors stay visible.
+[[tool.mypy.overrides]]
+module = ["onnxruntime", "onnxruntime.*", "sqlcipher3", "sqlcipher3.*"]
+ignore_missing_imports = true
+
 # v0.7.2 bandit config (audit finding C). We exclude tests because
 # fake-data + pytest harness use patterns bandit flags but are safe
 # in a test context (e.g. assert in tests, hardcoded keys for
