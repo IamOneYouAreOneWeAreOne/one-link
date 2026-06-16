@@ -307,7 +307,7 @@ impl DhtNode {
             }
             // Use the SHARED transport so response routing via the
             // receiver task lands back in the correct pending map.
-            let transport_ref: &UdpTransport = &*inner.transport;
+            let transport_ref: &UdpTransport = &inner.transport;
             let l = Lookup::new(target, bootstrap, transport_ref, false);
             l.run().await
         })?;
@@ -340,7 +340,7 @@ impl DhtNode {
             if bootstrap.is_empty() {
                 return Err(LookupError::NoBootstrap);
             }
-            let transport_ref: &UdpTransport = &*inner.transport;
+            let transport_ref: &UdpTransport = &inner.transport;
             let l = Lookup::new(target, bootstrap, transport_ref, true);
             l.run().await
         })?;

@@ -177,7 +177,7 @@ pub fn scan_to_vec(buffer: &[u8]) -> Vec<Boundary> {
 /// Threshold above which `scan_to_vec_parallel` parallelizes BLAKE3
 /// hashing across the discovered boundaries via Rayon. Below this size
 /// the threadpool dispatch overhead dominates the win.
-const PARALLEL_HASH_MIN_BYTES: usize = 1 * 1024 * 1024;
+const PARALLEL_HASH_MIN_BYTES: usize = 1024 * 1024;
 
 /// Scan a buffer and collect boundaries, hashing chunks in parallel
 /// via Rayon for buffers ≥ 1 MiB.

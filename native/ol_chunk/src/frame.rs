@@ -34,7 +34,7 @@ pub const fn frame_count_for_plaintext(chunk_plaintext_len: usize) -> usize {
     if chunk_plaintext_len == 0 {
         return 0;
     }
-    (chunk_plaintext_len + AEAD_FRAME_PLAINTEXT_LEN - 1) / AEAD_FRAME_PLAINTEXT_LEN
+    chunk_plaintext_len.div_ceil(AEAD_FRAME_PLAINTEXT_LEN)
 }
 
 /// Compute the on-wire ciphertext length for a chunk: plaintext + per-frame

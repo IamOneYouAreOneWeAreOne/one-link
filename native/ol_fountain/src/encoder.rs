@@ -49,8 +49,8 @@ impl<'a> LtEncoder<'a> {
         if source.is_empty() {
             return Err(FountainError::EmptySource);
         }
-        let k = ((source.len() + symbol_len - 1) / symbol_len) as u32;
-        let last_padded = if source.len() % symbol_len != 0 {
+        let k = source.len().div_ceil(symbol_len) as u32;
+        let last_padded = if !source.len().is_multiple_of(symbol_len) {
             let mut buf = vec![0u8; symbol_len];
             let tail_start = (k as usize - 1) * symbol_len;
             let tail_len = source.len() - tail_start;

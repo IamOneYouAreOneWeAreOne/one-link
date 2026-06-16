@@ -109,7 +109,7 @@ pub fn build_default_cover_packet<R: RngCore + CryptoRng>(
 /// silently and before any application-layer processing.
 #[must_use]
 pub fn is_cover_payload(payload: &[u8]) -> bool {
-    payload.len() >= COVER_MAGIC.len() && &payload[..COVER_MAGIC.len()] == COVER_MAGIC
+    payload.len() >= COVER_MAGIC.len() && payload[..COVER_MAGIC.len()] == COVER_MAGIC
 }
 
 #[cfg(test)]

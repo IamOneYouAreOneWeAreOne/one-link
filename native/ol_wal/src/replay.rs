@@ -25,6 +25,7 @@ use crate::record::{
 
 /// Result of replaying a single WAL file or an entire log directory.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct ReplayOutcome {
     /// Records recovered, in append order.
     pub records: Vec<Record>,
@@ -35,15 +36,6 @@ pub struct ReplayOutcome {
     pub truncated: Vec<(PathBuf, u64)>,
 }
 
-impl Default for ReplayOutcome {
-    fn default() -> Self {
-        Self {
-            records: Vec::new(),
-            bytes_scanned: 0,
-            truncated: Vec::new(),
-        }
-    }
-}
 
 /// Replay a single WAL file. Returns recovered records, the file's final
 /// size after any tail truncation, and the bytes scanned.

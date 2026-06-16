@@ -51,5 +51,5 @@ const fn splitmix64_next(z: u64) -> u64 {
 
 #[inline]
 const fn rotl64(x: u64, k: u32) -> u64 {
-    (x << k) | (x >> (64 - k))
+    x.rotate_left(k)
 }

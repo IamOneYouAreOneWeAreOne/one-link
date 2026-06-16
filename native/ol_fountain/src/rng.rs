@@ -66,7 +66,7 @@ impl SplitMix64 {
     pub fn next_u32_below(&mut self, range: u32) -> u32 {
         debug_assert!(range > 0);
         let r = u64::from(range);
-        let x = (self.next_u64() >> 32) as u64; // u32 reduced
+        let x = (self.next_u64() >> 32); // u32 reduced
         ((x.wrapping_mul(r)) >> 32) as u32
     }
 

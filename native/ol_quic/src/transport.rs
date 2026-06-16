@@ -218,7 +218,7 @@ impl Endpoint {
         let sni = "one-link.local";
         let connecting = self
             .inner
-            .connect_with(client_cfg, addr, &sni)
+            .connect_with(client_cfg, addr, sni)
             .map_err(QuicError::Connect)?;
         let conn = connecting.await?;
         Ok(Connection { inner: conn })

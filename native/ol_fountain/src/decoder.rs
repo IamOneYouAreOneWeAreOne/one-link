@@ -185,7 +185,7 @@ impl LtDecoder {
         for n in &unresolved {
             self.inverse
                 .entry(*n)
-                .or_insert_with(std::collections::BTreeSet::new)
+                .or_default()
                 .insert(symbol_id);
         }
         let neighbor_count = unresolved.len();

@@ -68,7 +68,7 @@ impl SplitMix64 {
 
 #[inline]
 const fn rotl64(x: u64, k: u32) -> u64 {
-    (x << k) | (x >> (64 - k))
+    x.rotate_left(k)
 }
 
 #[cfg(test)]
