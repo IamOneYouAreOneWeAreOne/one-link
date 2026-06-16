@@ -330,4 +330,12 @@ full audit list and recommended ordering.
 ## License
 
 Copyright (c) 2026 One Link contributors (weareone@oneunity.earth).
-Released under the MIT License. See [LICENSE](LICENSE).
+Released under the **GNU Affero General Public License v3.0 or later**
+(AGPL-3.0-or-later). See [LICENSE](LICENSE) and the full text in
+[LICENSE.AGPL-3.0](LICENSE.AGPL-3.0).
+
+AGPL is a deliberate, for-the-people choice: it keeps One Link free and
+open even when run as a network service — anyone who offers it to others
+must share their source, so it can't be quietly taken closed. (Versions
+before commit `87d1b98` / v0.20.7 were MIT; this README previously still
+said MIT, which was a stale inconsistency with LICENSE and pyproject.)
