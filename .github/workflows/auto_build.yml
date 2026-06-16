@@ -125,11 +125,17 @@ jobs:
             "https://www.python.org/ftp/python/${PYVER}/python-${PYVER}-macos11.pkg"
           sudo installer -pkg /tmp/python-universal2.pkg -target /
           FWBIN="/Library/Frameworks/Python.framework/Versions/3.12/bin"
-          # Make both `python` and `python3` resolve to the universal2 build.
+          # Make `python` + `pip` resolve to the universal2 build. The
+          # python.org pkg ships python3/pip3 but not bare python/pip,
+          # and the install step calls `python -m pip`, so ensure pip
+          # exists and both names resolve.
+          "$FWBIN/python3" -m ensurepip --upgrade || true
           ln -sf "$FWBIN/python3" "$FWBIN/python" || true
+          ln -sf "$FWBIN/pip3" "$FWBIN/pip" || true
           echo "$FWBIN" >> "$GITHUB_PATH"
           echo "--- universal2 interpreter check ---"
           "$FWBIN/python3" --version
+          "$FWBIN/python3" -m pip --version
           lipo -archs "$FWBIN/python3.12" || true
 
       - name: cache pip
@@ -232,13 +238,17 @@ jobs:
       - name: install build tooling
         shell: bash
         run: |
+          # Use `python -m pip` (not bare `pip`): on the macOS universal2
+          # leg the python.org framework provides pip3 but the bare `pip`
+          # console script isn't reliably on PATH. `python -m pip` works
+          # identically on every leg.
           python -m pip install --upgrade pip
-          pip install pyinstaller
+          python -m pip install pyinstaller
           # Install the project itself in editable mode so PyInstaller
           # can resolve every import path. On win_arm64 this triggers
           # the cryptography source build (Rust + OpenSSL must be
           # already in place — done in the two steps above).
-          pip install -e .
+          python -m pip install -e .
 
       - name: cache cargo registry + target
         uses: actions/cache@v4
