@@ -20,19 +20,23 @@ name: auto-build macOS Intel (decoupled)
 #     release (softprops only adds/replaces the listed files, leaving
 #     the arm64/Windows/Linux assets the main build published intact).
 
+# NOTE: deliberately NO `push:` trigger. macos-13 (the only hosted Intel
+# runner) sits queued for a long time, and GitHub's concurrency rules keep
+# only the NEWEST *pending* run in a group — `cancel-in-progress: false`
+# protects a RUNNING job but NOT queued ones. So a push trigger meant every
+# new commit superseded the still-queued Intel run before it ever got a
+# runner, and the dmg never published. Instead the Intel dmg rebuilds on a
+# daily schedule + on demand, which is plenty fresh for a release artifact.
 on:
-  push:
-    branches: [master]
   schedule:
-    # Daily at 08:17 UTC — catches the case where every recent push's
-    # Intel run was superseded/queued-out, so the dmg can never go more
-    # than ~a day stale relative to master.
+    # Daily at 08:17 UTC — keeps one-link-macos-x86_64.dmg no more than
+    # ~a day stale relative to master without any push-driven churn.
     - cron: "17 8 * * *"
   workflow_dispatch:
 
 concurrency:
-  # Distinct from the main auto-build group, and NON-cancelling: let a
-  # slow Intel build finish rather than killing it on the next push.
+  # Own group, non-cancelling: let a slow Intel build run to completion.
+  # With no push trigger there is no rapid-supersede problem to begin with.
   group: auto-build-macos-intel
   cancel-in-progress: false
 
