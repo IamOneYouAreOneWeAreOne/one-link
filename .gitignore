@@ -64,3 +64,4 @@ htmlcov/
 _exe_test.log
 *.log
 _wsl_linux_report.json
+requirements.lock

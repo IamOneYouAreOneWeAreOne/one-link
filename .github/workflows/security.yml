@@ -33,14 +33,19 @@ jobs:
           python scripts/lock_deps.py
 
       - name: pip-audit (OSV vulnerability scan)
-        # Run audit on the freshly-resolved lockfile, not the project
-        # dependency declaration — that way transitive vulnerabilities
-        # are caught too. --strict would fail the build on any finding;
-        # for v0.7.2 we report-only to surface findings without blocking
-        # development. Tighten to --strict in a follow-up release.
+        # Audit the freshly-resolved lockfile (so TRANSITIVE vulns are
+        # caught too, not just declared deps). 2026-06-16: this is now a
+        # HARD GATE — the external audit flagged the old report-only
+        # `|| true` as "supply-chain not enforceable." First line writes
+        # the JSON artifact (kept non-fatal so the artifact always
+        # uploads). Second line FAILS the build on any known
+        # vulnerability. The current resolved tree is clean (verified
+        # locally: pip-audit exit 0). If a future transitive advisory
+        # has no fix yet, add a documented `--ignore-vuln <ID>` here
+        # rather than reinstating a blanket `|| true`.
         run: |
           python -m pip_audit --requirement requirements.lock --format json --output pip-audit.json || true
-          python -m pip_audit --requirement requirements.lock || true
+          python -m pip_audit --requirement requirements.lock
 
       - name: bandit (SAST)
         # Excludes + skip-list configured in pyproject.toml [tool.bandit].
@@ -70,9 +75,11 @@ jobs:
             dist/sbom.cdx.json
           if-no-files-found: warn
 
-      - name: lockfile drift check
-        # If pyproject.toml moved ahead of the in-tree lockfile,
-        # tell the developer to regenerate. Non-blocking on PRs;
-        # the upload above is the source of truth for CI.
-        run: |
-          python scripts/lock_deps.py --check || echo "::warning::requirements.lock is out of date"
+      # NOTE (2026-06-16): no committed-lockfile "drift" gate here on
+      # purpose. pip-tools locks are PLATFORM-SPECIFIC, so a single
+      # committed requirements.lock would spuriously "drift" between the
+      # Win/Mac/Linux build legs. The enforceable guarantee is the HARD
+      # pip-audit gate above, which re-resolves + audits the full
+      # dependency tree on every run and fails on any known CVE. A
+      # committed, reproducible, cross-platform lock is future work that
+      # needs a universal resolver (e.g. uv) rather than pip-tools.
