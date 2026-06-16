@@ -152,8 +152,8 @@ fn adversarial_small_order_alpha_rejected() {
     let packet = build_sphinx_onion(&eph_sk, &[dest], b"x", &mut OsRng).unwrap();
     // Replace alpha with all-zero (small-order point).
     let mut bytes = *packet.as_bytes();
-    for i in 1..33 {
-        bytes[i] = 0;
+    for b in &mut bytes[1..33] {
+        *b = 0;
     }
     let tampered = SphinxPacket::from_bytes(&bytes).unwrap();
     let err = peel_sphinx_layer(&dest_sk, &tampered).unwrap_err();
@@ -169,8 +169,10 @@ fn adversarial_cross_circuit_alpha_swap_rejected() {
     let (dest_sk, dest) = make_relay();
     let (eph_a, _) = generate_static_keypair(&mut OsRng);
     let (eph_b, _) = generate_static_keypair(&mut OsRng);
-    let packet_a = build_sphinx_onion(&eph_a, &[dest.clone()], b"a", &mut OsRng).unwrap();
-    let packet_b = build_sphinx_onion(&eph_b, &[dest.clone()], b"b", &mut OsRng).unwrap();
+    let packet_a =
+        build_sphinx_onion(&eph_a, std::slice::from_ref(&dest), b"a", &mut OsRng).unwrap();
+    let packet_b =
+        build_sphinx_onion(&eph_b, std::slice::from_ref(&dest), b"b", &mut OsRng).unwrap();
 
     let mut spliced = *packet_a.as_bytes();
     spliced[1..33].copy_from_slice(&packet_b.as_bytes()[1..33]);
@@ -242,7 +244,8 @@ fn adversarial_pq_wrong_pq_dk_at_entry_rejected() {
     let (entry_x_sk, _entry_pq_dk, entry) = make_pq_entry();
     let (wrong_pq_dk, _) = generate_pq_keypair(&mut OsRng);
     let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-    let packet = build_pq_sphinx_onion(&eph_sk, &[entry.clone()], b"x", &mut OsRng).unwrap();
+    let packet =
+        build_pq_sphinx_onion(&eph_sk, std::slice::from_ref(&entry), b"x", &mut OsRng).unwrap();
     let err = peel_pq_sphinx_entry(&entry_x_sk, &wrong_pq_dk, &packet).unwrap_err();
     assert_eq!(err, OnionError::AeadFail);
 }

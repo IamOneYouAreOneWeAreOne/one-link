@@ -767,13 +767,9 @@ mod tests {
 
     // ── Bellare-Neven multi-sig round trip ──────────────────────
 
-    fn bn_setup(
-        n: usize,
-    ) -> (
-        Vec<SchnorrSigningKey>,
-        Vec<Vec<u8>>,
-        Vec<(SchnorrVerifyingKey, Vec<u8>, SchnorrSignature)>,
-    ) {
+    type BnEntry = (SchnorrVerifyingKey, Vec<u8>, SchnorrSignature);
+
+    fn bn_setup(n: usize) -> (Vec<SchnorrSigningKey>, Vec<Vec<u8>>, Vec<BnEntry>) {
         let sks: Vec<SchnorrSigningKey> = (0..n)
             .map(|_| SchnorrSigningKey::generate(&mut OsRng))
             .collect();

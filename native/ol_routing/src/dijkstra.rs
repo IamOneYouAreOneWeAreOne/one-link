@@ -80,16 +80,19 @@ impl Eq for HeapEntry {}
 
 impl PartialOrd for HeapEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        // Reverse so the heap is a min-heap.
-        other.cost.partial_cmp(&self.cost)
+        Some(self.cmp(other))
     }
 }
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
+        // Reverse so the BinaryHeap (a max-heap) behaves as a min-heap.
         // NaN should never appear (callers pass f64 costs from
         // edge_cost, which is well-defined for any non-negative
         // input). If it ever does, treat NaN as equal.
-        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+        other
+            .cost
+            .partial_cmp(&self.cost)
+            .unwrap_or(Ordering::Equal)
     }
 }
 

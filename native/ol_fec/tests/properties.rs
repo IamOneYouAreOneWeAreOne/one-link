@@ -1,3 +1,6 @@
+// Indexed loops address parallel data/parity shard arrays positionally;
+// iterators would obscure the Reed-Solomon shard correspondence.
+#![allow(clippy::needless_range_loop)]
 //! Proptest property coverage for `ol_fec`.
 
 use ol_fec::Codec;

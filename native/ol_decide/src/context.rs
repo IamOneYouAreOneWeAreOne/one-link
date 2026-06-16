@@ -208,6 +208,9 @@ impl Context {
     ///
     /// Most call sites should use this rather than struct-literal init
     /// so daemon-side feeds catch bad observations early.
+    // One argument per validated `Context` field — the validation is
+    // the whole point of this constructor, so it mirrors the struct.
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         kind: EventKind,
         size: usize,

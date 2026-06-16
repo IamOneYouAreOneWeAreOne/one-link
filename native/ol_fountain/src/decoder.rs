@@ -183,10 +183,7 @@ impl LtDecoder {
 
         // Insert pending + update reverse index.
         for n in &unresolved {
-            self.inverse
-                .entry(*n)
-                .or_default()
-                .insert(symbol_id);
+            self.inverse.entry(*n).or_default().insert(symbol_id);
         }
         let neighbor_count = unresolved.len();
         self.pending.insert(

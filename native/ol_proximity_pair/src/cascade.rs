@@ -78,13 +78,12 @@ pub fn multi_pass_reconcile(
     }
     let n = my_bits.len();
     let mut current = my_bits.to_vec();
-    for pass_idx in 0..passes.min(peer_syndromes.len()) {
+    for (pass_idx, syndrome) in peer_syndromes.iter().take(passes).enumerate() {
         let perm = permutation_for_pass(permutation_seed, pass_idx, n);
         // Apply permutation: build a permuted view of current.
         let permuted: Vec<u8> = perm.iter().map(|&pos| current[pos]).collect();
         // Reconcile in permuted order.
-        let reconciled_permuted =
-            reconcile_with_syndrome(&permuted, &peer_syndromes[pass_idx], block_bits);
+        let reconciled_permuted = reconcile_with_syndrome(&permuted, syndrome, block_bits);
         // Un-permute: place each reconciled bit back at its original index.
         let mut un_permuted = vec![0u8; n];
         for (perm_i, &orig_i) in perm.iter().enumerate() {
@@ -129,7 +128,7 @@ mod tests {
     fn permutation_is_a_bijection() {
         let perm = permutation_for_pass(0xCAFE, 0, 64);
         // Every index 0..64 appears exactly once.
-        let mut seen = vec![false; 64];
+        let mut seen = [false; 64];
         for &p in &perm {
             assert!(p < 64);
             assert!(!seen[p], "duplicate: {p}");

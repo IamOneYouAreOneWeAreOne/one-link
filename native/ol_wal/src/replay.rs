@@ -24,8 +24,7 @@ use crate::record::{
 };
 
 /// Result of replaying a single WAL file or an entire log directory.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ReplayOutcome {
     /// Records recovered, in append order.
     pub records: Vec<Record>,
@@ -35,7 +34,6 @@ pub struct ReplayOutcome {
     /// the log was crash-clean.
     pub truncated: Vec<(PathBuf, u64)>,
 }
-
 
 /// Replay a single WAL file. Returns recovered records, the file's final
 /// size after any tail truncation, and the bytes scanned.
@@ -304,11 +302,7 @@ mod tests {
         // Append a torn record header (8 bytes that pretends to have a
         // 100-byte payload but no actual payload follows).
         {
-            let mut f = OpenOptions::new()
-                .write(true)
-                .append(true)
-                .open(&path)
-                .unwrap();
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
             f.write_all(&[
                 0x99u8, 0x00, // kind, flags
                 0x00, 0x00, // reserved

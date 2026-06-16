@@ -173,7 +173,7 @@ impl ChunkStore {
             Vec::with_capacity(chunk_replay.records.len());
         for (file_id, path) in chunk_files {
             let bytes = std::fs::read(&path)?;
-            let mut cursor: u64 = u64::from(ol_wal::FILE_HEADER_LEN);
+            let mut cursor: u64 = ol_wal::FILE_HEADER_LEN;
             while (cursor as usize) < bytes.len() {
                 // Parse WAL framing manually to recover offsets.
                 let pos = cursor as usize;

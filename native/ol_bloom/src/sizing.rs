@@ -65,7 +65,7 @@ mod tests {
         // Per ADR-0011 examples (rounded to ceil + 8-bit minimum).
         // n=1024 at p=0.01 → m ≈ 9816 bits.
         let m = optimal_m_bits(1024, 0.01);
-        assert!(m >= 9816 && m <= 9825, "got {m}");
+        assert!((9816..=9825).contains(&m), "got {m}");
         // k ≈ 7.
         let k = optimal_k(1024, m);
         assert_eq!(k, 7, "expected ~7 hash funcs, got {k}");

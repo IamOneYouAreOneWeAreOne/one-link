@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn rejects_data_shard_count_mismatch() {
         let codec = Codec::new(5, 2).unwrap();
-        let buf = vec![0u8; 32];
+        let buf = [0u8; 32];
         let data: Vec<&[u8]> = vec![&buf[..]; 4]; // 4 shards, expected 5
         let result = codec.encode(&data);
         assert!(matches!(result, Err(FecError::DataShardCount { .. })));
@@ -245,9 +245,9 @@ mod tests {
     #[test]
     fn rejects_unequal_shard_lengths() {
         let codec = Codec::new(3, 2).unwrap();
-        let a = vec![0u8; 32];
-        let b = vec![0u8; 64];
-        let c = vec![0u8; 32];
+        let a = [0u8; 32];
+        let b = [0u8; 64];
+        let c = [0u8; 32];
         let data: Vec<&[u8]> = vec![&a[..], &b[..], &c[..]];
         let result = codec.encode(&data);
         assert!(matches!(result, Err(FecError::InconsistentShardLen { .. })));

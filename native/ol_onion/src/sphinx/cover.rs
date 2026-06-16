@@ -507,7 +507,8 @@ mod tests {
     fn build_cover_packet_round_trip() {
         let (dest_sk, dest) = make_relay();
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-        let packet = build_cover_packet(&eph_sk, &[dest.clone()], 128, &mut OsRng).unwrap();
+        let packet =
+            build_cover_packet(&eph_sk, std::slice::from_ref(&dest), 128, &mut OsRng).unwrap();
         let outcome = peel_sphinx_layer(&dest_sk, &packet).unwrap();
         // Audit M4: peel returns the authenticated Cover variant for
         // a packet built via the cover-traffic path. The payload is
@@ -636,7 +637,8 @@ mod tests {
         use crate::sphinx::core::{build_sphinx_onion, SPHINX_PACKET_LEN};
         let (_, dest) = make_relay();
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-        let cover = build_cover_packet(&eph_sk, &[dest.clone()], 256, &mut OsRng).unwrap();
+        let cover =
+            build_cover_packet(&eph_sk, std::slice::from_ref(&dest), 256, &mut OsRng).unwrap();
         let real = build_sphinx_onion(&eph_sk, &[dest], b"real payload", &mut OsRng).unwrap();
         assert_eq!(cover.as_bytes().len(), SPHINX_PACKET_LEN);
         assert_eq!(real.as_bytes().len(), SPHINX_PACKET_LEN);

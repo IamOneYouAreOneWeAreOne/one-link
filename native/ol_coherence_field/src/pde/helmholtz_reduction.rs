@@ -74,8 +74,8 @@ pub fn solve_helmholtz(
     let n = graph.n();
     // Diagonal of (Γ · I + D · L) = Γ + D · degree.
     let mut diag = vec![0.0; n];
-    for i in 0..n {
-        diag[i] = gamma + d * graph.degree(i);
+    for (i, slot) in diag.iter_mut().enumerate() {
+        *slot = gamma + d * graph.degree(i);
     }
     // Operator closure: y = (Γ · I + D · L) · x
     //                    = Γ · x + D · (L · x).

@@ -120,7 +120,9 @@ impl PrefetchPredictor {
                 })
                 .collect();
         };
-        let mut candidates: Vec<(([u8; 32], [u8; 32]), f64)> = state
+        // (from_blob, to_blob) edge keyed to its observed weight.
+        type CandidatePair = (([u8; 32], [u8; 32]), f64);
+        let mut candidates: Vec<CandidatePair> = state
             .pairs
             .iter()
             .filter(|((from, _), _)| from == &last)

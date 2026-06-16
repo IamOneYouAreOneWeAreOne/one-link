@@ -1,3 +1,6 @@
+// Indexed loops address parallel data/parity shard arrays by the same
+// index; iterators would obscure the Reed-Solomon shard correspondence.
+#![allow(clippy::needless_range_loop)]
 //! Phase C acceptance gate for ADR-0016:
 //!
 //!   > Reed-Solomon (10,4) survives any 4-shard erasure with 100%

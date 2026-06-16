@@ -55,8 +55,8 @@ impl NodeId {
     #[must_use]
     pub fn distance(&self, other: &Self) -> [u8; NODE_ID_BYTES] {
         let mut out = [0u8; NODE_ID_BYTES];
-        for i in 0..NODE_ID_BYTES {
-            out[i] = self.0[i] ^ other.0[i];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = self.0[i] ^ other.0[i];
         }
         out
     }

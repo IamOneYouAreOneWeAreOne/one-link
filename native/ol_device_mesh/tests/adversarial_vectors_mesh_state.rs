@@ -199,10 +199,10 @@ fn adversarial_reverse_op_order_still_converges() {
         })
         .collect();
     for op in &ops {
-        sa.ingest(op.clone(), &mut state_a, &lookup).unwrap();
+        sa.ingest(op.clone(), &mut state_a, lookup).unwrap();
     }
     for op in ops.iter().rev() {
-        sb.ingest(op.clone(), &mut state_b, &lookup).unwrap();
+        sb.ingest(op.clone(), &mut state_b, lookup).unwrap();
     }
     assert_eq!(state_a.root(), state_b.root());
 }

@@ -186,7 +186,7 @@ fn reference_encode(fields: &[(String, FieldType, Vec<u8>)]) -> Vec<u8> {
 
 fn random_variant_payload(state: &mut u64) -> Option<FieldType> {
     // 25% unit variant, 75% payload variant.
-    if next_rng(state) % 4 == 0 {
+    if next_rng(state).is_multiple_of(4) {
         None
     } else {
         Some(random_field_type(state))

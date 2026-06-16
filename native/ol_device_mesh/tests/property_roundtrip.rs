@@ -223,11 +223,7 @@ proptest! {
         } else {
             issued_at.saturating_sub((-verifier_offset) as u64)
         };
-        let actual_diff = if verifier_now > issued_at {
-            verifier_now - issued_at
-        } else {
-            issued_at - verifier_now
-        };
+        let actual_diff = verifier_now.abs_diff(issued_at);
         let r = verify_liveness(&proof, &witness, verifier_now);
         if actual_diff <= skew {
             prop_assert!(r.is_ok());

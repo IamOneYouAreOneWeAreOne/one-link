@@ -307,8 +307,8 @@ pub fn zip_lfh_offsets(buffer: &[u8]) -> Vec<usize> {
 /// - `compression_method` is a known constant (0 stored, 8 deflate,
 ///   9-99 lossless other / future).
 /// - `name_length + extra_length` fits within the buffer remainder. We
-///   relax this when we can't see the full entry; the magic + version
-///   + method gate is enough to make false positives statistically
+///   relax this when we can't see the full entry; the magic, version,
+///   and method gate is enough to make false positives statistically
 ///   negligible.
 fn zip_lfh_sanity_check(tail: &[u8]) -> bool {
     if tail.len() < ZIP_LFH_FIXED_LEN {
@@ -501,7 +501,7 @@ mod tests {
             let name = format!("file{i:02}\0");
             buf.extend_from_slice(&name.as_bytes()[..7]);
             // Entry body.
-            buf.extend(std::iter::repeat(0xAB ^ (i as u8)).take(entry_size));
+            buf.extend(std::iter::repeat_n(0xAB ^ (i as u8), entry_size));
         }
         buf
     }

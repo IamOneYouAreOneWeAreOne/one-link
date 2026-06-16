@@ -152,6 +152,9 @@ pub fn invert(mut m: Vec<Vec<u8>>) -> Option<Vec<Vec<u8>>> {
     for col in 0..n {
         // Find a pivot row in `col..n`.
         let mut pivot = None;
+        // Indexed loop is clearer than iterators for this Gauss-Jordan
+        // pivot search over a sub-range of rows with an early break.
+        #[allow(clippy::needless_range_loop)]
         for r in col..n {
             if m[r][col] != 0 {
                 pivot = Some(r);
@@ -176,6 +179,10 @@ pub fn invert(mut m: Vec<Vec<u8>>) -> Option<Vec<Vec<u8>>> {
                 continue;
             }
             // Subtract `factor * m[col]` from m[r]; subtraction = XOR.
+            // `c` indexes two distinct rows of the same matrix
+            // (m[col] read, m[r] write), so a single iterator can't
+            // express it without borrow-splitting gymnastics.
+            #[allow(clippy::needless_range_loop)]
             for c in 0..2 * n {
                 let v = mul(factor, m[col][c]);
                 m[r][c] ^= v;
@@ -253,6 +260,8 @@ mod tests {
         while bits < limit {
             // Build the submatrix of `gen` for the rows whose bit is set.
             let mut sub: Vec<Vec<u8>> = Vec::with_capacity(k);
+            // `r` drives a bit-shift selector as well as the row index.
+            #[allow(clippy::needless_range_loop)]
             for r in 0..n {
                 if (bits >> r) & 1 == 1 {
                     sub.push(gen[r].clone());

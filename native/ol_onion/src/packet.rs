@@ -35,9 +35,9 @@
 //! The AEAD-decrypted body is one of:
 //!
 //! - **Relay layer** (hops_remaining > 0):
-//!     `next_hop_id (32 B) || inner_OnionPacket_bytes (variable)`
+//!   `next_hop_id (32 B) || inner_OnionPacket_bytes (variable)`
 //! - **Destination layer** (hops_remaining == 0):
-//!     `user_payload (variable)`
+//!   `user_payload (variable)`
 //!
 //! The version + hops_remaining + ephem_pubkey + aead_nonce +
 //! ciphertext_len are bound into the AEAD AAD so a relay cannot
@@ -195,8 +195,8 @@ impl OnionPacket {
 
 /// Pad a wire-encoded `OnionPacket` to exactly [`TRANSPORT_PAD_HINT`]
 /// bytes. The original packet's first 2 bytes hold the
-/// `ciphertext_len` u16 (after the version + hops_remaining + ephem
-/// + nonce header), so the receiver can always extract the
+/// `ciphertext_len` u16 (after the version, hops_remaining, ephem,
+/// and nonce header), so the receiver can always extract the
 /// real packet length and strip the trailing padding before
 /// decoding. Pad bytes are random-looking (key-derived) so the
 /// padded packet shows uniform-byte-distribution to a network
@@ -336,8 +336,10 @@ mod tests {
 
     #[test]
     fn constants_self_consistent() {
-        assert!(MAX_USER_PAYLOAD > 0);
-        assert!(TRANSPORT_PAD_HINT >= MAX_HOPS * PER_LAYER_OVERHEAD);
+        // Compile-time checks: stronger than a runtime assert, and they
+        // satisfy clippy (no runtime assertion over pure constants).
+        const _: () = assert!(MAX_USER_PAYLOAD > 0);
+        const _: () = assert!(TRANSPORT_PAD_HINT >= MAX_HOPS * PER_LAYER_OVERHEAD);
     }
 
     #[test]

@@ -141,7 +141,7 @@ mod tests {
         let mut rng = SplitMix64::new(0xCAFE);
         for _ in 0..10_000 {
             let d = sample_degree(&cdf, &mut rng);
-            assert!(d >= 1 && d <= 64);
+            assert!((1..=64).contains(&d));
         }
     }
 

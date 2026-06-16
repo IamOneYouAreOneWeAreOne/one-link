@@ -23,11 +23,12 @@ impl PeerRegistry for PairedRegistry {
 }
 
 fn cfg() -> EndpointConfig {
-    let mut c = EndpointConfig::default();
-    c.bind = "127.0.0.1:0".parse().expect("valid bind");
-    c.idle_timeout_ms = 30_000;
-    c.keepalive_interval_ms = 5_000;
-    c
+    EndpointConfig {
+        bind: "127.0.0.1:0".parse().expect("valid bind"),
+        idle_timeout_ms: 30_000,
+        keepalive_interval_ms: 5_000,
+        ..Default::default()
+    }
 }
 
 fn bench_loopback_round_trip(c: &mut Criterion) {

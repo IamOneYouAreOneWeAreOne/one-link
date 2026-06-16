@@ -25,8 +25,8 @@
 //!   - FindNode / FindValue: 32-byte target
 //!   - FindNodeResult: 1-byte count + N × 32-byte NodeIds
 //!   - FindValueResult:
-//!       0x01 + signed-record-bytes  (Found)
-//!       0x02 + 1-byte count + N×32 (Closer)
+//!     - `0x01 + signed-record-bytes` (Found)
+//!     - `0x02 + 1-byte count + N×32` (Closer)
 
 use thiserror::Error;
 

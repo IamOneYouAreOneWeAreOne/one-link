@@ -195,11 +195,11 @@ fn lagrange_basis_at_zero(shares: &[Share]) -> Vec<u8> {
         let xi = shares[i].x;
         let mut num: u8 = 1;
         let mut den: u8 = 1;
-        for j in 0..kk {
+        for (j, share_j) in shares.iter().enumerate() {
             if i == j {
                 continue;
             }
-            let xj = shares[j].x;
+            let xj = share_j.x;
             num = gf_mul_fast(num, xj);
             // gf_sub == XOR in GF(2^8).
             den = gf_mul_fast(den, xi ^ xj);
@@ -261,6 +261,9 @@ pub fn reconstruct_bytes(xs: &[u8], streams: &[&[u8]], k: u32) -> Result<Vec<u8>
     }
     let basis = lagrange_basis_at_zero(&zero_b_shares);
     let mut out = Vec::with_capacity(n_bytes);
+    // `b` is a column index addressed across every share's byte stream
+    // (streams[i][b] for all i), so it can't iterate a single container.
+    #[allow(clippy::needless_range_loop)]
     for b in 0..n_bytes {
         let mut acc: u32 = 0;
         for i in 0..kk {

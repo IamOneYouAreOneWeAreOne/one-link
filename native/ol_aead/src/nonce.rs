@@ -54,8 +54,8 @@ mod tests {
     fn nonce_layout_lo64_then_index() {
         let mut chunk_id = [0u8; 32];
         // First 8 bytes = 0x01..0x08 (little-endian = 0x0807060504030201)
-        for i in 0..8 {
-            chunk_id[i] = (i + 1) as u8;
+        for (i, slot) in chunk_id.iter_mut().take(8).enumerate() {
+            *slot = (i + 1) as u8;
         }
         // Remaining bytes irrelevant.
         let nonce = frame_nonce(&chunk_id, 7).unwrap();

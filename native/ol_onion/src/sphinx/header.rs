@@ -175,7 +175,11 @@ pub enum HeaderPeelOutcome {
 
 /// Peel one layer of a Sphinx header.
 ///
-/// Returns Err if MAC verification fails.
+/// Returns `Err(())` if MAC verification fails. The error is
+/// deliberately unit-typed: a relay must learn nothing about *why* a
+/// header failed to verify (length vs MAC mismatch), so we surface no
+/// detail that could become a decryption-oracle side channel.
+#[allow(clippy::result_unit_err)]
 pub fn peel_header(
     keys: &HopKeys,
     received_header: &[u8],
@@ -244,7 +248,11 @@ mod tests {
     fn one_hop_round_trip() {
         let dest_keys = make_hop_keys(0x11);
         let next_hop_ids = vec![DESTINATION_MARKER];
-        let built = build_header(&[dest_keys.clone()], &next_hop_ids, &random_pad_for(1));
+        let built = build_header(
+            std::slice::from_ref(&dest_keys),
+            &next_hop_ids,
+            &random_pad_for(1),
+        );
         let outcome = peel_header(&dest_keys, &built.header, &built.mac).unwrap();
         assert_eq!(outcome, HeaderPeelOutcome::Deliver);
     }
@@ -362,7 +370,11 @@ mod tests {
     #[test]
     fn wrong_mac_rejected() {
         let dest = make_hop_keys(0x41);
-        let built = build_header(&[dest.clone()], &[DESTINATION_MARKER], &random_pad_for(1));
+        let built = build_header(
+            std::slice::from_ref(&dest),
+            &[DESTINATION_MARKER],
+            &random_pad_for(1),
+        );
         let mut bad_mac = built.mac;
         bad_mac[0] ^= 0x01;
         let err = peel_header(&dest, &built.header, &bad_mac);
@@ -372,7 +384,11 @@ mod tests {
     #[test]
     fn tampered_header_byte_rejected() {
         let dest = make_hop_keys(0x42);
-        let built = build_header(&[dest.clone()], &[DESTINATION_MARKER], &random_pad_for(1));
+        let built = build_header(
+            std::slice::from_ref(&dest),
+            &[DESTINATION_MARKER],
+            &random_pad_for(1),
+        );
         let mut bad_header = built.header.clone();
         bad_header[0] ^= 0x01;
         let err = peel_header(&dest, &bad_header, &built.mac);

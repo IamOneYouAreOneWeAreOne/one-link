@@ -26,8 +26,8 @@
 //! 1. **Probe** (out-of-scope for this crate): each side collects a
 //!    vector of physical observations. OneField uses RF channel
 //!    measurements; in One Link without SDR hardware we use WiFi
-//!    SSID/RSSI fingerprints + mDNS broadcasts + BLE advertisements
-//!    + timing observations. **What** to probe is the daemon's job;
+//!    SSID/RSSI fingerprints + mDNS broadcasts + BLE advertisements,
+//!    plus timing observations. **What** to probe is the daemon's job;
 //!    this crate operates on the resulting observation bytes.
 //!
 //! 2. **Quantize** ([`quantize::quantize_observations`]): map the

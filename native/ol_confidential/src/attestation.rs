@@ -140,6 +140,10 @@ pub struct AttestationDoc {
 /// master signature to "this SDP identity" so a verifier rejects
 /// any attestation whose embedded SDP pubkey does not match the
 /// channel they are actually talking to (audit C1).
+// Each argument is a distinct field bound into the signature
+// transcript; folding them into a struct would obscure exactly what is
+// (and isn't) covered by the attestation signature.
+#[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn canonical_attestation_transcript(
     provider_tag: ProviderTag,
@@ -195,6 +199,10 @@ pub fn fresh_attestation_nonce<R: RngCore + CryptoRng>(rng: &mut R) -> Attestati
 /// Returns `AttestationBadFreshnessWindow` if `deadline_unix <= issued_unix`,
 /// `AttestationFreshnessWindowTooWide` if the window exceeds policy,
 /// or `PqSig` if the signing primitive errs.
+// Mirrors the transcript fields one-to-one (see
+// `canonical_attestation_transcript`); a struct would just duplicate
+// that shape.
+#[allow(clippy::too_many_arguments)]
 pub fn sign_attestation(
     signing_key: &ol_pqsig::HybridSigningKey,
     provider_tag: ProviderTag,

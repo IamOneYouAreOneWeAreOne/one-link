@@ -116,7 +116,7 @@ fn make_dummy_zip(entries: usize, entry_size: usize) -> Vec<u8> {
         buf.extend_from_slice(&0u16.to_le_bytes()); // extra_length
         let name = format!("file{i:02}\0");
         buf.extend_from_slice(&name.as_bytes()[..7]);
-        buf.extend(std::iter::repeat((i as u8) ^ 0xAB).take(entry_size));
+        buf.extend(std::iter::repeat_n((i as u8) ^ 0xAB, entry_size));
     }
     buf
 }

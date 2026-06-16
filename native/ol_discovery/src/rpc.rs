@@ -180,20 +180,20 @@ pub enum RpcError {
 /// exceeds [`MAX_FIND_RESULTS`].
 pub fn validate_response_size(resp: &Response) -> Result<(), RpcError> {
     match resp {
-        Response::FindNodeResult { closest }
-            if closest.len() > MAX_FIND_RESULTS => {
-                return Err(RpcError::TooManyResults {
-                    got: closest.len(),
-                    max: MAX_FIND_RESULTS,
-                });
-            }
+        Response::FindNodeResult { closest } if closest.len() > MAX_FIND_RESULTS => {
+            return Err(RpcError::TooManyResults {
+                got: closest.len(),
+                max: MAX_FIND_RESULTS,
+            });
+        }
         Response::FindValueResult(FindValueOutcome::Closer(closer))
-            if closer.len() > MAX_FIND_RESULTS => {
-                return Err(RpcError::TooManyResults {
-                    got: closer.len(),
-                    max: MAX_FIND_RESULTS,
-                });
-            }
+            if closer.len() > MAX_FIND_RESULTS =>
+        {
+            return Err(RpcError::TooManyResults {
+                got: closer.len(),
+                max: MAX_FIND_RESULTS,
+            });
+        }
         _ => {}
     }
     Ok(())

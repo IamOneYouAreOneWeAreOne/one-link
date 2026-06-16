@@ -178,7 +178,7 @@ proptest! {
         }
         // With max_age = 0, every record older than `now` counts.
         let count = node.republish_records(now, 0);
-        let expected = ages.iter().filter(|a| **a > 0 || true).count();
+        let expected = ages.len();
         // make_node() publishes nothing; ages.len() records inserted; all
         // have publish_time <= now → all count.
         prop_assert_eq!(count, expected);

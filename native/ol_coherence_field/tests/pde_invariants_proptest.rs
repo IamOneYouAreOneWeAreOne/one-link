@@ -146,6 +146,7 @@ proptest! {
             ((prng >> 32) as u32 as f64) / (u32::MAX as f64) * 5.0
         }).collect();
         let x = solve_for(&graph, 1.0, 0.5, &s);
+        #[allow(clippy::needless_range_loop)] // indexed node access reads naturally for this field-positivity invariant
         for i in 0..n {
             prop_assert!(
                 x[i] >= -1e-9,

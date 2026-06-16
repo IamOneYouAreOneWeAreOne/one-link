@@ -262,7 +262,7 @@ impl TransferEngine {
     }
 
     /// Server-side handler for `ScopedBloomFilter`. Parses the want_list
-    /// + bloom from the payload, walks the want_list against the bloom,
+    /// and bloom from the payload, walks the want_list against the bloom,
     /// and returns the subset NOT in the bloom (i.e. chunks the peer
     /// doesn't yet have).
     ///

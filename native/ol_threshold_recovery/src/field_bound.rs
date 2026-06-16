@@ -260,9 +260,7 @@ mod tests {
 
     fn make_witness(n: usize, seed_byte: u8) -> FieldWitness {
         let mut field_seed = [0u8; 32];
-        for b in &mut field_seed {
-            *b = seed_byte;
-        }
+        field_seed.fill(seed_byte);
         let holder_scores = (0..n).map(|i| 0.1 + 0.1 * i as f64).collect();
         FieldWitness {
             field_seed,

@@ -102,7 +102,7 @@ fn crash_injection_survives_random_truncations() {
                 written_ids.push(written_id);
                 // Randomly flush in the middle so some chunks are durable +
                 // some are still in the WAL when we crash.
-                if next_rng(&mut state) % 7 == 0 {
+                if next_rng(&mut state).is_multiple_of(7) {
                     store.flush().expect("flush");
                 }
             }
@@ -131,7 +131,7 @@ fn crash_injection_survives_random_truncations() {
         if let Some(seg_path) = active_seg {
             let total = std::fs::metadata(&seg_path).unwrap().len();
             if total > 0 {
-                let tail = total.saturating_sub((next_rng(&mut state) % 64) as u64);
+                let tail = total.saturating_sub(next_rng(&mut state) % 64);
                 let mut f = OpenOptions::new().write(true).open(&seg_path).unwrap();
                 f.seek(SeekFrom::Start(tail)).unwrap();
                 f.set_len(tail).unwrap();

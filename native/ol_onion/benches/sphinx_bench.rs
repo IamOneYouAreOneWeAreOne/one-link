@@ -161,6 +161,7 @@ fn bench_full_3_hop_round_trip(c: &mut Criterion) {
                         black_box(payload);
                         break;
                     }
+                    SphinxPeelOutcome::Cover => break,
                 }
             }
         });

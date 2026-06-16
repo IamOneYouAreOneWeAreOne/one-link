@@ -132,7 +132,7 @@ proptest! {
         let mut initial = HashMap::new();
         for i in 0..n {
             // Triangular profile: peak at center, fall off linearly.
-            let dist = if i >= n_half { i - n_half } else { n_half - i };
+            let dist = i.abs_diff(n_half);
             let val = center_height * (1.0 - dist as f32 / n_half as f32);
             initial.insert(format!("n{}", i), val);
         }

@@ -859,20 +859,17 @@ fn bench_active_routing_observe(c: &mut Criterion) {
     };
     let ctx_hash = ctx.canonical_hash();
     c.bench_function("device_mesh::active_routing_observe", |b| {
-        b.iter_with_setup(
-            || RoutingHistory::empty(),
-            |mut h| {
-                h.observe(
-                    black_box(ctx_hash),
-                    black_box([0x01; DEVICE_ID_LEN]),
-                    true,
-                    1,
-                    1,
-                    1,
-                );
-                h
-            },
-        );
+        b.iter_with_setup(RoutingHistory::empty, |mut h| {
+            h.observe(
+                black_box(ctx_hash),
+                black_box([0x01; DEVICE_ID_LEN]),
+                true,
+                1,
+                1,
+                1,
+            );
+            h
+        });
     });
 }
 

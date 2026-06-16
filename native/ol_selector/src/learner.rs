@@ -151,8 +151,8 @@ impl OnlineLearner {
         regularization: f32,
         weight_bound_multiplier: f32,
     ) -> Self {
-        let lr = learning_rate.max(0.0).min(1.0);
-        let reg = regularization.max(0.0).min(1.0);
+        let lr = learning_rate.clamp(0.0, 1.0);
+        let reg = regularization.clamp(0.0, 1.0);
         let bound = weight_bound_multiplier.max(1.0);
         Self {
             selector: UnifiedMin::with_weights(initial_weights),

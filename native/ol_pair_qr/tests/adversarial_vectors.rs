@@ -29,7 +29,7 @@ fn adversarial_canon_max_length_var_works() {
     let cap = MAX_FIELD_BYTES;
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&(cap as u16).to_be_bytes());
-    bytes.extend(std::iter::repeat(0u8).take(cap));
+    bytes.extend(std::iter::repeat_n(0u8, cap));
     let mut r = Reader::new(&bytes);
     let v = r.read_var().unwrap();
     assert_eq!(v.len(), cap);

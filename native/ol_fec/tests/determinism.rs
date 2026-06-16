@@ -1,3 +1,6 @@
+// Indexed loop addresses the parity byte stream positionally to pin
+// exact cross-platform output; an iterator would obscure that intent.
+#![allow(clippy::needless_range_loop)]
 //! Cross-platform determinism vectors for `ol_fec`.
 //!
 //! The Reed-Solomon parity bytes for a fixed `(plaintext, k, m)` MUST

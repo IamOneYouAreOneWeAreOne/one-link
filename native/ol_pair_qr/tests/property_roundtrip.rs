@@ -133,9 +133,8 @@ proptest! {
         encoded[pos] ^= 0x01;
         // It might decode and fail signature; it might fail to
         // decode. Either way: NEVER produce a valid different Invite.
-        match Invite::decode_and_verify(&encoded) {
-            Ok(other) => prop_assert_ne!(other, invite),
-            Err(_) => {}
+        if let Ok(other) = Invite::decode_and_verify(&encoded) {
+            prop_assert_ne!(other, invite);
         }
     }
 }

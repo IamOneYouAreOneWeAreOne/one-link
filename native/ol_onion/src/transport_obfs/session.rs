@@ -67,7 +67,10 @@ impl Session {
 
     /// Deobfuscate an inbound packet with the peer's `counter`.
     /// Returns the recovered bytes (this layer has no integrity —
-    /// upper layer must MAC).
+    /// upper layer must MAC). The `Result` is unit-error on purpose:
+    /// it mirrors `seal_outbound`'s shape and reserves a fallible
+    /// surface for future integrity without leaking a failure reason.
+    #[allow(clippy::result_unit_err)]
     pub fn open_inbound(&self, ciphertext: &[u8], counter: u64) -> Result<Vec<u8>, ()> {
         // Both directions derive the nonce with OUTBOUND_DIRECTION_TAG:
         // direction is captured by WHICH key is used (outbound_key vs

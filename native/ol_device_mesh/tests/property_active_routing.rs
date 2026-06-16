@@ -161,7 +161,7 @@ fn picker_explores_when_uninformed() {
         }
     }
     // No candidate should sweep > 60% in the uninformed regime.
-    for (_, c) in &counts {
+    for c in counts.values() {
         assert!(*c < (trials * 6 / 10));
     }
 }

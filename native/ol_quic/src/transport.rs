@@ -74,7 +74,7 @@ impl Default for EndpointConfig {
 }
 
 impl EndpointConfig {
-    fn into_transport_config(&self) -> TransportConfig {
+    fn to_transport_config(&self) -> TransportConfig {
         let mut t = TransportConfig::default();
         t.max_idle_timeout(Some(
             quinn::IdleTimeout::try_from(std::time::Duration::from_millis(self.idle_timeout_ms))
@@ -134,7 +134,7 @@ impl Endpoint {
         let server_quic = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
             .map_err(|e| QuicError::Tls(rustls::Error::General(e.to_string())))?;
         let mut server_config = ServerConfig::with_crypto(Arc::new(server_quic));
-        let transport = Arc::new(config.into_transport_config());
+        let transport = Arc::new(config.to_transport_config());
         server_config.transport_config(transport.clone());
 
         let mut endpoint = QuinnEndpoint::server(server_config, config.bind)?;
@@ -164,7 +164,7 @@ impl Endpoint {
         let client_quic = quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)
             .map_err(|e| QuicError::Tls(rustls::Error::General(e.to_string())))?;
         let mut client_cfg = ClientConfig::new(Arc::new(client_quic));
-        let transport = Arc::new(config.into_transport_config());
+        let transport = Arc::new(config.to_transport_config());
         client_cfg.transport_config(transport.clone());
 
         let mut endpoint = QuinnEndpoint::client(config.bind)?;

@@ -86,12 +86,9 @@ fn assert_or_regen_usize(name: &str, expected: usize, actual: usize) {
     );
 }
 
-fn build_kat_circuit() -> (
-    (StaticSecret, HopDescriptor),
-    (StaticSecret, HopDescriptor),
-    (StaticSecret, HopDescriptor),
-    Circuit,
-) {
+type KatHop = (StaticSecret, HopDescriptor);
+
+fn build_kat_circuit() -> (KatHop, KatHop, KatHop, Circuit) {
     let make = |seed: [u8; 32], i: u8| {
         let sk = StaticSecret::from(seed);
         let pk = PublicKey::from(&sk);

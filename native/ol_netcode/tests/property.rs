@@ -19,8 +19,8 @@ fn next_rng(state: &mut u64) -> u64 {
 
 fn random_id(state: &mut u64) -> ChunkId {
     let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = (next_rng(state) & 0xFF) as u8;
+    for slot in &mut out {
+        *slot = (next_rng(state) & 0xFF) as u8;
     }
     out
 }

@@ -38,12 +38,13 @@ impl PeerRegistry for DenyAll {
 }
 
 fn ipv4_loopback_config() -> EndpointConfig {
-    let mut c = EndpointConfig::default();
-    c.bind = "127.0.0.1:0".parse().expect("valid bind");
-    // Faster idle timeout for tests.
-    c.idle_timeout_ms = 5_000;
-    c.keepalive_interval_ms = 1_000;
-    c
+    EndpointConfig {
+        bind: "127.0.0.1:0".parse().expect("valid bind"),
+        // Faster idle timeout for tests.
+        idle_timeout_ms: 5_000,
+        keepalive_interval_ms: 1_000,
+        ..Default::default()
+    }
 }
 
 #[tokio::test]
@@ -129,9 +130,8 @@ async fn rejects_when_client_not_in_server_registry() {
         conn.send_frame_request_response(request),
     )
     .await;
-    match result {
-        Ok(Ok(_)) => panic!("expected rejection at data path, got successful round-trip"),
-        Ok(Err(_)) | Err(_) => {} // pass
+    if let Ok(Ok(_)) = result {
+        panic!("expected rejection at data path, got successful round-trip");
     }
 }
 
@@ -163,9 +163,8 @@ async fn rejects_on_fingerprint_mismatch() {
         bob_client.connect(alice_addr, mallory_fp),
     )
     .await;
-    match result {
-        Ok(Ok(_)) => panic!("expected fingerprint mismatch rejection"),
-        Ok(Err(_)) | Err(_) => {}
+    if let Ok(Ok(_)) = result {
+        panic!("expected fingerprint mismatch rejection");
     }
 }
 

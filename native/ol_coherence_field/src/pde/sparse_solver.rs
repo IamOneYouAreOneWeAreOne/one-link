@@ -289,8 +289,8 @@ mod tests {
             CgConfig::default(),
         );
         assert!(result.converged);
-        for i in 0..n {
-            assert!((result.x[i] - b[i]).abs() < 1e-9);
+        for (xi, bi) in result.x.iter().zip(b.iter()) {
+            assert!((xi - bi).abs() < 1e-9);
         }
     }
 

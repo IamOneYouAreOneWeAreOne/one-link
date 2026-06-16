@@ -69,12 +69,12 @@ impl Sas {
         let raw_bits =
             u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) & ((1u32 << SAS_BITS) - 1);
         let mut words = [""; SAS_WORD_COUNT];
-        for i in 0..SAS_WORD_COUNT {
+        for (i, slot) in words.iter_mut().enumerate() {
             // Most significant 6 bits first → reads naturally
             // left-to-right.
             let shift = SAS_BITS - 6 * (i + 1);
             let idx = ((raw_bits >> shift) & 0x3F) as usize;
-            words[i] = SAS_WORDS[idx];
+            *slot = SAS_WORDS[idx];
         }
         Self { words, raw_bits }
     }

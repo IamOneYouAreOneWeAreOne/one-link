@@ -250,8 +250,8 @@ fn now_ms() -> u64 {
 ///
 /// The manifest is a flat ``path -> (size, mtime_ms, blob_hash)`` map;
 /// directory structure is inferred from the path separators. The
-/// blob reader is a closure that, given a 64-hex blob hash + offset
-/// + length, returns the slice of bytes. This split keeps ol_fuse
+/// blob reader is a closure that, given a 64-hex blob hash, offset,
+/// and length, returns the slice of bytes. This split keeps ol_fuse
 /// crypto-free — the daemon already has the chunk-store + AEAD wired
 /// up and can supply a closure that walks them.
 ///

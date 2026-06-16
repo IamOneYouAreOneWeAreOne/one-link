@@ -1,3 +1,7 @@
+// Indexed loops mirror the textbook dense linear-algebra notation
+// (matrix rows/cols addressed across several arrays); idiomatic
+// iterators would obscure the math this cross-check is verifying.
+#![allow(clippy::needless_range_loop)]
 //! Dense-linalg cross-check: solve `(Γ·I + D·L)·x = b` with a naive
 //! Gaussian elimination on a fully-materialized dense matrix, and
 //! verify the sparse CG path produces the same answer.

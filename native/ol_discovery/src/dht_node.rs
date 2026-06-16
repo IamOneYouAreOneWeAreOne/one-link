@@ -243,7 +243,15 @@ impl DhtNode {
         let handler: Arc<dyn RequestHandler> = Arc::new(InnerHandler {
             inner: inner.clone(),
         });
-        let recv_handle = runtime.block_on(async { inner.transport.spawn_receiver(handler) });
+        // `spawn_receiver` is synchronous but calls `tokio::spawn`
+        // internally, so it needs a runtime context. Enter the runtime
+        // (rather than block_on) and KEEP the returned JoinHandle alive
+        // in `_bg_handles` — we must not await it (that would block on
+        // the receiver loop ending).
+        let recv_handle = {
+            let _rt_guard = runtime.enter();
+            inner.transport.spawn_receiver(handler)
+        };
         Ok(Self {
             runtime,
             inner,

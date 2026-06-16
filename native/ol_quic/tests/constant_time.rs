@@ -28,8 +28,8 @@ impl PeerRegistry for PinnedRegistry {
         // This is the verifier hook the TLS layer hits. Implemented as
         // a CT byte compare on the fingerprint bytes.
         let mut diff = 0u8;
-        for i in 0..32 {
-            diff |= self.expected[i] ^ fp[i];
+        for (e, f) in self.expected.iter().zip(fp.iter()) {
+            diff |= e ^ f;
         }
         diff == 0
     }
@@ -121,10 +121,12 @@ async fn endpoint_rejects_wrong_fingerprint() {
     let registry = Arc::new(PinnedRegistry {
         expected: bob.fingerprint(),
     });
-    let mut c = EndpointConfig::default();
-    c.bind = "127.0.0.1:0".parse().expect("valid bind");
-    c.idle_timeout_ms = 2_000;
-    c.keepalive_interval_ms = 500;
+    let c = EndpointConfig {
+        bind: "127.0.0.1:0".parse().expect("valid bind"),
+        idle_timeout_ms: 2_000,
+        keepalive_interval_ms: 500,
+        ..Default::default()
+    };
     let endpoint = Endpoint::server_for_identity(alice, registry, c).unwrap();
 
     // PinnedRegistry only matches bob's fingerprint. unknown_fp differs.

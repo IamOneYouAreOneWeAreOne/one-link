@@ -318,7 +318,7 @@ mod tests {
             1,
         )
         .unwrap();
-        sa.ingest(op_a, &mut state_a, &lookup).unwrap();
+        sa.ingest(op_a, &mut state_a, lookup).unwrap();
         let op_b = AuthenticatedOp::sign(
             &sk_b,
             b"x".to_vec(),
@@ -331,16 +331,16 @@ mod tests {
             2,
         )
         .unwrap();
-        sb.ingest(op_b, &mut state_b, &lookup).unwrap();
+        sb.ingest(op_b, &mut state_b, lookup).unwrap();
 
         // Each side computes its diff for the other; ingests.
         let diff_for_b = sa.diff_for_peer(&sb.summary());
         for op in diff_for_b {
-            sb.ingest(op, &mut state_b, &lookup).unwrap();
+            sb.ingest(op, &mut state_b, lookup).unwrap();
         }
         let diff_for_a = sb.diff_for_peer(&sa.summary());
         for op in diff_for_a {
-            sa.ingest(op, &mut state_a, &lookup).unwrap();
+            sa.ingest(op, &mut state_a, lookup).unwrap();
         }
         assert_eq!(state_a.root(), state_b.root());
     }

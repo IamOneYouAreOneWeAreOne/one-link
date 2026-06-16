@@ -221,8 +221,8 @@ proptest! {
             seq,
             seq,
         ).unwrap();
-        let applied_a = sync.ingest(op.clone(), &mut state, &lookup).unwrap();
-        let applied_b = sync.ingest(op, &mut state, &lookup).unwrap();
+        let applied_a = sync.ingest(op.clone(), &mut state, lookup).unwrap();
+        let applied_b = sync.ingest(op, &mut state, lookup).unwrap();
         prop_assert!(applied_a);
         prop_assert!(!applied_b);
     }

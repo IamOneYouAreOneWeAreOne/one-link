@@ -59,7 +59,7 @@ fn kat_attestation_transcript_pinned_no_witness() {
     // the wire format. Regenerating this vector means a deliberate
     // wire bump.
     let hex_now = hex::encode(&bytes);
-    insta_eq(&hex_now, &EXPECTED_KAT_TRANSCRIPT_NO_WITNESS);
+    insta_eq(&hex_now, EXPECTED_KAT_TRANSCRIPT_NO_WITNESS);
 }
 
 #[test]
@@ -78,7 +78,7 @@ fn kat_attestation_transcript_pinned_with_witness() {
         &TEST_SDP_PUBKEY_B,
     );
     let hex_now = hex::encode(&bytes);
-    insta_eq(&hex_now, &EXPECTED_KAT_TRANSCRIPT_WITH_WITNESS);
+    insta_eq(&hex_now, EXPECTED_KAT_TRANSCRIPT_WITH_WITNESS);
 }
 
 #[test]

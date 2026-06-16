@@ -47,7 +47,7 @@ fn adversarial_extreme_bimodal_observations_dont_panic() {
     // that the pipeline doesn't panic + produces SOMETHING usable
     // (callers re-probe on degenerate output).
     let mut obs = vec![0u8; 64];
-    obs.extend(std::iter::repeat(0xFFu8).take(64));
+    obs.extend(std::iter::repeat_n(0xFFu8, 64));
     let cfg = QuantizeConfig {
         min_bytes: 32,
         guard_band: 0.05,
@@ -211,7 +211,7 @@ fn adversarial_permutation_high_pass_idx() {
     // Pass indices up to u32::MAX must be handled.
     let perm = permutation_for_pass(0xCAFE, 1_000_000, 64);
     assert_eq!(perm.len(), 64);
-    let mut seen = vec![false; 64];
+    let mut seen = [false; 64];
     for p in perm {
         assert!(!seen[p]);
         seen[p] = true;

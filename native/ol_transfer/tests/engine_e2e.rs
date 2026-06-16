@@ -35,11 +35,12 @@ impl PeerRegistry for PairedRegistry {
 }
 
 fn fast_config() -> EndpointConfig {
-    let mut c = EndpointConfig::default();
-    c.bind = "127.0.0.1:0".parse().expect("valid bind");
-    c.idle_timeout_ms = 30_000;
-    c.keepalive_interval_ms = 5_000;
-    c
+    EndpointConfig {
+        bind: "127.0.0.1:0".parse().expect("valid bind"),
+        idle_timeout_ms: 30_000,
+        keepalive_interval_ms: 5_000,
+        ..Default::default()
+    }
 }
 
 fn mk_record_u32(seed: u32, plaintext_len: u32, ciphertext_len: usize) -> ChunkRecord {

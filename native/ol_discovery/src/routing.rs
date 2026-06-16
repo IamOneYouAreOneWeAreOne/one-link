@@ -315,7 +315,7 @@ impl RoutingTable {
 
 /// Sort utility: stable-sort a list of NodeIds by XOR distance to
 /// `target`, ascending. Used by the lookup algorithm.
-pub fn sort_by_distance(ids: &mut Vec<NodeId>, target: &NodeId) {
+pub fn sort_by_distance(ids: &mut [NodeId], target: &NodeId) {
     ids.sort_by(|a, b| {
         let cmp = closer_to(a, b, target);
         if cmp == Ordering::Equal {

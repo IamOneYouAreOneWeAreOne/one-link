@@ -71,17 +71,17 @@ fn random_caveat(state: &mut u64) -> Caveat {
 
 fn random_context(state: &mut u64) -> OwnedContext {
     OwnedContext {
-        now_unix_ms: if next_rng(state) % 4 != 0 {
+        now_unix_ms: if !next_rng(state).is_multiple_of(4) {
             Some(next_rng(state) % 2_000_000_000)
         } else {
             None
         },
-        peer: if next_rng(state) % 3 != 0 {
+        peer: if !next_rng(state).is_multiple_of(3) {
             Some(random_bytes::<32>(state))
         } else {
             None
         },
-        path: if next_rng(state) % 3 != 0 {
+        path: if !next_rng(state).is_multiple_of(3) {
             Some(format!(
                 "/{}/{}",
                 random_string(state, 8),
@@ -90,7 +90,7 @@ fn random_context(state: &mut u64) -> OwnedContext {
         } else {
             None
         },
-        operation: if next_rng(state) % 3 != 0 {
+        operation: if !next_rng(state).is_multiple_of(3) {
             Some(
                 match next_rng(state) % 5 {
                     0 => "read",

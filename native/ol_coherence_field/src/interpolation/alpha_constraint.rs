@@ -49,7 +49,6 @@ use super::be_rar_impl::be_rar;
 /// `y → 0`, so `ln(nu) ~ −α · ln(y)`. With α = 1/2 the slope is
 /// `−0.5`. Used by the regression test to verify the implementation
 /// reproduces the forced exponent.
-#[must_use]
 pub fn low_y_log_slope(y_lo: f64, y_hi: f64) -> Result<f64, super::BeRarError> {
     let nu_lo = be_rar(y_lo)?;
     let nu_hi = be_rar(y_hi)?;

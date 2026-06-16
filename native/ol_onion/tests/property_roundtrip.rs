@@ -124,7 +124,7 @@ proptest! {
         // the real relay key by miracle — Ok(...). For [99u8; 32]
         // this is astronomically unlikely.
         let r = peel_one_layer(&attacker_sk, &packet);
-        prop_assert!(r.is_err() || matches!(r, Ok(_)));
+        prop_assert!(r.is_err() || r.is_ok());
     }
 }
 

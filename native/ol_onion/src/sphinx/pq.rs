@@ -495,8 +495,13 @@ mod tests {
     fn one_hop_pq_hybrid_round_trip() {
         let (entry_sk, entry_pq_sk, entry) = make_entry_relay();
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-        let packet =
-            build_pq_sphinx_onion(&eph_sk, &[entry.clone()], b"pq-hybrid", &mut OsRng).unwrap();
+        let packet = build_pq_sphinx_onion(
+            &eph_sk,
+            std::slice::from_ref(&entry),
+            b"pq-hybrid",
+            &mut OsRng,
+        )
+        .unwrap();
         // The entry IS the destination here (1-hop circuit).
         let outcome = peel_pq_sphinx_entry(&entry_sk, &entry_pq_sk, &packet).unwrap();
         match outcome {
@@ -553,7 +558,8 @@ mod tests {
         let (entry_sk, _, entry) = make_entry_relay();
         let (wrong_pq_dk, _wrong_pq_ek) = generate_pq_keypair(&mut OsRng);
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-        let packet = build_pq_sphinx_onion(&eph_sk, &[entry.clone()], b"x", &mut OsRng).unwrap();
+        let packet =
+            build_pq_sphinx_onion(&eph_sk, std::slice::from_ref(&entry), b"x", &mut OsRng).unwrap();
         // Wrong PQ decap key — ML-KEM has implicit rejection, so
         // decap succeeds but with a DIFFERENT shared, breaking
         // the hybrid derivation → MAC fails.
@@ -566,7 +572,8 @@ mod tests {
         let (_, entry_pq_sk, entry) = make_entry_relay();
         let (wrong_x_sk, _) = generate_static_keypair(&mut OsRng);
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-        let packet = build_pq_sphinx_onion(&eph_sk, &[entry.clone()], b"x", &mut OsRng).unwrap();
+        let packet =
+            build_pq_sphinx_onion(&eph_sk, std::slice::from_ref(&entry), b"x", &mut OsRng).unwrap();
         let err = peel_pq_sphinx_entry(&wrong_x_sk, &entry_pq_sk, &packet).unwrap_err();
         assert_eq!(err, OnionError::AeadFail);
     }

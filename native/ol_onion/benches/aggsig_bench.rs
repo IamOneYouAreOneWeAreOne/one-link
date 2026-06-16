@@ -22,7 +22,7 @@ fn bench_verify(c: &mut Criterion) {
     let sig = sk.sign(&msg);
     c.bench_function("aggsig::verify_256B", |b| {
         b.iter(|| {
-            black_box(verify(black_box(&vk), black_box(&msg), black_box(&sig)).unwrap());
+            verify(black_box(&vk), black_box(&msg), black_box(&sig)).unwrap();
         });
     });
 }
@@ -53,7 +53,7 @@ fn bench_batch_verify(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &entries, |b, entries| {
             b.iter(|| {
-                black_box(batch_verify(black_box(entries)).unwrap());
+                batch_verify(black_box(entries)).unwrap();
             });
         });
     }

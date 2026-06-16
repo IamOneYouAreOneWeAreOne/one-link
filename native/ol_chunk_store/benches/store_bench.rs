@@ -15,7 +15,7 @@ fn make_chunk(id_byte: u8, plaintext_len: u32) -> ChunkRecord {
     let mut chunk_id = [0u8; 32];
     chunk_id[0] = id_byte;
     chunk_id[1] = 0xAA;
-    let ct_len = plaintext_len as usize + ((plaintext_len as usize + 16383) / 16384) * 16;
+    let ct_len = plaintext_len as usize + (plaintext_len as usize).div_ceil(16384) * 16;
     ChunkRecord {
         kind: ChunkRecordKind::ChunkBlob,
         address_kind: ChunkAddressKind::Raw,

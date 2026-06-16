@@ -199,8 +199,8 @@ impl Bloom {
 
         for (cid, pos) in ids.iter().zip(positions.iter()) {
             if k as usize <= 8 {
-                for i in 0..(k as usize) {
-                    set_bit(&mut self.bits, pos[i]);
+                for &p in &pos[..(k as usize)] {
+                    set_bit(&mut self.bits, p);
                 }
             } else {
                 // Tall-k fallback: re-derive on the bit-set pass for

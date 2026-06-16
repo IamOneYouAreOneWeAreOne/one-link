@@ -166,6 +166,12 @@ impl PartialEq for SphinxPacket {
 impl Eq for SphinxPacket {}
 
 /// Outcome of [`peel_sphinx_layer`].
+///
+/// The `Forward` variant carries a full `SphinxPacket` (the dominant
+/// size). Boxing it to equalize variant sizes would force a heap
+/// allocation on every relay hop — the hot path — for a value that is
+/// constructed and consumed immediately, so we keep it inline.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SphinxPeelOutcome {
     /// Forward to the next hop with the new packet.
@@ -469,7 +475,8 @@ mod tests {
     fn one_hop_round_trip() {
         let (dest_sk, dest) = make_relay();
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-        let packet = build_sphinx_onion(&eph_sk, &[dest.clone()], b"hello", &mut OsRng).unwrap();
+        let packet =
+            build_sphinx_onion(&eph_sk, std::slice::from_ref(&dest), b"hello", &mut OsRng).unwrap();
         let outcome = peel_sphinx_layer(&dest_sk, &packet).unwrap();
         match outcome {
             SphinxPeelOutcome::Deliver { payload } => assert_eq!(payload, b"hello"),

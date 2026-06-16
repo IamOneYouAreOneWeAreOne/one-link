@@ -86,7 +86,8 @@ fn ratchet_handles_reordered_delivery_via_skipped_keys() {
     let mut skipped = SkippedKeyStore::with_capacity(16);
 
     // Sender encrypts chunks 0..10.
-    let mut ciphertexts: Vec<(u64, [u8; 32], Vec<u8>, Vec<u8>)> = Vec::new();
+    type Ciphertext = (u64, [u8; 32], Vec<u8>, Vec<u8>);
+    let mut ciphertexts: Vec<Ciphertext> = Vec::new();
     for step in 0..10u64 {
         let mk = sender_chain.next_message_key();
         let aead_key = mk_to_aead_key(&mk);

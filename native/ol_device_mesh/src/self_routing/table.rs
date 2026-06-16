@@ -274,7 +274,7 @@ mod tests {
             )
             .unwrap();
         let paths = multi_path_plan(&table, &src, &dst, 2);
-        assert!(paths.len() >= 1);
+        assert!(!paths.is_empty());
         // Verify each path is end-to-end correct.
         for p in &paths {
             assert_eq!(p.hops.first(), Some(&src));
