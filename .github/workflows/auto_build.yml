@@ -69,21 +69,22 @@ jobs:
           - os: ubuntu-latest
             artifact-name: one-link-linux-x86_64
             exe-name: one-link
-          # macos-13 (Intel Mac) DROPPED from the matrix 2026-06-03.
-          # The deprecated-runner-pool starvation makes that leg sit
-          # in "queued" for 2-24 hours on every push, and
-          # ``timeout-minutes`` only fires once a job is RUNNING — so
-          # a perpetually-queued leg blocks the build job from
-          # concluding, which blocks downstream installer / publish
-          # jobs from firing, which means installers + DMGs +
-          # AppImages never reach the auto-latest release. Intel-Mac
-          # users (a shrinking population — Apple's last Intel Mac
-          # shipped 2022) can run the arm64 .dmg under Rosetta 2 or
-          # use the portable .zip. Revisit when GitHub fixes
-          # macos-13 capacity OR when ``macos-13-large`` (paid) is
-          # acceptable, OR when we ship a separate cron workflow
-          # that builds Intel Mac on a weekly schedule without
-          # gating the main release.
+          # macos-13 (Intel Mac) — RE-ADDED 2026-06-16 to give Intel
+          # Macs a NATIVE x86_64 build. (Universal2 was attempted first
+          # but is blocked by pip installing single-arch dep wheels by
+          # default under a universal2 interpreter — cffi/PyAV/etc. came
+          # out single-arch and PyInstaller refused the fat binary.) A
+          # native x86_64 dmg is reliable: no fat-binary gymnastics.
+          # Why it was dropped before: macos-13 hosted runners can sit
+          # "queued" for a long time. That's tolerated here because
+          # ``fail-fast: false`` + the 30-min ``timeout-minutes`` mean a
+          # slow/stuck Intel leg gets cancelled and the OTHER legs still
+          # publish — the Intel dmg is occasionally stale, never
+          # blocking the rest. The website serves each Mac its native
+          # arch (arm64 vs x86_64), so neither slice runs under Rosetta.
+          - os: macos-13
+            artifact-name: one-link-macos-x86_64
+            exe-name: one-link
           # ── arm64 — added to close the coverage gap ───────────
           - os: macos-latest
             artifact-name: one-link-macos-arm64
