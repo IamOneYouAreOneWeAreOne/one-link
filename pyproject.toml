@@ -7,19 +7,24 @@ authors = [{ name = "One Link contributors", email = "weareone@oneunity.earth" }
 license = { text = "AGPL-3.0-or-later" }
 
 dependencies = [
-  # cryptography >= 44 is the first release that ships pre-built
+  # cryptography >= 44 was the first release that ships pre-built
   # win_arm64 wheels (and parallel wheels for linux_aarch64 /
-  # macosx_arm64). The older >=42 floor would resolve to a version
-  # without a Windows ARM64 wheel, fall through to a source build,
-  # and fail on the GitHub-hosted win_arm64 runner because there is
-  # no OpenSSL dev install on it. Bumping the floor removes the
-  # entire failure class without changing behavior anywhere else.
-  "cryptography>=44",
-  "zeroconf>=0.130",
+  # macosx_arm64). 2026-06-16: floor raised to >=48.0.1 to clear
+  # GHSA-537c-gmf6-5ccf (fixed in 48.0.1) flagged by the external
+  # supply-chain audit. One Link only uses the long-stable primitives
+  # (Ed25519 / X25519 / AES-GCM / HKDF / PBKDF2HMAC), so the major
+  # bump is API-safe; 48.x still ships the same wheel matrix.
+  "cryptography>=48.0.1",
+  # zeroconf >=0.149.12 clears CVE-2026-47180/47183/47184/48045
+  # (mDNS parsing/DoS issues) — One Link's LAN discovery is exactly
+  # the affected surface, so this one matters most.
+  "zeroconf>=0.149.12",
   "click>=8.1",
   "blake3>=0.4",
   "platformdirs>=4",
-  "aiohttp>=3.13.4",
+  # aiohttp >=3.14.1 clears 11 CVEs (CVE-2026-34993 .. 54280) in the
+  # 3.13.x line that the daemon's HTTP UI server is exposed to.
+  "aiohttp>=3.14.1",
   "watchdog>=4.0",
   # v0.15.4: QR code rendering for the LAN-pairing flow. Pure-Python,
   # BSD-licensed (Lincoln Loop), SVG output without Pillow.
