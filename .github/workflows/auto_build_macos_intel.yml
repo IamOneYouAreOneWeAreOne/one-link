@@ -1,0 +1,133 @@
+name: auto-build macOS Intel (decoupled)
+
+# 2026-06-16: a DEDICATED build for the Intel-Mac (x86_64) dmg,
+# decoupled from the main auto_build.yml.
+#
+# Why separate: macos-13 (the only hosted Intel runner) frequently sits
+# "queued" for a long time. In the main multi-platform workflow, whose
+# concurrency is cancel-in-progress, every push to master cancelled the
+# slow Intel leg before it published — so one-link-macos-x86_64.dmg
+# never reached the auto-latest release while arm64/Windows/Linux did.
+#
+# This workflow:
+#   * builds ONLY the Intel dmg,
+#   * uses its OWN concurrency group with cancel-in-progress: FALSE, so
+#     a new push QUEUES behind an in-flight Intel build instead of
+#     killing it — it runs to completion whenever a runner frees up,
+#   * also runs on a daily schedule + manual dispatch so it self-heals
+#     even if a push-triggered run is delayed,
+#   * upserts just the x86_64 dmg (+ sha256) onto the SAME `auto-latest`
+#     release (softprops only adds/replaces the listed files, leaving
+#     the arm64/Windows/Linux assets the main build published intact).
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    # Daily at 08:17 UTC — catches the case where every recent push's
+    # Intel run was superseded/queued-out, so the dmg can never go more
+    # than ~a day stale relative to master.
+    - cron: "17 8 * * *"
+  workflow_dispatch:
+
+concurrency:
+  # Distinct from the main auto-build group, and NON-cancelling: let a
+  # slow Intel build finish rather than killing it on the next push.
+  group: auto-build-macos-intel
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # update the rolling auto-latest release
+
+jobs:
+  build-intel:
+    name: build macOS Intel (x86_64)
+    runs-on: macos-13
+    # Generous cap: Intel builds are slow, but bound it so a wedged run
+    # eventually frees the concurrency slot for the next attempt.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: generate macOS .icns icon
+        shell: bash
+        run: |
+          chmod +x packaging/macos/make_icns.sh
+          packaging/macos/make_icns.sh
+
+      - name: install build tooling
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
+          python -m pip install -e .
+
+      - name: build native crate from source
+        shell: bash
+        continue-on-error: true
+        run: |
+          python -m pip install maturin
+          cd native/one_link_native
+          maturin develop --release \
+            || echo "maturin build failed; Intel dmg ships pure-Python"
+
+      - name: build the standalone binary
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python scripts/build_binary.py --gui --allow-native-cdc-fallback
+
+      - name: verify the binary is x86_64
+        shell: bash
+        run: |
+          BIN=""
+          for cand in \
+            "dist/one-link.app/Contents/MacOS/one-link" \
+            "dist/one-link/one-link"; do
+            [ -f "$cand" ] && { BIN="$cand"; break; }
+          done
+          [ -n "$BIN" ] || BIN="$(find dist -type f -name one-link -perm +111 | head -1)"
+          echo "binary: $BIN"
+          ARCHS="$(lipo -archs "$BIN")"
+          echo "architectures: $ARCHS"
+          echo "$ARCHS" | grep -q x86_64 || {
+            echo "::error::Intel build did not produce an x86_64 binary (got: $ARCHS)"
+            exit 1
+          }
+
+      - name: package macOS .dmg
+        shell: bash
+        run: |
+          cd dist
+          DMG_NAME="one-link-macos-x86_64.dmg"
+          chmod +x ../packaging/macos/make_dmg.sh
+          ../packaging/macos/make_dmg.sh \
+            "one-link.app" \
+            "$DMG_NAME" \
+            "One Link"
+          shasum -a 256 "$DMG_NAME" > "$DMG_NAME.sha256"
+          mkdir -p ../out
+          cp "$DMG_NAME" "$DMG_NAME.sha256" ../out/
+
+      - name: upload Intel dmg to auto-latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: auto-latest
+          # Do NOT set name/body here — that would clobber the main
+          # build's release notes. Only add/replace the Intel files.
+          prerelease: true
+          make_latest: false
+          files: |
+            out/one-link-macos-x86_64.dmg
+            out/one-link-macos-x86_64.dmg.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

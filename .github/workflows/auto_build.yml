@@ -69,22 +69,16 @@ jobs:
           - os: ubuntu-latest
             artifact-name: one-link-linux-x86_64
             exe-name: one-link
-          # macos-13 (Intel Mac) — RE-ADDED 2026-06-16 to give Intel
-          # Macs a NATIVE x86_64 build. (Universal2 was attempted first
-          # but is blocked by pip installing single-arch dep wheels by
-          # default under a universal2 interpreter — cffi/PyAV/etc. came
-          # out single-arch and PyInstaller refused the fat binary.) A
-          # native x86_64 dmg is reliable: no fat-binary gymnastics.
-          # Why it was dropped before: macos-13 hosted runners can sit
-          # "queued" for a long time. That's tolerated here because
-          # ``fail-fast: false`` + the 30-min ``timeout-minutes`` mean a
-          # slow/stuck Intel leg gets cancelled and the OTHER legs still
-          # publish — the Intel dmg is occasionally stale, never
-          # blocking the rest. The website serves each Mac its native
-          # arch (arm64 vs x86_64), so neither slice runs under Rosetta.
-          - os: macos-13
-            artifact-name: one-link-macos-x86_64
-            exe-name: one-link
+          # macos-13 (Intel Mac) is NOT in this matrix. Intel runners
+          # sit "queued" for a long time, and this workflow's
+          # cancel-in-progress concurrency means every new push to
+          # master would cancel a slow Intel leg before it published —
+          # so the Intel dmg never landed. It now builds in a DECOUPLED
+          # workflow (.github/workflows/auto_build_macos_intel.yml) with
+          # its OWN non-cancelling concurrency group + a daily schedule,
+          # so it publishes one-link-macos-x86_64.dmg to the same
+          # auto-latest release whenever a runner frees up, without
+          # blocking or being blocked by this fast multi-platform build.
           # ── arm64 — added to close the coverage gap ───────────
           - os: macos-latest
             artifact-name: one-link-macos-arm64
