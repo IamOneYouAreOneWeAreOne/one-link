@@ -794,6 +794,9 @@ class State:
             # consistent snapshot while the daemon keeps writing.
             if self.is_encrypted and getattr(self, "_db_passphrase", None):
                 from one_link import state_encryption as _se
+                # The guard above proves the passphrase is set + truthy;
+                # narrow str | None -> str for the typed call.
+                assert self._db_passphrase is not None
                 check_conn = _se.open_encrypted_connection(
                     self.db_path, self._db_passphrase,
                 )
@@ -2557,7 +2560,7 @@ class State:
 
                 # Build a detail line that's information-dense without
                 # being noisy. Skip empty parts.
-                detail_parts: list[str] = []
+                detail_parts = []
                 if mode:
                     detail_parts.append(mode)
                 if file_count:
@@ -3264,7 +3267,7 @@ class State:
                     # these we DELETE any pre-existing new_fp row
                     # (the merge case promoted the OLD state already)
                     # then UPDATE.
-                    for sql in (
+                    for sql_pair in (
                         ("DELETE FROM peer_capabilities       WHERE fingerprint = ?",
                          "UPDATE peer_capabilities       SET fingerprint = ? WHERE fingerprint = ?"),
                         ("DELETE FROM peer_capability_policy  WHERE fingerprint = ?",
@@ -3272,7 +3275,7 @@ class State:
                         ("DELETE FROM peer_read_markers       WHERE peer_fp = ?",
                          "UPDATE peer_read_markers       SET peer_fp = ? WHERE peer_fp = ?"),
                     ):
-                        del_sql, upd_sql = sql
+                        del_sql, upd_sql = sql_pair
                         with contextlib.suppress(*DB_OPERATIONAL_ERRORS):
                             c.execute(del_sql, (new_fp,))
                             c.execute(upd_sql, (new_fp, old_fp))

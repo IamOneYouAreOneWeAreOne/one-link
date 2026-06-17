@@ -318,7 +318,7 @@ class TransportPrioritizer:
         """Cap every non-P0 class to its minimum weight so voice
         bytes drain first. Reversible via :meth:`exit_voice_only_mode`."""
         with self._lock:
-            self._saved_weights = dict(self._weights)
+            self._saved_weights: dict[QoSClass, int] | None = dict(self._weights)
             # P0 (VOICE / LIFECYCLE / PRESENCE) keeps full weight.
             for qc in QoSClass:
                 if int(qc) >= 10:  # any class P1+ is throttled to a token

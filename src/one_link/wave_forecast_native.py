@@ -73,6 +73,9 @@ def wave_stepper():
     Use the ``set_*`` methods on the returned instance to customise.
     """
     _require_native()
+    # _require_native() raises unless the native class loaded, so it is
+    # non-None here (mypy can't see through the import-fallback assignment).
+    assert _WaveStepper is not None
     return _WaveStepper()
 
 

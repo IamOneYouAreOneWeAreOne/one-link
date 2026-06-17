@@ -334,7 +334,7 @@ class NativeTransferSession:
                 ChaCha20Poly1305,
             )
             if self.aead_kind == "aes":
-                per_chunk_aead = AESGCM(chunk_key)
+                per_chunk_aead: AESGCM | ChaCha20Poly1305 = AESGCM(chunk_key)
             else:
                 per_chunk_aead = ChaCha20Poly1305(chunk_key)
             nonce = idx.to_bytes(12, "little")
@@ -602,7 +602,7 @@ class NativeTransferSession:
                 ChaCha20Poly1305,
             )
             if self.aead_kind == "aes":
-                per_chunk_aead = AESGCM(chunk_key)
+                per_chunk_aead: AESGCM | ChaCha20Poly1305 = AESGCM(chunk_key)
             else:
                 per_chunk_aead = ChaCha20Poly1305(chunk_key)
             nonce = record.chunk_index.to_bytes(12, "little")

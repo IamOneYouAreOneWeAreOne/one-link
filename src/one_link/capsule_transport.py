@@ -30,6 +30,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import Iterator, Optional
 
+from one_link._coerce import to_int
+
 from one_link.async_capsule import (
     CAPSULE_CHUNK,
     CAPSULE_COMPLETE,
@@ -385,11 +387,7 @@ def parse_inbound_chunk(msg: dict) -> dict:
         raise InboundError("missing capsule_id")
     try:
         seq = int(msg.get("seq", -1))
-        total = (
-            int(msg.get("total"))
-            if msg.get("total") is not None
-            else None
-        )
+        total = to_int(msg.get("total")) if msg.get("total") is not None else None
     except (TypeError, ValueError) as exc:
         raise InboundError(f"malformed seq/total: {exc}") from exc
     if seq < 0:

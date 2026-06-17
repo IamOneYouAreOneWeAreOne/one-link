@@ -163,11 +163,16 @@ def install_excepthooks() -> None:
     prev_thread = threading.excepthook
     def _thread_hook(args: threading.ExceptHookArgs) -> None:
         if issubclass(args.exc_type, SystemExit):
-            return prev_thread(args)
+            prev_thread(args)
+            return
         tname = args.thread.name if args.thread is not None else "?"
+        # exc_value carries its own __traceback__; pass the exception
+        # directly (logging accepts BaseException) and fall back to no
+        # exc_info if it is absent — the 3-tuple form rejects a None value.
         _LOG.critical(
-            "uncaught exception in thread %r", tname,
-            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            "uncaught exception in thread %r",
+            tname,
+            exc_info=args.exc_value if args.exc_value is not None else False,
         )
         try:
             dump_crash(

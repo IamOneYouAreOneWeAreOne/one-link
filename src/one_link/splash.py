@@ -125,7 +125,9 @@ def run_splash() -> int:
             if iw > 96:
                 img = img.subsample(max(1, iw // 96))
             icon_label = tk.Label(inner, image=img, bg=BG_COLOR, bd=0)
-            icon_label.image = img  # keep a reference (tkinter GC quirk)
+            # Keep a reference so tkinter doesn't GC the image (a well-known
+            # quirk); `image` is a dynamic attribute Tk doesn't declare.
+            setattr(icon_label, "image", img)
             icon_label.pack(pady=(28, 12))
         except Exception:
             icon_path = None

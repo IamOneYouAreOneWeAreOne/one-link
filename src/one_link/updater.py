@@ -76,7 +76,7 @@ class InstallPlan:
     latest_version: Optional[str] = None
 
     def to_dict(self) -> dict:
-        out = {"status": self.status}
+        out: dict[str, object] = {"status": self.status}
         if self.tag:
             out["tag"] = self.tag
         if self.latest_version:

@@ -124,7 +124,7 @@ def detect_db_state(db_path: Path) -> str:
 def migrate_plaintext_to_encrypted(
     db_path: Path,
     passphrase: str,
-) -> Path:
+) -> Path | None:
     """One-shot migration: take the existing plaintext SQLite file at
     ``db_path`` and replace it with an SQLCipher-encrypted file at
     the same path containing the SAME data.

@@ -1276,8 +1276,8 @@ def verify_this_install(as_json):
     click.echo("")
     click.echo("Load-bearing source files (BLAKE2s-128 content hash):")
     name_w = max(len(n) for n in file_hashes)
-    for name, h in sorted(file_hashes.items()):
-        click.echo(f"  {name:<{name_w}}  {h}")
+    for name, hx in sorted(file_hashes.items()):
+        click.echo(f"  {name:<{name_w}}  {hx}")
     if missing:
         click.echo("")
         click.echo(
