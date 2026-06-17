@@ -6211,8 +6211,8 @@ class Daemon:
             )
             if msg.get("eof"):
                 f.handle.close()
-                got = f.hasher.hexdigest()
-                ok = got == f.blob_hex and f.received == f.size
+                got_hex = f.hasher.hexdigest()
+                ok = got_hex == f.blob_hex and f.received == f.size
                 done = {
                     "t": "FILE_DONE",
                     "id": msg["id"],
@@ -13987,7 +13987,7 @@ class Daemon:
         # awaiting_remote_ok > stuck_outbound); within a kind, newest
         # first (smaller since_ms = more recent = top). Then cap.
         items.sort(key=lambda x: (
-            self._ATTENTION_KIND_PRIORITY.get(x.get("kind"), 99),
+            self._ATTENTION_KIND_PRIORITY.get(str(x.get("kind")), 99),
             int(x.get("since_ms", 0)),
         ))
         if len(items) > self.ATTENTION_MAX_ITEMS:
@@ -15399,7 +15399,7 @@ class Daemon:
             # Pattern strength from the prefetch predictor, if available.
             pattern_strength = 0.0
             try:
-                preds = self.predict_next_files_for_peer(peer_fp, n=1)
+                preds = self.predict_next_files_for_peer(peer_fp, n=1) if peer_fp else []
                 if preds:
                     # predictor returns list of (file_id_bytes, confidence)
                     pattern_strength = float(preds[0][1])
@@ -15996,7 +15996,7 @@ class Daemon:
                 pass
             pattern_strength = 0.0
             try:
-                preds = self.predict_next_files_for_peer(peer_fp, n=1)
+                preds = self.predict_next_files_for_peer(peer_fp, n=1) if peer_fp else []
                 if preds:
                     pattern_strength = float(preds[0][1])
             except Exception:
@@ -18105,7 +18105,7 @@ class Daemon:
                     expires_ms=int(payload.expires_ms),
                     metadata={
                         "token_issuer": peer_fp,
-                        "capabilities": list(payload.body.get("capabilities") or [])[:16],
+                        "capabilities": list(cast("list[Any]", payload.body.get("capabilities") or []))[:16],
                     },
                 )
             task = asyncio.create_task(
