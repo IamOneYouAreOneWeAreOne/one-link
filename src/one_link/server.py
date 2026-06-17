@@ -5296,7 +5296,7 @@ class UIServer:
             messages = list(hits.get("messages") or [])
             for m in messages:
                 if isinstance(m, dict):
-                    m["peer_display_name"] = peer_lookup.get(m.get("peer_fp"))
+                    m["peer_display_name"] = peer_lookup.get(str(m.get("peer_fp") or ""))
             _send({
                 "t": "global_search_results",
                 "query": query,
@@ -6437,7 +6437,7 @@ class UIServer:
             #                  upload_id, offset, data_b64}
             # daemon → phone: {v, t:"send_file_chunk_ack", rid,
             #                  upload_id, offset, received_size}
-            upload_id = envelope.get("upload_id")
+            upload_id = envelope.get("upload_id", "")
             offset = envelope.get("offset")
             data_b64 = envelope.get("data_b64")
             if not isinstance(upload_id, str) or upload_id not in self._phone_uploads:
@@ -6495,7 +6495,7 @@ class UIServer:
             # daemon → phone: {v, t:"send_file_result", rid, ok,
             #                  transfer_id, msg, queued?, paused?}
             #          OR     {v, t:"error", rid, code, message}
-            upload_id = envelope.get("upload_id")
+            upload_id = envelope.get("upload_id", "")
             if not isinstance(upload_id, str) or upload_id not in self._phone_uploads:
                 _err("unknown_upload", "upload_id not found (init first / expired)")
                 return
@@ -15587,7 +15587,7 @@ class UIServer:
         """
         registry = self._ensure_folder_send_registry()
         key = self._folder_send_key(scope, ident, peer_fp)
-        last_result = None
+        last_result: "Exception | dict[str, Any] | None" = None
         try:
             for attempt in range(1, self._FOLDER_SEND_MAX_RETRIES + 1):
                 try:
