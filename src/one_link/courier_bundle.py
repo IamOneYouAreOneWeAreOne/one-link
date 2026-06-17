@@ -133,6 +133,15 @@ def decode_bundle_b64(value: str, *, max_bundle_bytes: int = DEFAULT_MAX_BUNDLE_
     return bundle
 
 
+def _to_int(value: object) -> int:
+    """Coerce a JSON-parsed value to int. Raises TypeError/ValueError on a
+    non-numeric value — matching the callers' existing error handling
+    (they either wrap it in CourierBundleError or let it propagate)."""
+    if isinstance(value, (int, float, str)):
+        return int(value)
+    raise TypeError(f"expected a number, got {type(value).__name__}")
+
+
 def export_courier_bundle(
     chunks: Iterable[tuple[str, bytes]],
     *,
@@ -164,7 +173,7 @@ def export_courier_bundle(
         "blob_hash": _clean_hash(blob_hash) if blob_hash else None,
         "name": _clean_name(name),
         "chunk_count": len(entries),
-        "total_bytes": sum(int(e["size"]) for e in entries),
+        "total_bytes": sum(_to_int(e["size"]) for e in entries),
         "chunks": entries,
     }
     plaintext = _canonical_json(manifest)
@@ -222,9 +231,9 @@ def import_courier_bundle(
     if len(plaintext) > max_plaintext_bytes:
         raise CourierBundleError("courier bundle payload exceeds the size limit")
     manifest = _load_manifest(plaintext)
-    if int(manifest["created_ms"]) != header.created_ms:
+    if _to_int(manifest["created_ms"]) != header.created_ms:
         raise CourierBundleError("courier bundle created time mismatch")
-    if int(manifest["expires_ms"]) != header.expires_ms:
+    if _to_int(manifest["expires_ms"]) != header.expires_ms:
         raise CourierBundleError("courier bundle expiry mismatch")
     recipient_fp = manifest.get("recipient_fp") or None
     expected = _clean_fp(expected_recipient_fp, required=False)
@@ -236,7 +245,7 @@ def import_courier_bundle(
         max_chunks=max_chunks,
         max_plaintext_bytes=max_plaintext_bytes,
     )
-    if int(manifest["total_bytes"]) != sum(len(data) for _, data in chunks):
+    if _to_int(manifest["total_bytes"]) != sum(len(data) for _, data in chunks):
         raise CourierBundleError("courier bundle byte count mismatch")
     if replay_seen is not None:
         if bundle_id in replay_seen:
@@ -300,8 +309,8 @@ def _decode_import_chunks(
         if h in seen:
             raise CourierBundleError("courier bundle contains duplicate chunks")
         try:
-            index = int(item.get("index", len(out)))
-            declared_size = int(item.get("size"))
+            index = _to_int(item.get("index", len(out)))
+            declared_size = _to_int(item.get("size"))
         except (TypeError, ValueError, OverflowError) as exc:
             raise CourierBundleError("courier chunk size is invalid") from exc
         if index != len(out):
@@ -404,7 +413,8 @@ def _canonical_json(value: Mapping[str, object]) -> bytes:
 
 
 def _public_manifest(manifest: Mapping[str, object]) -> dict[str, object]:
-    chunks = manifest.get("chunks", [])
+    chunks_raw = manifest.get("chunks", [])
+    chunks = chunks_raw if isinstance(chunks_raw, list) else []
     return {
         "version": manifest.get("version"),
         "bundle_id": manifest.get("bundle_id"),
