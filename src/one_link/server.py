@@ -5382,7 +5382,7 @@ class UIServer:
                 _err("group_not_found", "group not found")
                 return
             issued_ms = int(time.time() * 1000)
-            payload = {
+            invite_payload = {
                 "v": 1,
                 "type": "one_link_group_invite",
                 "group_id": group_id,
@@ -5394,11 +5394,11 @@ class UIServer:
                 "nonce": secrets.token_urlsafe(18),
             }
             signed = json.dumps(
-                payload, separators=(",", ":"), sort_keys=True,
+                invite_payload, separators=(",", ":"), sort_keys=True,
             ).encode("utf-8")
             sig_hex = self.daemon.me.sign(signed).hex()
             token_raw = json.dumps(
-                {"payload": payload, "signature_hex": sig_hex},
+                {"invite_payload": invite_payload, "signature_hex": sig_hex},
                 separators=(",", ":"),
                 sort_keys=True,
             ).encode("utf-8")
@@ -5409,7 +5409,7 @@ class UIServer:
                 "group_id": group_id,
                 "url": f"one-link://group-invite/{token}",
                 "token": token,
-                "expires_ms": payload["expires_ms"],
+                "expires_ms": invite_payload["expires_ms"],
             })
             return
 
@@ -6229,7 +6229,7 @@ class UIServer:
                 else None
             )
             client_msg_id_raw = envelope.get("client_msg_id")
-            client_msg_id: str | None = None
+            client_msg_id = None
             if isinstance(client_msg_id_raw, str):
                 stripped = client_msg_id_raw.strip()
                 if 8 <= len(stripped) <= 64 and all(
@@ -6387,7 +6387,7 @@ class UIServer:
                     f"max {PHONE_UPLOAD_MAX_PER_PEER} concurrent uploads per peer",
                 )
                 return
-            client_msg_id: str | None = None
+            client_msg_id = None
             if isinstance(client_msg_id_raw, str):
                 stripped = client_msg_id_raw.strip()
                 if 8 <= len(stripped) <= 64 and all(
@@ -8437,7 +8437,7 @@ class UIServer:
             except Exception:
                 continue
         if tau_values:
-            summary = {
+            summary: dict[str, float | None] = {
                 "count": len(tau_values),
                 "mean": sum(tau_values) / len(tau_values),
                 "min": min(tau_values),
@@ -15014,7 +15014,7 @@ class UIServer:
         except Exception as e:
             log.warning(
                 "folder share failed (%s -> %s): %s",
-                name, peer_fp[:8], e,
+                name, (peer_fp or "")[:8], e,
             )
             return web.json_response(
                 {"error": "folder share failed", "code": "folder_share_failed"},
@@ -15076,7 +15076,7 @@ class UIServer:
                     except Exception as e:  # pragma: no cover - bg
                         log.warning(
                             "auto-push after share failed (%s -> %s): %s",
-                            name, peer_fp[:8], e,
+                            name, (peer_fp or "")[:8], e,
                         )
                         self.broadcast({
                             "type": "folder_share_push_failed",
@@ -15237,6 +15237,7 @@ class UIServer:
             (archive_path, original_size, archive_size) = await asyncio.to_thread(
                 self._stage_folder_archive, folder_root, folder_name,
             )
+            assert archive_path is not None
             magic_rel = f"{self._FOLDER_ARCHIVE_MAGIC_DIR}/{folder_name}.zip"
             try:
                 await self.daemon.send_file(
@@ -15690,7 +15691,7 @@ class UIServer:
         path; we just need to re-attempt on link drops."""
         registry = self._ensure_folder_send_registry()
         key = self._folder_send_key(scope, ident, peer_fp)
-        last_result = None
+        last_result: "Exception | dict[str, Any] | None" = None
         try:
             for attempt in range(1, self._FOLDER_SEND_MAX_RETRIES + 1):
                 try:
@@ -21075,7 +21076,7 @@ class UIServer:
             "content": content,
         })
 
-    async def api_blob_raw(self, request: web.Request) -> web.Response:
+    async def api_blob_raw(self, request: web.Request) -> web.StreamResponse:
         """Stream a blob's raw bytes for <img>/<video>/<iframe>
         previews. Same hash validation as api_blob_preview."""
         blob_hash = request.match_info.get("hash", "").strip()
@@ -21198,7 +21199,7 @@ class UIServer:
             "content": content,
         })
 
-    async def api_folder_file_raw(self, request: web.Request) -> web.Response:
+    async def api_folder_file_raw(self, request: web.Request) -> web.StreamResponse:
         """Stream a folder file's raw bytes for <img>/<video>/<iframe>
         previews. Same path-traversal guard as the preview endpoint;
         Content-Type inferred from extension."""
