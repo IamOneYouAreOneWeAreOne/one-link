@@ -1441,7 +1441,9 @@ class Daemon:
         # the existing endpoint-announcement frame. accept-loop
         # task and per-peer outbound connection cache populate
         # below.
-        self._quic_server_endpoint: object | None = None
+        # Native pyo3 endpoint (one_link_native) — mypy has no stub for it,
+        # so Any is the honest type (lets its real methods type-check).
+        self._quic_server_endpoint: "Any | None" = None
         self._quic_accept_task: asyncio.Task | None = None
         self._quic_local_port: int | None = None
         # peer_fp_hex -> native QUIC Connection (outbound).
@@ -1484,7 +1486,7 @@ class Daemon:
         # the workaround. Production-grade fix is to extend the
         # native API.
         from collections import deque as _deque
-        self._quic_recent_paired: object = _deque(maxlen=64)
+        self._quic_recent_paired: "_deque[Any]" = _deque(maxlen=64)
         # Wave 2g: share-link registry (one-time send-to-anyone
         # capabilities). Mints + redeems happen through control
         # commands; persistence lives under data/share_links/.
@@ -2402,7 +2404,8 @@ class Daemon:
                 role = str(rec.get("local_role") or "")
                 if not call_id or not peer_fp or role not in {"originator", "recipient"}:
                     continue
-                life = rec.get("lifecycle") if isinstance(rec.get("lifecycle"), dict) else {}
+                _life = rec.get("lifecycle")
+                life = _life if isinstance(_life, dict) else {}
                 phase = CallPhase[str(life.get("phase") or "").upper()]
                 if phase == CallPhase.ENDED:
                     continue
