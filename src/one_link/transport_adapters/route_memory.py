@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
+from one_link._coerce import to_float, to_int
+
 from .base import AdapterProbe, PreparedRoute, RouteScore, TransportSession
 from .static import score_probe
 
@@ -25,7 +27,7 @@ class DurableRouteCandidateAdapter:
         route = self.kind
         transport = str(self.candidate.get("transport") or "tcp")
         host = str(self.candidate.get("host") or "unknown")
-        port = int(self.candidate.get("port") or 0)
+        port = to_int(self.candidate.get("port") or 0)
         return f"remembered.{peer}.{route}.{transport}.{host}.{port}"
 
     @property
@@ -40,9 +42,9 @@ class DurableRouteCandidateAdapter:
         return route or "lan"
 
     def probe(self) -> AdapterProbe:
-        attempts = max(0, int(self.candidate.get("attempts") or 0))
-        successes = max(0, int(self.candidate.get("successes") or 0))
-        failures = max(0, int(self.candidate.get("failures") or 0))
+        attempts = max(0, to_int(self.candidate.get("attempts") or 0))
+        successes = max(0, to_int(self.candidate.get("successes") or 0))
+        failures = max(0, to_int(self.candidate.get("failures") or 0))
         verified = bool(self.candidate.get("verified"))
         reliability = (
             successes / max(1, attempts)
@@ -50,7 +52,7 @@ class DurableRouteCandidateAdapter:
             else (0.98 if verified else 0.50)
         )
         reliability = max(0.05, min(0.995, float(reliability)))
-        bps = float(self.candidate.get("bandwidth_bps") or _default_bps(self.kind))
+        bps = to_float(self.candidate.get("bandwidth_bps") or _default_bps(self.kind))
         latency = self.candidate.get("latency_ms")
         latency_ms = float(latency) if isinstance(latency, (int, float)) else _default_latency_ms(self.kind)
         return AdapterProbe(
@@ -84,8 +86,8 @@ class DurableRouteCandidateAdapter:
     ) -> RouteScore:
         score = score_probe(probe, intent=intent, peer=peer)
         verified_bonus = 0.10 if bool(self.candidate.get("verified")) else 0.0
-        success_bonus = min(0.10, 0.025 * int(self.candidate.get("successes") or 0))
-        failure_penalty = min(0.20, 0.04 * int(self.candidate.get("failures") or 0))
+        success_bonus = min(0.10, 0.025 * to_int(self.candidate.get("successes") or 0))
+        failure_penalty = min(0.20, 0.04 * to_int(self.candidate.get("failures") or 0))
         return RouteScore(
             adapter_id=score.adapter_id,
             route_name=score.route_name,

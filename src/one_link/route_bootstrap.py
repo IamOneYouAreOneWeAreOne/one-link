@@ -18,6 +18,8 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
+from one_link._coerce import to_int
+
 import blake3
 
 from .identity import Identity, fingerprint_of, verify
@@ -113,7 +115,7 @@ class SignedRouteBootstrap:
 
     @property
     def expires_ms(self) -> int:
-        return int(self.body.get("expires_ms") or 0)
+        return to_int(self.body.get("expires_ms") or 0)
 
     @property
     def endpoints(self) -> tuple[dict[str, object], ...]:
@@ -235,7 +237,7 @@ def verify_bootstrap(
     body = dict(payload.body)
     if body.get("magic") != BOOTSTRAP_MAGIC:
         raise ValueError("bad bootstrap magic")
-    if int(body.get("version") or 0) != BOOTSTRAP_VERSION:
+    if to_int(body.get("version") or 0) != BOOTSTRAP_VERSION:
         raise ValueError("unsupported bootstrap version")
     issuer_pub_hex = str(body.get("issuer_pub_hex") or "")
     try:
@@ -249,8 +251,8 @@ def verify_bootstrap(
         raise ValueError("issuer fingerprint mismatch")
     if expected_issuer_fp and issuer_fp != expected_issuer_fp:
         raise ValueError("unexpected bootstrap issuer")
-    issued_ms = int(body.get("issued_ms") or 0)
-    expires_ms = int(body.get("expires_ms") or 0)
+    issued_ms = to_int(body.get("issued_ms") or 0)
+    expires_ms = to_int(body.get("expires_ms") or 0)
     now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
     if issued_ms <= 0 or expires_ms <= issued_ms:
         raise ValueError("invalid bootstrap time bounds")
@@ -292,12 +294,14 @@ def _endpoint_to_dict(endpoint: RouteEndpointHint | Mapping[str, object]) -> dic
     return RouteEndpointHint(
         kind=str(endpoint.get("kind") or ""),
         address=str(endpoint.get("address") or ""),
-        port=endpoint.get("port") if endpoint.get("port") is None else int(endpoint["port"]),
-        priority=int(endpoint.get("priority") or 100),
+        port=to_int(endpoint["port"]) if endpoint.get("port") is not None else None,
+        priority=to_int(endpoint.get("priority") or 100),
         route=str(endpoint.get("route") or "lan"),
         transport=str(endpoint.get("transport") or "tcp"),
-        expires_ms=endpoint.get("expires_ms") if endpoint.get("expires_ms") is None else int(endpoint["expires_ms"]),
-        metadata=endpoint.get("metadata") if isinstance(endpoint.get("metadata"), Mapping) else {},
+        expires_ms=(
+            to_int(endpoint["expires_ms"]) if endpoint.get("expires_ms") is not None else None
+        ),
+        metadata=_md if isinstance((_md := endpoint.get("metadata")), Mapping) else {},
     ).to_dict()
 
 
@@ -307,12 +311,14 @@ def _validate_endpoint_dict(endpoint: object) -> None:
     RouteEndpointHint(
         kind=str(endpoint.get("kind") or ""),
         address=str(endpoint.get("address") or ""),
-        port=endpoint.get("port") if endpoint.get("port") is None else int(endpoint["port"]),
-        priority=int(endpoint.get("priority") or 100),
+        port=to_int(endpoint["port"]) if endpoint.get("port") is not None else None,
+        priority=to_int(endpoint.get("priority") or 100),
         route=str(endpoint.get("route") or "lan"),
         transport=str(endpoint.get("transport") or "tcp"),
-        expires_ms=endpoint.get("expires_ms") if endpoint.get("expires_ms") is None else int(endpoint["expires_ms"]),
-        metadata=endpoint.get("metadata") if isinstance(endpoint.get("metadata"), Mapping) else {},
+        expires_ms=(
+            to_int(endpoint["expires_ms"]) if endpoint.get("expires_ms") is not None else None
+        ),
+        metadata=_md if isinstance((_md := endpoint.get("metadata")), Mapping) else {},
     ).to_dict()
 
 
