@@ -94,8 +94,18 @@ jobs:
       # run + measure + print here but only WARN if over threshold — they
       # are too noisy on shared CI runners to be a sound HARD gate (see
       # native/test_support/timing_gate.rs). The strict run is below.
-      - name: cargo test
-        timeout-minutes: 30
+      #
+      # Generous timeout: a COLD rust-cache must compile ~40 crates
+      # (ML-KEM / ML-DSA / curve25519 ...) in release from scratch, which
+      # can exceed 30 min on shared runners. Warm-cache runs finish in a
+      # few minutes — the high ceiling only bites on a cache miss, it is
+      # not a hang. Build first with --no-run so a compile blow-up is
+      # attributed to the build, not swallowed by the run timeout.
+      - name: cargo test (build)
+        timeout-minutes: 55
+        run: cargo test --workspace --exclude one_link_native --release --no-run
+      - name: cargo test (run)
+        timeout-minutes: 20
         run: cargo test --workspace --exclude one_link_native --release
 
       # Non-blocking strict pass: enforce the wall-clock timing gates
