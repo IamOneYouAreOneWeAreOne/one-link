@@ -8830,13 +8830,13 @@ class Daemon:
                     timeout_left = done_deadline - time.monotonic()
                     if timeout_left <= 0:
                         for blob in pending_dones:
-                            it = next(
+                            match = next(
                                 (x for x in items if x["blob"] == blob),
                                 None,
                             )
-                            if it:
+                            if match:
                                 results.append({
-                                    "rel_path": it["rel"], "ok": False,
+                                    "rel_path": match["rel"], "ok": False,
                                     "error": "no FILE_DONE within deadline",
                                 })
                                 failed += 1
@@ -8853,20 +8853,20 @@ class Daemon:
                     blob = str(m.get("blob") or "")
                     if blob in pending_dones:
                         pending_dones.discard(blob)
-                        it = next(
+                        match = next(
                             (x for x in items if x["blob"] == blob),
                             None,
                         )
-                        if it and not it["done"]:
-                            it["done"] = True
+                        if match and not match["done"]:
+                            match["done"] = True
                             sent += 1
                             if not any(
-                                r.get("rel_path") == it["rel"]
+                                r.get("rel_path") == match["rel"]
                                 for r in results
                             ):
                                 results.append({
-                                    "rel_path": it["rel"], "ok": True,
-                                    "size": it["size"],
+                                    "rel_path": match["rel"], "ok": True,
+                                    "size": match["size"],
                                 })
                             with contextlib.suppress(Exception):
                                 self._update_transfer(
