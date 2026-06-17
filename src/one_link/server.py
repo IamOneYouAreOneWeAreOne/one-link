@@ -6036,13 +6036,13 @@ class UIServer:
                     ),
                     timeout=20.0,
                 )
-                updated = state.get_message(msg_id)
+                msg_updated = state.get_message(msg_id)
                 _send({
                     "t": "edit_message_result",
                     "ok": True,
                     "msg_id": msg_id,
                     "result": result,
-                    "msg": _msg_record_to_event(updated) if updated else None,
+                    "msg": _msg_record_to_event(msg_updated) if msg_updated else None,
                 })
             except asyncio.TimeoutError:
                 _err("edit_timeout", "edit timed out after 20s")
@@ -6086,14 +6086,14 @@ class UIServer:
                     self.daemon.send_delete(target_peer, target_msg_id=msg_id),
                     timeout=20.0,
                 )
-                deleted = state.get_message(msg_id)
+                msg_deleted = state.get_message(msg_id)
                 _send({
                     "t": "delete_message_result",
                     "ok": True,
                     "delivered": True,
                     "msg_id": msg_id,
                     "result": result,
-                    "msg": _msg_record_to_event(deleted) if deleted else None,
+                    "msg": _msg_record_to_event(msg_deleted) if msg_deleted else None,
                 })
             except asyncio.TimeoutError:
                 _err("delete_timeout", "delete timed out after 20s")
@@ -6304,7 +6304,7 @@ class UIServer:
                 if peer_rec is None:
                     _err("peer_not_found", "peer not in roster")
                     return
-                updated = state.set_peer_profile(peer_fp, local_alias=alias)
+                profile_updated = state.set_peer_profile(peer_fp, local_alias=alias)
             except Exception as e:
                 _err("update_failed", f"set_peer_profile: {e}")
                 return
@@ -6312,7 +6312,7 @@ class UIServer:
                 "t": "set_peer_alias_result",
                 "ok": True,
                 "peer_fp": peer_fp,
-                "alias": getattr(updated, "local_alias", None),
+                "alias": getattr(profile_updated, "local_alias", None),
             })
             return
 
@@ -6336,7 +6336,7 @@ class UIServer:
                 if peer_rec is None:
                     _err("peer_not_found", "peer not in roster")
                     return
-                updated = state.set_peer_profile(peer_fp, muted=muted)
+                profile_updated = state.set_peer_profile(peer_fp, muted=muted)
             except Exception as e:
                 _err("update_failed", f"set_peer_profile: {e}")
                 return
@@ -6344,7 +6344,7 @@ class UIServer:
                 "t": "set_peer_mute_result",
                 "ok": True,
                 "peer_fp": peer_fp,
-                "muted": bool(getattr(updated, "muted", muted)),
+                "muted": bool(getattr(profile_updated, "muted", muted)),
             })
             return
 
