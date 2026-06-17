@@ -4079,7 +4079,7 @@ class UIServer:
             # Only count PINNED peers — pending or rejected peers'
             # version claims shouldn't drive the UI.
             try:
-                rec = self.daemon.state.get_peer(peer_fp)
+                rec = self.daemon.state.get_peer(peer_fp) if self.daemon.state is not None else None
                 if rec is None or getattr(rec, "trust", None) != "pinned":
                     continue
                 display = (
@@ -6897,7 +6897,7 @@ class UIServer:
     def _call_peer_label(self, peer_fp: str) -> str:
         peer_label = peer_fp[:8]
         try:
-            rec = self.daemon.state.get_peer(peer_fp)
+            rec = self.daemon.state.get_peer(peer_fp) if self.daemon.state is not None else None
             if rec is not None:
                 peer_label = (
                     getattr(rec, "local_alias", None)
@@ -7496,7 +7496,7 @@ class UIServer:
             peer_fp = mgr.state.peer_master_vk_hex
             peer_label = peer_fp[:8]
             try:
-                rec = self.daemon.state.get_peer(peer_fp)
+                rec = self.daemon.state.get_peer(peer_fp) if self.daemon.state is not None else None
                 if rec is not None:
                     peer_label = (
                         getattr(rec, "local_alias", None)
@@ -7561,7 +7561,7 @@ class UIServer:
         peer_fp = mgr.state.peer_master_vk_hex
         peer_label = peer_fp[:8]
         try:
-            rec = self.daemon.state.get_peer(peer_fp)
+            rec = self.daemon.state.get_peer(peer_fp) if self.daemon.state is not None else None
             if rec is not None:
                 peer_label = (
                     getattr(rec, "local_alias", None)
@@ -8189,7 +8189,9 @@ class UIServer:
                 "action": row.get("action") or "",
                 "path": row.get("path") or "",
                 "redacted": True,
-                "metadata_keys": sorted(str(k) for k in meta.keys())[:8],
+                "metadata_keys": sorted(
+                    str(k) for k in (meta.keys() if isinstance(meta, dict) else [])
+                )[:8],
             })
         privacy_proof = {
             "headline": "One Setup proof",
@@ -14884,6 +14886,7 @@ class UIServer:
 
         async def _bg_scan() -> None:
             try:
+                assert self.daemon.folder_engine is not None
                 await loop.run_in_executor(
                     None,
                     self.daemon.folder_engine.start_initial_scan, name,
@@ -16646,6 +16649,7 @@ class UIServer:
 
         async def _bg_scan() -> None:
             try:
+                assert self.daemon.folder_engine is not None
                 await loop.run_in_executor(
                     None,
                     self.daemon.folder_engine.start_initial_scan, name,
@@ -21649,6 +21653,8 @@ class UIServer:
                 "error": plan.error or "no wheel available for this host",
                 "plan": plan.to_dict(),
             }, status=409)
+        # Guarded just above (plan.wheel is None -> 409 return).
+        assert plan.wheel is not None
 
         # Step 2: download
         try:
