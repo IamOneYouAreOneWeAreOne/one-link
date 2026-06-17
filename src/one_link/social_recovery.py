@@ -200,12 +200,12 @@ def ed25519_priv_to_x25519(ed_priv_seed: bytes) -> bytes:
     if len(ed_priv_seed) != 32:
         raise ValueError("ed_priv_seed must be 32 bytes")
     import hashlib
-    h = hashlib.sha512(ed_priv_seed).digest()[:32]
-    h = bytearray(h)
-    h[0] &= 248
-    h[31] &= 127
-    h[31] |= 64
-    return bytes(h)
+    digest = hashlib.sha512(ed_priv_seed).digest()[:32]
+    hb = bytearray(digest)
+    hb[0] &= 248
+    hb[31] &= 127
+    hb[31] |= 64
+    return bytes(hb)
 
 
 # ── share wrap / unwrap ──────────────────────────────────────────────

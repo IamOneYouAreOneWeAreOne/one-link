@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -182,6 +182,7 @@ class _OnnxVoiceModelShim:
                 x_np = x.cpu().numpy()
             else:
                 x_np = np.asarray(x)
+            h0_np: "Any | None"
             if h0 is not None and isinstance(h0, torch.Tensor):
                 h0_np = h0.cpu().numpy()
             else:
@@ -308,6 +309,7 @@ class _OnnxSceneModelShim:
                 x_np = x.cpu().numpy()
             else:
                 x_np = np.asarray(x)
+            h0_np: "Any | None"
             if h0 is not None and isinstance(h0, torch.Tensor):
                 h0_np = h0.cpu().numpy()
             else:

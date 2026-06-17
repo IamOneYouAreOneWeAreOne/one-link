@@ -52,6 +52,8 @@ jobs:
           # — the [dev] extra doesn't pin mypy, and the old `|| pip install
           # mypy` fallback never fired when [dev] succeeded.
           pip install -e ".[dev]"
-          pip install mypy
+          # Pin mypy so the gate is reproducible (a newer mypy can add
+          # checks that turn the build red without a code change).
+          pip install "mypy==2.1.0"
       - name: mypy (HARD GATE)
         run: python -m mypy src/one_link
