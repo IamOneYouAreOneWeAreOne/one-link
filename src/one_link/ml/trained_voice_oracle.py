@@ -138,9 +138,9 @@ class TrainedVoiceOracle:
         preds = []
         for t in range(T - 1):
             preds.append(self.predict_next(mfcc_frames[t]))
-        preds = np.stack(preds)
+        preds_arr = np.stack(preds)
         targets = mfcc_frames[1:]
-        return compute_predictive_accuracy(targets, preds, sigma=self.sigma)
+        return compute_predictive_accuracy(targets, preds_arr, sigma=self.sigma)
 
     def predict_per_frame_accuracy(self, mfcc_frames: np.ndarray) -> np.ndarray:
         """Return per-frame accuracy (T-1 values). Used by the e2e sim to

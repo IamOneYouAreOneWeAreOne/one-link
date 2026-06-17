@@ -74,7 +74,7 @@ class SceneGen:
     lighting: float = 0.5
     objects: list[Object] = field(default_factory=list)
 
-    def static_phase(self, n_frames: int) -> list[np.ndarray]:
+    def static_phase(self, n_frames: int) -> list[tuple[np.ndarray, int]]:
         out = []
         for _ in range(n_frames):
             self.camera_motion = 0.01 * self.rng.random()
@@ -86,7 +86,7 @@ class SceneGen:
             out.append(self._snapshot(regime_id=0))
         return out
 
-    def translate_phase(self, n_frames: int) -> list[np.ndarray]:
+    def translate_phase(self, n_frames: int) -> list[tuple[np.ndarray, int]]:
         # Pick one object to move
         if not self.objects:
             self._spawn_object()
@@ -101,7 +101,7 @@ class SceneGen:
             out.append(self._snapshot(regime_id=1))
         return out
 
-    def pan_phase(self, n_frames: int) -> list[np.ndarray]:
+    def pan_phase(self, n_frames: int) -> list[tuple[np.ndarray, int]]:
         pan_dir = self.rng.uniform(0, 2 * math.pi)
         pan_speed = self.rng.uniform(0.5, 1.0)
         dx = pan_speed * math.cos(pan_dir)
@@ -115,7 +115,7 @@ class SceneGen:
             out.append(self._snapshot(regime_id=2))
         return out
 
-    def appear_phase(self, n_frames: int) -> list[np.ndarray]:
+    def appear_phase(self, n_frames: int) -> list[tuple[np.ndarray, int]]:
         if len(self.objects) < MAX_OBJECTS:
             self._spawn_object()
         out = []

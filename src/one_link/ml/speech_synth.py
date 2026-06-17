@@ -225,7 +225,7 @@ def synth_sentence(phonemes: list[tuple[str, float]], sr: float = 16000.0,
     audio_segments = []
     labels = []
     for i, (name, dur) in enumerate(phonemes):
-        seg = synth_phoneme(name, dur, sr=sr, seed=rng.integers(0, 2**31))
+        seg = synth_phoneme(name, dur, sr=sr, seed=int(rng.integers(0, 2**31)))
         audio_segments.append(seg)
         labels.append(np.full(seg.size, PHONEME_ID[name], dtype=np.int16))
     audio = np.concatenate(audio_segments) if audio_segments else np.zeros(0, dtype=np.float32)
