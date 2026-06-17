@@ -13,7 +13,7 @@ import os
 import platform
 import subprocess
 from dataclasses import dataclass
-from typing import Callable, Iterable, Mapping
+from typing import Callable, Iterable, Mapping, cast
 
 from .hardware_inventory import HardwareInventory, HardwarePath
 
@@ -358,10 +358,10 @@ def _hotspot_plan(path: HardwarePath | None, *, system: str) -> PathCreationPlan
             action="open_windows_hotspot_settings",
             automatic=False,
             requires_user_action=True,
-            requires_admin=bool(path.requires_admin),
+            requires_admin=bool(getattr(path, "requires_admin", False)),
             bulk_capable=True,
             control_capable=True,
-            estimated_bps=float(path.estimated_bps or 300_000_000.0),
+            estimated_bps=float(getattr(path, "estimated_bps", None) or 300_000_000.0),
             command=("start", "ms-settings:network-mobilehotspot"),
             settings_uri="ms-settings:network-mobilehotspot",
             reason="Windows hotspot must be confirmed in OS settings",
@@ -383,10 +383,10 @@ def _hotspot_plan(path: HardwarePath | None, *, system: str) -> PathCreationPlan
         action="open_os_hotspot_settings",
         automatic=False,
         requires_user_action=True,
-        requires_admin=bool(path.requires_admin),
+        requires_admin=bool(getattr(path, "requires_admin", False)),
         bulk_capable=True,
         control_capable=True,
-        estimated_bps=float(path.estimated_bps or 180_000_000.0),
+        estimated_bps=float(getattr(path, "estimated_bps", None) or 180_000_000.0),
         reason=f"{system or 'this platform'} requires a user-visible hotspot ceremony",
         guide_steps=(
             "open OS hotspot settings",
@@ -414,10 +414,10 @@ def _wifi_direct_plan(path: HardwarePath | None, *, system: str) -> PathCreation
         action="open_wifi_direct_ceremony",
         automatic=False,
         requires_user_action=True,
-        requires_admin=bool(path.requires_admin),
+        requires_admin=bool(getattr(path, "requires_admin", False)),
         bulk_capable=True,
         control_capable=True,
-        estimated_bps=float(path.estimated_bps or 480_000_000.0),
+        estimated_bps=float(getattr(path, "estimated_bps", None) or 480_000_000.0),
         reason=f"{system or 'platform'} Wi-Fi Direct needs a visible pairing ceremony",
         settings_uri="ms-settings:network-wifi" if system == "windows" else None,
         command=("start", "ms-settings:network-wifi") if system == "windows" else (),
@@ -450,10 +450,10 @@ def _ble_plan(path: HardwarePath | None, *, system: str) -> PathCreationPlan:
         action="open_ble_control_ceremony",
         automatic=False,
         requires_user_action=True,
-        requires_admin=bool(path.requires_admin),
+        requires_admin=bool(getattr(path, "requires_admin", False)),
         bulk_capable=False,
         control_capable=True,
-        estimated_bps=float(path.estimated_bps or 80_000.0),
+        estimated_bps=float(getattr(path, "estimated_bps", None) or 80_000.0),
         reason=f"{system or 'platform'} BLE is control-only and permission-gated",
         settings_uri="ms-settings:bluetooth" if system == "windows" else None,
         command=("start", "ms-settings:bluetooth") if system == "windows" else (),
@@ -729,7 +729,7 @@ def _path_from_probe(probe: Mapping[str, object]) -> HardwarePath:
         available=bool(probe.get("available")),
         bulk_capable=bool(probe.get("bulk_capable")),
         control_capable=bool(probe.get("control_capable", True)),
-        estimated_bps=float(probe.get("estimated_bps") or 0.0),
+        estimated_bps=float(cast("float | int | str | None", probe.get("estimated_bps")) or 0.0),
         privacy=str(probe.get("privacy") or "unknown"),
         range_hint=str(probe.get("range") or probe.get("range_hint") or "unknown"),
         requires_user_action=bool(probe.get("requires_user_action")),

@@ -260,13 +260,15 @@ def mint_certificate(
     }
     canonical = _canonicalize_cert_body(body)
     signature = old_priv.sign(canonical)
+    # Recompute from the typed sources: reading them back out of `body`
+    # (a dict[str, object]) would erase their concrete types.
     return RotationCertificate(
-        version=body["v"],
-        old_fp=body["old_fp"],
-        new_fp=body["new_fp"],
-        new_pub_hex=body["new_pub_hex"],
-        ts_ms=body["ts_ms"],
-        reason=body["reason"],
+        version=CERT_VERSION,
+        old_fp=fingerprint_for_pubkey(old_pub),
+        new_fp=fingerprint_for_pubkey(bytes(new_pub)),
+        new_pub_hex=bytes(new_pub).hex(),
+        ts_ms=int(ts_ms),
+        reason=reason,
         canonical_bytes=canonical,
         signature=signature,
     )
