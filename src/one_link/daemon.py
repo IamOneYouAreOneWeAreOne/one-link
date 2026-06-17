@@ -81,6 +81,7 @@ from typing import (
 import blake3
 
 if TYPE_CHECKING:
+    from one_link import rendezvous_client
     from one_link.server import UIServer
     from one_link_native.prefetch import Predictor as _NativePredictor
 
@@ -10962,7 +10963,7 @@ class Daemon:
                     file_count=offer.get("entry_count"),
                     total_bytes=offer.get("total_bytes"),
                 )
-            if not is_self_mesh and getattr(self, "ui_server", None) is not None:
+            if not is_self_mesh and self.ui_server is not None:
                 with contextlib.suppress(Exception):
                     self.ui_server.broadcast({
                         "type": "folder_offer_received",
