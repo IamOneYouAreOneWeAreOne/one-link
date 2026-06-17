@@ -72,7 +72,7 @@ import secrets
 import struct
 import time
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, MutableMapping
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -352,7 +352,7 @@ def verify_grant(
     expected_granter_pub: bytes | None = None,
     expected_subject_pub: bytes | None = None,
     now_ms: int | None = None,
-    seen_nonces: set[bytes] | None = None,
+    seen_nonces: set[bytes] | MutableMapping[bytes, None] | None = None,
 ) -> CapabilityGrant:
     """Verify a grant's signature + temporal validity + (optional)
     granter/subject identity binding + (optional) replay defense.

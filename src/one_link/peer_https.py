@@ -60,7 +60,7 @@ import socket
 import contextlib
 import ssl
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -259,6 +259,9 @@ def _load_root_ca(
     key = serialization.load_pem_private_key(
         root_ca_key_path(base).read_bytes(), password=None
     )
+    # Our root CA is always EC P-256; validate on load + narrow the
+    # broad load_pem_private_key() union for the typed return.
+    assert isinstance(key, ec.EllipticCurvePrivateKey)
     return key, cert
 
 
@@ -332,7 +335,9 @@ def _mint_leaf_tls(
             critical=False,
         )
         .add_extension(
-            x509.AuthorityKeyIdentifier.from_issuer_public_key(root_cert.public_key()),
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                cast(ec.EllipticCurvePublicKey, root_cert.public_key())
+            ),
             critical=False,
         )
         .sign(root_key, hashes.SHA256())
