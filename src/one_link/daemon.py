@@ -2435,9 +2435,12 @@ class Daemon:
                     invite_timeout_ms=int(life.get("invite_timeout_ms") or 30_000),
                     resume_window_ms=int(life.get("resume_window_ms") or 600_000),
                 )
-                media = rec.get("media_backfill") if isinstance(rec.get("media_backfill"), dict) else {}
-                sdp = media.get("sdp") if isinstance(media.get("sdp"), dict) else {}
-                ice = media.get("ice") if isinstance(media.get("ice"), list) else []
+                _mb = rec.get("media_backfill")
+                media = _mb if isinstance(_mb, dict) else {}
+                _sdp = media.get("sdp")
+                sdp = _sdp if isinstance(_sdp, dict) else {}
+                _ice = media.get("ice")
+                ice = _ice if isinstance(_ice, list) else []
                 self._call_sdp_backfill[call_id] = {
                     str(k): str(v) for k, v in sdp.items()
                     if k in {"sdp_offer", "sdp_answer"} and isinstance(v, str)
