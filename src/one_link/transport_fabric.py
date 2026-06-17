@@ -23,7 +23,7 @@ from .transport_activation import (
     ActivationPlan,
     activation_plans_for,
 )
-from .transport_adapters.base import AdapterProbe, RouteScore, TransportAdapter
+from .transport_adapters.base import AdapterProbe, RouteScore, ScorableAdapter
 from .transport_adapters.onefield import onefield_adapters_from_paths
 from .transport_adapters.route_memory import adapters_from_route_candidates
 from .transport_adapters.static import adapters_from_paths, score_probe
@@ -92,7 +92,7 @@ class FabricPlan:
 class UniversalCommsFabric:
     """Probe adapters and feed route evidence into the transfer brain."""
 
-    def __init__(self, adapters: Iterable[TransportAdapter]) -> None:
+    def __init__(self, adapters: Iterable[ScorableAdapter]) -> None:
         self._adapters = tuple(adapters)
 
     @classmethod
@@ -216,16 +216,17 @@ class UniversalCommsFabric:
             speeds=speeds,
         )
         t_decision = time.perf_counter_ns()
-        timing_ms = {
+        total_ms = _elapsed_ms(t0, t_decision)
+        timing_ms: dict[str, float | str] = {
             "adapter_count": float(len(self._adapters)),
             "probe_ms": _elapsed_ms(t0, t_probes),
             "score_ms": _elapsed_ms(t_probes, t_scores),
             "activation_ms": _elapsed_ms(t_scores, t_activation),
             "observation_ms": _elapsed_ms(t_activation, t_observations),
             "decision_ms": _elapsed_ms(t_observations, t_decision),
-            "total_ms": _elapsed_ms(t0, t_decision),
+            "total_ms": total_ms,
         }
-        timing_ms["health"] = _timing_health(timing_ms["total_ms"], len(self._adapters))
+        timing_ms["health"] = _timing_health(total_ms, len(self._adapters))
         return FabricPlan(
             probes=probes,
             scores=scores,
@@ -263,7 +264,7 @@ def observations_from_scores(scores: Iterable[RouteScore]) -> tuple[TransferRout
     return tuple(out)
 
 
-def _adapters_from_inventory_paths(paths: tuple | list) -> tuple[TransportAdapter, ...]:
+def _adapters_from_inventory_paths(paths: tuple | list) -> tuple[ScorableAdapter, ...]:
     static_paths = tuple(p for p in paths if getattr(p, "kind", "") != "onefield")
     onefield = onefield_adapters_from_paths(paths)
     return (*adapters_from_paths(static_paths), *onefield)

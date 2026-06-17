@@ -132,13 +132,31 @@ class TransportSession(Protocol):
     async def repair(self, reason: str) -> RepairResult: ...
 
 
-class TransportAdapter(Protocol):
-    adapter_id: str
-    kind: str
+class ScorableAdapter(Protocol):
+    """The probe/score surface the routing *fabric* needs — a strict
+    subset of `TransportAdapter`. Some adapters (static-path hints,
+    loopback) are scoring-only and don't implement the full connect
+    lifecycle, so the fabric (which only calls probe/score) is typed
+    against this narrower protocol.
+
+    `adapter_id`/`kind` are read-only properties (not plain attributes):
+    every concrete adapter exposes them via @property, and a *settable*
+    Protocol attribute is NOT satisfied by a read-only property.
+    """
+
+    @property
+    def adapter_id(self) -> str: ...
+
+    @property
+    def kind(self) -> str: ...
 
     def probe(self) -> AdapterProbe: ...
 
     def score(self, *, intent: object | None = None, peer: object | None = None) -> RouteScore: ...
+
+
+class TransportAdapter(ScorableAdapter, Protocol):
+    """Full adapter: scoring + the async connect lifecycle."""
 
     async def prepare(
         self,
