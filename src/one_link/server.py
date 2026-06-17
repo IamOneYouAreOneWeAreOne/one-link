@@ -16463,6 +16463,8 @@ class UIServer:
         path, root_name, err = self._validate_ad_hoc_folder_path(local_path_raw)
         if err is not None:
             return web.json_response(err, status=400)
+        # err is None here, so the validator returned a real path + name.
+        assert path is not None and root_name is not None
         peer = self._resolve_online_peer(peer_fp)
         if peer is None:
             return web.json_response(
@@ -16541,6 +16543,8 @@ class UIServer:
         path, root_name, err = self._validate_ad_hoc_folder_path(local_path_raw)
         if err is not None:
             return web.json_response(err, status=400)
+        # err is None here, so the validator returned a real path + name.
+        assert path is not None and root_name is not None
         peer = self._resolve_online_peer(peer_fp)
         if peer is None:
             return web.json_response(
