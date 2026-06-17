@@ -2883,14 +2883,16 @@ class Daemon:
                 )
                 self._auto_install_in_flight = False
                 return
+            wheel = plan.wheel
+            assert wheel is not None  # guarded above (plan.wheel is None -> return)
             wheel_path = await loop.run_in_executor(
                 None,
                 lambda: download_to_temp(
-                    plan.wheel.asset_url,
-                    expected_size=plan.wheel.size,
+                    wheel.asset_url,
+                    expected_size=wheel.size,
                 ),
             )
-            expected = plan.wheel.expected_sha256
+            expected = wheel.expected_sha256
             if not expected:
                 log.warning(
                     "auto-install: SHA256SUMS missing wheel hash; "
