@@ -472,7 +472,9 @@ mod tests {
             x_sk,
             pq_dk,
             PqSphinxHop {
-                id: HopId::from_bytes([rand::random::<u8>(); SLOT_ID_LEN]),
+                // 32 INDEPENDENT random bytes; `[rand::random(); N]` would
+                // copy one byte and collide with DESTINATION_MARKER 1/256.
+                id: HopId::from_bytes(rand::random::<[u8; SLOT_ID_LEN]>()),
                 static_x_pk: x_pk,
                 static_pq_pk: Some(pq_ek),
             },
@@ -484,7 +486,9 @@ mod tests {
         (
             x_sk,
             PqSphinxHop {
-                id: HopId::from_bytes([rand::random::<u8>(); SLOT_ID_LEN]),
+                // 32 INDEPENDENT random bytes; `[rand::random(); N]` would
+                // copy one byte and collide with DESTINATION_MARKER 1/256.
+                id: HopId::from_bytes(rand::random::<[u8; SLOT_ID_LEN]>()),
                 static_x_pk: x_pk,
                 static_pq_pk: None,
             },

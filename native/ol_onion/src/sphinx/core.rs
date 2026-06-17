@@ -465,7 +465,12 @@ mod tests {
         (
             sk,
             SphinxHop {
-                id: HopId::from_bytes([rand::random::<u8>(); SLOT_ID_LEN]),
+                // 32 INDEPENDENT random bytes. `[rand::random::<u8>(); N]`
+                // evaluates the byte ONCE and copies it, yielding an
+                // all-same-byte id that collides with DESTINATION_MARKER
+                // ([0u8; 32]) 1/256 of the time → an upstream hop delivers
+                // early and the round-trip fails (the ~1-2% flake).
+                id: HopId::from_bytes(rand::random::<[u8; SLOT_ID_LEN]>()),
                 static_pk: pk,
             },
         )
