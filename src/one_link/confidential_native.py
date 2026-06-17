@@ -46,10 +46,13 @@ PROVIDER_TAG_INTEL_SGX = 5
 PROVIDER_TAG_AMD_SEV_SNP = 6
 PROVIDER_TAG_ARM_TRUSTZONE = 7
 
-# Tier ordering: matches `ol_confidential::ConfidentialTier` discriminants.
-TIER_SOFTWARE = 0
-TIER_HARDWARE_BOUND = 1
-TIER_HARDWARE_ATTESTED = 2
+# NOTE: the TIER_* tier-byte constants are defined ONCE, below, next to
+# verify_attestation (values 1/2/3, matching the Rust pyo3 layer's
+# min_tier_byte match + tier_byte(): 1=Software, 2=HardwareBound,
+# 3=HardwareAttested). An earlier stale 0/1/2 copy lived here and was
+# silently overwritten by that block — its values were WRONG (0 is
+# rejected by Rust as an unknown tier byte, and 1 would mean Software
+# where HardwareBound was intended), so it has been removed.
 
 
 class ConfidentialNotInstalled(RuntimeError):
