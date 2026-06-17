@@ -520,7 +520,7 @@ def _posix_fs_supports_sparse(parent: Path) -> bool:
         # st_blocks is in 512-byte units. A sparse file shows
         # near-zero blocks; a physically-allocated file shows
         # ~4096 (2 MB / 512).
-        is_sparse = st.st_blocks < 256
+        is_sparse = getattr(st, "st_blocks", 1 << 30) < 256  # st_blocks is POSIX-only
     except OSError:
         is_sparse = True
     finally:
@@ -1450,7 +1450,7 @@ class Daemon:
         # Owned by daemon; closed in stop(). New entries appear
         # when send_file's QUIC path dials a peer that advertised
         # a quic port.
-        self._quic_outbound: dict[str, object] = {}
+        self._quic_outbound: dict[str, Any] = {}  # native pyo3 QUIC conns (no stub)
         # peer_fp_hex -> advertised QUIC port (Wave 2d). Populated
         # by _handle_endpoint_update; consumed by the outbound
         # dial helper.
@@ -1470,7 +1470,7 @@ class Daemon:
         # peer_fp_hex -> native QUIC Connection (inbound). Wave 2e.
         # Populated by the accept loop after binding the peer's
         # fingerprint via the recent-callback deque below.
-        self._quic_inbound: dict[str, object] = {}
+        self._quic_inbound: dict[str, Any] = {}  # native pyo3 QUIC conns (no stub)
         # QUIC endpoint-advertisement healing. QUIC ports are
         # OS-assigned and can change on daemon restart. If a single
         # ENDPOINT_UPDATE is missed, the fast path used to stay dark
@@ -24936,7 +24936,7 @@ class Daemon:
         return {"ok": False, "error": last_error}
 
     @staticmethod
-    def _quic_connection_alive(conn: object) -> bool:
+    def _quic_connection_alive(conn: Any) -> bool:
         """Best-effort liveness for cached native QUIC connections."""
         if conn is None:
             return False
@@ -24957,7 +24957,7 @@ class Daemon:
         except Exception:
             return False
 
-    async def _get_or_dial_quic(self, peer_fp: str, peer) -> object | None:
+    async def _get_or_dial_quic(self, peer_fp: str, peer) -> "Any | None":  # native pyo3 QUIC conn
         """Wave 2e: return a cached outbound QUIC Connection to
         ``peer_fp`` or open a fresh one and cache it.
 
