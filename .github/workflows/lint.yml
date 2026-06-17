@@ -6,9 +6,11 @@ name: lint
 # imports, redefinitions, f-string mistakes) without churning on the
 # one-line / lazy-import style this codebase intentionally uses.
 #
-# mypy is NOT yet a hard gate (the audit reported ~305 errors; clearing
-# them is a separate, larger effort). It runs here REPORT-ONLY so the
-# error count is visible + trends down, then flips to gating once clean.
+# mypy is now a HARD gate too: the audit's ~305-error baseline has been
+# driven to ZERO across all of src/one_link, so regressions that
+# reintroduce type errors fail CI. Config lives in pyproject.toml
+# [tool.mypy] (check_untyped_defs + targeted ignore_missing_imports for
+# stubless native/3rd-party modules).
 
 on:
   push:
@@ -30,7 +32,7 @@ jobs:
         run: python -m ruff check src/one_link
 
   mypy:
-    name: mypy (report-only)
+    name: mypy (gate)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +43,5 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]" || pip install mypy
-      - name: mypy (report-only — not yet gating)
-        run: |
-          python -m mypy src/one_link 2>&1 | tail -40 || true
-          echo "::notice::mypy is report-only until the ~305 baseline errors are cleared"
+      - name: mypy (HARD GATE)
+        run: python -m mypy src/one_link
