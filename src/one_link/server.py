@@ -5525,18 +5525,18 @@ class UIServer:
             if not isinstance(limit, int) or limit <= 0 or limit > 500:
                 limit = 50
             try:
-                rows = state.recent_group_messages(group_id=gid, limit=limit)
+                msg_rows = state.recent_group_messages(group_id=gid, limit=limit)
             except Exception as e:
                 _err("query_failed", f"recent_group_messages: {e}")
                 return
             try:
                 reactions = state.list_reactions_for_messages([
-                    str(r.get("id")) for r in rows if r.get("id")
+                    str(r.get("id")) for r in msg_rows if r.get("id")
                 ])
             except Exception:
                 reactions = {}
             payload = []
-            for r in rows:
+            for r in msg_rows:
                 sender_pub = r.get("sender_pub")
                 item = {
                     "id": r.get("id"),
@@ -5584,13 +5584,13 @@ class UIServer:
             if not isinstance(limit, int) or limit <= 0 or limit > 100:
                 limit = 50
             try:
-                rows = state.recent_group_messages(group_id=gid, limit=500)
+                msg_rows = state.recent_group_messages(group_id=gid, limit=500)
             except Exception as e:
                 _err("query_failed", f"recent_group_messages: {e}")
                 return
             needle = query.casefold()
             matches = [
-                r for r in rows
+                r for r in msg_rows
                 if needle in str(r.get("body") or "").casefold()
             ][:limit]
             try:
