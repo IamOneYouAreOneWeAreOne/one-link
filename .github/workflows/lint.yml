@@ -33,7 +33,13 @@ jobs:
 
   mypy:
     name: mypy (gate)
-    runs-on: ubuntu-latest
+    # Windows runner: this codebase has Windows-only stdlib usage (winreg,
+    # ctypes.windll, msvcrt, subprocess CREATE_* flags) that typeshed marks
+    # sys.platform=="win32"; on a Linux runner mypy reports them as
+    # attr-defined. Checking on Windows resolves them (and matches the dev
+    # platform where the 298->0 clearance was done). Optional ML/UI deps are
+    # handled by ignore_missing_imports in pyproject.
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -224,6 +224,19 @@ ignore_missing_imports = true
 module = ["scipy", "scipy.*", "ml", "ml.*"]
 ignore_missing_imports = true
 
+# Optional ML / UI / system deps that are not installed in the lint CI
+# environment (and torch ships no usable stubs). Treat as Any there so the
+# mypy gate is deterministic regardless of which extras are present.
+[[tool.mypy.overrides]]
+module = [
+    "numpy", "numpy.*",
+    "torch", "torch.*",
+    "PIL", "PIL.*",
+    "psutil",
+    "qrcode", "qrcode.*",
+]
+ignore_missing_imports = true
+
 # v0.7.2 bandit config (audit finding C). We exclude tests because
 # fake-data + pytest harness use patterns bandit flags but are safe
 # in a test context (e.g. assert in tests, hardcoded keys for
