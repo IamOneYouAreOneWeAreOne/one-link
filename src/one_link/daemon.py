@@ -7066,13 +7066,14 @@ class Daemon:
             return
 
         # All other messages require an existing manager.
-        mgr = self._call_registry.get(call_id)
-        if mgr is None:
+        _mgr = self._call_registry.get(call_id)
+        if _mgr is None:
             log.info(
                 "living-presence: %s for unknown call_id %s from %s; dropping",
                 t, call_id[:8], peer_fp[:8],
             )
             return
+        mgr = _mgr
 
         if t == "CALL_ACCEPT":
             event = ManagerEvent(
@@ -22976,14 +22977,15 @@ class Daemon:
                 peer_hint = req.get("peer_fp")
                 if peer_hint is not None:
                     peer_hint = str(peer_hint).strip().lower() or None
-                link, reason = self._share_links.redeem(
+                _lk, reason = self._share_links.redeem(
                     token_hex, by_peer_fp=peer_hint,
                 )
-                if link is None:
+                if _lk is None:
                     await self._reply(writer, {
                         "ok": False, "error": reason,
                     })
                     return
+                link = _lk
                 await self._reply(writer, {
                     "ok": True,
                     "blob": link.blob_hex,
