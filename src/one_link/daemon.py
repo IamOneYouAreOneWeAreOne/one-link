@@ -1383,7 +1383,7 @@ def _harden_process_dumpability() -> None:
     """
     try:
         import resource  # POSIX only
-        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))  # type: ignore[attr-defined]  # POSIX-only
         log.info("hardened: RLIMIT_CORE=0 (no coredumps)")
     except (ImportError, OSError, ValueError) as e:
         # ImportError = Windows; OSError = permission/unsupported.
@@ -24035,6 +24035,7 @@ class Daemon:
                                 # own thread. Background-thread
                                 # call_soon_threadsafe is the
                                 # supported bridge.
+                                assert prtc is not None
                                 _cover_event_loop.call_soon_threadsafe(
                                     prtc.send_dc, target_peer, "control", envelope,
                                 )
@@ -25110,6 +25111,7 @@ class Daemon:
             try:
                 # 5 s timeout so we periodically check the daemon
                 # is still meant to be running. Cheap loop.
+                assert endpoint is not None
                 conn = await asyncio.to_thread(
                     endpoint.accept_blocking, 5000,
                 )
