@@ -63,6 +63,8 @@ import time
 import uuid
 import zlib
 from collections import deque
+
+from one_link._coerce import to_int
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
@@ -1577,7 +1579,7 @@ class Daemon:
         # Row 6 — cover-traffic background scheduler. Spawned in
         # start() after the daemon's circuits are initialised;
         # joined in stop(). None when not running.
-        self._cover_traffic = None
+        self._cover_traffic: "Optional[Any]" = None
         self._cover_emit_count: int = 0
         # Audit L8 May 2026 — telemetry counter lock. The cover-emit
         # background thread + the asyncio dispatch path both mutate
@@ -1942,7 +1944,7 @@ class Daemon:
         # sphinx scheduler. The env-gate flag is read here; F4 mode
         # contract (paranoid mandates / battery_save forbids) is
         # applied on every mode change via apply_mode_contract.
-        self._cover_traffic: Optional[Any] = None
+        self._cover_traffic = None
         self._cover_traffic_env_gate: bool = (
             os.environ.get("ONE_LINK_COVER_TRAFFIC", "0") == "1"
         )
@@ -3153,7 +3155,7 @@ class Daemon:
                 ed_pub_hex = bytes(pubkey).hex()
             address = getattr(rec, "last_address", None) or getattr(rec, "address", None)
             port = getattr(rec, "last_port", None) or getattr(rec, "port", None)
-            port_i = int(port)
+            port_i = to_int(port)
             if not ed_pub_hex or not address or port_i <= 0 or port_i > 65535:
                 return None
             short_id = getattr(rec, "short_id", peer_master_vk_hex[:8])
@@ -15729,7 +15731,7 @@ class Daemon:
             c["path"][p] += 1
         h = decision.get("onion_hops")
         try:
-            h_int = int(h)
+            h_int = to_int(h)
         except (TypeError, ValueError):
             h_int = None
         if h_int in c["onion_hops"]:
