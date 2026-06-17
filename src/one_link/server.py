@@ -6444,7 +6444,7 @@ class UIServer:
             if not isinstance(data_b64, str) or not data_b64:
                 _err("bad_chunk", "data_b64 required")
                 return
-            rec = self._phone_uploads[upload_id]
+            upload_rec = self._phone_uploads[upload_id]
             try:
                 chunk = base64.urlsafe_b64decode(
                     data_b64 + "=" * (-len(data_b64) % 4)
@@ -6458,30 +6458,30 @@ class UIServer:
                     f"chunk exceeds {PHONE_UPLOAD_CHUNK_SIZE} bytes",
                 )
                 return
-            if offset != rec["received_size"]:
+            if offset != upload_rec["received_size"]:
                 _err(
                     "offset_mismatch",
-                    f"expected offset {rec['received_size']}, got {offset}",
+                    f"expected offset {upload_rec['received_size']}, got {offset}",
                 )
                 return
-            if rec["received_size"] + len(chunk) > rec["expected_size"]:
+            if upload_rec["received_size"] + len(chunk) > upload_rec["expected_size"]:
                 _err(
                     "size_overflow",
                     "chunk would exceed declared size_bytes",
                 )
                 return
             try:
-                rec["fh"].write(chunk)
+                upload_rec["fh"].write(chunk)
             except Exception as e:
                 _err("staging_write_failed", f"cannot write chunk: {e}")
                 return
-            rec["received_size"] += len(chunk)
-            rec["last_chunk_ms"] = int(time.time() * 1000)
+            upload_rec["received_size"] += len(chunk)
+            upload_rec["last_chunk_ms"] = int(time.time() * 1000)
             _send({
                 "t": "send_file_chunk_ack",
                 "upload_id": upload_id,
                 "offset": offset,
-                "received_size": rec["received_size"],
+                "received_size": upload_rec["received_size"],
             })
             return
 
@@ -6494,22 +6494,22 @@ class UIServer:
             if not isinstance(upload_id, str) or upload_id not in self._phone_uploads:
                 _err("unknown_upload", "upload_id not found (init first / expired)")
                 return
-            rec = self._phone_uploads.pop(upload_id)
+            upload_rec = self._phone_uploads.pop(upload_id)
             try:
-                rec["fh"].close()
+                upload_rec["fh"].close()
             except Exception:
                 pass
-            if rec["received_size"] != rec["expected_size"]:
+            if upload_rec["received_size"] != upload_rec["expected_size"]:
                 with contextlib.suppress(OSError):
-                    Path(rec["path"]).unlink(missing_ok=True)
+                    Path(upload_rec["path"]).unlink(missing_ok=True)
                 _err(
                     "size_mismatch",
-                    f"got {rec['received_size']} of {rec['expected_size']} bytes",
+                    f"got {upload_rec['received_size']} of {upload_rec['expected_size']} bytes",
                 )
                 return
             # Now drive the same daemon machinery /api/send-file uses.
-            peer_fp = rec["peer_fp"]
-            upload_path = Path(rec["path"])
+            peer_fp = upload_rec["peer_fp"]
+            upload_path = Path(upload_rec["path"])
             try:
                 target_peer = await self.daemon.resolve_for_send(peer_fp)
                 if target_peer is None:
@@ -6527,7 +6527,7 @@ class UIServer:
                             "queued": True,
                             "paused": True,
                             "transfer_id": getattr(durable, "id", None),
-                            "filename": rec["filename"],
+                            "filename": upload_rec["filename"],
                             "reason": "peer_offline",
                         })
                         return
@@ -6569,7 +6569,7 @@ class UIServer:
                     "t": "send_file_result",
                     "ok": True,
                     "transfer_id": durable_transfer_id,
-                    "filename": rec["filename"],
+                    "filename": upload_rec["filename"],
                     "result": result if isinstance(result, dict) else {"result": str(result)},
                 })
             except Exception as e:
@@ -11080,7 +11080,13 @@ class UIServer:
             token = str(body.get("token") or "")
             self._sweep_setup_device_invites()
             invite = self._setup_device_invites.get(token)
-            pending = invite.get("pending_claim") if isinstance(invite, dict) else None
+            # Narrow `invite` to a dict up front (it's Optional from .get):
+            # everything below indexes it, and `pending` only exists when
+            # `invite` is a dict, so a missing/absent invite is the same
+            # "no pending claim" failure either way.
+            if not isinstance(invite, dict):
+                raise ValueError("no pending device claim for this invite")
+            pending = invite.get("pending_claim")
             if not isinstance(pending, dict):
                 raise ValueError("no pending device claim for this invite")
             # 2026-05-21 audit T1-L: previously /confirm minted a
