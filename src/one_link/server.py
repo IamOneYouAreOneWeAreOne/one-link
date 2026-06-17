@@ -51,6 +51,7 @@ from aiohttp import WSMsgType, web
 
 from one_link.build_identity import runtime_build_identity
 from one_link.paths import data_dir, inbox_dir
+from one_link._coerce import to_int
 from one_link.transfer_doctor import enrich_transfer_event
 from one_link.transfer_safety import classify_file_risk
 
@@ -1524,7 +1525,7 @@ class UIServer:
         #    "created_ms": int, "last_chunk_ms": int}
         # Cleaned up by _sweep_phone_uploads on every init/chunk.
         self._phone_uploads: dict[str, dict[str, Any]] = {}
-        self._removable_event_detector = None
+        self._removable_event_detector: Optional[RemovableEventDetector] = None
         self._removable_monitor_last_ms = 0
         self._removable_monitor_events = 0
         # v0.20.0: WebRTC peer manager for browser-as-peer connections.
@@ -8932,7 +8933,7 @@ class UIServer:
             {"id": "devices", "label": "Devices", "score": device_score},
             {"id": "people", "label": "People", "score": people},
         ]
-        overall = round(sum(int(r["score"]) for r in score_rows) / len(score_rows))
+        overall = round(sum(to_int(r["score"]) for r in score_rows) / len(score_rows))
 
         actions: list[dict[str, Any]] = []
         if not setup_ready:
@@ -9531,7 +9532,7 @@ class UIServer:
                 if not isinstance(s, dict):
                     return web.json_response({"error": "shares[*] must be objects"}, status=400)
                 try:
-                    idx = int(s.get("index"))
+                    idx = to_int(s.get("index"))
                     b = _b64.b64decode(str(s.get("bytes_b64") or ""), validate=True)
                 except Exception as e:
                     return web.json_response({
@@ -9624,7 +9625,7 @@ class UIServer:
                 if not isinstance(s, dict):
                     return web.json_response({"error": "shares[*] must be objects"}, status=400)
                 try:
-                    idx = int(s.get("index"))
+                    idx = to_int(s.get("index"))
                     b = _b64.b64decode(str(s.get("bytes_b64") or ""), validate=True)
                 except Exception as e:
                     return web.json_response({
@@ -11701,7 +11702,7 @@ class UIServer:
             options,
             key=lambda o: (
                 {"ready": 0, "current": 1, "pending": 2, "blocked": 3}.get(str(o["status"]), 4),
-                int(o["priority"]),
+                to_int(o["priority"]),
                 str(o["id"]),
             ),
         )
@@ -16822,8 +16823,8 @@ class UIServer:
                 "peer_fp": peer_fp,
                 "status": status,
                 "ok": bool(extra.get("ok", status == "pushed")),
-                "wants": int(extra.get("wants", 0) or 0),
-                "blobs_sent": int(extra.get("blobs_sent", 0) or 0),
+                "wants": to_int(extra.get("wants", 0) or 0),
+                "blobs_sent": to_int(extra.get("blobs_sent", 0) or 0),
                 "merkle_root": str(extra.get("merkle_root") or merkle_root),
             }
             for k, v in extra.items():
@@ -21653,16 +21654,18 @@ class UIServer:
                 "error": plan.error or "no wheel available for this host",
                 "plan": plan.to_dict(),
             }, status=409)
-        # Guarded just above (plan.wheel is None -> 409 return).
-        assert plan.wheel is not None
+        # Guarded just above (plan.wheel is None -> 409 return). Bind a
+        # local so the narrowing also holds inside the executor lambda.
+        wheel = plan.wheel
+        assert wheel is not None
 
         # Step 2: download
         try:
             wheel_path = await loop.run_in_executor(
                 None,
                 lambda: download_to_temp(
-                    plan.wheel.asset_url,
-                    expected_size=plan.wheel.size,
+                    wheel.asset_url,
+                    expected_size=wheel.size,
                 ),
             )
         except Exception as e:
