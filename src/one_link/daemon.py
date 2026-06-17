@@ -1490,6 +1490,7 @@ class Daemon:
         # native API.
         from collections import deque as _deque
         self._quic_recent_paired: "_deque[Any]" = _deque(maxlen=64)
+        self._cap_root_key: "Optional[bytes]" = None  # macaroon HMAC root (lazy)
         # Wave 2g: share-link registry (one-time send-to-anyone
         # capabilities). Mints + redeems happen through control
         # commands; persistence lives under data/share_links/.
@@ -13657,7 +13658,7 @@ class Daemon:
         falls back to a direct unlink.
         """
         with contextlib.suppress(OSError, AttributeError, ValueError):
-            quarantine_target = out_path.with_name(
+            quarantine_target: "Optional[Path]" = out_path.with_name(
                 out_path.name + ".failed." + secrets.token_hex(4)
             )
             try:
@@ -14721,7 +14722,7 @@ class Daemon:
         Returns the stepper's configuration + step/warning counters +
         the latest per-peer predicted disturbance (short-fp keys for
         readability). Never raises."""
-        out = {
+        out: dict[str, object] = {
             "enabled": bool(getattr(self, "_wave_forecast_enabled", False)),
             "available": wave_forecast_native.HAS_NATIVE,
             "steps": int(getattr(self, "_wave_forecast_steps", 0) or 0),
@@ -25410,7 +25411,7 @@ class Daemon:
                             # dispatcher so resume registry +
                             # capability checks fire normally.
                             await self._on_peer_message(
-                                synth_channel, msg,
+                                cast("ch.Channel", synth_channel), msg,
                             )
                         else:
                             ack_payload = f"unknown_t:{msg_type}".encode("utf-8")[:128]
