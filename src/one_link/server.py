@@ -6013,11 +6013,11 @@ class UIServer:
             if len(new_body.encode("utf-8")) > 65536:
                 _err("body_too_large", "max 64 KiB UTF-8")
                 return
-            rec = state.get_message(msg_id)
-            if rec is None:
+            msg_rec = state.get_message(msg_id)
+            if msg_rec is None:
                 _err("message_not_found", "message not found")
                 return
-            if rec.direction != "out":
+            if msg_rec.direction != "out":
                 _err("not_outbound", "can only edit your own outbound messages")
                 return
             try:
@@ -6059,11 +6059,11 @@ class UIServer:
             if not isinstance(peer_fp, str) or not peer_fp:
                 _err("bad_peer_fp", "peer_fp required")
                 return
-            rec = state.get_message(msg_id)
-            if rec is None:
+            msg_rec = state.get_message(msg_id)
+            if msg_rec is None:
                 _err("message_not_found", "message not found")
                 return
-            if rec.direction != "out":
+            if msg_rec.direction != "out":
                 _err("not_outbound", "can only delete your own outbound messages")
                 return
             try:
