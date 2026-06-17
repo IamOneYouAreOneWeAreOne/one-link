@@ -2202,7 +2202,7 @@ class Daemon:
                         last_exc = e
                         time.sleep(_LOCK_HANDOFF_INTERVAL)
                 if last_exc is not None:
-                    e = last_exc
+                    exc = last_exc
                     f.seek(0)
                     # Read whatever PID is in the file for a friendlier
                     # error message; if we can't read it, fall back to
@@ -2216,7 +2216,7 @@ class Daemon:
                     raise RuntimeError(
                         "One Link daemon is already running"
                         f"{pid_hint} for this ONE_LINK_HOME"
-                    ) from e
+                    ) from exc
             elif sys.platform != "win32":
                 # ``sys.platform != "win32"`` is a guard mypy
                 # understands as a platform narrow — fcntl is then
@@ -2236,7 +2236,7 @@ class Daemon:
                         last_exc = e
                         time.sleep(_LOCK_HANDOFF_INTERVAL)
                 if last_exc is not None:
-                    e = last_exc
+                    exc = last_exc
                     f.seek(0)
                     pid_hint = ""
                     with contextlib.suppress(Exception):
@@ -2246,7 +2246,7 @@ class Daemon:
                     raise RuntimeError(
                         "One Link daemon is already running"
                         f"{pid_hint} for this ONE_LINK_HOME"
-                    ) from e
+                    ) from exc
 
             # Step 2: now (with the OS lock held) defence-in-depth
             # check on the PID file. If a previous daemon crashed
@@ -5358,7 +5358,7 @@ class Daemon:
             # us through expensive verify+accept paths and filling
             # the capability_audit table.
             if not hasattr(self, "_capability_grant_per_peer"):
-                self._capability_grant_per_peer = {}
+                self._capability_grant_per_peer: dict[str, Any] = {}
             gwindow = self._capability_grant_per_peer.setdefault(
                 peer_fp, deque()
             )
