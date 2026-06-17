@@ -13658,11 +13658,12 @@ class Daemon:
         falls back to a direct unlink.
         """
         with contextlib.suppress(OSError, AttributeError, ValueError):
-            quarantine_target: "Optional[Path]" = out_path.with_name(
+            target = out_path.with_name(
                 out_path.name + ".failed." + secrets.token_hex(4)
             )
+            quarantine_target: "Optional[Path]" = target
             try:
-                out_path.rename(quarantine_target)
+                out_path.rename(target)
             except OSError:
                 quarantine_target = None
             if quarantine_target is not None:
