@@ -1785,7 +1785,7 @@ class Daemon:
         # v0.5.1: optional rendezvous client. Started in start() iff URLs
         # are configured in state; stopped on shutdown. None when offline /
         # unconfigured — daemon falls back to mDNS-only behaviour.
-        self.rendezvous = None  # type: rendezvous_client.RendezvousClient | None
+        self.rendezvous: "rendezvous_client.RendezvousClient | None" = None
         # v0.5.3: peer-server port stamped during start() so live re-config
         # of rendezvous URLs (no restart) can re-derive advertised endpoints.
         self._rendezvous_peer_port: int = 0
