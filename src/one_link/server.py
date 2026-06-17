@@ -1495,7 +1495,9 @@ class UIServer:
             middlewares=[self._security_middleware],
         )
         self.runner: Optional[web.AppRunner] = None
-        self.site: Optional[web.TCPSite] = None
+        # BaseSite: bound via either web.TCPSite or web.SockSite (exclusive
+        # socket), so the common aiohttp base is the right annotation.
+        self.site: Optional[web.BaseSite] = None
         self.port: int = 0
         # v0.15.2: which interface the UI server is bound to. Set in
         # start() — readers (e.g. /api/me, control "status" report)
@@ -1535,7 +1537,7 @@ class UIServer:
         # that create UIServer without calling start() can still
         # read these attributes without an AttributeError. Real
         # values populated by _start_https_listener().
-        self.https_site: Optional[web.TCPSite] = None
+        self.https_site: Optional[web.BaseSite] = None
         self.https_port: Optional[int] = None
         self.https_cert_fp_sha256: Optional[str] = None
         # v0.20.2: hook the data-bridge listener so browser-peers
@@ -5806,7 +5808,7 @@ class UIServer:
             return
 
         if msg_t == "fetch_messages":
-            peer_fp = envelope.get("peer_fp")
+            peer_fp = envelope.get("peer_fp", "")
             if not isinstance(peer_fp, str) or not peer_fp:
                 _err("bad_peer_fp", "peer_fp required")
                 return
@@ -5870,7 +5872,7 @@ class UIServer:
             return
 
         if msg_t == "search_messages":
-            peer_fp = envelope.get("peer_fp")
+            peer_fp = envelope.get("peer_fp", "")
             if not isinstance(peer_fp, str) or not peer_fp:
                 _err("bad_peer_fp", "peer_fp required")
                 return
@@ -5932,7 +5934,7 @@ class UIServer:
 
         if msg_t == "react_message":
             msg_id = str(envelope.get("msg_id") or "").strip()
-            peer_fp = envelope.get("peer_fp")
+            peer_fp = envelope.get("peer_fp", "")
             emoji = envelope.get("emoji")
             op = str(envelope.get("op") or "add").strip().lower()
             if not msg_id:
@@ -5997,7 +5999,7 @@ class UIServer:
 
         if msg_t == "edit_message":
             msg_id = str(envelope.get("msg_id") or "").strip()
-            peer_fp = envelope.get("peer_fp")
+            peer_fp = envelope.get("peer_fp", "")
             new_body = envelope.get("body")
             if not msg_id:
                 _err("bad_msg_id", "msg_id required")
@@ -6050,7 +6052,7 @@ class UIServer:
 
         if msg_t == "delete_message":
             msg_id = str(envelope.get("msg_id") or "").strip()
-            peer_fp = envelope.get("peer_fp")
+            peer_fp = envelope.get("peer_fp", "")
             if not msg_id:
                 _err("bad_msg_id", "msg_id required")
                 return
@@ -6202,7 +6204,7 @@ class UIServer:
             # reply-to threads, outbox-on-offline, etc.) are identical
             # — the phone is a first-class send surface, not a parallel
             # half-implementation.
-            peer_fp = envelope.get("peer_fp")
+            peer_fp = envelope.get("peer_fp", "")
             body = envelope.get("body")
             if not isinstance(peer_fp, str) or not peer_fp:
                 _err("bad_peer_fp", "peer_fp required")
@@ -6283,7 +6285,7 @@ class UIServer:
             #   daemon → phone: {v, t:"set_peer_alias_result", rid,
             #                    ok, peer_fp, alias}
             #          OR       {v, t:"error", rid, code, message}
-            peer_fp = envelope.get("peer_fp")
+            peer_fp = envelope.get("peer_fp", "")
             alias = envelope.get("alias")
             if not isinstance(peer_fp, str) or not peer_fp:
                 _err("bad_peer_fp", "peer_fp required")
@@ -6318,7 +6320,7 @@ class UIServer:
             #                    peer_fp, muted (bool)}
             #   daemon → phone: {v, t:"set_peer_mute_result", rid,
             #                    ok, peer_fp, muted}
-            peer_fp = envelope.get("peer_fp")
+            peer_fp = envelope.get("peer_fp", "")
             muted = envelope.get("muted")
             if not isinstance(peer_fp, str) or not peer_fp:
                 _err("bad_peer_fp", "peer_fp required")
@@ -6353,7 +6355,7 @@ class UIServer:
             #                    upload_id, chunk_size}
             #            OR     {v, t:"error", rid, code, message}
             self._sweep_phone_uploads()
-            peer_fp = envelope.get("peer_fp")
+            peer_fp = envelope.get("peer_fp", "")
             filename = envelope.get("filename") or "upload.bin"
             mime = envelope.get("mime") or "application/octet-stream"
             size_bytes = envelope.get("size_bytes")
@@ -21907,7 +21909,7 @@ class UIServer:
             # exist and the default semantics already prevent stealing.
             ex_sock = self._bind_exclusive_socket(bind_host, candidate)
             if ex_sock is not None:
-                site = web.SockSite(self.runner, ex_sock)
+                site: web.BaseSite = web.SockSite(self.runner, ex_sock)
                 try:
                     await site.start()
                 except OSError:
@@ -22050,7 +22052,7 @@ class UIServer:
             # either.
             ex_sock = self._bind_exclusive_socket(bind_host, candidate)
             if ex_sock is not None:
-                site = web.SockSite(self.runner, ex_sock, ssl_context=ctx)
+                site: web.BaseSite = web.SockSite(self.runner, ex_sock, ssl_context=ctx)
                 try:
                     await site.start()
                 except OSError:
