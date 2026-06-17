@@ -942,6 +942,9 @@ def run_app(
     else:
         _safe_echo("  using running daemon.")
 
+    # Reachable only via the loop's `break` (info is up) or the
+    # already-running branch; every failure path above returns first.
+    assert info is not None
     url = f"http://127.0.0.1:{info.server_port}/?t={info.token}"
     _safe_echo(f"  open: {url}")
     if not no_browser:

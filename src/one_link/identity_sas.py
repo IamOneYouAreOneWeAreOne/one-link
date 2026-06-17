@@ -30,7 +30,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional
+from typing import Callable, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +238,7 @@ def evaluate_rotation(
     inbound_master_vk_hex: str,
     inbound_signature_from_prior: Optional[bytes],
     existing: Optional[TrustRecord],
-    verify_prior_signature: callable,
+    verify_prior_signature: Callable[..., bool],
 ) -> RotationDecision:
     """Decide what to do with an inbound master_vk.
 

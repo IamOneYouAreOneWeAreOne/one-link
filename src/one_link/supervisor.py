@@ -36,7 +36,7 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from one_link import crash_log
 from one_link.paths import data_dir
@@ -173,9 +173,9 @@ def run(
     *,
     max_crashes: int = DEFAULT_MAX_CRASHES,
     window_s: float = DEFAULT_WINDOW_S,
-    spawn: callable = _spawn_daemon_child,
-    sleep: callable = time.sleep,
-    now: callable = time.time,
+    spawn: Callable[..., Any] = _spawn_daemon_child,
+    sleep: Callable[[float], None] = time.sleep,
+    now: Callable[[], float] = time.time,
 ) -> int:
     """Supervise the daemon — block until clean exit or circuit-trip.
 
