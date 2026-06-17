@@ -57,6 +57,8 @@ from one_link.transfer_safety import classify_file_risk
 
 if TYPE_CHECKING:
     from one_link.daemon import Daemon
+    from one_link.removable_media import RemovableEventDetector
+    from one_link.state import PeerRecord
 
 log = logging.getLogger("one_link.server")
 
@@ -5287,8 +5289,8 @@ class UIServer:
                 log.warning("phone global search file scan failed: %s", e)
             peer_lookup: dict[str, str] = {}
             try:
-                for rec in state.list_peers():
-                    peer_lookup[rec.fingerprint] = rec.display_name
+                for pr in state.list_peers():
+                    peer_lookup[pr.fingerprint] = pr.display_name
             except Exception:
                 pass
             messages = list(hits.get("messages") or [])
@@ -5423,14 +5425,14 @@ class UIServer:
             except ValueError:
                 _err("bad_group_id", "group_id must be hex")
                 return
-            rec = state.get_peer(peer_fp)
-            if rec is None or rec.trust != "pinned" or not rec.pubkey:
+            peer_rec: "Optional[PeerRecord]" = state.get_peer(peer_fp)
+            if peer_rec is None or peer_rec.trust != "pinned" or not peer_rec.pubkey:
                 _err("bad_member", "member must be a paired pinned peer")
                 return
             try:
                 result = await asyncio.wait_for(
                     self.daemon.add_group_member(
-                        group_id=gid, member_pubkey=rec.pubkey, role=role,
+                        group_id=gid, member_pubkey=peer_rec.pubkey, role=role,
                     ),
                     timeout=20.0,
                 )
@@ -5458,14 +5460,14 @@ class UIServer:
             except ValueError:
                 _err("bad_group_id", "group_id must be hex")
                 return
-            rec = state.get_peer(peer_fp)
-            if rec is None or not rec.pubkey:
+            peer_rec = state.get_peer(peer_fp)
+            if peer_rec is None or not peer_rec.pubkey:
                 _err("bad_member", "unknown member")
                 return
             try:
                 result = await asyncio.wait_for(
                     self.daemon.remove_group_member(
-                        group_id=gid, member_pubkey=rec.pubkey,
+                        group_id=gid, member_pubkey=peer_rec.pubkey,
                     ),
                     timeout=20.0,
                 )
@@ -6298,8 +6300,8 @@ class UIServer:
                 _err("alias_too_long", "alias max 64 chars")
                 return
             try:
-                rec = state.get_peer(peer_fp)
-                if rec is None:
+                peer_rec = state.get_peer(peer_fp)
+                if peer_rec is None:
                     _err("peer_not_found", "peer not in roster")
                     return
                 updated = state.set_peer_profile(peer_fp, local_alias=alias)
@@ -6330,8 +6332,8 @@ class UIServer:
                 _err("bad_muted", "muted must be true or false")
                 return
             try:
-                rec = state.get_peer(peer_fp)
-                if rec is None:
+                peer_rec = state.get_peer(peer_fp)
+                if peer_rec is None:
                     _err("peer_not_found", "peer not in roster")
                     return
                 updated = state.set_peer_profile(peer_fp, muted=muted)
