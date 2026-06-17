@@ -104,8 +104,12 @@ jobs:
       - name: cargo test (build)
         timeout-minutes: 55
         run: cargo test --workspace --exclude one_link_native --release --no-run
+      # 35 min: the wall-clock constant-time gates run fixed iteration
+      # counts, so on slower ubuntu/windows runners the suite's RUNTIME
+      # (binaries already built above) runs a bit past 20 min — macOS
+      # finishes well under it. Not a hang; give the slower legs room.
       - name: cargo test (run)
-        timeout-minutes: 20
+        timeout-minutes: 40
         run: cargo test --workspace --exclude one_link_native --release
 
       # Non-blocking strict pass: enforce the wall-clock timing gates
