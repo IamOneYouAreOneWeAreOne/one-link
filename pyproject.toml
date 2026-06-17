@@ -216,6 +216,14 @@ ignore_missing_imports = true
 module = ["onnxruntime", "onnxruntime.*", "sqlcipher3", "sqlcipher3.*"]
 ignore_missing_imports = true
 
+# scipy ships no type stubs / py.typed marker. The `ml.*` modules import
+# each other as top-level `ml.<x>` (resolved at runtime via a sys.path
+# shim in the ML oracles), which the checker can't follow — they are
+# optional training-time helpers, so silence the missing-import noise.
+[[tool.mypy.overrides]]
+module = ["scipy", "scipy.*", "ml", "ml.*"]
+ignore_missing_imports = true
+
 # v0.7.2 bandit config (audit finding C). We exclude tests because
 # fake-data + pytest harness use patterns bandit flags but are safe
 # in a test context (e.g. assert in tests, hardcoded keys for
