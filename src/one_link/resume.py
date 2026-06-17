@@ -87,7 +87,7 @@ from typing import Any, Iterable
 try:
     from blake3 import blake3 as _blake3
 except ImportError:  # pragma: no cover - optional dep
-    _blake3 = None  # type: ignore[assignment]
+    _blake3 = None  # type: ignore[assignment,misc]  # optional dep: rebind imported name to None
 
 log = logging.getLogger(__name__)
 

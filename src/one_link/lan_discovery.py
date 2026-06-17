@@ -891,7 +891,7 @@ async def enrich_via_ssdp_xml(
         return_exceptions=True,
     )
     for d, xml in zip(targets, xmls):
-        if isinstance(xml, Exception) or not xml:
+        if isinstance(xml, BaseException) or not xml:
             continue
         info = parse_upnp_description(xml)
         if info.get("friendlyName") and not d.hostname:
@@ -1705,7 +1705,7 @@ async def full_scan(
     )
     batches: list[list[DiscoveredDevice]] = []
     for r in results:
-        if isinstance(r, Exception):
+        if isinstance(r, BaseException):
             log.debug("scanner failed: %s", r)
             continue
         batches.append(r)
@@ -1784,13 +1784,13 @@ async def full_scan(
 def _local_ips() -> list[str]:
     """Return this machine's own LAN IP addresses (so we filter
     ourselves out of the discovery results)."""
-    ips = set()
+    ips: set[str] = set()
     try:
         for fam, _t, _p, _c, sockaddr in socket.getaddrinfo(
             socket.gethostname(), None,
         ):
             if fam == socket.AF_INET:
-                ips.add(sockaddr[0])
+                ips.add(str(sockaddr[0]))
     except Exception:
         pass
     # Loopback is always self.
