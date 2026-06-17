@@ -33,6 +33,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+from one_link._coerce import to_int
 from one_link.confidential_native import (
     HAS_NATIVE,
     AttestationDoc,
@@ -291,11 +292,11 @@ class AttestationWire:
         # - platform_quote: bounded to 64 KiB raw → ~87382 chars
         #   (TPM-quote upper bound)
         return cls(
-            provider_tag=int(d["provider_tag"]),  # type: ignore[arg-type]
+            provider_tag=to_int(d["provider_tag"]),
             master_vk_b64=_b64str("master_vk", 2700),
             peer_nonce_b64=_b64str("peer_nonce", 60),
-            issued_unix=int(d["issued_unix"]),  # type: ignore[arg-type]
-            deadline_unix=int(d["deadline_unix"]),  # type: ignore[arg-type]
+            issued_unix=to_int(d["issued_unix"]),
+            deadline_unix=to_int(d["deadline_unix"]),
             field_witness_commitment_b64=(
                 None
                 if d.get("field_witness_commitment") is None
