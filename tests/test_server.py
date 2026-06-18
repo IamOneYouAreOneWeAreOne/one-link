@@ -9,7 +9,6 @@ WS event stream.
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import os
 import socket
@@ -929,6 +928,134 @@ async def test_api_send_file_online_creates_durable_intent_before_send(
     }]
     assert queued and queued[0]["path"].is_file() is True
     assert queued[0]["path"].read_bytes() == b"send me safely"
+    state.close()
+
+
+def _durable_send_daemon(state, peer_fp, *, send_file, resumes):
+    """Build a fake daemon that pre-queues a durable transfer row (like the
+    real one) so the api_send_file failure paths can be exercised."""
+
+    class _Daemon:
+        me = SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa")
+
+        def __init__(self):
+            self.state = state
+
+        async def resolve_for_send(self, needle):
+            return SimpleNamespace(
+                short_id="bbbbbbbb", ed_pub_hex=(b"\xbb" * 32).hex(),
+            )
+
+        def _peer_fp_from_peer(self, peer):
+            return peer_fp
+
+        def _schedule_resume_paused(self, fp, *, force=False):
+            resumes.append((fp, force))
+
+        def queue_file_transfer(
+            self, *, peer_fp, path, reason="peer offline", schedule_resume=True,
+        ):
+            return self.state.upsert_transfer(
+                id="durable-online-1",
+                direction="out",
+                peer_fp=peer_fp,
+                kind="file",
+                name=Path(path).name,
+                size=Path(path).stat().st_size,
+                status="paused",
+                progress_bytes=0,
+                total_bytes=Path(path).stat().st_size,
+                chunks_done=0,
+                chunks_total=1,
+                metadata={"path": str(path), "transient": True},
+            )
+
+        async def send_file(self, peer, path, *, transfer_id=None, **kwargs):
+            return await send_file(peer, path, transfer_id=transfer_id, **kwargs)
+
+    return _Daemon()
+
+
+@pytest.mark.asyncio
+async def test_api_send_file_transient_failure_without_transfer_id_queues(
+    tmp_path: Path, monkeypatch,
+):
+    """REGRESSION: a flapping/unreachable peer makes send_file raise a plain
+    transient error that does NOT carry a .transfer_id attribute. The durable
+    row was already created, so this must become a 202 'paused; will resume'
+    (One Link's offline-resilient promise) — not a hard error that dead-ends
+    the user with the staged bytes thrown away."""
+    from one_link.server import UIServer
+    from one_link.state import State
+
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    state = State(db_path=tmp_path / "state.db")
+    peer_fp = "bb" * 32
+    state.upsert_peer(
+        fingerprint=peer_fp, short_id="bbbbbbbb", pubkey=b"\xbb" * 32,
+        hostname="FlappyBox", trust_default="pinned",
+    )
+    resumes: list[tuple[str, bool]] = []
+
+    async def send_file(peer, path, *, transfer_id=None, **_kwargs):
+        # mirrors the daemon log's "Connection lost" — no transfer_id attr
+        raise ConnectionError("connection lost")
+
+    server = UIServer(
+        _durable_send_daemon(state, peer_fp, send_file=send_file, resumes=resumes)
+    )
+    resp = await server.api_send_file(_FakeMultipartReq([
+        _FakePart("peer", text="bbbbbbbb"),
+        _FakePart("file", data=b"queue me", filename="flap.bin"),
+    ]))
+    body = json.loads(resp.text)
+
+    assert resp.status == 202
+    assert body["paused"] is True
+    assert body["queued"] is True
+    assert body["transfer_id"] == "durable-online-1"
+    # the durable row survives (not deleted) so resume can finish it
+    assert state.get_transfer("durable-online-1") is not None
+    # and a resume was scheduled for the peer
+    assert resumes == [(peer_fp, True)]
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_api_send_file_permanent_failure_drops_durable_row(
+    tmp_path: Path, monkeypatch,
+):
+    """A permanent failure (sending disabled by policy) must surface a hard
+    error AND drop the orphaned durable row so it doesn't retry forever."""
+    from one_link.server import UIServer
+    from one_link.state import State
+
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    state = State(db_path=tmp_path / "state.db")
+    peer_fp = "bb" * 32
+    state.upsert_peer(
+        fingerprint=peer_fp, short_id="bbbbbbbb", pubkey=b"\xbb" * 32,
+        hostname="DeniedBox", trust_default="pinned",
+    )
+    resumes: list[tuple[str, bool]] = []
+
+    async def send_file(peer, path, *, transfer_id=None, **_kwargs):
+        raise RuntimeError("files capability is disabled for this peer")
+
+    server = UIServer(
+        _durable_send_daemon(state, peer_fp, send_file=send_file, resumes=resumes)
+    )
+    resp = await server.api_send_file(_FakeMultipartReq([
+        _FakePart("peer", text="bbbbbbbb"),
+        _FakePart("file", data=b"nope", filename="denied.bin"),
+    ]))
+    body = json.loads(resp.text)
+
+    assert resp.status == 403
+    assert body["code"] == "capability_disabled"
+    # orphaned durable row is cleaned up; no resume scheduled
+    assert state.get_transfer("durable-online-1") is None
+    assert resumes == []
     state.close()
 
 

@@ -20011,6 +20011,40 @@ class UIServer:
             log.exception("send_file failed: %s", e)
             translated = _translate_send_error(e)
             _record_translated_error(translated, e, source="server.api")
+            # We already created a durable, resumable transfer row
+            # (durable_transfer_id, with a staged copy of the file) before
+            # the live attempt. A transient failure here — peer flapping
+            # connect/disconnect, "connection lost", handshake not yet
+            # healed, timeout, momentarily unreachable — must NOT dead-end
+            # as a hard error: One Link promises offline-resilient delivery.
+            # Keep the staged bytes, schedule a resume, and report the same
+            # graceful 202 "paused; will resume" the exception-carries-
+            # transfer_id path returns above. Only genuinely permanent
+            # failures (sending disabled by policy, device blocked) surface
+            # a hard error — and there we drop the orphaned durable row so
+            # it doesn't retry a hopeless send forever.
+            permanent_codes = {"capability_disabled", "peer_rejected"}
+            code = str(translated.get("code") or "")
+            if durable_transfer_id and code not in permanent_codes:
+                keep_upload_for_resume = True
+                if target_fp:
+                    with contextlib.suppress(Exception):
+                        self.daemon._schedule_resume_paused(target_fp, force=True)
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "paused": True,
+                        "queued": True,
+                        "transfer_id": durable_transfer_id,
+                        "code": translated.get("code"),
+                        "error": translated.get("error"),
+                        "hint": "The device isn't reachable right now. One Link kept your file and will send it automatically when the device is back.",
+                    },
+                    status=202,
+                )
+            if durable_transfer_id and self.daemon.state is not None:
+                with contextlib.suppress(Exception):
+                    self.daemon.state.delete_transfer(durable_transfer_id)
             return web.json_response(translated, status=translated["status"])
         finally:
             try:
