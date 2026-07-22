@@ -59,9 +59,21 @@ HybridKEM caller surface stays identical.
 """
 from __future__ import annotations
 
+import logging
 import struct
 from dataclasses import dataclass
 from typing import Protocol
+
+log = logging.getLogger(__name__)
+
+
+class PQUnavailableError(RuntimeError):
+    """Raised when a post-quantum hybrid KEM is requested but the native
+    PQ engine is absent and the caller has NOT explicitly opted into a
+    classical-only downgrade. Failing closed here is the whole point: a
+    silent fall-back to X25519-only defeats the harvest-now-decrypt-later
+    protection this module exists for, and is exactly what a PQ-strip
+    downgrade attack tries to induce."""
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -444,21 +456,41 @@ def _post_bind_transcript(shared_secret: bytes, transcript: bytes) -> bytes:
 # ── default_kem factory ───────────────────────────────────────────
 
 
-def default_kem() -> HybridKEM | NativeHybridKEM:
-    """Pick the best-available hybrid KEM at runtime.
+def default_kem(*, allow_classical_downgrade: bool = False) -> HybridKEM | NativeHybridKEM:
+    """Pick the best-available hybrid KEM at runtime — FAIL-CLOSED.
 
-    Returns :class:`NativeHybridKEM` when ``one_link_native.pqkem``
-    is installed; otherwise :class:`HybridKEM` with the X25519 +
-    NullKEM placeholder. New code should call this rather than
-    instantiating ``HybridKEM`` directly so daemons running on
-    machines with the native engine installed automatically get
-    real PQ protection.
+    Returns :class:`NativeHybridKEM` (real ML-KEM-768 + X25519) when
+    ``one_link_native.pqkem`` is installed. When the native engine is
+    ABSENT this **raises** :class:`PQUnavailableError` rather than
+    silently returning :class:`HybridKEM` with the X25519 + NullKEM
+    placeholder (which contributes ZERO post-quantum entropy — i.e. no
+    HNDL protection at all).
 
-    The negotiation layer is the daemon's responsibility — if a peer
-    advertises only the Python placeholder, the local daemon
-    downgrades to ``HybridKEM(NullKEM)`` for that channel."""
+    A silent downgrade to classical-only was the prior behaviour and is a
+    real vulnerability: an attacker who can suppress the peer's PQ
+    capability (or a deploy that simply forgot to build the native wheel)
+    would run X25519-only while every audit log still says "PQ hybrid",
+    with only an INFO line to betray it. The downgrade must therefore be an
+    EXPLICIT, logged, auditable decision by the caller — never a default.
+
+    Pass ``allow_classical_downgrade=True`` to accept the classical-only
+    KEM anyway (logged at WARNING); use this only where the caller has
+    consciously decided X25519-only is acceptable for that channel."""
     from . import pqkem_native
 
     if pqkem_native.HAS_NATIVE:
         return NativeHybridKEM()
+    if not allow_classical_downgrade:
+        raise PQUnavailableError(
+            "post-quantum hybrid KEM unavailable: one_link_native.pqkem is not "
+            "installed, so default_kem() refuses to silently downgrade to "
+            "X25519-only (NullKEM = zero PQ entropy, no harvest-now-decrypt-later "
+            "protection). Build the native engine (maturin develop --release), or "
+            "pass allow_classical_downgrade=True to consciously accept classical-only."
+        )
+    log.warning(
+        "PQ-hybrid KEM unavailable (one_link_native.pqkem absent); DOWNGRADING to "
+        "X25519-only via explicit allow_classical_downgrade=True. This channel has "
+        "NO post-quantum / harvest-now-decrypt-later protection."
+    )
     return HybridKEM()

@@ -51,11 +51,15 @@ crypto + chunking core.
 
 from __future__ import annotations
 
+import hmac
 import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Optional
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 log = logging.getLogger(__name__)
 
@@ -65,11 +69,14 @@ log = logging.getLogger(__name__)
 _native_aead: Any = None
 _native_chunk: Any = None
 _native_store: Any = None
+_native_root: Any = None
 try:
+    import one_link_native
     from one_link_native import aead as _native_aead  # type: ignore[attr-defined,no-redef]
     from one_link_native import chunk as _native_chunk  # type: ignore[attr-defined,no-redef]
     from one_link_native import store as _native_store  # type: ignore[attr-defined,no-redef]
 
+    _native_root = one_link_native
     HAS_NATIVE: bool = True
 except ImportError as exc:
     HAS_NATIVE = False
@@ -80,21 +87,32 @@ except ImportError as exc:
         exc,
     )
 
+_STORE_OPERATION_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError)
+if HAS_NATIVE:
+    # ADR-0008 maps durable-store/WAL failures to this dedicated exception.
+    # Keep TypeError/AttributeError out of the degradation boundary: those
+    # indicate an API/programming defect and must stop the transfer loudly.
+    _STORE_OPERATION_ERRORS += (_native_root.OlChunkStoreError,)
+
 
 # Re-exported constants (kept in sync with the native crate via stubs).
 CDC_AVG_SIZE: int = 64 * 1024  # 64 KiB — matches ADR-0001 default
 AEAD_TAG_LEN: int = 16
 AEAD_FRAME_PLAINTEXT_LEN: int = 16 * 1024  # 16 KiB per AEAD frame
 SHARED_SECRET_LEN: int = 32
+MAX_CHUNK_PLAINTEXT_LEN: int = 256 * 1024
+MAX_CHUNK_CIPHERTEXT_LEN: int = MAX_CHUNK_PLAINTEXT_LEN + 4096
+MAX_RATCHET_SKIP: int = 1024
 
-# 2026-05-21 audit T2-D: opt-in chunk_id re-verify after decrypt.
-# Default OFF (the user's "no slowdowns" constraint). Operators in
-# adversarial-peer environments flip ``ONE_LINK_VERIFY_CHUNK_HASH=1``
-# to add a BLAKE3 pass per chunk that proves chunk_id == hash of
-# plaintext, defeating cache-poisoning via AAD-only commitment.
-_VERIFY_CHUNK_HASH: bool = (
-    __import__("os").environ.get("ONE_LINK_VERIFY_CHUNK_HASH") == "1"
-)
+# Native transfer is bidirectional over one authenticated Channel.  A single
+# root used in both directions is unsafe: both senders start at chunk index
+# zero, so simultaneous traffic repeats the same (key, nonce) pair.  Derive
+# independent traffic roots with explicit protocol labels before constructing
+# the per-direction ratchets.  The transcript is supplied as HKDF salt by the
+# Channel integration, binding the traffic roots to that exact handshake.
+_DIRECTION_SECRET_INFO_PREFIX = b"OL1/native-transfer/traffic-secret|v2|"
+_INITIATOR_TO_RESPONDER = b"initiator-to-responder"
+_RESPONDER_TO_INITIATOR = b"responder-to-initiator"
 
 # 2026-05-22 audit Batch T: max indices retained in the
 # replay-window seen-set. Tuned so that typical multi-file channels
@@ -196,6 +214,11 @@ class NativeTransferSession:
     # Fast-path AEAD primitive (cryptography.hazmat) — None when using
     # the native multi-frame backend.
     _fast_aead: Any = field(default=None, init=False, repr=False)
+    _store_failures: list[dict[str, Any]] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+    )
     # 2026-05-22 audit Batch T: per-session replay window. T1-B added
     # per-chunk_index AEAD keys but the daemon's receive path still
     # accepted wire-supplied ``chunk_index`` without a replay window
@@ -276,21 +299,18 @@ class NativeTransferSession:
         native AEAD layer's hard cap). If ``chunk_id`` is None we
         derive it from the chosen ``address_kind``:
 
-        * ``"raw"`` (default): ``BLAKE3(plaintext)`` — per-recipient
-          chunk IDs; identical plaintext from two senders produces
-          different chunk IDs. The conservative choice.
+        * ``"raw"`` (default): ``BLAKE3(plaintext)`` — ordinary global
+          content addressing.
         * ``"convergent"``: ``BLAKE3.derive_key("ol-chunk-addr-
           convergent-v1", plaintext)`` — opt-in for raw-media types
           whose plaintext bytes don't leak per-recipient information.
           Enables cross-sender dedup at the storage layer.
 
-        Explicit ``chunk_id`` (already-computed) bypasses the
-        derivation entirely. Performance: the AEAD layer's tag
-        covers chunk_id as AAD, so we DON'T re-hash on receive —
-        verification is via the AEAD tag itself, saving one full
-        BLAKE3 pass per chunk on both sides.
+        Explicit ``chunk_id`` (already-computed) bypasses sender-side
+        derivation. The receiver still proves that it is either the raw or
+        convergent address of the authenticated plaintext before returning it.
         """
-        if len(plaintext) > 256 * 1024:
+        if len(plaintext) > MAX_CHUNK_PLAINTEXT_LEN:
             raise ValueError(
                 f"chunk plaintext exceeds 256 KiB limit "
                 f"({len(plaintext)} bytes); split via cdc_iter first"
@@ -340,7 +360,11 @@ class NativeTransferSession:
             nonce = idx.to_bytes(12, "little")
             ciphertext = per_chunk_aead.encrypt(nonce, plaintext, chunk_id)
         else:
-            ciphertext = self._cipher.encrypt_chunk(chunk_id, plaintext)
+            # The native multi-frame backend must use the ratchet output too;
+            # a session-static cipher would silently discard the advertised
+            # per-chunk forward secrecy.
+            per_chunk_cipher = _native_aead.new_cipher(chunk_key, self.aead_kind)
+            ciphertext = per_chunk_cipher.encrypt_chunk(chunk_id, plaintext)
             if not isinstance(ciphertext, bytes):
                 ciphertext = bytes(ciphertext)
         return NativeChunkRecord(
@@ -405,7 +429,8 @@ class NativeTransferSession:
                 f"{chunk_strategy!r}"
             )
         path = Path(path)
-        size = path.stat().st_size
+        source_stat = path.stat()
+        size = source_stat.st_size
         # Phase B convergent-encryption default: raw-media files get
         # convergent BLAKE3 addresses (enables cross-sender dedup);
         # everything else stays on raw-BLAKE3 (per-recipient keys).
@@ -413,6 +438,7 @@ class NativeTransferSession:
 
         if size <= self.SINGLE_CHUNK_FAST_PATH_MAX:
             plaintext = path.read_bytes()
+            self._assert_source_stable(path, source_stat, len(plaintext))
             chunk_id = self._compute_address(plaintext, addr_kind)
             record = self.encrypt_chunk_bytes(plaintext, chunk_id=chunk_id)
             self._maybe_store(record, address_kind=addr_kind)
@@ -421,6 +447,7 @@ class NativeTransferSession:
 
         if size <= self.STREAMING_THRESHOLD:
             data = path.read_bytes()
+            self._assert_source_stable(path, source_stat, len(data))
             yield from self._encrypt_buffer(data, chunk_strategy, addr_kind)
             return
 
@@ -443,6 +470,36 @@ class NativeTransferSession:
                 self._maybe_store(record, address_kind=addr_kind)
                 bytes_sent += len(block)
                 yield record
+        self._assert_source_stable(path, source_stat, bytes_sent)
+
+    @staticmethod
+    def _assert_source_stable(path: Path, before: Any, bytes_read: int) -> None:
+        """Fail a transfer whose source changed during streaming.
+
+        Silently reaching EOF after a source was truncated left the receiver
+        waiting forever for the declared byte count. A same-path replacement
+        could instead send bytes that no longer matched the offer. Both are
+        recoverable retry conditions, but only if the sender reports them.
+        """
+        after = path.stat()
+        identity_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        identity_after = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        )
+        if bytes_read != before.st_size or identity_after != identity_before:
+            raise OSError(
+                "native transfer source changed or was truncated while reading "
+                f"{path} (declared={before.st_size}, read={bytes_read}, "
+                f"current={after.st_size})"
+            )
 
     # ── address-kind dispatch (Phase B convergent encryption) ──────
 
@@ -513,9 +570,9 @@ class NativeTransferSession:
         handled by the store's Bloom front."""
         if self._store is None:
             return
-        if self._store.has_chunk(record.chunk_id):
-            return
         try:
+            if self._store.has_chunk(record.chunk_id):
+                return
             self._store.append_chunk(
                 record_kind="blob",
                 address_kind=address_kind,
@@ -525,17 +582,15 @@ class NativeTransferSession:
                 length_plaintext=record.plaintext_len,
                 ciphertext=record.ciphertext,
             )
-        except Exception as exc:
-            # 2026-05-22 audit Batch W: chunk-store append failure
+        except _STORE_OPERATION_ERRORS as exc:
+            # 2026-05-22 audit Batch W: chunk-store lookup/append failure
             # silently disabled swarm-pull for the next peer that
             # asked for this chunk (we'd have it on disk via the
             # outbound transfer but the store's index never learned).
             # Record on the session's _degradation_events so the
             # daemon's diagnostics surface can show "this peer's
             # chunk-store append is failing, swarm-dedupe degraded."
-            log.warning("native chunk-store append failed (%s)", exc)
-            if not hasattr(self, "_store_failures"):
-                self._store_failures = []
+            log.warning("native chunk-store operation failed (%s)", exc)
             self._store_failures.append({
                 "at_ms": int(time.time() * 1000),
                 "chunk_id_prefix": record.chunk_id.hex()[:16],
@@ -551,9 +606,9 @@ class NativeTransferSession:
     def decrypt_chunk(self, record: NativeChunkRecord) -> bytes:
         """Decrypt a chunk record produced by the matching sender.
 
-        Integrity is guaranteed by the AEAD tag binding ``chunk_id``
-        as AAD: any chunk_id mismatch fails the tag check inside the
-        AEAD layer, raising before any plaintext is exposed.
+        The AEAD tag binds ``chunk_id`` as AAD, and a mandatory post-decrypt
+        content-address check proves the authenticated ID is derived from the
+        plaintext before a caller can persist it.
 
         2026-05-21 audit T2-D: a paired-but-malicious peer could
         legally craft a chunk whose ``chunk_id`` matches some other
@@ -564,13 +619,10 @@ class NativeTransferSession:
         poisoned: another peer asking ``has_chunk(target_id)`` would
         be served the attacker's bytes from our cache.
 
-        Defense: when ``ONE_LINK_VERIFY_CHUNK_HASH=1`` is set,
-        after decrypt we recompute ``BLAKE3(plaintext)`` and verify
-        ``== chunk_id`` before returning. Default off because
-        BLAKE3 over a 256 KiB chunk is ~85 µs (~33% slowdown on
-        the receive hot path). Operators in adversarial-peer
-        environments flip the flag; everyone else trusts the AAD-
-        as-commitment property + the peer's pinned trust.
+        Defense: after decrypt we always recompute the raw address, and only
+        on mismatch compute the convergent address. The declared ID must match
+        one of those protocol-defined content addresses. This is a production
+        integrity boundary, not an operator-controlled speed knob.
         """
         # 2026-05-22 audit Batch T: replay-window check. Reject a
         # re-presented chunk_index BEFORE deriving keys + decrypting.
@@ -580,6 +632,24 @@ class NativeTransferSession:
         # the file as size-overrun. With the seen-set short-circuit
         # the duplicate is bounced free.
         idx_key = int(record.chunk_index)
+        if idx_key < 0:
+            raise ValueError("chunk_index must be non-negative")
+        current_index = int(self._ratchet.current_index)
+        if idx_key > current_index + MAX_RATCHET_SKIP:
+            raise ValueError(
+                f"chunk_index {idx_key} exceeds receive window "
+                f"({current_index}..{current_index + MAX_RATCHET_SKIP})"
+            )
+        if not 0 <= int(record.plaintext_len) <= MAX_CHUNK_PLAINTEXT_LEN:
+            raise ValueError(
+                f"plaintext_len out of range: {record.plaintext_len}"
+            )
+        if len(record.chunk_id) != 32:
+            raise ValueError("chunk_id must be exactly 32 bytes")
+        if not AEAD_TAG_LEN <= len(record.ciphertext) <= MAX_CHUNK_CIPHERTEXT_LEN:
+            raise ValueError(
+                f"ciphertext length out of range: {len(record.ciphertext)}"
+            )
         if idx_key in self._recent_decrypted_indices:
             raise ReplayError(
                 f"chunk_index {idx_key} already decrypted this session "
@@ -593,9 +663,15 @@ class NativeTransferSession:
         # ``ChunkRatchet.skipped_store(cap=1024)``.
         if self._skipped_store is None:
             self._skipped_store = self._ratchet.skipped_store()
-        chunk_key = self._ratchet.key_at(
-            int(record.chunk_index), skipped=self._skipped_store,
-        )
+        in_order = idx_key == current_index
+        if in_order:
+            # Derive without committing the ratchet.  A forged tag must not
+            # consume the honest next key and desynchronize every later file.
+            chunk_key = self._ratchet.peek_at_current()
+        else:
+            chunk_key = self._ratchet.key_at(
+                idx_key, skipped=self._skipped_store,
+            )
         if self._fast_aead is not None:
             from cryptography.hazmat.primitives.ciphers.aead import (
                 AESGCM,
@@ -610,23 +686,34 @@ class NativeTransferSession:
                 nonce, record.ciphertext, record.chunk_id
             )
         else:
-            plaintext = self._cipher.decrypt_chunk(
+            per_chunk_cipher = _native_aead.new_cipher(chunk_key, self.aead_kind)
+            plaintext = per_chunk_cipher.decrypt_chunk(
                 record.chunk_id,
                 record.plaintext_len,
                 record.ciphertext,
             )
             if not isinstance(plaintext, bytes):
                 plaintext = bytes(plaintext)
-        # T2-D paranoid-mode hash re-verify.
-        if _VERIFY_CHUNK_HASH:
-            import blake3 as _blake3
-            actual = _blake3.blake3(plaintext).digest()
-            if actual != bytes(record.chunk_id):
-                raise ValueError(
-                    f"chunk_id mismatch on decrypt: declared "
-                    f"{bytes(record.chunk_id).hex()[:16]}, actual "
-                    f"{actual.hex()[:16]} (ONE_LINK_VERIFY_CHUNK_HASH=1)"
-                )
+        # T2-D: AAD authenticates the sender's claim but cannot make the
+        # claim a content address. Verify raw first (the common one-hash path);
+        # convergent media chunks pay the second hash only when necessary.
+        declared_id = bytes(record.chunk_id)
+        raw_id = bytes(_native_chunk.chunk_address_raw(plaintext))
+        address_valid = hmac.compare_digest(declared_id, raw_id)
+        if not address_valid:
+            convergent_id = bytes(
+                _native_chunk.chunk_address_convergent(plaintext)
+            )
+            address_valid = hmac.compare_digest(declared_id, convergent_id)
+        if not address_valid:
+            raise ValueError(
+                "chunk_id is not a content address of decrypted plaintext: "
+                f"declared={declared_id.hex()[:16]}, raw={raw_id.hex()[:16]}"
+            )
+        if in_order:
+            _committed_key, committed_index = self._ratchet.next_key()
+            if committed_index != idx_key:
+                raise RuntimeError("native chunk ratchet commit index mismatch")
         # Batch T: record this index as decrypted, FIFO-evicting the
         # oldest entry once the cap is hit.
         self._recent_decrypted_indices[idx_key] = None
@@ -649,6 +736,143 @@ class NativeTransferSession:
         return b"".join(self.decrypt_chunk(r) for r in records)
 
 
+# ─── Bidirectional channel integration ─────────────────────────────────────
+
+
+def derive_directional_secrets(
+    root_secret: bytes,
+    *,
+    transcript_hash: bytes,
+) -> tuple[bytes, bytes]:
+    """Derive canonical native-transfer traffic secrets.
+
+    Returns ``(initiator_to_responder, responder_to_initiator)``.  Calling
+    peers use the same canonical ordering and map it to local TX/RX according
+    to their authenticated handshake role.  Distinct HKDF info labels make
+    the two roots cryptographically independent; consequently chunk index
+    zero in each direction has neither a repeated AEAD key nor a repeated
+    key/nonce pair.
+
+    ``transcript_hash`` must be the authenticated channel transcript.  It is
+    deliberately required rather than optional so a caller cannot create
+    traffic roots that are accidentally reusable across channel handshakes.
+    """
+    root = bytes(root_secret)
+    transcript = bytes(transcript_hash)
+    if len(root) != SHARED_SECRET_LEN:
+        raise ValueError(
+            f"root_secret must be {SHARED_SECRET_LEN} bytes, got {len(root)}"
+        )
+    if len(transcript) != 32:
+        raise ValueError(
+            f"transcript_hash must be 32 bytes, got {len(transcript)}"
+        )
+
+    def _derive(label: bytes) -> bytes:
+        return HKDF(
+            algorithm=hashes.SHA256(),
+            length=SHARED_SECRET_LEN,
+            salt=transcript,
+            info=_DIRECTION_SECRET_INFO_PREFIX + label,
+        ).derive(root)
+
+    initiator_to_responder = _derive(_INITIATOR_TO_RESPONDER)
+    responder_to_initiator = _derive(_RESPONDER_TO_INITIATOR)
+    if initiator_to_responder == responder_to_initiator:
+        # This is computationally unreachable for HKDF barring a catastrophic
+        # implementation failure.  Keep the invariant executable: silently
+        # reusing a root here would recreate the nonce-collision vulnerability.
+        raise RuntimeError("native directional traffic-secret collision")
+    return initiator_to_responder, responder_to_initiator
+
+
+@dataclass(frozen=True, slots=True)
+class NativeTransferDuplexSession:
+    """Direction-safe native transfer facade for one authenticated channel.
+
+    ``NativeTransferSession`` owns a stateful chunk ratchet and therefore must
+    never be shared by channel TX and RX.  This facade preserves the daemon's
+    existing one-object API while routing every encrypt operation to
+    ``tx_session`` and every decrypt operation to ``rx_session``.  The two
+    sessions are seeded from independent, role-bound traffic secrets.
+    """
+
+    tx_session: NativeTransferSession
+    rx_session: NativeTransferSession
+
+    def __post_init__(self) -> None:
+        if self.tx_session is self.rx_session:
+            raise ValueError("native TX and RX sessions must be distinct")
+        if self.tx_session.shared_secret == self.rx_session.shared_secret:
+            raise ValueError("native TX and RX traffic secrets must be distinct")
+        if self.tx_session.aead_kind != self.rx_session.aead_kind:
+            raise ValueError("native TX and RX AEAD kinds must match")
+        if self.tx_session.cipher_backend != self.rx_session.cipher_backend:
+            raise ValueError("native TX and RX cipher backends must match")
+
+    def encrypt_chunk_bytes(
+        self,
+        plaintext: bytes,
+        *,
+        chunk_id: Optional[bytes] = None,
+        address_kind: str = "raw",
+    ) -> NativeChunkRecord:
+        return self.tx_session.encrypt_chunk_bytes(
+            plaintext,
+            chunk_id=chunk_id,
+            address_kind=address_kind,
+        )
+
+    def encrypt_file(
+        self,
+        path: Path,
+        *,
+        chunk_strategy: str = "fixed",
+    ) -> Iterator[NativeChunkRecord]:
+        return self.tx_session.encrypt_file(path, chunk_strategy=chunk_strategy)
+
+    def decrypt_chunk(self, record: NativeChunkRecord) -> bytes:
+        return self.rx_session.decrypt_chunk(record)
+
+    def decrypt_records_to_bytes(
+        self,
+        records: list[NativeChunkRecord],
+    ) -> bytes:
+        return self.rx_session.decrypt_records_to_bytes(records)
+
+
+def duplex_session_from_directional_secrets(
+    tx_secret: bytes,
+    rx_secret: bytes,
+    *,
+    aead_kind: Optional[str] = None,
+    store_root: Optional[Path] = None,
+    cipher_backend: str = "fast",
+) -> NativeTransferDuplexSession:
+    """Construct a direction-safe facade from role-mapped traffic roots."""
+    tx = bytes(tx_secret)
+    rx = bytes(rx_secret)
+    if tx == rx:
+        raise ValueError("native TX and RX traffic secrets must be distinct")
+    return NativeTransferDuplexSession(
+        tx_session=session_from_shared_secret(
+            tx,
+            aead_kind=aead_kind,
+            store_root=store_root,
+            cipher_backend=cipher_backend,
+        ),
+        rx_session=session_from_shared_secret(
+            rx,
+            aead_kind=aead_kind,
+            # decrypt_chunk does not touch the outbound ciphertext store.
+            # Opening the same native store twice can create avoidable lock
+            # contention, so the one local TX session owns that handle.
+            store_root=None,
+            cipher_backend=cipher_backend,
+        ),
+    )
+
+
 # ─── Session establishment ─────────────────────────────────────────────────
 
 
@@ -669,7 +893,12 @@ def establish_session_pair(
     """
     from . import pq_hybrid
 
-    kem = pq_hybrid.default_kem()
+    # In-process test helper: accept the classical-only KEM when the native
+    # engine is absent (CI without the maturin wheel) so the round-trip still
+    # exercises. The daemon's real flow derives its secret from the channel
+    # handshake (session_from_shared_secret), not this helper, and must NOT
+    # pass allow_classical_downgrade -- there a missing PQ engine fails closed.
+    kem = pq_hybrid.default_kem(allow_classical_downgrade=True)
     sk, pk = kem.keypair()
     ct, shared_send = kem.encapsulate(pk)
     shared_recv = kem.decapsulate(ct, sk)
@@ -706,9 +935,9 @@ def session_from_shared_secret(
     Daemon callers wire in the channel handshake's
     ``HKDF(shared_secret, salt, info=...)`` output here.
 
-    ``aead_kind`` defaults to AES on hosts with hardware AES-NI,
-    ChaCha20-Poly1305 elsewhere — the same heuristic the legacy
-    channel uses for its session cipher.
+    ``aead_kind`` defaults to ChaCha20-Poly1305 as a protocol constant.
+    Cipher choice cannot depend on each endpoint's local CPU features: a
+    heterogeneous AES-NI/non-AES pair must construct the same AEAD.
 
     ``cipher_backend`` defaults to ``"fast"`` (cryptography.hazmat
     BoringSSL-backed AEAD); set to ``"native"`` to use
@@ -716,7 +945,7 @@ def session_from_shared_secret(
     if not HAS_NATIVE:
         raise RuntimeError("native_transfer requires one_link_native")
     if aead_kind is None:
-        aead_kind = "aes" if _native_aead.host_has_hardware_aes() else "chacha"
+        aead_kind = "chacha"
     return NativeTransferSession(
         shared_secret=shared_secret,
         aead_kind=aead_kind,

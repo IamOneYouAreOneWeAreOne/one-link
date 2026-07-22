@@ -28,9 +28,15 @@ except ImportError as exc:
     HYBRID_SECRET_KEY_LEN = 2432
     HYBRID_CIPHERTEXT_LEN = 1120
     SHARED_SECRET_LEN = 32
-    log.info(
+    # WARNING, not INFO: losing the native PQ engine is a security-relevant
+    # capability downgrade (harvest-now-decrypt-later exposure), not routine
+    # info. default_kem() now fails closed on this unless a caller explicitly
+    # opts into the classical-only downgrade.
+    log.warning(
         "one_link_native.pqkem not installed (%s); ADR-0017 PQ-hybrid KEM "
-        "unavailable. Build via `cd native && maturin develop --release`.",
+        "UNAVAILABLE -- PQ protection is OFF unless the native engine is built "
+        "(`cd native && maturin develop --release`). default_kem() will fail "
+        "closed rather than silently downgrade to X25519-only.",
         exc,
     )
 
