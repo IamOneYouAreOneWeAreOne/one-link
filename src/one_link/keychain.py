@@ -91,6 +91,24 @@ def _load_keyring():
         raise KeychainBackendError("keyring import failed") from exc
 
 
+def _keyring_has_no_backend(exc: Exception) -> bool:
+    """True iff ``exc`` is keyring's typed no-functional-backend signal.
+
+    ``NoKeyringError`` is the library's deliberate statement that this host
+    has no credential store to ask at all (headless Linux without a Secret
+    Service, locked-down service accounts). That is semantically identical
+    to keyring not being installed — which already falls back to the private
+    local key file — and is NOT a failed lookup on an existing store, so
+    honoring it does not weaken the absence-is-unproven rule for every other
+    exception.
+    """
+    try:
+        from keyring.errors import NoKeyringError  # type: ignore[import-not-found]
+    except Exception:  # pragma: no cover - keyring missing or broken
+        return False
+    return isinstance(exc, NoKeyringError)
+
+
 # ── Local key-file fallback ───────────────────────────────────────────
 # 2026-06-16 (external-audit remediation): the OS keychain is the
 # PREFERRED home for the state.db key, but on headless Linux (no Secret
@@ -321,6 +339,13 @@ def get_passphrase() -> str | None:
         except Exception as e:
             if isinstance(e, KeyMaterialIntegrityError):
                 raise
+            if _keyring_has_no_backend(e):
+                log.info(
+                    "keychain: no functional OS keychain backend on this "
+                    "host; the private local key file is the authority "
+                    "channel (at-rest encryption stays on)."
+                )
+                return _read_local_key()
             raise KeychainBackendError(
                 "OS keychain lookup failed; authority absence is unproven"
             ) from e
@@ -662,32 +687,42 @@ def ensure_passphrase() -> str | None:
                     ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER, new_pw,
                 )
             except Exception as write_exc:
-                # Some backends can commit and then report an error.  Prove
-                # the postcondition before deciding whether local creation is
-                # safe; a failed lookup is not absence.
-                try:
-                    after = kr.get_password(
-                        ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER
+                if _keyring_has_no_backend(write_exc):
+                    # Typed no-backend signal: there is no store the write
+                    # could have partially landed in, so local creation is
+                    # the designed channel, not a guess.
+                    log.info(
+                        "keychain: no functional OS keychain backend on "
+                        "this host; minting the state key in the private "
+                        "local key file."
                     )
-                except Exception as read_exc:
-                    raise KeychainBackendError(
-                        "OS keychain write outcome is unknown; refusing fallback creation"
-                    ) from read_exc
-                if after is not None:
-                    if not isinstance(after, str) or not after:
-                        raise KeyMaterialIntegrityError(
-                            "OS keychain returned invalid authority after a write failure"
+                else:
+                    # Some backends can commit and then report an error.
+                    # Prove the postcondition before deciding whether local
+                    # creation is safe; a failed lookup is not absence.
+                    try:
+                        after = kr.get_password(
+                            ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER
                         )
-                    if secrets.compare_digest(after, new_pw):
-                        return new_pw
-                    # Another authority appeared; never overwrite it and use
-                    # the proven backend winner.
-                    return after
-                log.warning(
-                    "keychain write failed (%s) and absence was re-confirmed; "
-                    "using the private local fallback",
-                    type(write_exc).__name__,
-                )
+                    except Exception as read_exc:
+                        raise KeychainBackendError(
+                            "OS keychain write outcome is unknown; refusing fallback creation"
+                        ) from read_exc
+                    if after is not None:
+                        if not isinstance(after, str) or not after:
+                            raise KeyMaterialIntegrityError(
+                                "OS keychain returned invalid authority after a write failure"
+                            )
+                        if secrets.compare_digest(after, new_pw):
+                            return new_pw
+                        # Another authority appeared; never overwrite it and
+                        # use the proven backend winner.
+                        return after
+                    log.warning(
+                        "keychain write failed (%s) and absence was "
+                        "re-confirmed; using the private local fallback",
+                        type(write_exc).__name__,
+                    )
             else:
                 try:
                     after = kr.get_password(

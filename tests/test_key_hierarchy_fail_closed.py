@@ -288,6 +288,60 @@ def test_empty_existing_local_sqlcipher_key_is_not_overwritten(
     _assert_preserved(path, b"")
 
 
+def test_headless_no_backend_host_mints_and_reuses_local_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """keyring's typed NoKeyringError proves the host has no credential
+    store at all (headless Linux without a Secret Service). That is the
+    designed local-key-file case, not an unproven lookup failure — the
+    regression here left every CI/server daemon permanently stateless."""
+    errors_mod = pytest.importorskip("keyring.errors")
+
+    class _NoBackendKeyring:
+        @staticmethod
+        def get_password(_service, _user):
+            raise errors_mod.NoKeyringError("no keyring backend on this host")
+
+        @staticmethod
+        def set_password(_service, _user, _value):
+            raise errors_mod.NoKeyringError("no keyring backend on this host")
+
+    path = tmp_path / keychain.LOCAL_KEY_FILENAME
+    monkeypatch.delenv(keychain.ENV_VAR, raising=False)
+    monkeypatch.delenv(keychain.DISABLE_ENV, raising=False)
+    monkeypatch.setattr(keychain, "_load_keyring", lambda: _NoBackendKeyring())
+    monkeypatch.setattr(keychain, "_local_key_path", lambda: path)
+
+    minted = keychain.ensure_passphrase()
+    assert isinstance(minted, str) and minted
+    assert path.exists()
+    # The read path takes the same typed branch and finds the local key.
+    assert keychain.get_passphrase() == minted
+
+
+def test_generic_keychain_lookup_failure_stays_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Anything other than the typed no-backend signal keeps meaning "the
+    store exists but the lookup failed" — absence stays unproven and no
+    replacement authority may be minted."""
+
+    class _BrokenKeyring:
+        @staticmethod
+        def get_password(_service, _user):
+            raise RuntimeError("dbus timeout")
+
+    path = tmp_path / keychain.LOCAL_KEY_FILENAME
+    monkeypatch.delenv(keychain.ENV_VAR, raising=False)
+    monkeypatch.delenv(keychain.DISABLE_ENV, raising=False)
+    monkeypatch.setattr(keychain, "_load_keyring", lambda: _BrokenKeyring())
+    monkeypatch.setattr(keychain, "_local_key_path", lambda: path)
+
+    with pytest.raises(keychain.KeychainBackendError):
+        keychain.get_passphrase()
+    assert not path.exists()
+
+
 def test_recovery_reports_existing_unavailable_seed_distinct_from_absence(
     tmp_path: Path,
 ) -> None:
