@@ -54,6 +54,7 @@ from __future__ import annotations
 import contextlib
 import gzip
 import io
+import logging
 import os
 import secrets
 import shutil
@@ -71,6 +72,7 @@ from typing import Any, BinaryIO, Iterable, Mapping, cast
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+log = logging.getLogger("one_link.backup_bundle")
 
 BUNDLE_MAGIC = b"OLBAK\x01\x00\x00"
 NONCE_LEN = 12
@@ -408,10 +410,14 @@ def _validate_archive_member(
 # Files inside the daemon data_dir that we INCLUDE in the default
 # bundle. Inbox + chunk-cache are large and not load-bearing for
 # identity / chat / groups, so they're opt-in via include_files.
+#
+# ``state.db-wal`` / ``state.db-shm`` are deliberately ABSENT: they are a
+# running SQLite's volatile shared state, not backup content. Both the
+# encrypted and unencrypted paths archive a coherent online snapshot whose
+# main file stands alone, so a restore can never depend on a sidecar — and
+# nothing reads a live mmap-backed ``-shm`` out from under a writer.
 DEFAULT_INCLUDE = {
     "state.db",
-    "state.db-wal",
-    "state.db-shm",  # may not exist; that's fine
     "master.seed",
     "data-root-key.bin",
     "lockbox.salt",
@@ -704,6 +710,7 @@ def create_bundle(
     # DEFAULT_INCLUDE nor any generated member.
     overrides: dict[str, Path] = {}
     excluded: set[str] = set()
+    extra_names: set[str] = set(extra_allowlist)
     temporary_owner: tempfile.TemporaryDirectory[str] | None = None
     try:
         state_path = data_dir / "state.db"
@@ -774,11 +781,60 @@ def create_bundle(
                     keychain.RECOVERY_KEY_FILENAME: artifact_path,
                 }
                 excluded = {"state.db-wal", "state.db-shm"}
+            elif db_state == "plaintext":
+                # An unencrypted database earns the SAME coherence guarantee:
+                # a main file archived beside its independently changing
+                # sidecars can restore torn state. The online-backup snapshot
+                # is self-contained, so no sidecar is archived at all.
+                temporary_owner = tempfile.TemporaryDirectory(
+                    prefix=".olbak-state-",
+                    dir=str(data_dir.parent),
+                )
+                temporary_root = Path(temporary_owner.name)
+                with contextlib.suppress(OSError):
+                    os.chmod(temporary_root, 0o700)
+                snapshot_path = temporary_root / "state.db"
+                try:
+                    state_encryption.create_plaintext_snapshot(
+                        source_path=state_path,
+                        destination_path=snapshot_path,
+                    )
+                except Exception as exc:
+                    # A file can carry SQLite's header magic and still be
+                    # unopenable: a truncated or corrupted database, or a
+                    # fixture. Refusing to back up then would withhold the
+                    # user's identity, seed, and keys over a damaged database
+                    # -- the moment a backup matters most. Preserve the raw
+                    # bytes (sidecars included, so nothing committed is lost)
+                    # and let restore/forensics deal with the damage.
+                    log.warning(
+                        "state.db could not be snapshotted (%s: %s); archiving "
+                        "the raw database and its sidecars instead",
+                        type(exc).__name__,
+                        exc,
+                    )
+                    temporary_owner.cleanup()
+                    temporary_owner = None
+                    extra_names = set(extra_names) | {
+                        "state.db-wal",
+                        "state.db-shm",
+                    }
+                else:
+                    overrides = {"state.db": snapshot_path}
+                    excluded = {"state.db-wal", "state.db-shm"}
+            else:
+                # Encrypted with no recoverable authority (keyring disabled and
+                # no explicit key): a coherent snapshot is impossible without
+                # the key, and dropping the WAL would silently discard
+                # committed transactions that were never checkpointed. Archive
+                # the sidecars alongside the main file, exactly as before, and
+                # let the restore path reassemble them.
+                extra_names = set(extra_names) | {"state.db-wal", "state.db-shm"}
 
         plaintext = _build_plaintext_archive(
             data_dir,
             include_files=include_files,
-            extra_allowlist=extra_allowlist,
+            extra_allowlist=extra_names,
             member_overrides=overrides,
             excluded_names=excluded,
         )

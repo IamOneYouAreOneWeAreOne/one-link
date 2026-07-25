@@ -586,6 +586,78 @@ def create_encrypted_snapshot(
         raise
 
 
+def create_plaintext_snapshot(
+    *,
+    source_path: Path,
+    destination_path: Path,
+) -> Path:
+    """Create one coherent, standalone snapshot of an UNENCRYPTED database.
+
+    The unencrypted twin of :func:`create_encrypted_snapshot`, and required
+    for the same two reasons. First, a main database file archived beside
+    its independently changing ``-wal``/``-shm`` sidecars is not a snapshot:
+    restoring that trio can yield a torn database. Second, those sidecars
+    are live shared state of a running SQLite — copying them out from under
+    an active writer can fault the process, not merely produce bad bytes.
+
+    The online-backup API reads a transactionally consistent view while
+    another connection keeps writing; the result is checkpointed into its
+    main file, switched to DELETE journaling so no sidecar is load-bearing,
+    closed, reopened, and verified before returning.
+    """
+
+    source = Path(source_path).resolve()
+    destination = Path(destination_path).resolve()
+    if source == destination:
+        raise ValueError("snapshot destination must differ from the source")
+    if os.path.lexists(destination):
+        raise FileExistsError(f"snapshot destination already exists: {destination}")
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    import sqlite3
+
+    source_conn: Any | None = None
+    destination_conn: Any | None = None
+    try:
+        source_conn = sqlite3.connect(
+            str(source), check_same_thread=False, isolation_level=None,
+        )
+        destination_conn = sqlite3.connect(
+            str(destination), check_same_thread=False, isolation_level=None,
+        )
+        source_conn.backup(destination_conn, pages=1024, sleep=0.01)
+        destination_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        destination_conn.execute("PRAGMA journal_mode = DELETE").fetchone()
+        destination_conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        destination_conn.close()
+        destination_conn = None
+        source_conn.close()
+        source_conn = None
+
+        # Reopen after every WAL handle is gone: proves the main file stands
+        # alone and never silently depends on a sidecar we do not archive.
+        verify = sqlite3.connect(str(destination), check_same_thread=False)
+        try:
+            verify.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        finally:
+            verify.close()
+        if os.name != "nt":
+            os.chmod(destination, 0o600)
+        with destination.open("r+b") as handle:
+            os.fsync(handle.fileno())
+        _fsync_parent_directory(destination)
+        return destination
+    except BaseException:
+        if destination_conn is not None:
+            with contextlib.suppress(Exception):
+                destination_conn.close()
+        if source_conn is not None:
+            with contextlib.suppress(Exception):
+                source_conn.close()
+        _remove_generated_database_family(destination)
+        raise
+
+
 def database_accepts_passphrase(db_path: Path, passphrase: str) -> bool:
     """Return true only when *passphrase* fully opens the encrypted DB."""
 
@@ -661,25 +733,43 @@ def replace_encrypted_database_key_atomic(
         raise
 
 
+# Every unencrypted SQLite database begins with this exact 16-byte magic
+# (SQLite file-format spec §1.3). SQLCipher encrypts the whole file
+# including the header, so its first bytes are ciphertext and cannot match.
+SQLITE_FILE_MAGIC = b"SQLite format 3\x00"
+
+
 def detect_db_state(db_path: Path) -> str:
     """Inspect db_path and return one of:
       - "missing"     no file (fresh install)
-      - "plaintext"   exists and opens with stdlib sqlite3
-      - "encrypted"   exists and rejects stdlib sqlite3 (likely
-                      SQLCipher OR corrupted)
+      - "plaintext"   an unencrypted SQLite file (header magic present)
+      - "encrypted"   header is not SQLite's magic (SQLCipher, or damaged)
       - "empty"       file exists but is zero bytes
+
+    Detection reads the file HEADER and never opens a database handle.
+
+    This is load-bearing, not a micro-optimization. The daemon holds the
+    live database open through SQLCipher, whose bundled SQLite is a second,
+    independent copy of the library inside this process. Two SQLite copies
+    that both open the same WAL database each keep their own shared-memory
+    bookkeeping for the ``-shm`` index and neither can see the other's
+    locks, so the mappings corrupt each other: probing a live database with
+    stdlib ``sqlite3`` faulted the writer thread outright (SIGBUS/SIGSEGV,
+    reproduced 19 times in 25 runs). A header read takes no lock, creates
+    no sidecar, and cannot perturb the running database.
     """
     if not db_path.exists():
         return "missing"
     if db_path.stat().st_size == 0:
         return "empty"
-    import sqlite3 as _stdsq
     try:
-        with _stdsq.connect(str(db_path)) as c:
-            c.execute("SELECT count(*) FROM sqlite_master").fetchone()
-        return "plaintext"
-    except _stdsq.DatabaseError:
+        with open(db_path, "rb") as handle:
+            header = handle.read(len(SQLITE_FILE_MAGIC))
+    except OSError:
+        # Unreadable is not provably plaintext; treat it the way an
+        # unreadable database was always treated -- as not-plaintext.
         return "encrypted"
+    return "plaintext" if header == SQLITE_FILE_MAGIC else "encrypted"
 
 
 def migrate_plaintext_to_encrypted(

@@ -63,6 +63,38 @@ def test_detect_empty(tmp_path: Path):
     assert se.detect_db_state(p) == "empty"
 
 
+def test_detect_never_opens_a_database_handle(tmp_path: Path, monkeypatch):
+    """Detection must read the header, never open the database.
+
+    The daemon holds the live database open through SQLCipher — a second,
+    independent SQLite library inside the same process. Two SQLite copies
+    that both open one WAL database keep separate shared-memory bookkeeping
+    for the ``-shm`` index and corrupt each other's mappings: probing a live
+    database with stdlib sqlite3 faulted the writer thread with
+    SIGBUS/SIGSEGV in 19 of 25 runs. Any future refactor that reintroduces
+    an open() here must fail this test rather than a user's daemon.
+    """
+    import sqlite3 as stdlib_sqlite3
+
+    p = tmp_path / "live.db"
+    conn = stdlib_sqlite3.connect(str(p))
+    conn.execute("CREATE TABLE t(x INTEGER)")
+    conn.commit()
+    conn.close()
+
+    def _forbidden(*args, **kwargs):  # pragma: no cover - assertion payload
+        raise AssertionError(
+            "detect_db_state opened a database handle; header inspection "
+            "only (a second SQLite library must never touch a live WAL db)"
+        )
+
+    monkeypatch.setattr(stdlib_sqlite3, "connect", _forbidden)
+    sqlcipher = pytest.importorskip("sqlcipher3")
+    monkeypatch.setattr(sqlcipher, "connect", _forbidden, raising=False)
+
+    assert se.detect_db_state(p) == "plaintext"
+
+
 def test_stale_plaintext_backup_cleanup_overwrites_every_byte_and_unlinks(
     tmp_path: Path,
     monkeypatch,
