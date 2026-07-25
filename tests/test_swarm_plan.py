@@ -192,7 +192,7 @@ def test_swarm_plan_uses_coherence_after_trust(tmp_path: Path):
     assert plan.assignments[0].source_peer_fp == "bb" * 32
 
 
-def test_swarm_plan_handles_large_sparse_claims_quickly(tmp_path: Path):
+def _timed_sparse_plan(chunk_count: int) -> tuple[float, object]:
     chunks = [
         FileChunkManifest(
             index=i,
@@ -201,7 +201,7 @@ def test_swarm_plan_handles_large_sparse_claims_quickly(tmp_path: Path):
             size=2048,
             hash=f"{i:064x}",
         )
-        for i in range(4096)
+        for i in range(chunk_count)
     ]
     manifest = FileManifest(
         name="large-sparse.bin",
@@ -232,10 +232,35 @@ def test_swarm_plan_handles_large_sparse_claims_quickly(tmp_path: Path):
         needed_indexes=[chunk.index for chunk in chunks],
         sources=sources,
     )
-    elapsed = time.perf_counter() - start
+    return time.perf_counter() - start, plan
+
+
+def test_swarm_plan_handles_large_sparse_claims_quickly(tmp_path: Path):
+    """Planning must scale ~linearly in chunk count.
+
+    A fixed 1-second wall cap gated shared-runner load, not the algorithm:
+    a loaded CI box ran the same healthy planner in 2.4 s where a dev box
+    runs it in ~0.2 s. The regression this test exists to catch is an
+    accidental O(n^2) in plan_swarm_sources, and that is machine-invariant
+    in the SCALING ratio: linear planning makes the 4096-chunk run ~8x the
+    512-chunk run, quadratic makes it ~64x. The loose absolute backstop
+    still catches a pathological constant factor."""
+    small_elapsed, _small_plan = _timed_sparse_plan(512)
+    elapsed, plan = _timed_sparse_plan(4096)
 
     assert plan.complete
-    assert len(plan.assignments) == manifest.chunk_count
-    assert sum(plan.per_source_counts().values()) == manifest.chunk_count
+    assert len(plan.assignments) == 4096
+    assert sum(plan.per_source_counts().values()) == 4096
     assert len(plan.sources) > 8
-    assert elapsed < 1.0
+    # Clamp the small-run denominator so timer noise cannot inflate the
+    # ratio on machines where 512 chunks plan in microseconds.
+    ratio = elapsed / max(small_elapsed, 0.005)
+    assert ratio < 24.0, (
+        f"4096-chunk plan took {ratio:.1f}x the 512-chunk plan "
+        f"({elapsed:.3f}s vs {small_elapsed:.3f}s); linear scaling is ~8x, "
+        "quadratic is ~64x. plan_swarm_sources likely regressed."
+    )
+    assert elapsed < 15.0, (
+        f"4096-chunk plan took {elapsed:.3f}s; even a heavily loaded runner "
+        "should finish well inside 15s unless the constant factor exploded."
+    )

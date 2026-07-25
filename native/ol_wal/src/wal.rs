@@ -193,24 +193,12 @@ impl Wal {
         // Single write of the whole batch — atomic up to the kernel's
         // pwrite semantics on this platform.
         self.file.write_all(&self.pending)?;
-        // Durability barrier. On macOS, sync_data via fs2's full_sync
-        // maps to F_FULLFSYNC.
-        #[cfg(target_os = "macos")]
-        {
-            use fs2::FileExt;
-            let _ = &self.file;
-            self.file.sync_data()?; // file.sync_all() also OK; sync_data is faster.
-                                    // Note: `fs2` does not currently expose F_FULLFSYNC directly
-                                    // on stable; we rely on `sync_data` mapping to fcntl(F_FULLFSYNC)
-                                    // when the file was opened with `fcntl(F_FULLFSYNC)`. On macOS,
-                                    // `sync_data` defaults to fsync — to truly hit the platter we
-                                    // open the file with `F_FULLFSYNC` set; for now `sync_data`
-                                    // is the closest portable surface.
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.file.sync_data()?;
-        }
+        // Durability barrier. Caveat on macOS: plain fsync/fdatasync does
+        // not force the platter; truly durable writes need
+        // fcntl(F_FULLFSYNC), which std does not expose. `sync_data` is the
+        // closest portable surface today and the F_FULLFSYNC upgrade is a
+        // named hardening item, not silently claimed.
+        self.file.sync_data()?;
         self.file_size += self.pending.len() as u64;
         self.pending.clear();
         Ok(())

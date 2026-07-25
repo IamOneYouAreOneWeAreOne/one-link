@@ -117,7 +117,12 @@ def test_out_of_tree_symlink_is_rejected(tmp_path):
         link.symlink_to(outside)
     except OSError:
         pytest.skip("symbolic links are unavailable on this host")
-    with pytest.raises(module.BundleError, match="escapes bundle"):
+    # On Windows every symlink is a reparse point, and the packager rejects
+    # that whole class before target classification (junction/reparse
+    # semantics are their own attack surface, and Windows bundles never ship
+    # links). Both messages are the same fail-closed outcome.
+    expected = "reparse point" if os.name == "nt" else "escapes bundle"
+    with pytest.raises(module.BundleError, match=expected):
         module.package_bundle(
             bundle,
             tmp_path / "bundle.zip",
@@ -141,7 +146,9 @@ def test_absolute_symlink_is_rejected_even_when_target_is_in_tree(tmp_path):
     except OSError:
         pytest.skip("symbolic links are unavailable on this host")
 
-    with pytest.raises(module.BundleError, match="target is absolute"):
+    # Windows rejects the reparse-point class before target classification.
+    expected = "reparse point" if os.name == "nt" else "target is absolute"
+    with pytest.raises(module.BundleError, match=expected):
         module.package_bundle(
             bundle,
             tmp_path / "bundle.zip",
@@ -167,6 +174,17 @@ def test_safe_symlink_is_integrity_indexed_with_target_digest(tmp_path):
         pytest.skip("symbolic links are unavailable on this host")
 
     output = tmp_path / "bundle.zip"
+    if os.name == "nt":
+        # Windows bundles never ship links: the packager refuses the whole
+        # reparse-point class, so "safe" relative symlinks are POSIX-only.
+        with pytest.raises(module.BundleError, match="reparse point"):
+            module.package_bundle(
+                bundle,
+                output,
+                executable="one-link",
+                epoch=1_700_000_000,
+            )
+        return
     module.package_bundle(
         bundle,
         output,

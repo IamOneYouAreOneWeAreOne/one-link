@@ -24,8 +24,8 @@
 //! 4. Explicit fail-closed status/errors on unsupported or disabled builds.
 //! 5. A bounded [`MemoryBackend`] used by adversarial unit tests.
 //!
-//! macOS FSKit and Windows WinFsp/Dokan live in separate crates and remain
-//! unimplemented; their presence never manufactures a successful mount.
+//! macOS `FSKit` and Windows `WinFsp`/`Dokan` live in separate crates and
+//! remain unimplemented; their presence never manufactures a successful mount.
 
 // `deny` (not `forbid`) so the one place that calls libc::getuid /
 // getgid in the FUSE adapter can locally lift it with

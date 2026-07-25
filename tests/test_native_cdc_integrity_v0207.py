@@ -45,6 +45,35 @@ def test_windows_msvc_native_cdc_link_is_reproducible(tmp_path):
     assert command[-2:] == ["/link", "/Brepro"]
 
 
+def test_windows_msvc_target_clang_uses_lld_link_switches(tmp_path, monkeypatch):
+    """An msvc-triple clang drives lld-link, which parses GNU ld switches as
+    input files (`could not open '0x180000000'`) — it must receive the
+    /Brepro + /base equivalents instead."""
+    monkeypatch.setattr(native_cdc, "_clang_targets_msvc", lambda _c: True)
+    command = _compile_command(
+        "clang.exe",
+        tmp_path / "scanner.c",
+        tmp_path / "scanner.dll",
+        target_os_name="nt",
+    )
+    assert "-Wl,/Brepro" in command
+    assert "-Wl,/base:0x180000000" in command
+    assert "-Wl,--no-insert-timestamp" not in command
+    assert "-Wl,--image-base,0x180000000" not in command
+
+
+def test_windows_gnu_target_clang_keeps_gnu_ld_switches(tmp_path, monkeypatch):
+    monkeypatch.setattr(native_cdc, "_clang_targets_msvc", lambda _c: False)
+    command = _compile_command(
+        "clang.exe",
+        tmp_path / "scanner.c",
+        tmp_path / "scanner.dll",
+        target_os_name="nt",
+    )
+    assert "-Wl,--no-insert-timestamp" in command
+    assert "-Wl,--image-base,0x180000000" in command
+
+
 def _write_sidecar(dll_path: Path, hex_hash: str) -> None:
     sidecar = dll_path.with_suffix(dll_path.suffix + ".sha256")
     sidecar.write_text(f"{hex_hash}  {dll_path.name}\n", encoding="ascii")

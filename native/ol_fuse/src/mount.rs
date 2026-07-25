@@ -94,11 +94,13 @@ pub struct MountedFilesystem {
 
 impl std::fmt::Debug for MountedFilesystem {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `session` is a live kernel-mount guard with no useful Debug form;
+        // finish_non_exhaustive marks it as deliberately omitted.
         formatter
             .debug_struct("MountedFilesystem")
             .field("mountpoint", &self.mountpoint)
             .field("running", &self.is_running())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -114,10 +116,9 @@ impl MountedFilesystem {
     pub fn is_running(&self) -> bool {
         #[cfg(all(target_os = "linux", feature = "linux-mount"))]
         {
-            return self
-                .session
+            self.session
                 .as_ref()
-                .is_some_and(|session| !session.guard.is_finished());
+                .is_some_and(|session| !session.guard.is_finished())
         }
         #[cfg(not(all(target_os = "linux", feature = "linux-mount")))]
         {

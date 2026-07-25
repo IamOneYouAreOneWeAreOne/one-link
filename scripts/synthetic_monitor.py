@@ -280,9 +280,21 @@ def _step_health_check(
     detail: dict[str, Any] = {}
     if log_path is not None:
         with contextlib.suppress(OSError):
-            detail["daemon_log_tail"] = log_path.read_text(
-                encoding="utf-8", errors="replace",
-            )[-2000:]
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+            # The failure cause (state/lockbox init) logs long before the
+            # probe window, so a raw tail scrolls it away. Extract the lines
+            # that explain an unhealthy daemon, then add a short tail for
+            # ordering context.
+            markers = (
+                "WARNING", "ERROR", "CRITICAL", "Traceback",
+                "state init", "lockbox", "KeyMaterial",
+            )
+            flagged = [
+                line for line in text.splitlines()
+                if any(marker in line for marker in markers)
+            ]
+            detail["daemon_log_flagged"] = flagged[-25:]
+            detail["daemon_log_tail"] = text[-800:]
     return StepResult(
         name=f"health_{label}", ok=False, duration_ms=_now_ms() - t0,
         error=last_error or "health endpoint never became ready",

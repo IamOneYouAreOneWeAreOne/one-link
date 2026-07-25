@@ -3,7 +3,7 @@
 //! trait to libfuse's inode-keyed callback shape.
 //!
 //! Compiled only when the `linux-mount` feature is enabled AND we're on
-//! Linux. Other platforms get the stub mount() that returns
+//! Linux. Other platforms get the stub `mount()` that returns
 //! [`crate::MountError::UnsupportedPlatform`].
 //!
 //! ## Inode mapping
@@ -140,26 +140,17 @@ impl<B: FilesystemBackend> FuserAdapter<B> {
 
 impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let name = match name.to_str() {
-            Some(n) => n,
-            None => {
-                reply.error(libc::EINVAL);
-                return;
-            }
+        let Some(name) = name.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
         };
-        let mut table = match self.table.lock() {
-            Ok(table) => table,
-            Err(_) => {
-                reply.error(libc::EIO);
-                return;
-            }
+        let Ok(mut table) = self.table.lock() else {
+            reply.error(libc::EIO);
+            return;
         };
-        let parent_path = match table.path_for(parent) {
-            Some(p) => p.to_string(),
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
+        let Some(parent_path) = table.path_for(parent).map(String::from) else {
+            reply.error(libc::ENOENT);
+            return;
         };
         // Compose the absolute path the backend expects. Parent root
         // is stored as the empty string in our inode table; backend
@@ -167,9 +158,9 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
         // need a single leading slash, nested children get the
         // parent's stored path (already absolute) + "/" + name.
         let full = if parent_path.is_empty() {
-            format!("/{}", name)
+            format!("/{name}")
         } else {
-            format!("{}/{}", parent_path, name)
+            format!("{parent_path}/{name}")
         };
         match self.backend.getattr(&full) {
             Ok(stat) => {
@@ -183,19 +174,13 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
     }
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        let table = match self.table.lock() {
-            Ok(table) => table,
-            Err(_) => {
-                reply.error(libc::EIO);
-                return;
-            }
+        let Ok(table) = self.table.lock() else {
+            reply.error(libc::EIO);
+            return;
         };
-        let path = match table.path_for(ino) {
-            Some(p) => p.to_string(),
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
+        let Some(path) = table.path_for(ino).map(String::from) else {
+            reply.error(libc::ENOENT);
+            return;
         };
         drop(table);
         let lookup_path = if path.is_empty() { "/" } else { &path };
@@ -219,23 +204,19 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        if offset < 0 {
+        // A negative kernel offset is invalid; the try_from doubles as the
+        // sign check, so no sign-losing cast exists on this path.
+        let Ok(offset) = u64::try_from(offset) else {
             reply.error(libc::EINVAL);
             return;
-        }
-        let table = match self.table.lock() {
-            Ok(table) => table,
-            Err(_) => {
-                reply.error(libc::EIO);
-                return;
-            }
         };
-        let path = match table.path_for(ino) {
-            Some(p) => p.to_string(),
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
+        let Ok(table) = self.table.lock() else {
+            reply.error(libc::EIO);
+            return;
+        };
+        let Some(path) = table.path_for(ino).map(String::from) else {
+            reply.error(libc::ENOENT);
+            return;
         };
         drop(table);
         // Backend paths are absolute. For the root inode we stored
@@ -246,7 +227,7 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
             reply.error(libc::EISDIR);
             return;
         }
-        match self.backend.read(&path, offset as u64, size) {
+        match self.backend.read(&path, offset, size) {
             Ok(bytes) => reply.data(&bytes),
             Err(err) => reply.error(Self::errno(&err)),
         }
@@ -264,26 +245,21 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        if offset < 0 {
+        // Same pattern as read(): try_from IS the negative-offset guard.
+        let Ok(offset) = u64::try_from(offset) else {
             reply.error(libc::EINVAL);
             return;
-        }
-        let table = match self.table.lock() {
-            Ok(table) => table,
-            Err(_) => {
-                reply.error(libc::EIO);
-                return;
-            }
         };
-        let path = match table.path_for(ino) {
-            Some(p) => p.to_string(),
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
+        let Ok(table) = self.table.lock() else {
+            reply.error(libc::EIO);
+            return;
+        };
+        let Some(path) = table.path_for(ino).map(String::from) else {
+            reply.error(libc::ENOENT);
+            return;
         };
         drop(table);
-        match self.backend.write(&path, offset as u64, data) {
+        match self.backend.write(&path, offset, data) {
             Ok(n) => reply.written(n),
             Err(err) => reply.error(Self::errno(&err)),
         }
@@ -297,23 +273,20 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        if offset < 0 {
+        // Directory streams are indexed in usize space below; the try_from
+        // both rejects negative kernel offsets and removes every wrapping
+        // cast from the index arithmetic.
+        let Ok(offset) = usize::try_from(offset) else {
             reply.error(libc::EINVAL);
             return;
-        }
-        let mut table = match self.table.lock() {
-            Ok(table) => table,
-            Err(_) => {
-                reply.error(libc::EIO);
-                return;
-            }
         };
-        let path = match table.path_for(ino) {
-            Some(p) => p.to_string(),
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
+        let Ok(mut table) = self.table.lock() else {
+            reply.error(libc::EIO);
+            return;
+        };
+        let Some(path) = table.path_for(ino).map(String::from) else {
+            reply.error(libc::ENOENT);
+            return;
         };
         let lookup_path = if path.is_empty() { "/" } else { &path };
         let entries = match self.backend.readdir(lookup_path) {
@@ -338,20 +311,20 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
             (ino, FileType::Directory, "."),
             (parent_ino, FileType::Directory, ".."),
         ];
-        let mut next_offset = offset;
         for (idx, (e_ino, kind, name)) in synthetic.iter().enumerate() {
-            let i = idx as i64;
-            if i < offset {
+            if idx < offset {
                 continue;
             }
-            if reply.add(*e_ino, i + 1, *kind, name) {
+            let Ok(next) = i64::try_from(idx + 1) else {
+                break;
+            };
+            if reply.add(*e_ino, next, *kind, name) {
                 reply.ok();
                 return;
             }
-            next_offset = i + 1;
         }
         for (i, entry) in entries.iter().enumerate() {
-            let abs_idx = (i + synthetic.len()) as i64;
+            let abs_idx = i + synthetic.len();
             if abs_idx < offset {
                 continue;
             }
@@ -365,43 +338,35 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
                 format!("{}/{}", path, entry.name)
             };
             let child_ino = table.lookup_or_assign(&full);
-            if reply.add(child_ino, abs_idx + 1, kind, &entry.name) {
+            let Ok(next) = i64::try_from(abs_idx + 1) else {
+                break;
+            };
+            if reply.add(child_ino, next, kind, &entry.name) {
                 reply.ok();
                 return;
             }
-            next_offset = abs_idx + 1;
         }
-        let _ = next_offset;
         reply.ok();
     }
 
     fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        let name = match name.to_str() {
-            Some(n) => n,
-            None => {
-                reply.error(libc::EINVAL);
-                return;
-            }
+        let Some(name) = name.to_str() else {
+            reply.error(libc::EINVAL);
+            return;
         };
-        let table = match self.table.lock() {
-            Ok(table) => table,
-            Err(_) => {
-                reply.error(libc::EIO);
-                return;
-            }
+        let Ok(table) = self.table.lock() else {
+            reply.error(libc::EIO);
+            return;
         };
-        let parent_path = match table.path_for(parent) {
-            Some(p) => p.to_string(),
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
+        let Some(parent_path) = table.path_for(parent).map(String::from) else {
+            reply.error(libc::ENOENT);
+            return;
         };
         drop(table);
         let full = if parent_path.is_empty() {
             name.to_string()
         } else {
-            format!("{}/{}", parent_path, name)
+            format!("{parent_path}/{name}")
         };
         match self.backend.unlink(&full) {
             Ok(()) => reply.ok(),

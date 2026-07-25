@@ -373,6 +373,29 @@ def native_platform_tag() -> str:
     return f"{system}-{machine}"
 
 
+def _clang_targets_msvc(compiler: str) -> bool:
+    """True iff this clang's default triple links through MSVC-style lld-link.
+
+    A Windows clang can drive either linker flavor: an ``x86_64-pc-windows-
+    msvc`` default (the upstream llvm.org installer, GitHub runners) invokes
+    lld-link, which rejects GNU ld switches — it parses ``0x180000000`` as an
+    input file — while a ``-gnu`` clang accepts them. Probing the triple is
+    the only honest discriminator; on probe failure fall back to the GNU
+    assumption, which matches this function's pre-probe behavior.
+    """
+    try:
+        probe = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [compiler, "-dumpmachine"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "msvc" in probe.stdout.strip().lower()
+
+
 def _compile_command(
     compiler: str,
     src: Path,
@@ -384,7 +407,8 @@ def _compile_command(
 
     GNU PE linkers otherwise stamp the current wall clock into the DLL header,
     making two ``SOURCE_DATE_EPOCH`` release builds differ despite identical
-    source. MSVC receives the corresponding reproducible-link switch.
+    source. MSVC (cl.exe or an MSVC-target clang) receives the corresponding
+    reproducible-link switches for lld-link/link.exe instead.
     """
     os_name = os.name if target_os_name is None else target_os_name
     name = Path(compiler).name.lower()
@@ -409,11 +433,18 @@ def _compile_command(
         str(src),
     ]
     if os_name == "nt":
-        command.insert(4, "-Wl,--no-insert-timestamp")
-        # GNU ld derives a DLL's default preferred image base from its output
-        # path, which defeats byte-identical rebuilds in different checkouts.
-        # Relocations/ASLR remain enabled; this only fixes the preferred base.
-        command.insert(5, "-Wl,--image-base,0x180000000")
+        if "clang" in name and _clang_targets_msvc(compiler):
+            # lld-link's reproducibility switches: /Brepro pins the PE
+            # timestamp/checksum, /base fixes the preferred image base.
+            command.insert(4, "-Wl,/Brepro")
+            command.insert(5, "-Wl,/base:0x180000000")
+        else:
+            command.insert(4, "-Wl,--no-insert-timestamp")
+            # GNU ld derives a DLL's default preferred image base from its
+            # output path, which defeats byte-identical rebuilds in different
+            # checkouts. Relocations/ASLR remain enabled; this only fixes the
+            # preferred base.
+            command.insert(5, "-Wl,--image-base,0x180000000")
     else:
         command.insert(3, "-fPIC")
     return command

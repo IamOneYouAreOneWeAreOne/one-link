@@ -195,11 +195,20 @@ def test_perf_gate_cache_gc_eviction_throughput(tmp_path: Path) -> None:
 # Sidecar IO regression gate
 # ──────────────────────────────────────────────────────────────────
 
-def test_perf_gate_sidecar_write_under_5ms(tmp_path: Path) -> None:
-    """Resume sidecar persist must stay under 5 ms per op. The
-    daemon writes one per 64 chunks at the debounce cadence; a
-    multi-ms regression here would dominate wall-time on big
-    transfers. Current: ~740 µs. Cap at 5 ms gives ~7× margin."""
+def test_perf_gate_sidecar_write_stays_near_raw_disk_cost(tmp_path: Path) -> None:
+    """Resume sidecar persist must stay close to the raw cost of durably
+    writing the same bytes on the same disk.
+
+    The daemon writes one sidecar per 64 chunks at the debounce cadence, so
+    a multi-ms regression here would dominate wall-time on big transfers.
+    A fixed wall-clock cap measured the runner's disk, not the code: CI
+    disks with write-through/AV overhead run ~30 ms where a dev NVMe runs
+    ~740 µs, and both are the same healthy code. The regression this gate
+    exists to catch (schema bloat, extra IO round-trips, validation
+    blowups) shows up as the RATIO between persist_sidecar and a bare
+    fsync'd write+replace of the same payload in the same directory — that
+    ratio is disk-invariant. The absolute 5 ms cap still applies whenever
+    the disk itself is fast enough for it to be meaningful."""
     from one_link.resume import ResumeSidecar, persist_sidecar
 
     inbox = tmp_path / "inbox"
@@ -216,6 +225,25 @@ def test_perf_gate_sidecar_write_under_5ms(tmp_path: Path) -> None:
             {"index": 0, "hash": "a" * 64, "size": 4096, "start": 0, "end": 4096},
         ],
     )
+    payload = sc.to_json()
+
+    # Baseline: the exact durability primitive persist_sidecar uses —
+    # same-directory temp, write, flush, fsync, atomic replace — with the
+    # same payload bytes. 100 reps, median, same as the gated measurement.
+    baseline_dir = tmp_path / "baseline"
+    baseline_dir.mkdir()
+    baseline_target = baseline_dir / "baseline.json"
+    baseline_durations: list[float] = []
+    for i in range(100):
+        tmp_file = baseline_dir / f".baseline_{i}.tmp"
+        t0 = time.perf_counter()
+        with tmp_file.open("x", encoding="utf-8", newline="") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_file, baseline_target)
+        baseline_durations.append(time.perf_counter() - t0)
+    baseline_us = statistics.median(baseline_durations) * 1e6
 
     # 100 round-trips, take the median so a single GC pause
     # doesn't blow up the average.
@@ -225,7 +253,10 @@ def test_perf_gate_sidecar_write_under_5ms(tmp_path: Path) -> None:
         persist_sidecar(inbox, sc)
         durations.append(time.perf_counter() - t0)
     median_us = statistics.median(durations) * 1e6
-    assert median_us < 5000.0, (
-        f"sidecar persist median {median_us:.0f} µs exceeds the "
-        f"5 ms regression cap. Disk slow? Schema bloated?"
+
+    cap_us = max(5000.0, 8.0 * baseline_us)
+    assert median_us < cap_us, (
+        f"sidecar persist median {median_us:.0f} µs exceeds "
+        f"{cap_us:.0f} µs (8× the {baseline_us:.0f} µs raw durable-write "
+        f"baseline on this disk). Schema bloated? Extra IO round-trips?"
     )

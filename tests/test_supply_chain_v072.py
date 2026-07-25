@@ -339,7 +339,9 @@ def test_workflows_use_frozen_uv_and_explicit_root_for_native_builds():
                         "instead of the root uv.lock"
                     )
     assert sync_count >= 15
-    assert nested_maturin_count == 9
+    # 10th audited site 2026-07-25: full_suite_and_e2e.yml builds the native
+    # engine so the suite exercises the real fail-closed PQ channel path.
+    assert nested_maturin_count == 10
 
 
 def test_windows_native_binding_uses_shell_matching_its_commands():
