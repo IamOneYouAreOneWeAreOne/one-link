@@ -168,10 +168,7 @@ def test_fresh_home_os_keyring_round_trip_installs_exact_recovered_authority(
         home=tmp_path / "source-keyring",
         seed=seed,
     )
-    source_key = memory.get_password(
-        keychain.ONE_LINK_KEYCHAIN_SERVICE,
-        keychain.keychain_account(source),
-    )
+    source_key = memory.get_password(*keychain.keychain_target(source))
     assert source_key
     bundle = backup_bundle.create_bundle(seed=seed, data_dir=source)
     state.close()
@@ -189,10 +186,7 @@ def test_fresh_home_os_keyring_round_trip_installs_exact_recovered_authority(
         assert restored.get_setting("portable-proof") == "exact-row-value"
     finally:
         restored.close()
-    assert memory.get_password(
-        keychain.ONE_LINK_KEYCHAIN_SERVICE,
-        keychain.keychain_account(target),
-    ) == source_key
+    assert memory.get_password(*keychain.keychain_target(target)) == source_key
     assert not (target / keychain.LOCAL_KEY_FILENAME).exists()
     assert not (target / keychain.RECOVERY_KEY_FILENAME).exists()
 

@@ -353,6 +353,86 @@ class _MemoryKeyringStore:
         self.values[(service, user)] = value
 
 
+class _WinVaultLikeKeyring:
+    """Faithful model of keyring's Windows backend, with a lost update.
+
+    Windows Credential Manager stores ONE credential per service target,
+    carrying the username as an attribute, so ``set_password`` is a
+    read-modify-write on that shared cell: an existing credential is first
+    re-saved under the compound ``user@service`` target, then the primary
+    target is overwritten. ``get_password`` reads the primary and falls
+    back to the compound name when the username does not match.
+
+    ``competitor`` models the other daemon in a concurrent first boot: it
+    already read the store as empty, so when it writes (here, right after
+    our own write and before our read-back) it overwrites the primary cell
+    WITHOUT preserving a compound copy of ours. Cross-process is the real
+    shape — one process's provisioning lock cannot serialize another
+    profile's — so this is modelled directly rather than with threads,
+    which the module-level lock would serialize.
+    """
+
+    def __init__(self, competitor=None, competitor_value="competitor-key") -> None:
+        self.primary: dict[str, tuple[str, str]] = {}
+        self._competitor = competitor
+        self._competitor_value = competitor_value
+        self._competitor_done = False
+
+    def get_password(self, service: str, user: str):
+        found = self.primary.get(service)
+        if found is not None and found[0] == user:
+            return found[1]
+        compound = self.primary.get(f"{user}@{service}")
+        return compound[1] if compound is not None else None
+
+    def set_password(self, service: str, user: str, value: str) -> None:
+        existing = self.primary.get(service)
+        if existing is not None:
+            self.primary[f"{existing[0]}@{service}"] = existing
+        self.primary[service] = (user, value)
+        if self._competitor is not None and not self._competitor_done:
+            self._competitor_done = True
+            comp_service, comp_user = self._competitor
+            self.primary[comp_service] = (comp_user, self._competitor_value)
+
+
+def test_concurrent_first_boot_of_another_profile_cannot_clobber_this_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact CI failure: two fresh profiles first-boot on one machine.
+
+    With a shared service target both daemons read an empty store, the
+    second write replaces the first with no compound copy, and the first
+    daemon's fail-closed read-back reports "read-back did not match
+    generated authority" and runs forever without persistence. Per-profile
+    SERVICE targets remove the shared cell, so the competitor's write lands
+    somewhere this profile never reads.
+    """
+    import one_link.paths as paths_mod
+
+    mine = tmp_path / "home-a"
+    theirs = tmp_path / "home-b"
+    mine.mkdir()
+    theirs.mkdir()
+    store = _WinVaultLikeKeyring(competitor=keychain.keychain_target(theirs))
+    monkeypatch.delenv(keychain.ENV_VAR, raising=False)
+    monkeypatch.delenv(keychain.DISABLE_ENV, raising=False)
+    monkeypatch.setattr(keychain, "_load_keyring", lambda: store)
+    monkeypatch.setattr(paths_mod, "data_dir", lambda: mine)
+    monkeypatch.setattr(
+        keychain, "_local_key_path", lambda: mine / keychain.LOCAL_KEY_FILENAME
+    )
+
+    minted = keychain.ensure_passphrase()
+
+    assert isinstance(minted, str) and minted
+    assert minted != "competitor-key"
+    # This profile's own target still holds exactly what it minted.
+    assert store.get_password(*keychain.keychain_target(mine)) == minted
+    # A second read (the next daemon restart) agrees.
+    assert keychain.get_passphrase() == minted
+
+
 def test_two_profiles_on_one_machine_get_independent_keychain_slots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -379,9 +459,12 @@ def test_two_profiles_on_one_machine_get_independent_keychain_slots(
 
     assert minted["home-a"] and minted["home-b"]
     assert minted["home-a"] != minted["home-b"]
-    accounts = {user for (_service, user) in store.values}
-    assert len(accounts) == 2
-    assert keychain.ONE_LINK_KEYCHAIN_USER not in accounts
+    # Scoping is on the SERVICE target (the cell Windows actually keys on),
+    # so two profiles must occupy two distinct services and never the
+    # legacy shared one.
+    services = {service for (service, _user) in store.values}
+    assert len(services) == 2
+    assert keychain.ONE_LINK_KEYCHAIN_SERVICE not in services
 
 
 def test_legacy_shared_slot_still_reads_and_migrates(
@@ -408,8 +491,7 @@ def test_legacy_shared_slot_still_reads_and_migrates(
     monkeypatch.setattr(paths_mod, "data_dir", lambda: home)
 
     assert keychain.get_passphrase() == legacy_value
-    scoped = keychain.keychain_account(home)
-    assert store.values[(keychain.ONE_LINK_KEYCHAIN_SERVICE, scoped)] == legacy_value
+    assert store.values[keychain.keychain_target(home)] == legacy_value
     # The legacy slot survives: other profiles may still be reading it.
     assert store.values[
         (keychain.ONE_LINK_KEYCHAIN_SERVICE, keychain.ONE_LINK_KEYCHAIN_USER)
