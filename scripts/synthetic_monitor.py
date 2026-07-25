@@ -227,9 +227,20 @@ def _step_api_me_reachable(
 
 
 def _step_health_check(
-    home: Path, label: str,
+    home: Path, label: str, log_path: Path | None = None,
+    ready_timeout: float = 90.0,
 ) -> StepResult:
-    """GET /api/one-health surfaces no critical failures."""
+    """GET /api/one-health becomes reachable within the readiness window.
+
+    ``/api/one-health`` deliberately answers 503 ("One Link is starting")
+    until daemon state — including the fail-closed lockbox/key-authority
+    chain — has finished initializing, and slow CI runners can still be
+    inside that window after /api/me answers. One instant probe would gate
+    on runner speed, not on health; poll until the endpoint leaves the
+    documented starting state, and report how long readiness took. On a
+    final failure attach the daemon's own log tail so the result is
+    diagnosable without SSH access to the runner.
+    """
     t0 = _now_ms()
     daemon = _resolve_home(home)
     if daemon is None:
@@ -237,22 +248,45 @@ def _step_health_check(
             name=f"health_{label}", ok=False, duration_ms=_now_ms() - t0,
             error="authenticated daemon/UI unavailable",
         )
-    try:
-        h = _api_get(
-            f"http://127.0.0.1:{daemon.server_port}",
-            "/api/one-health",
-            daemon.token,
-            timeout=10.0,
-        )
-    except Exception as e:
-        return StepResult(
-            name=f"health_{label}", ok=False, duration_ms=_now_ms() - t0,
-            error=f"{type(e).__name__}: {e}",
-        )
-    overall = h.get("overall") or h.get("status") or h.get("ok")
+    deadline = time.time() + ready_timeout
+    last_error = ""
+    while True:
+        try:
+            h = _api_get(
+                f"http://127.0.0.1:{daemon.server_port}",
+                "/api/one-health",
+                daemon.token,
+                timeout=10.0,
+            )
+            overall = h.get("overall") or h.get("status") or h.get("ok")
+            return StepResult(
+                name=f"health_{label}", ok=True, duration_ms=_now_ms() - t0,
+                detail={
+                    "overall": overall,
+                    "ready_after_ms": _now_ms() - t0,
+                },
+            )
+        except urllib.error.HTTPError as e:
+            # 503 is the endpoint's documented "still starting" answer;
+            # anything else is an immediate genuine failure.
+            last_error = f"{type(e).__name__}: {e}"
+            if e.code != 503:
+                break
+        except Exception as e:  # URLError, TimeoutError, bad JSON
+            last_error = f"{type(e).__name__}: {e}"
+        if time.time() >= deadline:
+            break
+        time.sleep(2.0)
+    detail: dict[str, Any] = {}
+    if log_path is not None:
+        with contextlib.suppress(OSError):
+            detail["daemon_log_tail"] = log_path.read_text(
+                encoding="utf-8", errors="replace",
+            )[-2000:]
     return StepResult(
-        name=f"health_{label}", ok=True, duration_ms=_now_ms() - t0,
-        detail={"overall": overall},
+        name=f"health_{label}", ok=False, duration_ms=_now_ms() - t0,
+        error=last_error or "health endpoint never became ready",
+        detail=detail,
     )
 
 
@@ -294,9 +328,9 @@ def main() -> int:
         log("step: B.api_me")
         steps.append(_step_api_me_reachable(b_home, "B"))
         log("step: A.health")
-        steps.append(_step_health_check(a_home, "A"))
+        steps.append(_step_health_check(a_home, "A", log_path=a_log))
         log("step: B.health")
-        steps.append(_step_health_check(b_home, "B"))
+        steps.append(_step_health_check(b_home, "B", log_path=b_log))
 
         return _emit_result(args, steps)
     finally:

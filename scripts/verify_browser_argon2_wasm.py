@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -16,12 +17,44 @@ NATIVE = ROOT / "native"
 SHIPPED = ROOT / "src/one_link/web/assets/argon2id-v1.wasm"
 WORKER = ROOT / "src/one_link/web/assets/argon2id-worker.js"
 BUILT = NATIVE / "target/wasm32-unknown-unknown/release/ol_argon2_wasm.wasm"
-EXPECTED_SHA256 = "8fac36bd917280333cd7ca4bcc262b1733ed120035507008b09c0c3f1f172505"
+EXPECTED_SHA256 = "22aab37746981785f986de39d99cf0e135218899690ce6b359c63e69e5c5d447"
 PINNED_RUSTC = "1.96.0"
 
 
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _remap_rustflags() -> str:
+    """Build RUSTFLAGS that erase the build machine from the artifact.
+
+    Dependency panic-location strings embed the absolute cargo registry path
+    of whichever machine compiled them, which both leaks the builder's home
+    directory into a shipped browser asset and makes the digest differ on
+    every host. Remapping CARGO_HOME to the fixed ``/cargo`` root removes the
+    machine-specific prefix on every platform.
+    """
+    cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
+    return f"--remap-path-prefix={cargo_home}=/cargo"
+
+
+def _canonical_digest(blob: bytes) -> str:
+    """Digest that is invariant to path-separator spelling in ``/cargo`` runs.
+
+    After the CARGO_HOME remap the only remaining host difference is that a
+    Windows rustc joins module paths inside a dependency with backslashes
+    (``/cargo\\registry\\...\\params.rs``) where POSIX hosts use forward
+    slashes. Normalizing separators inside those printable ``/cargo...`` runs
+    -- bounded by the ``.rs`` suffix -- yields one digest for identical code
+    on every platform. Everything outside those runs must still match
+    byte-for-byte.
+    """
+    canonical = re.sub(
+        rb"/cargo[ -~]*?\.rs",
+        lambda m: m.group().replace(b"\\", b"/"),
+        blob,
+    )
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _verify_static_contract() -> None:
@@ -51,6 +84,8 @@ def _rebuild_and_compare() -> None:
         raise RuntimeError(
             f"reproduction requires rustc {PINNED_RUSTC}; found {version!r}"
         )
+    env = dict(os.environ)
+    env["RUSTFLAGS"] = _remap_rustflags()
     subprocess.run(
         [
             "cargo", "build", "-p", "ol_argon2_wasm", "--target",
@@ -58,13 +93,16 @@ def _rebuild_and_compare() -> None:
         ],
         cwd=NATIVE,
         check=True,
+        env=env,
     )
-    built_digest = _digest(BUILT)
-    shipped_digest = _digest(SHIPPED)
+    built_digest = _canonical_digest(BUILT.read_bytes())
+    shipped_digest = _canonical_digest(SHIPPED.read_bytes())
     if built_digest != shipped_digest:
         raise RuntimeError(
-            "reproduced WASM differs from the shipped artifact: "
-            f"built={built_digest}, shipped={shipped_digest}"
+            "reproduced WASM differs from the shipped artifact "
+            "(canonical path-spelling-invariant digests): "
+            f"built={built_digest}, shipped={shipped_digest}, "
+            f"built_raw={_digest(BUILT)}"
         )
 
 

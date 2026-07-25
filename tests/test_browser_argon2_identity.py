@@ -19,7 +19,7 @@ def test_wasm_is_exact_first_party_release_artifact() -> None:
     assert blob.startswith(b"\x00asm")
     assert 8 <= len(blob) <= 128 * 1024
     digest = hashlib.sha256(blob).hexdigest()
-    assert digest == "8fac36bd917280333cd7ca4bcc262b1733ed120035507008b09c0c3f1f172505"
+    assert digest == "22aab37746981785f986de39d99cf0e135218899690ce6b359c63e69e5c5d447"
     assert digest in WORKER.read_text(encoding="utf-8")
 
 

@@ -65,8 +65,27 @@ jobs:
           version: "0.11.31"
           enable-cache: true
 
+      # The live PQ channel handshake fails closed without the verified
+      # one_link_native pqkem ABI (no classical/NullKEM downgrade), so a
+      # suite run without the native engine cannot exercise the real
+      # channel path at all. Build it exactly like native_bench_gate.yml
+      # so this safety net tests what ships, not the refusal branch.
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup default 1.96.0
+
+      - name: Cache cargo target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: native
+
       - name: install
-        run: uv sync --frozen --python python --extra dev
+        run: uv sync --frozen --python python --extra dev --extra release
+
+      - name: Build native (release)
+        working-directory: native
+        run: uv run --project .. --frozen --extra release maturin develop --release --locked
 
       - name: pytest (full suite, excluding e2e + heavy soaks)
         shell: bash
@@ -75,7 +94,7 @@ jobs:
         # rest of tests/ (6400+ unit + integration + invariants)
         # all run on every push.
         run: |
-          uv run --frozen --extra dev python -m pytest tests/ \
+          uv run --frozen --extra dev --extra release python -m pytest tests/ \
             --ignore=tests/e2e \
             --ignore=tests/test_call_reliability_soak.py \
             --deselect tests/test_pairing.py \

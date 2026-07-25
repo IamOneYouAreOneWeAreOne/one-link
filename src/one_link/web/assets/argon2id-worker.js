@@ -13,7 +13,7 @@ const MAX_PASSWORD_BYTES = 1024;
 const MAX_WASM_BYTES = 128 * 1024;
 const WASM_URL = "/browser-crypto/argon2id-v1.wasm";
 const WASM_SHA256 =
-  "8fac36bd917280333cd7ca4bcc262b1733ed120035507008b09c0c3f1f172505";
+  "22aab37746981785f986de39d99cf0e135218899690ce6b359c63e69e5c5d447";
 
 let consumed = false;
 

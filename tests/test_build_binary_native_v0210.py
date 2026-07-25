@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import platform
 import subprocess
 import sys
 import types
@@ -106,6 +107,14 @@ def _install_fake_runner(
         return real_import_module(name, package)
 
     monkeypatch.setattr(mod.importlib, "import_module", fake_import_module)
+    # The mandatory-native import gate runs before every stage these tests
+    # target, and CI runners for the pure-Python suite do not build the
+    # compiled ABI. Provide the same version-stamped stand-in on every path
+    # so each test reaches its stage regardless of the host; the gate itself
+    # keeps its own dedicated test that blocks this import explicitly.
+    fake_native = types.ModuleType("one_link_native")
+    fake_native.__version__ = "0.21.0-alpha.0"
+    monkeypatch.setitem(sys.modules, "one_link_native", fake_native)
     # The fake runner writes sentinel DLL bytes. Native ABI behavior is covered
     # by dedicated compiled-library tests; packaging unit tests keep their
     # subprocess seam while asserting the builder invokes the mandatory probe.
@@ -293,12 +302,6 @@ def test_build_binary_collects_native_modules_without_local_build_metadata(
         mod,
         isolated_output_root,
     )
-    monkeypatch.setitem(
-        sys.modules,
-        "one_link_native",
-        types.ModuleType("one_link_native"),
-    )
-    sys.modules["one_link_native"].__version__ = "0.21.0-alpha.0"
 
     assert mod.main(output_root=isolated_output_root) == 0
     assert fake_exe.is_file()
@@ -323,7 +326,8 @@ def test_build_binary_collects_native_modules_without_local_build_metadata(
         if any("build_update_helper.py" in str(argument) for argument in command)
     ]
     assert len(helper_cmds) == 1
-    assert (fake_exe.parent / "one-link-update-helper.exe").is_file()
+    helper_suffix = ".exe" if platform.system() == "Windows" else ""
+    assert (fake_exe.parent / f"one-link-update-helper{helper_suffix}").is_file()
 
     spec_text = (isolated_output_root / "build" / "one-link.spec").read_text(encoding="utf-8")
     assert "one_link.sessions" in spec_text

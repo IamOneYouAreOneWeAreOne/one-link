@@ -13,7 +13,7 @@ PEER = ROOT / "src/one_link/web/peer.html"
 MANIFEST = ROOT / "native/ol_ed25519_wasm/Cargo.toml"
 RUST = ROOT / "native/ol_ed25519_wasm/src/lib.rs"
 WASM = ROOT / "src/one_link/web/assets/ed25519-v1.wasm"
-DIGEST = "99792408d50e1b920e99ab9e85095cf0f77f9933a30bcb81b63f7556b34f6cc0"
+DIGEST = "b112d5518115ac2a8dd923836f6f5eecf413a4d2ba97183e6809c863927fb9c7"
 
 
 def test_wasm_is_exact_integrity_pinned_first_party_artifact() -> None:

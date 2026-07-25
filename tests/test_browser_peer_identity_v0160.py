@@ -185,7 +185,7 @@ async def test_browser_argon_worker_and_wasm_are_exact_no_store_assets(http):
     assert wasm.startswith(b"\x00asm")
     assert 8 <= len(wasm) <= 128 * 1024
     digest = hashlib.sha256(wasm).hexdigest()
-    assert digest == "8fac36bd917280333cd7ca4bcc262b1733ed120035507008b09c0c3f1f172505"
+    assert digest == "22aab37746981785f986de39d99cf0e135218899690ce6b359c63e69e5c5d447"
     assert digest in worker
 
 
@@ -202,7 +202,7 @@ async def test_browser_ed25519_wasm_is_exact_no_store_asset(http):
     assert blob.startswith(b"\x00asm")
     assert 8 <= len(blob) <= 256 * 1024
     assert hashlib.sha256(blob).hexdigest() == (
-        "99792408d50e1b920e99ab9e85095cf0f77f9933a30bcb81b63f7556b34f6cc0"
+        "b112d5518115ac2a8dd923836f6f5eecf413a4d2ba97183e6809c863927fb9c7"
     )
 
 
