@@ -40,6 +40,7 @@ return to a caller.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import os
 import secrets
@@ -61,6 +62,13 @@ log = logging.getLogger("one_link.keychain")
 
 ONE_LINK_KEYCHAIN_SERVICE = "one_link"
 ONE_LINK_KEYCHAIN_USER = "state_db_key"
+# The pre-scoping account name. One machine-global slot meant every profile
+# (distinct ONE_LINK_HOME) on a machine shared -- or, on concurrent first
+# boot, CLOBBERED -- one encryption authority: daemon A minted K_A, daemon B
+# overwrote with K_B, and A's fail-closed read-back check then refused to
+# start. Reads still consult this slot so existing installs keep their key;
+# writes go to the per-profile account only.
+_LEGACY_KEYCHAIN_ACCOUNT = ONE_LINK_KEYCHAIN_USER
 ENV_VAR = "ONE_LINK_PASSPHRASE"
 # Filename of the local key-file fallback (see _local_key_path).
 LOCAL_KEY_FILENAME = "state.key"
@@ -107,6 +115,49 @@ def _keyring_has_no_backend(exc: Exception) -> bool:
     except Exception:  # pragma: no cover - keyring missing or broken
         return False
     return isinstance(exc, NoKeyringError)
+
+
+def keychain_account(data_root=None) -> str:
+    """Per-profile OS-keychain account name for the state.db authority.
+
+    The credential store is machine-global, but One Link profiles are
+    per-data-dir: with a single shared account name, two profiles on one
+    machine share one encryption authority, and two concurrent first boots
+    (the synthetic monitor's daemon pair, any multi-profile setup) race
+    set_password and trip each other's fail-closed read-back checks.
+    Scoping the account by a digest of the data directory gives every
+    profile its own slot; reads fall back to the legacy shared slot so
+    existing installs keep decrypting their state.
+    """
+    from pathlib import Path
+
+    if data_root is None:
+        from one_link.paths import data_dir
+
+        data_root = data_dir()
+    normalized = str(Path(data_root).resolve()).replace("\\", "/")
+    if os.name == "nt":
+        normalized = normalized.casefold()
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return f"{ONE_LINK_KEYCHAIN_USER}@{digest}"
+
+
+def _migrate_legacy_slot(kr, account: str, value: str) -> None:
+    """Best-effort copy of a legacy-slot authority into the scoped slot.
+
+    Never deletes the legacy entry: other profiles on this machine may
+    still be reading it, and destroying a shared authority would orphan
+    their encrypted state. A failed migration just means the next read
+    falls back to the legacy slot again.
+    """
+    try:
+        kr.set_password(ONE_LINK_KEYCHAIN_SERVICE, account, value)
+    except Exception as exc:
+        log.warning(
+            "keychain: could not migrate the legacy shared authority to the "
+            "per-profile slot (%s); continuing on the legacy slot",
+            type(exc).__name__,
+        )
 
 
 # ── Local key-file fallback ───────────────────────────────────────────
@@ -324,7 +375,14 @@ def get_passphrase() -> str | None:
     kr = _load_keyring()
     if kr is not None:
         try:
-            v = kr.get_password(ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER)
+            account = keychain_account()
+            v = kr.get_password(ONE_LINK_KEYCHAIN_SERVICE, account)
+            from_legacy = False
+            if v is None:
+                v = kr.get_password(
+                    ONE_LINK_KEYCHAIN_SERVICE, _LEGACY_KEYCHAIN_ACCOUNT
+                )
+                from_legacy = v is not None
             if v is not None:
                 if not isinstance(v, str) or not v:
                     raise KeyMaterialIntegrityError(
@@ -335,6 +393,8 @@ def get_passphrase() -> str | None:
                     raise KeyMaterialIntegrityError(
                         "OS keychain and local state-key authorities conflict"
                     )
+                if from_legacy:
+                    _migrate_legacy_slot(kr, account, v)
                 return v
         except Exception as e:
             if isinstance(e, KeyMaterialIntegrityError):
@@ -465,9 +525,16 @@ def _configured_passphrase_at(data_root) -> str | None:
         try:
             value = kr.get_password(
                 ONE_LINK_KEYCHAIN_SERVICE,
-                ONE_LINK_KEYCHAIN_USER,
+                keychain_account(data_root),
             )
+            if value is None:
+                value = kr.get_password(
+                    ONE_LINK_KEYCHAIN_SERVICE,
+                    _LEGACY_KEYCHAIN_ACCOUNT,
+                )
         except Exception as exc:
+            if _keyring_has_no_backend(exc):
+                return _read_local_key_at(local_path)
             raise KeychainBackendError(
                 "OS keychain lookup failed during database recovery"
             ) from exc
@@ -499,38 +566,45 @@ def _publish_recovered_passphrase(data_root, passphrase: str) -> str:
             return winner
         kr = _load_keyring()
         if kr is not None:
+            account = keychain_account(root)
             try:
                 kr.set_password(
                     ONE_LINK_KEYCHAIN_SERVICE,
-                    ONE_LINK_KEYCHAIN_USER,
+                    account,
                     passphrase,
                 )
             except Exception as write_exc:
-                try:
-                    after = kr.get_password(
-                        ONE_LINK_KEYCHAIN_SERVICE,
-                        ONE_LINK_KEYCHAIN_USER,
+                if _keyring_has_no_backend(write_exc):
+                    log.info(
+                        "keychain: no functional OS keychain backend; the "
+                        "recovered authority goes to the private local file."
                     )
-                except Exception as read_exc:
-                    raise KeychainBackendError(
-                        "OS keychain recovery-key write outcome is unknown"
-                    ) from read_exc
-                if after is not None:
-                    if not isinstance(after, str) or not after:
-                        raise KeyMaterialIntegrityError(
-                            "OS keychain returned invalid recovery authority"
+                else:
+                    try:
+                        after = kr.get_password(
+                            ONE_LINK_KEYCHAIN_SERVICE,
+                            account,
                         )
-                    return after
-                log.warning(
-                    "keychain recovery write failed (%s) and absence was "
-                    "re-confirmed; using the private local fallback",
-                    type(write_exc).__name__,
-                )
+                    except Exception as read_exc:
+                        raise KeychainBackendError(
+                            "OS keychain recovery-key write outcome is unknown"
+                        ) from read_exc
+                    if after is not None:
+                        if not isinstance(after, str) or not after:
+                            raise KeyMaterialIntegrityError(
+                                "OS keychain returned invalid recovery authority"
+                            )
+                        return after
+                    log.warning(
+                        "keychain recovery write failed (%s) and absence was "
+                        "re-confirmed; using the private local fallback",
+                        type(write_exc).__name__,
+                    )
             else:
                 try:
                     after = kr.get_password(
                         ONE_LINK_KEYCHAIN_SERVICE,
-                        ONE_LINK_KEYCHAIN_USER,
+                        account,
                     )
                 except Exception as exc:
                     raise KeychainBackendError(
@@ -682,9 +756,10 @@ def ensure_passphrase() -> str | None:
         new_pw = secrets.token_urlsafe(32)
         kr = _load_keyring()
         if kr is not None:
+            account = keychain_account()
             try:
                 kr.set_password(
-                    ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER, new_pw,
+                    ONE_LINK_KEYCHAIN_SERVICE, account, new_pw,
                 )
             except Exception as write_exc:
                 if _keyring_has_no_backend(write_exc):
@@ -702,7 +777,7 @@ def ensure_passphrase() -> str | None:
                     # creation is safe; a failed lookup is not absence.
                     try:
                         after = kr.get_password(
-                            ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER
+                            ONE_LINK_KEYCHAIN_SERVICE, account
                         )
                     except Exception as read_exc:
                         raise KeychainBackendError(
@@ -726,7 +801,7 @@ def ensure_passphrase() -> str | None:
             else:
                 try:
                     after = kr.get_password(
-                        ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER
+                        ONE_LINK_KEYCHAIN_SERVICE, account
                     )
                 except Exception as exc:
                     raise KeychainBackendError(
@@ -784,10 +859,17 @@ def rotate_passphrase() -> str | None:
         kr = _load_keyring()
         if kr is None:
             return None
+        account = keychain_account()
         try:
-            prior = kr.get_password(
-                ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER
-            )
+            prior = kr.get_password(ONE_LINK_KEYCHAIN_SERVICE, account)
+            if prior is None:
+                # A not-yet-migrated install still holds its authority in the
+                # legacy shared slot; the rotated key goes to the scoped slot
+                # (reads prefer it), and the legacy slot is left untouched
+                # because other profiles may still depend on it.
+                prior = kr.get_password(
+                    ONE_LINK_KEYCHAIN_SERVICE, _LEGACY_KEYCHAIN_ACCOUNT
+                )
         except Exception as exc:
             raise KeychainBackendError(
                 "cannot read OS keychain authority before rotation"
@@ -801,12 +883,12 @@ def rotate_passphrase() -> str | None:
         new_pw = secrets.token_urlsafe(32)
         try:
             kr.set_password(
-                ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER, new_pw,
+                ONE_LINK_KEYCHAIN_SERVICE, account, new_pw,
             )
         except Exception as write_exc:
             try:
                 after = kr.get_password(
-                    ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER
+                    ONE_LINK_KEYCHAIN_SERVICE, account
                 )
             except Exception as read_exc:
                 raise KeychainBackendError(
@@ -814,7 +896,9 @@ def rotate_passphrase() -> str | None:
                 ) from read_exc
             if isinstance(after, str) and secrets.compare_digest(after, new_pw):
                 return new_pw
-            if isinstance(after, str) and secrets.compare_digest(after, prior):
+            if after is None or (
+                isinstance(after, str) and secrets.compare_digest(after, prior)
+            ):
                 log.warning("keychain rotate failed: %s", type(write_exc).__name__)
                 return None
             raise KeyMaterialIntegrityError(
@@ -822,7 +906,7 @@ def rotate_passphrase() -> str | None:
             ) from write_exc
         try:
             after = kr.get_password(
-                ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER
+                ONE_LINK_KEYCHAIN_SERVICE, account
             )
         except Exception as exc:
             raise KeychainBackendError(
@@ -867,21 +951,23 @@ def forget_passphrase() -> bool:
     kr = _load_keyring()
     if kr is None:
         return removed
-    try:
-        kr.delete_password(
-            ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER,
-        )
-        return True
-    except Exception as e:
-        # Most backends raise PasswordDeleteError on "not found";
-        # treat that as "nothing to do" rather than failure.
-        if type(e).__name__ in (
-            "PasswordDeleteError", "PasswordError",
-            "KeyringError", "NoKeyringError",
-        ):
-            return removed
-        log.warning("keychain delete failed: %s", type(e).__name__)
-        return removed
+    # Delete the per-profile slot AND the legacy shared slot: pre-scoping,
+    # every profile shared the legacy entry, so leaving it behind would let
+    # get_passphrase silently resurrect the "forgotten" key. Post-scoping
+    # profiles have their own slots and are unaffected by the legacy delete.
+    for slot in (keychain_account(), _LEGACY_KEYCHAIN_ACCOUNT):
+        try:
+            kr.delete_password(ONE_LINK_KEYCHAIN_SERVICE, slot)
+            removed = True
+        except Exception as e:
+            # Most backends raise PasswordDeleteError on "not found";
+            # treat that as "nothing to do" rather than failure.
+            if type(e).__name__ not in (
+                "PasswordDeleteError", "PasswordError",
+                "KeyringError", "NoKeyringError",
+            ):
+                log.warning("keychain delete failed: %s", type(e).__name__)
+    return removed
 
 
 def backend_label() -> str:

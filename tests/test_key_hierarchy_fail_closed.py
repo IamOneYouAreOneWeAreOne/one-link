@@ -342,6 +342,80 @@ def test_generic_keychain_lookup_failure_stays_fail_closed(
     assert not path.exists()
 
 
+class _MemoryKeyringStore:
+    def __init__(self) -> None:
+        self.values: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service: str, user: str):
+        return self.values.get((service, user))
+
+    def set_password(self, service: str, user: str, value: str) -> None:
+        self.values[(service, user)] = value
+
+
+def test_two_profiles_on_one_machine_get_independent_keychain_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The credential store is machine-global; the pre-scoping shared slot
+    made two concurrent first boots (the synthetic monitor's daemon pair,
+    any multi-profile machine) clobber each other's authority and trip the
+    fail-closed read-back check. Per-data-dir accounts must isolate them."""
+    store = _MemoryKeyringStore()
+    monkeypatch.delenv(keychain.ENV_VAR, raising=False)
+    monkeypatch.delenv(keychain.DISABLE_ENV, raising=False)
+    monkeypatch.setattr(keychain, "_load_keyring", lambda: store)
+
+    minted: dict[str, str] = {}
+    for profile in ("home-a", "home-b"):
+        home = tmp_path / profile
+        home.mkdir()
+        monkeypatch.setattr(
+            keychain, "_local_key_path", lambda h=home: h / keychain.LOCAL_KEY_FILENAME
+        )
+        import one_link.paths as paths_mod
+
+        monkeypatch.setattr(paths_mod, "data_dir", lambda h=home: h)
+        minted[profile] = keychain.ensure_passphrase()
+
+    assert minted["home-a"] and minted["home-b"]
+    assert minted["home-a"] != minted["home-b"]
+    accounts = {user for (_service, user) in store.values}
+    assert len(accounts) == 2
+    assert keychain.ONE_LINK_KEYCHAIN_USER not in accounts
+
+
+def test_legacy_shared_slot_still_reads_and_migrates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing install's authority lives under the legacy shared account;
+    it must keep decrypting (read fallback) and be copied -- never moved --
+    into the per-profile slot."""
+    store = _MemoryKeyringStore()
+    legacy_value = "legacy-authority-value"
+    store.values[
+        (keychain.ONE_LINK_KEYCHAIN_SERVICE, keychain.ONE_LINK_KEYCHAIN_USER)
+    ] = legacy_value
+    home = tmp_path / "legacy-home"
+    home.mkdir()
+    monkeypatch.delenv(keychain.ENV_VAR, raising=False)
+    monkeypatch.delenv(keychain.DISABLE_ENV, raising=False)
+    monkeypatch.setattr(keychain, "_load_keyring", lambda: store)
+    monkeypatch.setattr(
+        keychain, "_local_key_path", lambda: home / keychain.LOCAL_KEY_FILENAME
+    )
+    import one_link.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "data_dir", lambda: home)
+
+    assert keychain.get_passphrase() == legacy_value
+    scoped = keychain.keychain_account(home)
+    assert store.values[(keychain.ONE_LINK_KEYCHAIN_SERVICE, scoped)] == legacy_value
+    # The legacy slot survives: other profiles may still be reading it.
+    assert store.values[
+        (keychain.ONE_LINK_KEYCHAIN_SERVICE, keychain.ONE_LINK_KEYCHAIN_USER)
+    ] == legacy_value
+
+
 def test_recovery_reports_existing_unavailable_seed_distinct_from_absence(
     tmp_path: Path,
 ) -> None:

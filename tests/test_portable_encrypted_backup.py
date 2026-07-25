@@ -170,7 +170,7 @@ def test_fresh_home_os_keyring_round_trip_installs_exact_recovered_authority(
     )
     source_key = memory.get_password(
         keychain.ONE_LINK_KEYCHAIN_SERVICE,
-        keychain.ONE_LINK_KEYCHAIN_USER,
+        keychain.keychain_account(source),
     )
     assert source_key
     bundle = backup_bundle.create_bundle(seed=seed, data_dir=source)
@@ -191,7 +191,7 @@ def test_fresh_home_os_keyring_round_trip_installs_exact_recovered_authority(
         restored.close()
     assert memory.get_password(
         keychain.ONE_LINK_KEYCHAIN_SERVICE,
-        keychain.ONE_LINK_KEYCHAIN_USER,
+        keychain.keychain_account(target),
     ) == source_key
     assert not (target / keychain.LOCAL_KEY_FILENAME).exists()
     assert not (target / keychain.RECOVERY_KEY_FILENAME).exists()
