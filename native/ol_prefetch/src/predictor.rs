@@ -1,8 +1,17 @@
-//! Predictor: tracks (peer, file_id, t) access traces, predicts next file.
+//! Predictor: tracks (peer, `file_id`, t) access traces, predicts next file.
 
 use std::collections::HashMap;
 
 use thiserror::Error;
+
+type CandidatePair = (([u8; 32], [u8; 32]), f64);
+
+fn u64_as_f64(value: u64) -> f64 {
+    let bytes = value.to_be_bytes();
+    let high = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let low = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    f64::from(high) * 4_294_967_296.0 + f64::from(low)
+}
 
 /// Errors the predictor surface can produce.
 #[derive(Debug, Error)]
@@ -35,7 +44,7 @@ pub struct Prediction {
 struct PeerState {
     last_file: Option<[u8; 32]>,
     last_t_ms: u64,
-    /// (last_file, next_file) → time-weighted co-occurrence count.
+    /// (`last_file`, `next_file`) → time-weighted co-occurrence count.
     pairs: HashMap<([u8; 32], [u8; 32]), f64>,
     /// per-file access counts (for cold-start fallback).
     files: HashMap<[u8; 32], f64>,
@@ -79,7 +88,7 @@ impl PrefetchPredictor {
         })
     }
 
-    /// Record one access: peer P accessed file F at time t_ms.
+    /// Record one access: peer P accessed file F at time `t_ms`.
     pub fn observe(&mut self, peer: &[u8; 32], file_id: [u8; 32], t_ms: u64) {
         let state = self.peers.entry(*peer).or_default();
         *state.files.entry(file_id).or_insert(0.0) += 1.0;
@@ -88,8 +97,9 @@ impl PrefetchPredictor {
                 let gap = t_ms - state.last_t_ms;
                 if gap <= MAX_CO_OCCURRENCE_GAP_MS {
                     // weight = exp(-gap * ln(2) / half_life)
-                    let kernel =
-                        (-(gap as f64) * std::f64::consts::LN_2 / self.half_life_ms as f64).exp();
+                    let kernel = (-u64_as_f64(gap) * std::f64::consts::LN_2
+                        / u64_as_f64(self.half_life_ms))
+                    .exp();
                     let key = (prev, file_id);
                     *state.pairs.entry(key).or_insert(0.0) += kernel;
                 }
@@ -121,7 +131,6 @@ impl PrefetchPredictor {
                 .collect();
         };
         // (from_blob, to_blob) edge keyed to its observed weight.
-        type CandidatePair = (([u8; 32], [u8; 32]), f64);
         let mut candidates: Vec<CandidatePair> = state
             .pairs
             .iter()
@@ -242,12 +251,11 @@ mod tests {
         assert!(!preds.is_empty());
         // The tight pattern should win — D2 ranks above C8.
         let positions: Vec<u8> = preds.iter().map(|p| p.file_id[0]).collect();
-        let pos_d2 = positions.iter().position(|&b| b == 0xD2).unwrap_or(99);
-        let pos_c8 = positions.iter().position(|&b| b == 0xC8).unwrap_or(99);
+        let recent_position = positions.iter().position(|&b| b == 0xD2).unwrap_or(99);
+        let old_position = positions.iter().position(|&b| b == 0xC8).unwrap_or(99);
         assert!(
-            pos_d2 < pos_c8,
-            "recent D2 should outrank old C8; got positions {:?}",
-            positions
+            recent_position < old_position,
+            "recent D2 should outrank old C8; got positions {positions:?}"
         );
     }
 
@@ -271,8 +279,7 @@ mod tests {
         let pos_b = positions.iter().position(|&b| b == 0xB).unwrap_or(99);
         assert!(
             pos_c < pos_b,
-            "fresh C should outrank decayed B; positions={:?}",
-            positions
+            "fresh C should outrank decayed B; positions={positions:?}"
         );
     }
 

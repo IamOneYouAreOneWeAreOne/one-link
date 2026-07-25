@@ -129,7 +129,9 @@ fn adversarial_high_entropy_secret_typical_master_key() {
 fn adversarial_long_secret_4kb() {
     // Stress: 4096-byte secret (multiple cache lines, typical "key
     // bundle" size). Each byte should reconstruct independently.
-    let secret: Vec<u8> = (0..4096u32).map(|i| (i as u8).wrapping_mul(31)).collect();
+    let secret: Vec<u8> = (0..4096u32)
+        .map(|i| i.to_le_bytes()[0].wrapping_mul(31))
+        .collect();
     let mut st = PrngState::new(0x1111_2222);
     let streams = share_bytes(&secret, 3, 5, &mut st).unwrap();
     let xs = vec![1u8, 2, 3];

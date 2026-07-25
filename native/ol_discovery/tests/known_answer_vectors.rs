@@ -24,6 +24,7 @@
 use ed25519_dalek::SigningKey;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use std::fmt::Write;
 
 use ol_discovery::node_id::NodeId;
 use ol_discovery::record::{PeerRecord, SignedRecord, RECORD_DEFAULT_TTL_SECS};
@@ -37,8 +38,8 @@ const PUBKEY_FIXED: [u8; 32] = [
 const EXPECTED_NODE_ID_HEX: &str =
     "bcff11daf7dbb8c789b7bcc4e45298041666f92fa8454b1c3fa86e174fd611e4";
 
-/// canonical_bytes() of the seed PeerRecord — pinned to detect wire
-/// format drift. Encodes magic / pubkey / pub_time / ttl / endpoint
+/// `canonical_bytes()` of the seed `PeerRecord` — pinned to detect wire
+/// format drift. Encodes magic / pubkey / `pub_time` / TTL / endpoint
 /// count / endpoint length-prefixed string in a deterministic layout.
 const EXPECTED_CANONICAL_HEX: &str = concat!(
     "4f4c5231",                                                         // OLR1 magic
@@ -50,8 +51,8 @@ const EXPECTED_CANONICAL_HEX: &str = concat!(
     "7564703a2f2f312e322e332e343a35363738", // "udp://1.2.3.4:5678" (18 bytes)
 );
 
-/// Verify the SignedRecord round-trips through verify with a
-/// ChaCha20-seeded signing key. We pin the first 32 bytes of the
+/// Verify the `SignedRecord` round-trips through verify with a
+/// `ChaCha20`-seeded signing key. We pin the first 32 bytes of the
 /// 64-byte Ed25519 signature for cross-build reproducibility.
 ///
 /// The full 64-byte signature includes a nonce derived from the
@@ -67,14 +68,18 @@ fn check_regen<F: FnOnce()>(label: &str, dump: F) {
     }
 }
 
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    output
+}
+
 #[test]
 fn kat_node_id_blake3_pinned() {
     let actual = NodeId::from_pubkey(&PUBKEY_FIXED);
-    let actual_hex: String = actual
-        .as_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let actual_hex = hex_lower(actual.as_bytes());
     check_regen("NodeId from [0x42; 32]", || {
         eprintln!("    EXPECTED_NODE_ID_HEX = \"{actual_hex}\"");
     });
@@ -94,7 +99,7 @@ fn fixed_record() -> PeerRecord {
 fn kat_record_canonical_bytes_pinned() {
     let rec = fixed_record();
     let bytes = rec.canonical_bytes();
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let hex = hex_lower(&bytes);
     let expected: String = EXPECTED_CANONICAL_HEX
         .chars()
         .filter(|c| !c.is_whitespace())
@@ -126,10 +131,7 @@ fn kat_signed_record_seeded_verify_roundtrip() {
     };
     let signed = SignedRecord::sign(rec, &sk).unwrap();
     // First 32 bytes of the Ed25519 signature (the "R" point) pinned.
-    let sig_first_hex: String = signed.signature[..32]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let sig_first_hex = hex_lower(&signed.signature[..32]);
     check_regen("Sig[0..32] of seeded record", || {
         eprintln!("    EXPECTED_SIG_FIRST_32_HEX = \"{sig_first_hex}\"");
     });

@@ -1,7 +1,7 @@
 {
   "name": "One Link",
   "short_name": "One Link",
-  "description": "Peer-to-peer LAN chat + file sync. End-to-end encrypted by default. No account, no server, no telemetry.",
+  "description": "Direct-first encrypted chat, calls, file transfer, and sync. No required account or product analytics; optional discovery and relay services support cross-network routes.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

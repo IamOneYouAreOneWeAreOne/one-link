@@ -2,6 +2,7 @@
 
 use ol_codegen::{emit_rust_struct, parse_struct, EmitOptions};
 use proptest::prelude::*;
+use std::fmt::Write as _;
 
 proptest! {
     /// parse_struct never panics on arbitrary UTF-8 input.
@@ -20,15 +21,16 @@ proptest! {
         seeds in proptest::collection::vec(0u8..6, 1..6),
     ) {
         let types = ["u8", "u16", "u32", "u64", "[u8; 32]", "String"];
-        let mut cl = format!("struct {} {{\n", name);
+        let mut cl = format!("struct {name} {{\n");
         for (i, seed) in seeds.iter().take(n_fields).enumerate() {
-            cl.push_str(&format!("    field_{}: {},\n", i, types[*seed as usize]));
+            writeln!(cl, "    field_{i}: {},", types[usize::from(*seed)])
+                .expect("writing to a String cannot fail");
         }
         cl.push('}');
         let parsed = parse_struct(&cl).expect("constructed CL is valid");
         let rust = emit_rust_struct(&parsed, &EmitOptions::default()).unwrap();
         prop_assert!(!rust.is_empty());
-        let needle = format!("pub struct {}", name);
+        let needle = format!("pub struct {name}");
         prop_assert!(rust.contains(&needle));
         prop_assert!(rust.contains("pub fn encode(&self)"));
     }

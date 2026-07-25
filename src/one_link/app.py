@@ -13,16 +13,16 @@ background process is.
 from __future__ import annotations
 
 import json
+import ctypes
+import http.client
+import logging
 import os
-import shutil
 import signal
 import socket
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
-import webbrowser
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -30,11 +30,25 @@ from typing import Optional
 import click
 
 from one_link import __version__
+from one_link import control_ipc
 from one_link import daemon as daemon_mod
-from one_link import server as server_mod
 from one_link.build_identity import runtime_build_identity
+from one_link.fault_observability import report_best_effort_failure
 from one_link.paths import data_dir
-from one_link.safe_http import validated_urlopen
+from one_link.process_security import (
+    hidden_creationflags,
+    launch_explicit_command,
+    launch_loopback_url,
+    resolve_explicit_executable,
+    resolve_system_executable,
+    sanitized_process_env,
+    trusted_process_env,
+    trusted_system_directories,
+    validate_loopback_url,
+)
+
+
+log = logging.getLogger("one_link.app")
 
 
 @dataclass(frozen=True)
@@ -80,35 +94,147 @@ def _daemon_is_lan_bound(info: "RunningDaemon") -> bool:
     return bind_host not in ("127.0.0.1", "localhost", "::1")
 
 
-def _control_request(port: int, cmd: str, timeout: float = 2.0, **kwargs) -> dict:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
+def _control_request(
+    port: int,
+    cmd: str,
+    timeout: float = 2.0,
+    *,
+    secret: str | None = None,
+    **kwargs,
+) -> dict:
     try:
-        s.connect(("127.0.0.1", port))
-        s.sendall((json.dumps({"cmd": cmd, **kwargs}) + "\n").encode("utf-8"))
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf.decode("utf-8").strip() or "{}")
+        return control_ipc.request_control(
+            int(port),
+            {"cmd": cmd, **kwargs},
+            timeout=timeout,
+            secret=secret,
+        )
     except Exception as e:
         return {"ok": False, "error": str(e)}
-    finally:
-        s.close()
 
 
-def _ui_status(server_port: int, token: str, timeout: float = 1.5) -> dict:
-    req = urllib.request.Request(
-        f"http://127.0.0.1:{server_port}/api/status",
-        headers={"Authorization": f"Bearer {token}"},
+def _open_verified_ui_instance(
+    server_port: int,
+    control_status: dict,
+    *,
+    secret: str,
+    timeout: float = 1.5,
+) -> http.client.HTTPConnection | None:
+    """Open and authenticate a keep-alive channel to the daemon's UI.
+
+    The caller requests ``ui_launch_info`` only after this proof succeeds, then
+    sends the owner bearer over this *same TCP connection*.  Requiring an open
+    HTTP/1.1 keep-alive socket closes the proof-to-bearer port-swap race: a
+    listener cannot be replaced underneath an already-connected socket.
+
+    A stale port hint or malicious localhost listener therefore never receives
+    the UI token merely because it can imitate an unsigned status payload. The
+    fresh challenge is HMAC-bound to the authenticated control daemon's process
+    identity, build fingerprint, and reported port.
+    """
+
+    challenge = control_ipc.make_ui_instance_challenge()
+    query = urllib.parse.urlencode({"challenge": challenge})
+    connection = http.client.HTTPConnection(
+        "127.0.0.1",
+        int(server_port),
+        timeout=timeout,
     )
     try:
-        with validated_urlopen(req, timeout=timeout, allow_loopback_http=True) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except (OSError, urllib.error.URLError, json.JSONDecodeError) as e:
-        return {"ok": False, "error": str(e)}
+        connection.request(
+            "GET",
+            f"/api/local-instance-proof?{query}",
+            headers={"Accept": "application/json", "Connection": "keep-alive"},
+        )
+        response = connection.getresponse()
+        raw = response.read(16 * 1024 + 1)
+        if len(raw) > 16 * 1024:
+            connection.close()
+            return None
+        # A proof on a connection the server intends to close cannot safely
+        # carry the later bearer; HTTPConnection would reconnect to whatever
+        # process acquired the port. Require a live HTTP/1.1 channel.
+        if response.status != 200 or response.version < 11 or response.will_close:
+            connection.close()
+            return None
+        body = json.loads(raw.decode("utf-8"))
+    except (OSError, http.client.HTTPException, UnicodeDecodeError, json.JSONDecodeError):
+        connection.close()
+        return None
+    if not isinstance(body, dict) or body.get("ok") is not True:
+        connection.close()
+        return None
+    instance_id = str(control_status.get("daemon_instance_id") or "")
+    source_fp = str(control_status.get("source_fingerprint") or "")
+    pid = control_status.get("pid")
+    if not instance_id or not source_fp or not isinstance(pid, int):
+        connection.close()
+        return None
+    if (
+        body.get("daemon_instance_id") != instance_id
+        or body.get("source_fingerprint") != source_fp
+        or body.get("pid") != pid
+        or body.get("ui_server_port") != int(server_port)
+    ):
+        connection.close()
+        return None
+    if not control_ipc.verify_ui_instance_proof(
+        str(body.get("proof") or ""),
+        secret,
+        challenge=challenge,
+        instance_id=instance_id,
+        pid=pid,
+        port=int(server_port),
+        source_fingerprint=source_fp,
+    ):
+        connection.close()
+        return None
+    sock = connection.sock
+    if sock is None:
+        connection.close()
+        return None
+    try:
+        peer = sock.getpeername()
+    except OSError:
+        connection.close()
+        return None
+    if not isinstance(peer, tuple) or peer[:2] != ("127.0.0.1", int(server_port)):
+        connection.close()
+        return None
+    return connection
+
+
+def _ui_status_on_verified_connection(
+    connection: http.client.HTTPConnection,
+    token: str,
+) -> dict:
+    """Fetch status without permitting HTTPConnection to reconnect."""
+
+    if connection.sock is None:
+        return {"ok": False, "error": "verified UI connection is closed"}
+    try:
+        connection.request(
+            "GET",
+            "/api/status",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+                "Connection": "close",
+            },
+        )
+        response = connection.getresponse()
+        raw = response.read(2 * 1024 * 1024 + 1)
+        if response.status != 200:
+            return {"ok": False, "error": f"UI status HTTP {response.status}"}
+        if len(raw) > 2 * 1024 * 1024:
+            return {"ok": False, "error": "UI status response is oversized"}
+        value = json.loads(raw.decode("utf-8"))
+        return value if isinstance(value, dict) else {
+            "ok": False,
+            "error": "UI status response is not an object",
+        }
+    except (OSError, http.client.HTTPException, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 def _runtime_matches_control(control_status: dict, ui_status: dict) -> bool:
@@ -123,6 +249,9 @@ def _runtime_matches_control(control_status: dict, ui_status: dict) -> bool:
     build = runtime_build_identity()
     return (
         ui_status.get("app_version") == control_status.get("app_version")
+        and ui_status.get("daemon_instance_id")
+        == control_status.get("daemon_instance_id")
+        and ui_status.get("pid") == control_status.get("pid")
         and control_status.get("source_fingerprint")
         == build["source_fingerprint"]
         and ui_status.get("source_fingerprint")
@@ -130,7 +259,68 @@ def _runtime_matches_control(control_status: dict, ui_status: dict) -> bool:
     )
 
 
-def _resolve_running_daemon() -> Optional[RunningDaemon]:
+def resolve_authenticated_daemon(
+    control_port: int,
+    secret: str,
+    *,
+    timeout: float = 2.0,
+) -> Optional[RunningDaemon]:
+    """Resolve an explicit daemon/UI pair through both authentication layers."""
+
+    ctrl = int(control_port)
+    if not 1 <= ctrl <= 65535:
+        return None
+    operation_timeout = max(0.1, float(timeout))
+    status = _control_request(
+        ctrl,
+        "status",
+        timeout=operation_timeout,
+        secret=secret,
+    )
+    if status.get("ok") is not True:
+        return None
+    srv = status.get("ui_server_port")
+    if not isinstance(srv, int) or not 1 <= srv <= 65535:
+        return None
+    verified_connection = _open_verified_ui_instance(
+        int(srv),
+        status,
+        secret=secret,
+        timeout=operation_timeout,
+    )
+    if verified_connection is None:
+        return None
+    try:
+        launch = _control_request(
+            ctrl,
+            "ui_launch_info",
+            timeout=operation_timeout,
+            secret=secret,
+        )
+        if (
+            launch.get("ok") is not True
+            or launch.get("ui_server_port") != srv
+            or launch.get("daemon_instance_id") != status.get("daemon_instance_id")
+            or launch.get("pid") != status.get("pid")
+            or launch.get("source_fingerprint") != status.get("source_fingerprint")
+        ):
+            return None
+        token = launch.get("token")
+        if (
+            not isinstance(token, str)
+            or not 32 <= len(token) <= 512
+            or token != token.strip()
+        ):
+            return None
+        ui_status = _ui_status_on_verified_connection(verified_connection, token)
+    finally:
+        verified_connection.close()
+    if not _runtime_matches_control(status, ui_status):
+        return None
+    return RunningDaemon(ctrl, int(srv), token, status)
+
+
+def _resolve_running_daemon(*, timeout: float = 2.0) -> Optional[RunningDaemon]:
     """Return the reachable daemon plus its self-reported status.
 
     Side-effect-free: passes clear_stale=False so a poll during a
@@ -138,29 +328,10 @@ def _resolve_running_daemon() -> Optional[RunningDaemon]:
     control.port (which it writes once and never recreates)."""
     try:
         ctrl = daemon_mod.read_control_port(clear_stale=False)
+        secret = control_ipc.read_control_secret()
     except RuntimeError:
         return None
-    if not _alive(ctrl):
-        return None
-    status = _control_request(ctrl, "status")
-    if status.get("ok") is not True:
-        return None
-    srv = status.get("ui_server_port")
-    if not isinstance(srv, int) or srv <= 0:
-        srv = None
-    try:
-        token = server_mod.read_ui_token()
-    except RuntimeError:
-        return None
-    if srv is None:
-        try:
-            srv = server_mod.read_server_port()
-        except RuntimeError:
-            return None
-    ui_status = _ui_status(int(srv), token)
-    if not _runtime_matches_control(status, ui_status):
-        return None
-    return RunningDaemon(ctrl, int(srv), token, status)
+    return resolve_authenticated_daemon(ctrl, secret, timeout=timeout)
 
 
 def _wait_for_daemon(timeout: float = 45.0) -> Optional[RunningDaemon]:
@@ -174,12 +345,7 @@ def _wait_for_daemon(timeout: float = 45.0) -> Optional[RunningDaemon]:
 
 
 def _lock_pid() -> int | None:
-    p = data_dir() / daemon_mod.DAEMON_LOCK_FILE
-    try:
-        raw = p.read_text(encoding="ascii", errors="ignore").strip()
-        return int(raw) if raw else None
-    except Exception:
-        return None
+    return daemon_mod._read_lock_pid()
 
 
 def _terminate_pid(pid: int, timeout: float = 5.0) -> bool:
@@ -199,41 +365,71 @@ def _terminate_pid(pid: int, timeout: float = 5.0) -> bool:
     if os.name == "nt":
         # Console-less children can ignore SIGTERM on Windows. Last resort.
         try:
-            taskkill = (
-                Path(os.environ.get("SystemRoot", r"C:\Windows"))
-                / "System32"
-                / "taskkill.exe"
-            )
-            subprocess.run(
-                [str(taskkill), "/PID", str(int(pid)), "/T", "/F"],
+            taskkill = resolve_system_executable("taskkill.exe", platform_name="windows")
+            result = subprocess.run(
+                [taskkill, "/PID", str(int(pid)), "/T", "/F"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=3,
                 check=False,
+                creationflags=hidden_creationflags(),
+                cwd=str(Path(taskkill).parent),
+                env=trusted_process_env(platform_name="windows"),
+                shell=False,
             )
+            return result.returncode == 0
         except Exception:
-            pass
-    return True
-
-
-def _stop_incompatible_daemon(info: RunningDaemon) -> bool:
-    """Best-effort stop for stale daemons before launching this build."""
-    if info.compatible:
-        return True
-    status = info.status or {}
-    if status.get("ok") is True:
-        _control_request(info.control_port, "shutdown", timeout=2.0)
-        deadline = time.time() + 6.0
-        while time.time() < deadline:
-            if not _alive(info.control_port):
-                return True
-            time.sleep(0.15)
-    pid = status.get("pid")
-    if not isinstance(pid, int):
-        pid = _lock_pid()
-    if isinstance(pid, int):
-        return _terminate_pid(pid)
+            return False
+    # SIGTERM timed out and this platform has no stronger fallback.
     return False
+
+
+def _stop_running_daemon(info: RunningDaemon) -> bool:
+    """Best-effort authenticated stop before a build or bind-mode change."""
+    status = info.status or {}
+    if status.get("ok") is not True:
+        return False
+    _control_request(info.control_port, "shutdown", timeout=2.0)
+    deadline = time.time() + 6.0
+    while time.time() < deadline:
+        if not _alive(info.control_port):
+            return True
+        time.sleep(0.15)
+    pid = status.get("pid")
+    # ``RunningDaemon.status`` came from authenticated IPC and was cross-checked
+    # against the HMAC-proven UI process. Never substitute the unauthenticated
+    # lock file here: a stale/recycled daemon.lock PID could name an unrelated
+    # process. Revalidate the authenticated PID against the live OS command line
+    # immediately before any forceful fallback.
+    if (
+        type(pid) is not int
+        or pid <= 0
+        or not daemon_mod._pid_matches_one_link_daemon(pid)
+    ):
+        return False
+    return _terminate_pid(pid)
+
+
+def _stop_verified_legacy_daemon() -> bool | None:
+    """Replace a pre-authentication daemon without trusting its socket.
+
+    Clients never create ``control.secret``. Its absence plus a live lock PID
+    whose command line and ``ONE_LINK_HOME`` are independently verified is the
+    narrow upgrade case where an older daemon cannot understand the hardened
+    handshake. Return ``True`` when stopped, ``False`` only when a verified
+    legacy daemon could not be stopped, and ``None`` when there is no safely
+    identifiable legacy process. A present/corrupt secret is never bypassed.
+    """
+
+    secret_path = data_dir() / control_ipc.CONTROL_SECRET_FILE
+    if secret_path.exists() or secret_path.is_symlink():
+        return None
+    pid = _lock_pid()
+    if not isinstance(pid, int) or pid <= 0 or not daemon_mod._pid_is_alive(pid):
+        return None
+    if not daemon_mod._pid_matches_one_link_daemon(pid):
+        return None
+    return _terminate_pid(pid)
 
 
 DAEMON_LAUNCH_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB before rotation
@@ -300,9 +496,16 @@ def _spawn_daemon() -> subprocess.Popen:
     _rotate_daemon_launch_log(log_path)
 
     if getattr(sys, "frozen", False):
-        daemon_cmd = [sys.executable, "daemon", "-v"]
+        daemon_cmd = [resolve_explicit_executable(sys.executable), "daemon", "-v"]
     else:
-        daemon_cmd = [sys.executable, "-m", "one_link.cli", "daemon", "-v"]
+        daemon_cmd = [
+            resolve_explicit_executable(sys.executable),
+            "-P",
+            "-m",
+            "one_link.cli",
+            "daemon",
+            "-v",
+        ]
 
     # Windows: the launcher (especially under PyInstaller --onefile and
     # when launched from a terminal that has its own Job Object) is
@@ -326,7 +529,7 @@ def _spawn_daemon() -> subprocess.Popen:
     # mid-conversation death, log ends with normal traffic, no
     # traceback) — line-flush mode for the child eliminates the entire
     # buffering-trap failure class.
-    child_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    child_env = {**sanitized_process_env(), "PYTHONUNBUFFERED": "1"}
     if os.name == "nt":
         return _spawn_daemon_windows_detached(daemon_cmd, log_path, env=child_env)
     # POSIX: setsid() detaches from the controlling terminal and the
@@ -346,6 +549,8 @@ def _spawn_daemon() -> subprocess.Popen:
         close_fds=True,
         start_new_session=True,
         env=child_env,
+        cwd=str(Path(daemon_cmd[0]).parent),
+        shell=False,
     )
 
 
@@ -373,10 +578,16 @@ def _spawn_supervisor() -> subprocess.Popen:
         pass
     _rotate_daemon_launch_log(log_path)
     if getattr(sys, "frozen", False):
-        cmd = [sys.executable, "supervisor"]
+        cmd = [resolve_explicit_executable(sys.executable), "supervisor"]
     else:
-        cmd = [sys.executable, "-m", "one_link.cli", "supervisor"]
-    child_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        cmd = [
+            resolve_explicit_executable(sys.executable),
+            "-P",
+            "-m",
+            "one_link.cli",
+            "supervisor",
+        ]
+    child_env = {**sanitized_process_env(), "PYTHONUNBUFFERED": "1"}
     if os.name == "nt":
         return _spawn_daemon_windows_detached(cmd, log_path, env=child_env)
     # Append (not truncate) — see _spawn_daemon for the rationale.
@@ -392,6 +603,8 @@ def _spawn_supervisor() -> subprocess.Popen:
         close_fds=True,
         start_new_session=True,
         env=child_env,
+        cwd=str(Path(cmd[0]).parent),
+        shell=False,
     )
 
 
@@ -420,6 +633,9 @@ def _spawn_daemon_windows_detached(
     DETACHED = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
     NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
     BREAKAWAY = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+    if not daemon_cmd:
+        raise ValueError("daemon command is empty")
+    daemon_cmd = [resolve_explicit_executable(daemon_cmd[0]), *daemon_cmd[1:]]
 
     # Append, never truncate — preserves the launcher's full forensic
     # chain (supervisor lines + every prior daemon run) across this
@@ -433,7 +649,7 @@ def _spawn_daemon_windows_detached(
 
     base = NO_WINDOW | DETACHED | NEW_GROUP
     last_err: Exception | None = None
-    for flags in (base | BREAKAWAY, base, 0):
+    for flags in (base | BREAKAWAY, base):
         try:
             return subprocess.Popen(
                 daemon_cmd,
@@ -443,16 +659,17 @@ def _spawn_daemon_windows_detached(
                 creationflags=flags,
                 close_fds=True,
                 env=env,
+                cwd=str(Path(daemon_cmd[0]).parent),
+                shell=False,
             )
         except (OSError, ValueError) as e:
             # A restrictive Job Object can reject CREATE_BREAKAWAY_FROM_JOB
-            # with "access denied"; drop the flag and retry. flags=0 is
-            # the final, always-valid fallback (tracked child, but it
-            # starts — strictly better than silently spawning nothing).
+            # with "access denied"; drop the breakaway flag and retry. We
+            # deliberately do not fall back to flags=0: that would reattach
+            # the background daemon to a console/job and recreate the
+            # inherited-session lifetime bug this function exists to avoid.
             last_err = e
             continue
-    # Should be unreachable (flags=0 cannot raise these), but never
-    # return a no-op handle that hides a non-spawn.
     raise RuntimeError(
         f"could not spawn daemon subprocess: {last_err}"
     )
@@ -475,8 +692,13 @@ def _default_window_geometry() -> tuple[int, int, int, int]:
             # SM_CXSCREEN / SM_CYSCREEN — primary monitor pixels.
             screen_w = int(user32.GetSystemMetrics(0))
             screen_h = int(user32.GetSystemMetrics(1))
-        except Exception:
-            pass
+        except (AttributeError, OSError, TypeError, ValueError) as exc:
+            report_best_effort_failure(
+                log,
+                "windows_screen_geometry",
+                exc,
+                level=logging.DEBUG,
+            )
     else:
         # tkinter is in the stdlib; cheap probe that works on
         # macOS / Linux without GUI libs.
@@ -487,8 +709,15 @@ def _default_window_geometry() -> tuple[int, int, int, int]:
             screen_w = root.winfo_screenwidth()
             screen_h = root.winfo_screenheight()
             root.destroy()
-        except Exception:
-            pass
+        except Exception as exc:
+            # tkinter can raise TclError at construction or any later display
+            # query; importing it conditionally keeps headless installs valid.
+            report_best_effort_failure(
+                log,
+                "tk_screen_geometry",
+                exc,
+                level=logging.DEBUG,
+            )
     if screen_w >= 800 and screen_h >= 600:
         # 80% of screen, but clamp the max so on 4K monitors the
         # window stays at a reasonable read width.
@@ -497,6 +726,30 @@ def _default_window_geometry() -> tuple[int, int, int, int]:
     x = max(0, (screen_w - width) // 2) if screen_w else 120
     y = max(0, (screen_h - height) // 2) if screen_h else 80
     return width, height, x, y
+
+
+def _windows_known_folder(csidl: int) -> Path | None:
+    """Read a Windows known folder through Shell32, never environment text."""
+
+    if os.name != "nt":
+        return None
+    try:
+        buffer = ctypes.create_unicode_buffer(32_768)
+        result = int(
+            ctypes.windll.shell32.SHGetFolderPathW(
+                None,
+                int(csidl),
+                None,
+                0,
+                buffer,
+            )
+        )
+        path = Path(buffer.value)
+        if result == 0 and path.is_absolute():
+            return path
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+    return None
 
 
 def _find_chromium_browser_exe() -> Optional[str]:
@@ -511,23 +764,35 @@ def _find_chromium_browser_exe() -> Optional[str]:
     on every Windows 10/11 machine.
     """
     if os.name == "nt":
-        candidates = [
-            os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
-            os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
-            os.path.expandvars(r"%LocalAppData%\Microsoft\Edge\Application\msedge.exe"),
-            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
-            os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
-            os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
-        ]
-        for p in candidates:
-            if p and os.path.isfile(p):
-                return p
+        # CSIDL values: LOCAL_APPDATA=0x1c, PROGRAM_FILES=0x26,
+        # PROGRAM_FILESX86=0x2a. Shell32 resolves redirects and architecture
+        # correctly without trusting attacker-controlled environment values.
+        program_files = _windows_known_folder(0x26)
+        program_files_x86 = _windows_known_folder(0x2A)
+        local_app_data = _windows_known_folder(0x1C)
+        roots = tuple(
+            root
+            for root in (program_files_x86, program_files, local_app_data)
+            if root is not None
+        )
+        relative_candidates = (
+            ("Microsoft", "Edge", "Application", "msedge.exe"),
+            ("Google", "Chrome", "Application", "chrome.exe"),
+        )
+        for relative in relative_candidates:
+            for root in roots:
+                try:
+                    return resolve_explicit_executable(root.joinpath(*relative))
+                except (OSError, ValueError):
+                    continue
         return None
-    # POSIX: check $PATH.
+    # POSIX: fixed system directories only; never the caller's PATH/cwd.
     for name in ("microsoft-edge", "google-chrome", "chromium", "chrome"):
-        path = shutil.which(name)
-        if path:
-            return path
+        for root in trusted_system_directories():
+            try:
+                return resolve_explicit_executable(root / name)
+            except (OSError, ValueError):
+                continue
     return None
 
 
@@ -554,16 +819,28 @@ def _is_existing_app_window_running(profile_dir: Path) -> bool:
             "  $_.CommandLine -like '*--app=http://127.0.0.1:*' "
             "} | Select-Object -First 1 -ExpandProperty ProcessId"
         )
+        powershell = resolve_system_executable(
+            "powershell.exe",
+            platform_name="windows",
+        )
         res = _subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps, str(profile_dir)],
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                ps,
+                str(profile_dir),
+            ],
             stdout=_subprocess.PIPE,
             stderr=_subprocess.DEVNULL,
             text=True,
             timeout=2.0,
-            creationflags=(
-                _subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            ),
+            creationflags=hidden_creationflags(),
             check=False,
+            cwd=str(Path(powershell).parent),
+            env=trusted_process_env(platform_name="windows"),
+            shell=False,
         )
         return bool(res.stdout.strip())
     except Exception:
@@ -585,9 +862,10 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
     just our UI — no browser chrome. Indistinguishable from a
     native app for everyday use.
 
-    Falls back to ``os.startfile``/``webbrowser.open`` when no
-    Chromium binary is found or the launch fails.
+    Falls back to the fixed OS browser launcher when no Chromium binary is
+    found or the launch fails; ``$BROWSER`` is deliberately not honored.
     """
+    url = validate_loopback_url(url)
     if standalone:
         browser = _find_chromium_browser_exe()
         if browser is not None:
@@ -640,20 +918,7 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
                     "--no-first-run",
                     "--no-default-browser-check",
                 ]
-                flags = (
-                    subprocess.CREATE_NO_WINDOW
-                    | subprocess.DETACHED_PROCESS
-                    if os.name == "nt"
-                    else 0
-                )
-                subprocess.Popen(
-                    args,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    stdin=subprocess.DEVNULL,
-                    creationflags=flags,
-                    close_fds=True,
-                )
+                launch_explicit_command(args, platform_name=sys.platform)
                 # 2026-06-04: Do NOT call os.startfile(url) as a
                 # "fallback" after a successful Popen. Edge's
                 # msedge.exe --app=URL launcher process detaches a
@@ -670,17 +935,17 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
                 # and Edge/Chrome will surface the window in a
                 # moment.
                 return
-            except Exception:
+            except (OSError, RuntimeError, ValueError) as exc:
                 # Popen raised — Chromium really did fail to launch.
                 # Fall through to default browser. User gets a tab
                 # but at least sees something.
-                pass
-    if os.name == "nt":
-        os.startfile(url)  # type: ignore[attr-defined]
-        return
-    opened = webbrowser.open(url, new=2)
-    if not opened:
-        raise RuntimeError("browser did not accept the URL")
+                report_best_effort_failure(
+                    log,
+                    "chromium_app_launch",
+                    exc,
+                    interval_s=30.0,
+                )
+    launch_loopback_url(url, platform_name=sys.platform)
 
 
 def _detect_lan_ip() -> str:
@@ -716,14 +981,8 @@ def _safe_secho(*args, **kwargs) -> None:
         return
 
 
-def _print_lan_warning(lan_ip: str, port: int, token: str) -> None:
-    """v0.15.2 — yellow security warning + LAN URL. Made deliberately
-    loud so a user who passed --lan understands the trust boundary
-    they just opened: anyone on the same Wi-Fi who has the URL+token
-    can reach the UI. Uses ASCII-only glyphs because Windows cp1252
-    consoles raise UnicodeEncodeError on ⚠ (warning sign) — the
-    crash happens AFTER the daemon spawns, leaving the user with a
-    running daemon but no printed URL."""
+def _print_lan_warning(lan_ip: str, port: int) -> None:
+    """Explain explicit LAN mode without printing an owner credential."""
     _safe_echo("")
     _safe_secho(
         "  ** LAN MODE - One Link UI is now exposed to your local network.",
@@ -731,14 +990,16 @@ def _print_lan_warning(lan_ip: str, port: int, token: str) -> None:
         bold=True,
     )
     _safe_echo(
-        "     Anyone on this Wi-Fi who has the URL + token can access your UI."
+        "     Owner access remains local/HTTPS-only; plain LAN HTTP never accepts "
+        "owner credentials."
     )
     _safe_echo(
-        "     The token gates pairing + sending; treat the URL like a password."
+        "     Start phone pairing from the local One Link window so it uses a "
+        "short-lived invite."
     )
     _safe_echo("")
     _safe_secho(
-        f"  Phone/LAN URL: http://{lan_ip}:{port}/?t={token}",
+        f"  Phone pairing landing: http://{lan_ip}:{port}/connect",
         fg="cyan",
         bold=True,
     )
@@ -774,20 +1035,22 @@ def _spawn_splash() -> Optional[subprocess.Popen]:
     process exiting) makes it dismiss itself. No IPC protocol.
     """
     try:
+        executable = resolve_explicit_executable(sys.executable)
         if getattr(sys, "frozen", False):
-            cmd = [sys.executable, "splash"]
+            cmd = [executable, "splash"]
         else:
-            cmd = [sys.executable, "-m", "one_link.splash"]
-        creationflags = 0
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            cmd = [executable, "-P", "-m", "one_link.splash"]
         return subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=creationflags if os.name == "nt" else 0,
+            creationflags=hidden_creationflags(),
+            start_new_session=os.name != "nt",
             close_fds=True,
+            env=sanitized_process_env(),
+            cwd=str(Path(executable).parent),
+            shell=False,
         )
     except Exception:
         return None
@@ -799,17 +1062,28 @@ def _close_splash(proc: Optional[subprocess.Popen]) -> None:
     Falls back to terminate() if the close+wait races a hung splash."""
     if proc is None:
         return
-    try:
-        if proc.stdin is not None:
-            try: proc.stdin.close()
-            except Exception: pass
+    if proc.stdin is not None:
         try:
-            proc.wait(timeout=2.0)
-        except Exception:
-            try: proc.terminate()
-            except Exception: pass
-    except Exception:
+            proc.stdin.close()
+        except (OSError, ValueError) as exc:
+            report_best_effort_failure(
+                log, "splash_stdin_close", exc, level=logging.DEBUG,
+            )
+    try:
+        proc.wait(timeout=2.0)
+        return
+    except subprocess.TimeoutExpired:
         pass
+    except (ChildProcessError, OSError) as exc:
+        report_best_effort_failure(
+            log, "splash_wait", exc, level=logging.DEBUG,
+        )
+    try:
+        proc.terminate()
+    except (OSError, ProcessLookupError) as exc:
+        report_best_effort_failure(
+            log, "splash_terminate", exc, level=logging.DEBUG,
+        )
 
 
 def run_app(
@@ -828,12 +1102,12 @@ def run_app(
     # splash, no other harm done.
     splash_proc = None if no_browser else _spawn_splash()
     _safe_echo("One Link")
-    # v0.15.2: --lan opt-in. Set BEFORE we try to reuse a running
-    # daemon so any spawned-fresh daemon inherits the right bind
-    # host. If a 127.0.0.1-bound daemon is already running, we'll
-    # stop it and replace; the user explicitly asked for LAN mode.
-    if lan:
-        os.environ["ONE_LINK_BIND_HOST"] = "0.0.0.0"  # nosec B104
+    # Bind policy is explicit and symmetric. The safe default is loopback;
+    # --lan is a deliberate opt-in and --loopback-only also replaces a
+    # previously LAN-bound daemon instead of silently reusing it.
+    os.environ["ONE_LINK_BIND_HOST"] = (
+        "0.0.0.0" if lan else "127.0.0.1"  # nosec B104
+    )
 
     spawned: Optional[subprocess.Popen] = None
     info = _resolve_running_daemon()
@@ -843,33 +1117,39 @@ def run_app(
         # not as permission to launch a competing daemon.
         info = _wait_for_daemon(timeout=2.0)
 
-    # v0.15.2: --lan forces a daemon replacement when an existing
-    # daemon is bound to loopback. We don't have a bind-host field
-    # in the existing status payload (older daemons), so we
-    # detect LAN-bind by trying to connect to the daemon via the
-    # LAN IP — if that succeeds, the daemon is already LAN-bound.
-    if lan and info is not None and info.compatible:
-        if not _daemon_is_lan_bound(info):
-            _safe_echo("  switching daemon to LAN mode...")
-            _stop_incompatible_daemon(info)
+    if info is not None and info.compatible:
+        is_lan_bound = _daemon_is_lan_bound(info)
+        if is_lan_bound != bool(lan):
+            mode = "LAN" if lan else "loopback-only"
+            _safe_echo(f"  switching daemon to {mode} mode...")
+            if not _stop_running_daemon(info):
+                _close_splash(splash_proc)
+                return 2
             # Give the OS a moment to release the listening socket so
-            # the freshly-spawned daemon can rebind the same port. On
-            # Windows the TIME_WAIT can otherwise force the new daemon
-            # to fall through to a higher candidate port.
+            # the freshly-spawned daemon can rebind the well-known port.
             time.sleep(1.0)
             info = _wait_for_daemon(timeout=1.0)
-            if info is not None:
-                # Daemon survived our shutdown request? Rare; fall
-                # through and accept whatever we end up with.
-                pass
+            if info is not None and _daemon_is_lan_bound(info) != bool(lan):
+                _close_splash(splash_proc)
+                return 2
 
     if info is not None and not info.compatible:
         running = info.status.get("app_version") or "unknown"
         _safe_echo(f"  replacing stale daemon ({running} -> {__version__})...")
-        _stop_incompatible_daemon(info)
+        _stop_running_daemon(info)
         info = _wait_for_daemon(timeout=1.0)
         if info is not None and not info.compatible:
             info = None
+
+    if info is None:
+        legacy_stop = _stop_verified_legacy_daemon()
+        if legacy_stop is False:
+            _safe_echo("  ! verified legacy daemon could not be stopped safely")
+            _close_splash(splash_proc)
+            return 2
+        if legacy_stop is True:
+            _safe_echo("  replaced legacy daemon with authenticated control IPC.")
+            time.sleep(0.5)
 
     if info is None:
         # Spawn-and-wait, with one retry via the error dialog if the
@@ -891,8 +1171,12 @@ def run_app(
                 _safe_echo("  daemon up.")
                 break
             _safe_echo("  ! daemon failed to start cleanly")
-            try: spawned.terminate()
-            except Exception: pass
+            try:
+                spawned.terminate()
+            except (OSError, ProcessLookupError) as exc:
+                report_best_effort_failure(
+                    log, "failed_spawn_terminate", exc, level=logging.DEBUG,
+                )
             spawned = None
             # Don't let the splash sit behind the error dialog.
             _close_splash(splash_proc)
@@ -946,7 +1230,7 @@ def run_app(
     # already-running branch; every failure path above returns first.
     assert info is not None
     url = f"http://127.0.0.1:{info.server_port}/?t={info.token}"
-    _safe_echo(f"  open: {url}")
+    _safe_echo(f"  open: http://127.0.0.1:{info.server_port}/ (authenticated)")
     if not no_browser:
         try:
             _open_browser_url(url, standalone=standalone)
@@ -966,7 +1250,7 @@ def run_app(
                 fg="yellow",
             )
         else:
-            _print_lan_warning(lan_ip, info.server_port, info.token)
+            _print_lan_warning(lan_ip, info.server_port)
 
     if spawned is not None:
         # The daemon is fully detached — Windows: spawned through the

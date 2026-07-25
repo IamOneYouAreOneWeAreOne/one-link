@@ -2,7 +2,7 @@
 //! Only meaningful on Windows with a real TPM; gated by feature
 //! `windows-tpm`.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_main, Criterion};
 use ol_confidential::windows_tpm::{produce_platform_quote, TpmAttestationKey};
 
 fn bench_tpm_sign(c: &mut Criterion) {
@@ -40,10 +40,11 @@ fn bench_tpm_platform_quote(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_tpm_sign,
-    bench_tpm_public_blob_export,
-    bench_tpm_platform_quote,
-);
+fn benches() {
+    let mut criterion = Criterion::default().configure_from_args();
+    bench_tpm_sign(&mut criterion);
+    bench_tpm_public_blob_export(&mut criterion);
+    bench_tpm_platform_quote(&mut criterion);
+}
+
 criterion_main!(benches);

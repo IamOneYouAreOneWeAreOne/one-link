@@ -3,7 +3,7 @@
 //! path: master sealing, child derivation, sealed signing, and
 //! attestation issuance + verification.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_main, Criterion};
 use ol_confidential::{
     fresh_attestation_nonce, verify_attestation, ConfidentialProvider, SoftwareProvider,
 };
@@ -88,12 +88,13 @@ fn bench_attest_verify(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_seal_master,
-    bench_derive_child,
-    bench_sealed_sign,
-    bench_attest_issue,
-    bench_attest_verify,
-);
+fn benches() {
+    let mut criterion = Criterion::default().configure_from_args();
+    bench_seal_master(&mut criterion);
+    bench_derive_child(&mut criterion);
+    bench_sealed_sign(&mut criterion);
+    bench_attest_issue(&mut criterion);
+    bench_attest_verify(&mut criterion);
+}
+
 criterion_main!(benches);

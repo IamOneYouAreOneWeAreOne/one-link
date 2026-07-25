@@ -35,7 +35,10 @@
 
 mod repair;
 
-pub use repair::{compress, compression_ratio, decompress, Grammar, GrammarError, Rule};
+pub use repair::{
+    compress, compression_ratio, decompress, Grammar, GrammarError, Rule, MAX_COMPRESS_INPUT_BYTES,
+    MAX_DECOMPRESSED_BYTES, MAX_GRAMMAR_RULES, MAX_GRAMMAR_SEQUENCE_SYMBOLS,
+};
 
 /// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

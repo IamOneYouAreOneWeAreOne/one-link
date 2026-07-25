@@ -4,12 +4,10 @@
 
 use libfuzzer_sys::fuzz_target;
 use ol_device_mesh::distributed_fs::{
-    repair_plan, sign_storage_attestation, under_replicated, ChunkHash,
-    ChunkPlacement, ErasurePolicy, FileManifest,
+    repair_plan, sign_storage_attestation, under_replicated, ChunkHash, ChunkPlacement,
+    ErasurePolicy, FileManifest,
 };
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use std::collections::BTreeSet;
@@ -40,12 +38,9 @@ fuzz_target!(|data: &[u8]| {
     let policy_m = data.get(1).copied().unwrap_or(1) % 8;
     let min_devices = (data.get(2).copied().unwrap_or(1) % 8).max(1);
     if let Ok(policy) = ErasurePolicy::new(policy_k, policy_m, min_devices) {
-        let chunk_count = ((data.get(3).copied().unwrap_or(0) as usize)
-            % 16)
-            .max(1)
+        let chunk_count = ((data.get(3).copied().unwrap_or(0) as usize) % 16).max(1)
             * policy.total_shards() as usize;
-        let chunks: Vec<ChunkHash> =
-            (0..chunk_count).map(|i| [(i as u8); 32]).collect();
+        let chunks: Vec<ChunkHash> = (0..chunk_count).map(|i| [(i as u8); 32]).collect();
         let m = FileManifest {
             file_size: u64::from(data.get(4).copied().unwrap_or(1)),
             chunk_size: u32::from(data.get(5).copied().unwrap_or(1)).max(1),
@@ -62,9 +57,7 @@ fuzz_target!(|data: &[u8]| {
 
     // 3. repair_plan on arbitrary placement sets.
     let policy = ErasurePolicy::new(2, 1, 3).unwrap();
-    let mesh: BTreeSet<[u8; DEVICE_ID_LEN]> = (1u8..=4)
-        .map(|i| [i; DEVICE_ID_LEN])
-        .collect();
+    let mesh: BTreeSet<[u8; DEVICE_ID_LEN]> = (1u8..=4).map(|i| [i; DEVICE_ID_LEN]).collect();
     let placements: Vec<ChunkPlacement> = (0u8..4)
         .map(|i| {
             let mut p = ChunkPlacement::empty([i; 32]);

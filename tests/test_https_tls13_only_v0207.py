@@ -15,9 +15,7 @@ quietly regress them.
 from __future__ import annotations
 
 import ssl
-from pathlib import Path
 
-import pytest
 
 from one_link import peer_https
 

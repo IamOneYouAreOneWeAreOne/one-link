@@ -15,30 +15,22 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import socket
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
+from one_link import control_ipc
 from one_link import daemon as daemon_mod
 
 
-def _request(cmd: str, *, timeout: float = 3600.0, **kwargs) -> dict:
+def _request(cmd: str, *, timeout: float = 3600.0, **kwargs: Any) -> dict[str, Any]:
     port = daemon_mod.read_control_port()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    try:
-        sock.connect(("127.0.0.1", port))
-        sock.sendall((json.dumps({"cmd": cmd, **kwargs}) + "\n").encode("utf-8"))
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = sock.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf.decode("utf-8").strip() or "{}")
-    finally:
-        sock.close()
+    return control_ipc.request_control(
+        port,
+        {"cmd": cmd, **kwargs},
+        timeout=timeout,
+    )
 
 
 def _mbps(nbytes: int, seconds: float) -> float:
@@ -81,7 +73,7 @@ def main() -> int:
 
     try:
         size = path.stat().st_size
-        rows: list[dict[str, object]] = []
+        rows: list[dict[str, Any]] = []
         if not args.json:
             print(f"One Link live send benchmark: peer={args.peer} file={path.name} size={size}")
         for i in range(max(1, int(args.repeat))):
@@ -114,7 +106,7 @@ def main() -> int:
             skipped = int(result.get("cdc_skipped") or 0)
             effective = size
             report = result.get("transfer_report") or {}
-            row = {
+            row: dict[str, Any] = {
                 "run": i + 1,
                 "ok": True,
                 "elapsed_s": round(elapsed, 6),

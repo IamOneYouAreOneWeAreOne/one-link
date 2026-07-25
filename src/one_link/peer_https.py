@@ -1,4 +1,4 @@
-"""v0.20.4 — Self-signed HTTPS for the daemon.
+"""Private, constrained HTTPS authority for the local daemon.
 
 Why this ship exists
 ====================
@@ -14,12 +14,9 @@ on the phone for: identity generation, signature verification,
 SAS pairing, all of it. Without HTTPS, the entire arc is unusable
 on iOS Safari over LAN.
 
-This module solves it by minting a self-signed certificate on the
-daemon, persisting it to data_dir, and serving an HTTPS listener
-on a parallel port. The phone gets a "Not Private" warning the
-first time it scans the pair QR; the user taps "Continue" once
-per device, and from then on Web Crypto works and the pair flow
-actually completes.
+This module solves it with a per-install P-256 root and a proper TLS
+leaf.  iOS installs the root through an explicitly removable profile;
+the daemon serves the leaf and chain on a parallel TLS 1.3 listener.
 
 Cert design
 ===========
@@ -27,29 +24,34 @@ Cert design
 - Algorithm: ECDSA P-256. RSA-2048 also works but produces
   larger certs; Ed25519 is rejected by some browsers (Safari) for
   TLS server certs as of 2026. P-256 is the universal sweet spot.
-- Validity: 365 days, auto-rotated when within 30 days of expiry.
-- Common Name: "One Link Self-Signed"
-- Subject Alternative Names: covers every interface the daemon
-  might reach the phone on:
-      DNS: localhost, *.local, onelink.local
-      IP:  127.0.0.1, ::1, plus any LAN IPv4/IPv6 we can detect
+- The root has critical RFC 5280 NameConstraints.  It can issue only
+  for localhost, the private ``onelink.local`` namespace, and the
+  exact IP endpoints present when it is minted.  It is not a general
+  web interception CA.
+- The root signing authority is an authenticated LockBox envelope.
+  The persisted file contains neither a cleartext PKCS#8 key nor an
+  independently replaceable certificate/key pair.  On Windows the
+  LockBox key is bound to the current user with DPAPI; passphrase and
+  recoverable master-seed modes retain their normal LockBox semantics.
+- The TLS leaf key must be available to OpenSSL and remains a strict
+  owner-only file.  Compromise of that key can impersonate this daemon
+  only; it cannot mint another certificate.
+- Leaf validity is 365 days and rotates 30 days before expiry.  The
+  root remains stable unless it expires or its exact endpoint scope no
+  longer covers the daemon, in which case the profile must be reinstalled.
+- Subject Alternative Names cover localhost, ``onelink.local``, the
+  per-daemon ``<short-id>.onelink.local`` name, and detected LAN IPs.
 - Persisted to:
       <data_dir>/peer_https/cert.pem
       <data_dir>/peer_https/key.pem
   Both 0o600. Regenerated if missing or expired.
 
-What this ship does NOT yet do
-==============================
-
-- Cert pinning on the phone side. v0.20.4 just relies on the
-  user accepting the "Not Private" warning once. A future ship
-  could pin the SHA-256 of the cert in the QR (so the phone can
-  verify "this is the SAME cert my laptop minted") — that closes
-  the residual MITM window during the cert-trust ceremony.
-- mDNS broadcasting of `onelink.local`. We include `onelink.local`
-  in the SAN so a future mDNS-enabled daemon can use it without
-  cert regen, but we don't actually broadcast it yet.
+The profile is still a manual local trust ceremony: on an unmanaged
+iPhone, Apple requires the user to install the profile and separately
+enable SSL trust in Certificate Trust Settings.  The profile and UI say
+this directly and expose removal instructions.
 """
+
 from __future__ import annotations
 
 import datetime
@@ -59,36 +61,271 @@ import os
 import socket
 import contextlib
 import ssl
+import struct
 from pathlib import Path
 from typing import Optional, cast
 
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
+
+from one_link.key_material import (
+    KeyMaterialIntegrityError,
+    atomic_create_bytes,
+    atomic_replace_bytes,
+    artifact_exists,
+    read_bytes_if_exists,
+)
 
 log = logging.getLogger(__name__)
 
 
 # Sub-directory under data_dir for HTTPS material.
 HTTPS_DIR = "peer_https"
-# 2026-05-23 (TN2326): cert.pem is now leaf+root chain (PEM-concat).
-# key.pem is the leaf key. root_ca.pem + root_ca_key.pem are the
-# long-lived trust anchor. The mobileconfig embeds the root, not the
-# leaf — iOS trusts the root, the chain validates the leaf at TLS
-# handshake. A dual-purpose self-signed cert (the old shape) passes
-# the Trust Settings toggle on most iOS versions but fails the
-# actual TLS handshake on some iOS 17/18 builds with a
-# "network connection lost" Safari error.
-CERT_FILE = "cert.pem"            # leaf + root chain
-KEY_FILE = "key.pem"              # leaf key
-ROOT_CA_FILE = "root_ca.pem"      # long-lived trust anchor (in mobileconfig)
-ROOT_CA_KEY_FILE = "root_ca_key.pem"  # signs the leaf on rotation
+# cert.pem is the leaf+root chain (PEM-concat). key.pem is the leaf key.
+# root_ca.pem is a public projection used by the mobileconfig.  The
+# historically named root_ca_key.pem is now an authenticated LockBox
+# authority envelope containing the matching root certificate and key as
+# one transaction.  Keeping the old path permits an in-place, fail-closed
+# migration from releases that stored a cleartext PKCS#8 key there.
+CERT_FILE = "cert.pem"  # leaf + root chain
+KEY_FILE = "key.pem"  # leaf key
+ROOT_CA_FILE = "root_ca.pem"  # long-lived trust anchor (in mobileconfig)
+ROOT_CA_KEY_FILE = "root_ca_key.pem"  # encrypted root authority envelope
+
+_ROOT_AUTHORITY_MAGIC = b"OLTCAUTH\x01"
+_ROOT_AUTHORITY_HEADER = struct.Struct(">9sII")
+_ROOT_AUTHORITY_MAX_BYTES = 128 * 1024
+_TLS_MATERIAL_MAX_BYTES = 256 * 1024
 
 # Lifetime + rotation thresholds.
-CERT_VALID_DAYS = 365             # leaf lifetime
-CERT_ROTATE_WITHIN_DAYS = 30      # leaf rotation window
-ROOT_CA_VALID_DAYS = 365 * 10     # root lives 10 years; phones trust once
+CERT_VALID_DAYS = 365  # leaf lifetime
+CERT_ROTATE_WITHIN_DAYS = 30  # leaf rotation window
+ROOT_CA_VALID_DAYS = 365 * 10  # root lives 10 years; phones trust once
+
+
+class TLSAuthorityError(RuntimeError):
+    """An existing TLS authority is incomplete, corrupt, or unauthentic."""
+
+
+class TLSAuthorityRotationRequired(RuntimeError):
+    """A valid authority must rotate to meet the current security policy."""
+
+
+def _must_enforce_private_permissions() -> bool:
+    """Return whether POSIX mode bits protect the generated key files.
+
+    Windows protects these files with the account's ACL/default DACL and its
+    ``chmod`` implementation only controls a read-only flag. On POSIX,
+    failure to apply 0600 can expose a CA or leaf private key to another
+    local account, so generation must fail closed.
+    """
+
+    return os.name != "nt"
+
+
+def _restrict_private_files(*paths: Path) -> None:
+    """Apply the documented 0600 mode, failing closed where meaningful."""
+
+    for path in paths:
+        if os.name == "nt":
+            # chmod is only a read-only bit on Windows.  Apply the same
+            # current-user ACL used by the identity and LockBox authorities.
+            from one_link.identity import _restrict_windows_acl
+
+            _restrict_windows_acl(path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError as exc:
+            if _must_enforce_private_permissions():
+                raise PermissionError(
+                    f"could not restrict TLS key material permissions: {path}"
+                ) from exc
+            log.warning(
+                "peer-https: platform could not apply mode 0600 to %s: %s",
+                path,
+                exc,
+            )
+
+
+def _write_private_bytes(path: Path, payload: bytes) -> None:
+    """Write secret key bytes only after tightening an existing inode.
+
+    ``Path.write_bytes`` creates files using the process umask and chmods
+    later, leaving a small 0644 exposure window on common POSIX defaults.
+    Open without truncation, enforce 0600, then replace the contents.
+    """
+
+    flags = os.O_WRONLY | os.O_CREAT
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    fd = os.open(path, flags, 0o600)
+    try:
+        if _must_enforce_private_permissions():
+            fchmod = getattr(os, "fchmod", None)
+            if not callable(fchmod):
+                raise PermissionError(f"could not restrict TLS key material permissions: {path}")
+            try:
+                fchmod(fd, 0o600)
+            except OSError as exc:
+                raise PermissionError(
+                    f"could not restrict TLS key material permissions: {path}"
+                ) from exc
+        os.ftruncate(fd, 0)
+        with os.fdopen(fd, "wb", closefd=False) as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+    finally:
+        os.close(fd)
+
+
+def _harden_private_path(path: Path) -> None:
+    """Hardener callback for durable authority-file publication."""
+
+    _restrict_private_files(path)
+
+
+def _spki_bytes(key: object) -> bytes:
+    public_bytes = getattr(key, "public_bytes", None)
+    if not callable(public_bytes):
+        raise TLSAuthorityError("TLS authority contains an unsupported public key")
+    return public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+
+def _encode_root_authority(
+    key: ec.EllipticCurvePrivateKey,
+    cert: x509.Certificate,
+) -> bytes:
+    """Encode the matching root certificate/key into one strict record."""
+
+    cert_der = cert.public_bytes(serialization.Encoding.DER)
+    key_der = key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    payload = (
+        _ROOT_AUTHORITY_HEADER.pack(
+            _ROOT_AUTHORITY_MAGIC,
+            len(cert_der),
+            len(key_der),
+        )
+        + cert_der
+        + key_der
+    )
+    if len(payload) > _ROOT_AUTHORITY_MAX_BYTES:
+        raise TLSAuthorityError("TLS root authority exceeds its size limit")
+    return payload
+
+
+def _decode_root_authority(
+    payload: bytes,
+) -> tuple[ec.EllipticCurvePrivateKey, x509.Certificate]:
+    """Strictly decode a LockBox-authenticated root authority record."""
+
+    if not isinstance(payload, bytes) or len(payload) < _ROOT_AUTHORITY_HEADER.size:
+        raise TLSAuthorityError("TLS root authority record is truncated")
+    if len(payload) > _ROOT_AUTHORITY_MAX_BYTES:
+        raise TLSAuthorityError("TLS root authority record exceeds its size limit")
+    magic, cert_len, key_len = _ROOT_AUTHORITY_HEADER.unpack_from(payload)
+    if magic != _ROOT_AUTHORITY_MAGIC:
+        raise TLSAuthorityError("TLS root authority record has an unknown version")
+    if cert_len <= 0 or key_len <= 0:
+        raise TLSAuthorityError("TLS root authority record contains an empty field")
+    expected = _ROOT_AUTHORITY_HEADER.size + cert_len + key_len
+    if expected != len(payload):
+        raise TLSAuthorityError("TLS root authority record lengths are inconsistent")
+    cert_start = _ROOT_AUTHORITY_HEADER.size
+    key_start = cert_start + cert_len
+    try:
+        cert = x509.load_der_x509_certificate(payload[cert_start:key_start])
+        loaded_key = serialization.load_der_private_key(
+            payload[key_start:],
+            password=None,
+        )
+    except (TypeError, ValueError, UnsupportedAlgorithm) as exc:
+        raise TLSAuthorityError("TLS root authority record is not valid DER") from exc
+    if not isinstance(loaded_key, ec.EllipticCurvePrivateKey):
+        raise TLSAuthorityError("TLS root authority private key is not EC")
+    return loaded_key, cert
+
+
+def _wrap_root_authority(base: Path, payload: bytes) -> bytes:
+    from one_link.lockbox import acquire_lockbox, is_wrapped
+
+    wrapped = acquire_lockbox(base).wrap(payload)
+    if not is_wrapped(wrapped):
+        raise TLSAuthorityError("LockBox returned an invalid TLS authority envelope")
+    return wrapped
+
+
+def _unwrap_root_authority(base: Path, wrapped: bytes) -> bytes:
+    from one_link.lockbox import LockBoxError, acquire_lockbox, is_wrapped
+
+    if not is_wrapped(wrapped):
+        raise TLSAuthorityError("TLS root authority is not LockBox-wrapped")
+    try:
+        return acquire_lockbox(base).unwrap(wrapped)
+    except LockBoxError as exc:
+        raise TLSAuthorityError("TLS root authority failed LockBox authentication") from exc
+
+
+def _publish_private_authority(
+    path: Path,
+    payload: bytes,
+    *,
+    replace: bool,
+) -> bool:
+    """Durably publish one authenticated authority envelope."""
+
+    def _validate(candidate: bytes) -> None:
+        if candidate != payload:
+            raise KeyMaterialIntegrityError("TLS authority read-back mismatch")
+
+    if replace:
+        atomic_replace_bytes(
+            path,
+            payload,
+            label="TLS root authority",
+            validate=_validate,
+            harden_path=_harden_private_path,
+        )
+        return True
+    return atomic_create_bytes(
+        path,
+        payload,
+        label="TLS root authority",
+        validate=_validate,
+        harden_path=_harden_private_path,
+    )
+
+
+def _publish_root_projection(path: Path, cert: x509.Certificate) -> None:
+    pem = cert.public_bytes(serialization.Encoding.PEM)
+
+    def _validate(candidate: bytes) -> None:
+        try:
+            parsed = x509.load_pem_x509_certificate(candidate)
+        except (ValueError, UnsupportedAlgorithm) as exc:
+            raise KeyMaterialIntegrityError("TLS root certificate projection is invalid") from exc
+        if parsed.fingerprint(hashes.SHA256()) != cert.fingerprint(hashes.SHA256()):
+            raise KeyMaterialIntegrityError(
+                "TLS root certificate projection does not match authority"
+            )
+
+    atomic_replace_bytes(
+        path,
+        pem,
+        label="TLS root certificate projection",
+        validate=_validate,
+        harden_path=_harden_private_path,
+    )
 
 
 def https_dir(base: Path) -> Path:
@@ -124,8 +361,8 @@ def _detect_lan_addresses() -> list[str]:
     try:
         s.connect(("8.8.8.8", 80))
         out.add(s.getsockname()[0])
-    except Exception:
-        pass
+    except OSError as exc:
+        log.debug("peer-https: egress LAN-address detection failed: %s", exc)
     finally:
         s.close()
     # All IPv4 addresses bound to this host.
@@ -134,8 +371,8 @@ def _detect_lan_addresses() -> list[str]:
         _, _, addrs = socket.gethostbyname_ex(hostname)
         for a in addrs:
             out.add(a)
-    except Exception:
-        pass
+    except OSError as exc:
+        log.debug("peer-https: hostname LAN-address enumeration failed: %s", exc)
     return sorted(out)
 
 
@@ -168,18 +405,298 @@ def _build_subject_alt_names(
     return x509.SubjectAlternativeName(names)
 
 
+def _build_root_name_constraints() -> x509.NameConstraints:
+    """Limit the installed CA to One Link names and current IP endpoints.
+
+    RFC 5280 encodes IP constraints as an address plus mask.  A /32 or /128
+    therefore grants exactly one address.  Endpoint changes deliberately
+    rotate the root and require a fresh, visible trust ceremony instead of
+    silently widening a phone-wide trust anchor.
+    """
+
+    permitted: list[x509.GeneralName] = [
+        x509.DNSName("localhost"),
+        # RFC 5280 DNS constraints permit this name and labels below it,
+        # including the per-daemon <short-id>.onelink.local endpoint.
+        x509.DNSName("onelink.local"),
+    ]
+    for ip_str in _detect_lan_addresses():
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        prefix = 32 if ip.version == 4 else 128
+        permitted.append(x509.IPAddress(ipaddress.ip_network(f"{ip}/{prefix}")))
+    return x509.NameConstraints(
+        permitted_subtrees=permitted,
+        excluded_subtrees=None,
+    )
+
+
+def _root_constraints_cover_current_endpoints(cert: x509.Certificate) -> bool:
+    try:
+        extension = cert.extensions.get_extension_for_class(x509.NameConstraints)
+    except x509.ExtensionNotFound:
+        return False
+    if not extension.critical:
+        return False
+    constraints = extension.value
+    if constraints.excluded_subtrees:
+        return False
+    permitted = constraints.permitted_subtrees or []
+    dns_values = {
+        name.value.lower().rstrip(".") for name in permitted if isinstance(name, x509.DNSName)
+    }
+    if not {"localhost", "onelink.local"}.issubset(dns_values):
+        return False
+    ip_networks = [
+        name.value
+        for name in permitted
+        if isinstance(name, x509.IPAddress)
+        and isinstance(
+            name.value,
+            (ipaddress.IPv4Network, ipaddress.IPv6Network),
+        )
+    ]
+    for ip_str in _detect_lan_addresses():
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if not any(ip.version == network.version and ip in network for network in ip_networks):
+            return False
+    return True
+
+
+def _validate_root_authority(
+    key: ec.EllipticCurvePrivateKey,
+    cert: x509.Certificate,
+) -> None:
+    """Validate every invariant before a root may sign a new leaf."""
+
+    if not isinstance(key.curve, ec.SECP256R1):
+        raise TLSAuthorityError("TLS root authority is not P-256")
+    public_key = cert.public_key()
+    if not isinstance(public_key, ec.EllipticCurvePublicKey):
+        raise TLSAuthorityError("TLS root certificate is not EC")
+    if not isinstance(public_key.curve, ec.SECP256R1):
+        raise TLSAuthorityError("TLS root certificate is not P-256")
+    if _spki_bytes(key.public_key()) != _spki_bytes(public_key):
+        raise TLSAuthorityError("TLS root certificate and private key do not match")
+    if cert.subject != cert.issuer:
+        raise TLSAuthorityError("TLS root certificate is not self-issued")
+    signature_hash = cert.signature_hash_algorithm
+    if signature_hash is None:
+        raise TLSAuthorityError("TLS root certificate lacks a signature hash")
+    try:
+        public_key.verify(
+            cert.signature,
+            cert.tbs_certificate_bytes,
+            ec.ECDSA(signature_hash),
+        )
+    except InvalidSignature as exc:
+        raise TLSAuthorityError("TLS root certificate self-signature is invalid") from exc
+    try:
+        basic = cert.extensions.get_extension_for_class(x509.BasicConstraints)
+        usage = cert.extensions.get_extension_for_class(x509.KeyUsage)
+    except x509.ExtensionNotFound as exc:
+        raise TLSAuthorityError("TLS root certificate is missing a required extension") from exc
+    if not basic.critical or not basic.value.ca or basic.value.path_length != 0:
+        raise TLSAuthorityError("TLS root BasicConstraints are invalid")
+    if not usage.critical or not usage.value.key_cert_sign or not usage.value.crl_sign:
+        raise TLSAuthorityError("TLS root KeyUsage is invalid")
+    if not _root_constraints_cover_current_endpoints(cert):
+        raise TLSAuthorityRotationRequired(
+            "TLS root is unconstrained or no longer covers current endpoints"
+        )
+
+
+def _certificate_needs_rotation(
+    cert: x509.Certificate,
+    *,
+    rotate_within_days: int,
+) -> bool:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    expiry = getattr(cert, "not_valid_after_utc", None)
+    if expiry is None:
+        expiry = cert.not_valid_after.replace(tzinfo=datetime.timezone.utc)
+    return expiry - now < datetime.timedelta(days=rotate_within_days)
+
+
+def _leaf_san_covers_current_endpoints(
+    leaf: x509.Certificate,
+    *,
+    short_id: str,
+) -> bool:
+    try:
+        san = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    except x509.ExtensionNotFound:
+        return False
+    dns = {name.value.lower().rstrip(".") for name in san if isinstance(name, x509.DNSName)}
+    required_dns = {"localhost", "onelink.local"}
+    if short_id:
+        required_dns.add(f"{short_id}.onelink.local".lower())
+    if not required_dns.issubset(dns):
+        return False
+    ips = {name.value for name in san if isinstance(name, x509.IPAddress)}
+    for ip_str in _detect_lan_addresses():
+        try:
+            endpoint = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if endpoint not in ips:
+            return False
+    return True
+
+
+def _validate_leaf_material(
+    base: Path,
+    *,
+    root_cert: x509.Certificate,
+    short_id: str,
+) -> bool:
+    """Validate persisted leaf files; return false only for safe regeneration.
+
+    Access, reparse-point, and concurrent-replacement failures from the
+    key-material reader propagate and fail closed.  Ordinary malformed or
+    mismatched leaf bytes are non-authoritative and can be reminted beneath
+    the still-authenticated root.
+    """
+
+    chain_pem = read_bytes_if_exists(
+        cert_path(base),
+        label="TLS leaf certificate chain",
+        max_bytes=_TLS_MATERIAL_MAX_BYTES,
+        harden_path=_harden_private_path,
+    )
+    key_pem = read_bytes_if_exists(
+        key_path(base),
+        label="TLS leaf private key",
+        max_bytes=_TLS_MATERIAL_MAX_BYTES,
+        harden_path=_harden_private_path,
+    )
+    if chain_pem is None or key_pem is None:
+        return False
+    try:
+        certs = x509.load_pem_x509_certificates(chain_pem)
+        loaded_key = serialization.load_pem_private_key(key_pem, password=None)
+    except (TypeError, ValueError, UnsupportedAlgorithm):
+        return False
+    if len(certs) != 2 or not isinstance(loaded_key, ec.EllipticCurvePrivateKey):
+        return False
+    leaf, projected_root = certs
+    leaf_public = leaf.public_key()
+    if not isinstance(leaf_public, ec.EllipticCurvePublicKey):
+        return False
+    if not isinstance(leaf_public.curve, ec.SECP256R1):
+        return False
+    if not isinstance(loaded_key.curve, ec.SECP256R1):
+        return False
+    if _spki_bytes(loaded_key.public_key()) != _spki_bytes(leaf_public):
+        return False
+    if projected_root.fingerprint(hashes.SHA256()) != root_cert.fingerprint(hashes.SHA256()):
+        return False
+    if leaf.issuer != root_cert.subject:
+        return False
+    signature_hash = leaf.signature_hash_algorithm
+    root_public = root_cert.public_key()
+    if signature_hash is None or not isinstance(root_public, ec.EllipticCurvePublicKey):
+        return False
+    try:
+        root_public.verify(
+            leaf.signature,
+            leaf.tbs_certificate_bytes,
+            ec.ECDSA(signature_hash),
+        )
+        basic = leaf.extensions.get_extension_for_class(x509.BasicConstraints)
+        usage = leaf.extensions.get_extension_for_class(x509.KeyUsage)
+        eku = leaf.extensions.get_extension_for_class(x509.ExtendedKeyUsage)
+    except (InvalidSignature, x509.ExtensionNotFound):
+        return False
+    if not basic.critical or basic.value.ca:
+        return False
+    if not usage.critical or not usage.value.digital_signature:
+        return False
+    if usage.value.key_cert_sign or usage.value.crl_sign:
+        return False
+    if x509.ExtendedKeyUsageOID.SERVER_AUTH not in eku.value:
+        return False
+    if not _leaf_san_covers_current_endpoints(leaf, short_id=short_id):
+        return False
+    return not _certificate_needs_rotation(
+        leaf,
+        rotate_within_days=CERT_ROTATE_WITHIN_DAYS,
+    )
+
+
+def _publish_leaf_key(
+    path: Path,
+    payload: bytes,
+    *,
+    expected_public: ec.EllipticCurvePublicKey,
+) -> None:
+    def _validate(candidate: bytes) -> None:
+        try:
+            loaded = serialization.load_pem_private_key(candidate, password=None)
+        except (TypeError, ValueError, UnsupportedAlgorithm) as exc:
+            raise KeyMaterialIntegrityError("TLS leaf key read-back is invalid") from exc
+        if not isinstance(loaded, ec.EllipticCurvePrivateKey):
+            raise KeyMaterialIntegrityError("TLS leaf key read-back is not EC")
+        if _spki_bytes(loaded.public_key()) != _spki_bytes(expected_public):
+            raise KeyMaterialIntegrityError("TLS leaf key read-back does not match")
+
+    atomic_replace_bytes(
+        path,
+        payload,
+        label="TLS leaf private key",
+        validate=_validate,
+        harden_path=_harden_private_path,
+    )
+
+
+def _publish_leaf_chain(
+    path: Path,
+    payload: bytes,
+    *,
+    leaf: x509.Certificate,
+    root: x509.Certificate,
+) -> None:
+    def _validate(candidate: bytes) -> None:
+        try:
+            certs = x509.load_pem_x509_certificates(candidate)
+        except (ValueError, UnsupportedAlgorithm) as exc:
+            raise KeyMaterialIntegrityError("TLS leaf chain read-back is invalid") from exc
+        if len(certs) != 2:
+            raise KeyMaterialIntegrityError("TLS leaf chain read-back has wrong length")
+        if certs[0].fingerprint(hashes.SHA256()) != leaf.fingerprint(hashes.SHA256()):
+            raise KeyMaterialIntegrityError("TLS leaf chain read-back changed the leaf")
+        if certs[1].fingerprint(hashes.SHA256()) != root.fingerprint(hashes.SHA256()):
+            raise KeyMaterialIntegrityError("TLS leaf chain read-back changed the root")
+
+    atomic_replace_bytes(
+        path,
+        payload,
+        label="TLS leaf certificate chain",
+        validate=_validate,
+        harden_path=_harden_private_path,
+    )
+
+
 def _mint_root_ca(
-    base: Path, *, short_id: str = "",
+    base: Path,
+    *,
+    short_id: str = "",
 ) -> tuple[ec.EllipticCurvePrivateKey, x509.Certificate]:
-    """Mint the long-lived root CA. Lives 10 years and signs every
-    leaf TLS cert this daemon ever serves. The phone trusts THIS
-    via the mobileconfig — install once, never rotate.
+    """Mint and transactionally publish a constrained root authority.
 
     Per Apple TN2326: the root has BasicConstraints CA=True, key
-    usage = certSign+crlSign, NO subjectAltName (it's a trust
-    anchor, not a TLS endpoint), NO extendedKeyUsage (leaves
-    declare their own purposes). SubjectKeyIdentifier present;
-    AuthorityKeyIdentifier == SubjectKeyIdentifier (self-issued).
+    usage = certSign+crlSign, no subjectAltName, and no EKU.  A
+    critical NameConstraints extension prevents this manually trusted
+    root from authenticating names outside One Link's local scope.
+
+    The certificate and private key are serialized together, LockBox-
+    wrapped, and atomically published before the public root projection.
+    If publication races, the existing authenticated winner is loaded.
     """
     d = https_dir(base)
     d.mkdir(parents=True, exist_ok=True)
@@ -187,14 +704,13 @@ def _mint_root_ca(
     rkp = root_ca_key_path(base)
 
     key = ec.generate_private_key(ec.SECP256R1())
-    cn = (
-        f"One Link Root CA ({short_id})"
-        if short_id else "One Link Root CA"
+    cn = f"One Link Root CA ({short_id})" if short_id else "One Link Root CA"
+    subject = issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, cn),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "One Link"),
+        ]
     )
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, cn),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "One Link"),
-    ])
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (
         x509.CertificateBuilder()
@@ -230,22 +746,24 @@ def _mint_root_ca(
             x509.AuthorityKeyIdentifier.from_issuer_public_key(key.public_key()),
             critical=False,
         )
+        .add_extension(
+            _build_root_name_constraints(),
+            critical=True,
+        )
         .sign(key, hashes.SHA256())
     )
+    _validate_root_authority(key, cert)
 
-    rcp.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    rkp.write_bytes(key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    ))
-    try:
-        os.chmod(rcp, 0o600)
-        os.chmod(rkp, 0o600)
-    except Exception:
-        pass
+    encoded = _encode_root_authority(key, cert)
+    wrapped = _wrap_root_authority(base, encoded)
+    replacing = artifact_exists(rkp, label="TLS root authority")
+    if not _publish_private_authority(rkp, wrapped, replace=replacing):
+        # A concurrent first publisher won.  Never overwrite it with a
+        # different authority; converge on the authenticated winner.
+        return _load_root_ca(base)
+    _publish_root_projection(rcp, cert)
     log.info(
-        "peer-https: minted root CA (valid_days=%d, sha256=%s)",
+        "peer-https: minted constrained root CA (valid_days=%d, sha256=%s, authority=lockbox)",
         ROOT_CA_VALID_DAYS,
         cert.fingerprint(hashes.SHA256()).hex()[:32],
     )
@@ -255,13 +773,72 @@ def _mint_root_ca(
 def _load_root_ca(
     base: Path,
 ) -> tuple[ec.EllipticCurvePrivateKey, x509.Certificate]:
-    cert = x509.load_pem_x509_certificate(root_ca_path(base).read_bytes())
-    key = serialization.load_pem_private_key(
-        root_ca_key_path(base).read_bytes(), password=None
+    rcp = root_ca_path(base)
+    rkp = root_ca_key_path(base)
+    authority_blob = read_bytes_if_exists(
+        rkp,
+        label="TLS root authority",
+        max_bytes=_ROOT_AUTHORITY_MAX_BYTES,
+        harden_path=_harden_private_path,
     )
-    # Our root CA is always EC P-256; validate on load + narrow the
-    # broad load_pem_private_key() union for the typed return.
-    assert isinstance(key, ec.EllipticCurvePrivateKey)
+    if authority_blob is None:
+        raise TLSAuthorityError("TLS root authority is missing")
+
+    from one_link.lockbox import is_wrapped
+
+    if is_wrapped(authority_blob):
+        key, cert = _decode_root_authority(_unwrap_root_authority(base, authority_blob))
+    else:
+        # One-time migration from the historical cleartext PKCS#8 key.  The
+        # existing certificate is required and validated before replacement;
+        # an incomplete/corrupt trust anchor is never treated as first boot.
+        cert_pem = read_bytes_if_exists(
+            rcp,
+            label="TLS root certificate",
+            max_bytes=_ROOT_AUTHORITY_MAX_BYTES,
+            harden_path=_harden_private_path,
+        )
+        if cert_pem is None:
+            raise TLSAuthorityError("legacy TLS root key exists without its certificate")
+        try:
+            cert = x509.load_pem_x509_certificate(cert_pem)
+            loaded_key = serialization.load_pem_private_key(
+                authority_blob,
+                password=None,
+            )
+        except (TypeError, ValueError, UnsupportedAlgorithm) as exc:
+            raise TLSAuthorityError("legacy TLS root authority is invalid") from exc
+        if not isinstance(loaded_key, ec.EllipticCurvePrivateKey):
+            raise TLSAuthorityError("legacy TLS root private key is not EC")
+        key = loaded_key
+
+    _validate_root_authority(key, cert)
+
+    expected_pem = cert.public_bytes(serialization.Encoding.PEM)
+    projection = read_bytes_if_exists(
+        rcp,
+        label="TLS root certificate projection",
+        max_bytes=_ROOT_AUTHORITY_MAX_BYTES,
+        harden_path=_harden_private_path,
+    )
+    projection_matches = False
+    if projection is not None:
+        try:
+            projected_cert = x509.load_pem_x509_certificate(projection)
+            projection_matches = projected_cert.fingerprint(hashes.SHA256()) == cert.fingerprint(
+                hashes.SHA256()
+            )
+        except (ValueError, UnsupportedAlgorithm):
+            projection_matches = False
+    if not projection_matches or projection != expected_pem:
+        # The authenticated combined authority is the source of truth.  The
+        # public PEM is a regenerable projection, not independent authority.
+        _publish_root_projection(rcp, cert)
+
+    if not is_wrapped(authority_blob):
+        wrapped = _wrap_root_authority(base, _encode_root_authority(key, cert))
+        _publish_private_authority(rkp, wrapped, replace=True)
+        log.info("peer-https: migrated cleartext root key into LockBox authority")
     return key, cert
 
 
@@ -287,14 +864,13 @@ def _mint_leaf_tls(
     kp = key_path(base)
 
     key = ec.generate_private_key(ec.SECP256R1())
-    cn = (
-        f"One Link Daemon ({short_id})"
-        if short_id else "One Link Daemon"
+    cn = f"One Link Daemon ({short_id})" if short_id else "One Link Daemon"
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, cn),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "One Link"),
+        ]
     )
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, cn),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "One Link"),
-    ])
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (
         x509.CertificateBuilder()
@@ -343,21 +919,28 @@ def _mint_leaf_tls(
         .sign(root_key, hashes.SHA256())
     )
 
-    chain_pem = (
-        cert.public_bytes(serialization.Encoding.PEM)
-        + root_cert.public_bytes(serialization.Encoding.PEM)
+    chain_pem = cert.public_bytes(serialization.Encoding.PEM) + root_cert.public_bytes(
+        serialization.Encoding.PEM
     )
-    cp.write_bytes(chain_pem)
-    kp.write_bytes(key.private_bytes(
+    key_pem = key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
-    ))
-    try:
-        os.chmod(cp, 0o600)
-        os.chmod(kp, 0o600)
-    except Exception:
-        pass
+    )
+    # Publish the key first and chain second.  Each replacement is durable and
+    # validated; a crash between them leaves a detectable mismatch that is
+    # safely reminted under the unchanged authenticated root on next boot.
+    _publish_leaf_key(
+        kp,
+        key_pem,
+        expected_public=key.public_key(),
+    )
+    _publish_leaf_chain(
+        cp,
+        chain_pem,
+        leaf=cert,
+        root=root_cert,
+    )
     log.info(
         "peer-https: minted leaf TLS cert (valid_days=%d, sha256=%s)",
         valid_days,
@@ -378,22 +961,30 @@ def generate_self_signed(
     followed by root; aiohttp's load_cert_chain serves both to
     clients so iOS validates the leaf via the trusted root.
 
-    Idempotent for the root (re-used if already on disk and not
-    expired); always mints a fresh leaf so every call rotates.
+    Idempotent for a valid root authority; always mints a fresh leaf.
+    Existing corrupt/partial authority fails closed.  Only a valid root
+    that is expired, lacks NameConstraints, or no longer covers the
+    current exact endpoints is deliberately rotated.
     """
     rkp = root_ca_key_path(base)
     rcp = root_ca_path(base)
-    have_root = rkp.is_file() and rcp.is_file()
-    if have_root:
+    have_authority = artifact_exists(rkp, label="TLS root authority")
+    have_projection = artifact_exists(rcp, label="TLS root certificate")
+    if have_authority:
         try:
             root_key, root_cert = _load_root_ca(base)
-            # Bail to a fresh root if the existing one is itself near
-            # expiry (10-year cert; only happens once a decade).
+        except TLSAuthorityRotationRequired as exc:
+            log.warning(
+                "peer-https: rotating valid root authority to satisfy policy: %s",
+                exc,
+            )
+            root_key, root_cert = _mint_root_ca(base, short_id=short_id)
+        else:
+            # Root projection may have been repaired by _load_root_ca.
             if needs_rotation(rcp, rotate_within_days=30):
                 root_key, root_cert = _mint_root_ca(base, short_id=short_id)
-        except Exception as e:
-            log.warning("peer-https: existing root CA unreadable, regenerating: %s", e)
-            root_key, root_cert = _mint_root_ca(base, short_id=short_id)
+    elif have_projection:
+        raise TLSAuthorityError("TLS root certificate exists without its signing authority")
     else:
         root_key, root_cert = _mint_root_ca(base, short_id=short_id)
     return _mint_leaf_tls(
@@ -419,7 +1010,9 @@ def needs_rotation(
     try:
         data = cert_path_to_check.read_bytes()
         cert = x509.load_pem_x509_certificate(data)
-    except Exception as e:
+    except FileNotFoundError:
+        return True
+    except (ValueError, UnsupportedAlgorithm) as e:
         log.warning("peer-https: cert unparseable, will rotate: %s", e)
         return True
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -439,38 +1032,47 @@ def ensure_cert(base: Path, *, short_id: str = "") -> tuple[Path, Path]:
     does NOT, this is the pre-TN2326 single-cert layout. The existing
     cert is a self-signed dual-purpose root+leaf; iOS will toggle it
     as trusted but Safari rejects the TLS handshake on iOS 17/18.
-    Wipe it and regenerate the chain — the user will have to re-
-    install the mobileconfig once, but every connection thereafter
-    works.
+    Atomic publication replaces that non-authoritative leaf material
+    with a two-certificate chain; the user must install the new profile.
     """
     cp = cert_path(base)
     kp = key_path(base)
     rcp = root_ca_path(base)
     rkp = root_ca_key_path(base)
 
-    # Migration: old single-cert layout (cert.pem exists, no root.pem).
-    if cp.is_file() and not rcp.is_file():
-        log.info(
-            "peer-https: migrating pre-TN2326 single-cert layout to two-cert chain"
-        )
-        with contextlib.suppress(Exception):
-            cp.unlink()
-        with contextlib.suppress(Exception):
-            kp.unlink()
-
-    needs_regen = (
-        not rcp.is_file()
-        or not rkp.is_file()
-        or not kp.is_file()
-        or needs_rotation(cp)
-    )
-    if needs_regen:
+    # root_ca.pem is a regenerable public projection of the authenticated
+    # combined authority.  A missing projection is repaired by
+    # generate_self_signed; a missing authority with a remaining projection
+    # fails closed there instead of silently replacing phone trust.
+    have_authority = artifact_exists(rkp, label="TLS root authority")
+    have_projection = artifact_exists(rcp, label="TLS root certificate")
+    if not have_authority or not have_projection:
         return generate_self_signed(base, short_id=short_id)
+    # Validate authority even when the leaf is fresh.  This detects endpoint
+    # scope changes, authority tampering, and projection replacement before
+    # OpenSSL starts serving an invalid or over-broad chain.
+    try:
+        root_key, root_cert = _load_root_ca(base)
+    except TLSAuthorityRotationRequired:
+        return generate_self_signed(base, short_id=short_id)
+    if not _validate_leaf_material(
+        base,
+        root_cert=root_cert,
+        short_id=short_id,
+    ):
+        return _mint_leaf_tls(
+            base,
+            root_key=root_key,
+            root_cert=root_cert,
+            short_id=short_id,
+        )
     return cp, kp
 
 
 def build_ssl_context(
-    base: Path, *, short_id: str = "",
+    base: Path,
+    *,
+    short_id: str = "",
 ) -> Optional[ssl.SSLContext]:
     """Build an ssl.SSLContext loaded with the daemon's self-signed
     cert. Returns None if the cert can't be created (e.g. the data
@@ -540,7 +1142,12 @@ def cert_fingerprint_sha256(cert_path_to_read: Path) -> Optional[str]:
     try:
         data = cert_path_to_read.read_bytes()
         cert = x509.load_pem_x509_certificate(data)
-    except Exception:
+    except (OSError, ValueError) as exc:
+        log.warning(
+            "peer-https: cannot derive certificate fingerprint from %s: %s",
+            cert_path_to_read,
+            exc,
+        )
         return None
     return cert.fingerprint(hashes.SHA256()).hex()
 
@@ -564,6 +1171,7 @@ def _format_pem_for_plist(pem_bytes: bytes) -> bytes:
     """
     from cryptography import x509
     from cryptography.hazmat.primitives.serialization import Encoding
+
     cert = x509.load_pem_x509_certificate(pem_bytes.strip())
     return cert.public_bytes(Encoding.DER)
 
@@ -574,10 +1182,12 @@ def build_mobileconfig(
     organization: str = "One Link",
     profile_display_name: str = "One Link Trust",
 ) -> bytes:
-    """v0.20.6 — build an iOS Configuration Profile that installs the
-    daemon's self-signed cert as a trusted root. After install, iOS
-    trusts every TLS connection signed by this cert system-wide,
-    which means /peer over HTTPS works with zero warnings.
+    """Build a removable iOS profile for this daemon's constrained root.
+
+    After the user separately enables SSL trust, iOS accepts TLS leaves
+    from this authority only for the exact local IP endpoints present at
+    mint time, localhost, and the private One Link DNS namespace.  It is
+    deliberately incapable of authenticating arbitrary public websites.
 
     The profile is unsigned. iOS shows a "Not Verified" badge during
     install, but the user can still install it after entering their
@@ -613,9 +1223,9 @@ def build_mobileconfig(
         "PayloadUUID": str(uuid.uuid4()).upper(),
         "PayloadDisplayName": "One Link Root CA",
         "PayloadDescription": (
-            "Trust the One Link Root CA so your phone can talk to "
-            "any One Link daemon you pair with, over HTTPS, with no "
-            "warnings."
+            "Trust only this laptop's constrained One Link authority "
+            "for its local One Link names and current network addresses. "
+            "It cannot authenticate arbitrary public websites."
         ),
         "PayloadCertificateFileName": "one-link-root.cer",
         "PayloadContent": _format_pem_for_plist(root_pem),
@@ -628,9 +1238,10 @@ def build_mobileconfig(
         "PayloadUUID": str(uuid.uuid4()).upper(),
         "PayloadDisplayName": profile_display_name,
         "PayloadDescription": (
-            "Adds your laptop's One Link daemon as a trusted source "
-            "so your phone can pair with it over HTTPS without seeing "
-            "a 'Not Private' warning. Remove anytime via "
+            "Adds this laptop's endpoint-constrained One Link authority "
+            "so your phone can pair over HTTPS. If the laptop's network "
+            "address changes, install the newly generated profile. Remove "
+            "anytime via "
             "Settings → General → VPN & Device Management."
         ),
         "PayloadOrganization": organization,

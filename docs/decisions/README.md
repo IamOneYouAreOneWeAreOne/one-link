@@ -27,10 +27,11 @@ ADRs 0009-0019 reserved for Phase B (information layer + filesystem surface).
 ADRs 0020-0029 reserved for Phase C (multi-axis baseline).
 ADRs 0030-0039 reserved for Phase D (visionary).
 
-Each future ADR will be added when its phase begins. Phase B will need at
-minimum: Bloom filter parameters, RaptorQ symbol size + IPR resolution, XOR
-network coding combination policy, FUSE/FSKit/Dokan FFI surface,
-format-aware chunking codec list, convergent encryption content-type policy.
+Each future ADR is added when its phase begins. Phase B decisions include at
+minimum: Bloom filter parameters, LT symbol sizing plus the deferred
+RaptorQ/IPR/versioning decision, XOR network-coding combination policy,
+FUSE/FSKit/Dokan FFI surface, format-aware chunking codec list, and convergent
+encryption content-type policy.
 
 ## ADR template
 

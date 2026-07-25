@@ -24,6 +24,10 @@ DEFAULT_SRC = OUT_DIR / "one-glyph.png"
 SRC = Path(os.environ.get("ONE_LINK_GLYPH_SRC", str(DEFAULT_SRC))).expanduser()
 
 APP_ICON_BG = (0, 0, 0)
+# Retained for the reusable gradient renderer even though the current app icon
+# deliberately uses the solid black product treatment.
+ACCENT_TOP = (140, 80, 255)
+ACCENT_BOT = (60, 38, 200)
 
 
 def luminance_to_alpha(im_rgba: Image.Image) -> Image.Image:

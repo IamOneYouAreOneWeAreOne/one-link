@@ -1,6 +1,6 @@
-//! Microbenchmarks for ol_pair_qr hot paths.
+//! Microbenchmarks for `ol_pair_qr` hot paths.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_main, Criterion};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 
@@ -58,10 +58,11 @@ fn bench_sas_derive(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_full_pair,
-    bench_invite_decode_verify,
-    bench_sas_derive
-);
-criterion_main!(benches);
+fn benchmarks() {
+    let mut criterion = Criterion::default().configure_from_args();
+    bench_full_pair(&mut criterion);
+    bench_invite_decode_verify(&mut criterion);
+    bench_sas_derive(&mut criterion);
+}
+
+criterion_main!(benchmarks);

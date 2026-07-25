@@ -18,6 +18,23 @@ use ol_device_mesh::mesh_state::{
     AuthenticatedOp, Delta, MeshState, SubtreePolicyKind, AUTH_OP_DOMAIN, MAX_DELTA_VALUE_LEN,
     MAX_OPS_PER_SYNC, MAX_SUBTREE_LABEL_LEN,
 };
+use std::fmt::Write as _;
+
+const EXPECTED_EMPTY_ROOT_HEX: &str =
+    "a3d76f88d3da0a6cf8efa8a25075bbd2a3a35d3c8b6dc4e6d9f9b3a30c4f8c54";
+const EXPECTED_AUTH_OP_TRANSCRIPT_HEX: &str = concat!(
+    "4f4c2d6d6573682d617574682d6f702d7631", // "OL-mesh-auth-op-v1"
+    "00000008",                             // subtree length = 8
+    "636f6e7461637473",                     // "contacts"
+    "02",                                   // OrAdd kind tag
+    "00000005",                             // element length = 5
+    "616c696365",                           // "alice"
+    "55555555555555555555555555555555",     // tag = [0x55; 16]
+    "11111111111111111111111111111111",     // device_id = [0x11; 16]
+    "0000000000000003",                     // day_index = 3
+    "0000000000000007",                     // seq = 7
+    "000000006553f100",                     // wall_unix = 1_700_000_000
+);
 
 fn check_regen<F: FnOnce()>(label: &str, dump: F) {
     if std::env::var("OL_MESH_STATE_KAT_REGEN").as_deref() == Ok("1") {
@@ -27,7 +44,11 @@ fn check_regen<F: FnOnce()>(label: &str, dump: F) {
 }
 
 fn to_hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    let mut hex = String::with_capacity(b.len() * 2);
+    for byte in b {
+        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
 }
 
 // ── 1. Domain tags pinned ─────────────────────────────────────────
@@ -55,8 +76,6 @@ fn kat_empty_state_root_pinned() {
     check_regen("empty state root", || {
         eprintln!("    EXPECTED_EMPTY_ROOT_HEX = \"{hex}\"");
     });
-    const EXPECTED_EMPTY_ROOT_HEX: &str =
-        "a3d76f88d3da0a6cf8efa8a25075bbd2a3a35d3c8b6dc4e6d9f9b3a30c4f8c54";
     // Pinned per first observation; regen path lets future migrations
     // bump it deliberately.
     assert_eq!(hex.len(), 64);
@@ -122,19 +141,6 @@ fn kat_auth_op_canonical_transcript_pinned() {
     check_regen("auth-op canonical transcript", || {
         eprintln!("    EXPECTED_AUTH_OP_TRANSCRIPT_HEX = \"{hex}\"");
     });
-    const EXPECTED_AUTH_OP_TRANSCRIPT_HEX: &str = concat!(
-        "4f4c2d6d6573682d617574682d6f702d7631", // "OL-mesh-auth-op-v1"
-        "00000008",                             // subtree length = 8
-        "636f6e7461637473",                     // "contacts"
-        "02",                                   // OrAdd kind tag
-        "00000005",                             // element length = 5
-        "616c696365",                           // "alice"
-        "55555555555555555555555555555555",     // tag = [0x55; 16]
-        "11111111111111111111111111111111",     // device_id = [0x11; 16]
-        "0000000000000003",                     // day_index = 3
-        "0000000000000007",                     // seq = 7
-        "000000006553f100",                     // wall_unix = 1_700_000_000
-    );
     assert_eq!(
         hex, EXPECTED_AUTH_OP_TRANSCRIPT_HEX,
         "auth-op transcript drift"

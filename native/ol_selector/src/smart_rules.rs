@@ -49,15 +49,17 @@ impl Decide<Decision> for SmartRules {
 
 /// Rule: transport choice.
 ///
-///   paranoid                    → Relay (hide path always)
-///   latency_strict              → QuicDatagram (size<8K) or QuicStream
-///                                  (NEVER relay — relay doubles RTT,
-///                                   which violates the LatencyStrict
-///                                   contract from Gap 20)
-///   file & size > 500KB         → QuicStream (bulk)
-///   stranger | cellular         → Relay (hide path on metered/untrusted)
-///   foreground & size < 8KB     → QuicDatagram (no head-of-line block)
-///   else                        → QuicStream
+/// ```text
+/// paranoid                    → Relay (hide path always)
+/// latency_strict              → QuicDatagram (size<8K) or QuicStream
+///                                (NEVER relay — relay doubles RTT,
+///                                 which violates the LatencyStrict
+///                                 contract from Gap 20)
+/// file & size > 500KB         → QuicStream (bulk)
+/// stranger | cellular         → Relay (hide path on metered/untrusted)
+/// foreground & size < 8KB     → QuicDatagram (no head-of-line block)
+/// else                        → QuicStream
+/// ```
 fn pick_transport(ctx: &Context) -> Transport {
     if ctx.user_mode == UserMode::Paranoid {
         return Transport::Relay;
@@ -88,10 +90,12 @@ fn pick_transport(ctx: &Context) -> Transport {
 
 /// Rule: classical vs coherence path.
 ///
-///   size < 1280                → Classical (anchor floor wastes bytes)
-///   file & size > 100KB        → Coherence (CDC dedup wins on large files)
-///   user_mode = LatencyStrict  → Classical (predictability for latency)
-///   else                        → Coherence (warmup-friendly default)
+/// ```text
+/// size < 1280                → Classical (anchor floor wastes bytes)
+/// file & size > 100KB        → Coherence (CDC dedup wins on large files)
+/// user_mode = LatencyStrict  → Classical (predictability for latency)
+/// else                       → Coherence (warmup-friendly default)
+/// ```
 fn pick_path(ctx: &Context) -> Path {
     if ctx.size < 1280 {
         return Path::Classical;
@@ -107,10 +111,12 @@ fn pick_path(ctx: &Context) -> Path {
 
 /// Rule: onion-circuit hop count.
 ///
-///   paranoid                                       → Five
-///   stranger | cellular | metered                  → Three
-///   paired & battery_save                          → One
-///   else                                            → Three (floor for non-paired)
+/// ```text
+/// paranoid                       → Five
+/// stranger | cellular | metered  → Three
+/// paired & battery_save          → One
+/// else                           → Three (floor for non-paired)
+/// ```
 fn pick_onion_hops(ctx: &Context) -> OnionHops {
     if ctx.user_mode == UserMode::Paranoid {
         return OnionHops::Five;
@@ -129,10 +135,12 @@ fn pick_onion_hops(ctx: &Context) -> OnionHops {
 
 /// Rule: cover traffic on/off.
 ///
-///   battery_save                → off (cover is bandwidth + energy expensive)
-///   onion ≥ 3 hops              → on (cover only meaningful with full onion)
-///   paranoid                    → on
-///   else                        → off
+/// ```text
+/// battery_save    → off (cover is bandwidth + energy expensive)
+/// onion ≥ 3 hops  → on (cover only meaningful with full onion)
+/// paranoid        → on
+/// else            → off
+/// ```
 fn pick_cover_traffic(ctx: &Context) -> bool {
     if ctx.user_mode == UserMode::BatterySave {
         return false;
@@ -148,10 +156,12 @@ fn pick_cover_traffic(ctx: &Context) -> bool {
 ///
 /// This rule is the Gap 14 latency-tail fix in action.
 ///
-///   foreground & (msg or size<2KB)  → UrgentBypass (NEVER delay urgent chat)
-///   latency_strict                   → EmitNow
-///   background & LongDrx             → Batch (amortize radio wake)
-///   else                              → EmitNow
+/// ```text
+/// foreground & (msg or size<2KB)  → UrgentBypass (NEVER delay urgent chat)
+/// latency_strict                  → EmitNow
+/// background & LongDrx            → Batch (amortize radio wake)
+/// else                            → EmitNow
+/// ```
 fn pick_batch(ctx: &Context) -> BatchDecision {
     if ctx.urgency == Urgency::Foreground && (ctx.kind == EventKind::Msg || ctx.size < 2048) {
         return BatchDecision::UrgentBypass;
@@ -167,12 +177,14 @@ fn pick_batch(ctx: &Context) -> BatchDecision {
 
 /// Rule: anchor-lay for sub-RTT loss recovery.
 ///
-///   battery_save                → only on observed loss > 10% (save bytes)
-///   paranoid                    → always lay (resilience > bandwidth)
-///   observed_loss > 5%          → yes
-///   cellular & file             → yes (cellular often re-transmits at chunk granularity)
-///   latency_strict & file       → yes (re-transmit on loss adds latency)
-///   else                        → no (anchor laying costs bandwidth)
+/// ```text
+/// battery_save           → only on observed loss > 10% (save bytes)
+/// paranoid               → always lay (resilience > bandwidth)
+/// observed_loss > 5%     → yes
+/// cellular & file        → yes (cellular often re-transmits at chunk granularity)
+/// latency_strict & file  → yes (re-transmit on loss adds latency)
+/// else                   → no (anchor laying costs bandwidth)
+/// ```
 fn pick_anchor(ctx: &Context) -> bool {
     if ctx.user_mode == UserMode::BatterySave {
         return ctx.observed_loss > 0.10;
@@ -194,10 +206,12 @@ fn pick_anchor(ctx: &Context) -> bool {
 
 /// Rule: pre-warm the predictor for this event.
 ///
-///   battery_save                → never (no speculative work)
-///   latency_strict & strong pattern → yes (favor speed over caution)
-///   pattern_strength > 0.5      → yes (predictor has signal)
-///   else                        → no (cold predictor pollutes pattern store)
+/// ```text
+/// battery_save                     → never (no speculative work)
+/// latency_strict & strong pattern  → yes (favor speed over caution)
+/// pattern_strength > 0.5           → yes (predictor has signal)
+/// else                             → no (cold predictor pollutes pattern store)
+/// ```
 fn pick_predictor_warm(ctx: &Context) -> bool {
     if ctx.user_mode == UserMode::BatterySave {
         return false;

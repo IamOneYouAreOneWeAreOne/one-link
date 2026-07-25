@@ -10,7 +10,6 @@ manager's dispatch + handler methods directly with stubbed DC.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 from types import SimpleNamespace
@@ -224,7 +223,6 @@ async def test_handle_attest_response_with_wrong_challenge_rejected():
     # Plant a fake "expected" challenge.
     peer.attestation_challenge = bytes([0xAA] * 32)
     # Build a doc signed against a DIFFERENT challenge.
-    from one_link.confidential_native import fresh_attestation_nonce
     from one_link.handshake_attestation import (
         AttestationWire,
         issue_for_challenge,

@@ -10,8 +10,8 @@ the preset.
 These tests pin the wiring so a regression can't sneak back in.
 
 For EACH preset field, we assert:
-  1. The resolver function exists and returns the right value
-     for explicit setting / unset (falls back to preset default).
+  1. The resolver function exists, enforces the preset ceiling, and permits
+     explicit settings only to make policy stricter.
   2. The consuming subsystem actually checks the resolver — verified
      by reading the source for the resolver-call site (rather than
      spinning up a full daemon for each test).
@@ -66,9 +66,8 @@ def test_rendezvous_resolver_defaults_by_preset(preset_name, expected):
     just_works PERMITS rendezvous (the cross-network mode; it still
     only runs if the user configured rendezvous URLs —
     _start_rendezvous checks that). quiet + off_grid default it OFF
-    (LAN-only / hard-isolation), but a user can still opt in via the
-    explicit rendezvous_enabled SETTING, which the resolver honours
-    over the preset."""
+    (LAN-only / hard-isolation); a stale explicit setting cannot loosen
+    either preset."""
     assert sov.resolve_rendezvous_enabled(
         state_setting=None, preset_name=preset_name,
     ) is expected
@@ -99,17 +98,16 @@ def test_inherit_mdns_rendezvous_resolver_defaults(preset_name, expected):
 
 
 @pytest.mark.parametrize("name", ["just_works", "quiet", "off_grid"])
-def test_explicit_setting_overrides_preset_for_all_new_resolvers(name):
-    """For each new resolver: explicit 'true' wins over a preset
-    that defaults False, and explicit 'false' wins over a preset
-    that defaults True."""
+def test_explicit_setting_can_only_tighten_new_resolvers(name):
+    """Explicit OFF tightens; explicit ON cannot loosen a preset ceiling."""
     for resolver in (
         sov.resolve_mdns_discovery_enabled,
         sov.resolve_rendezvous_enabled,
         sov.resolve_turn_relay_enabled,
         sov.resolve_inherit_rendezvous_from_mdns_enabled,
     ):
-        assert resolver(state_setting="true", preset_name=name) is True
+        permitted = resolver(state_setting=None, preset_name=name)
+        assert resolver(state_setting="true", preset_name=name) is permitted
         assert resolver(state_setting="false", preset_name=name) is False
 
 
@@ -216,12 +214,23 @@ def test_preset_list_surfaces_all_new_fields():
 # ── Privacy panel renders rows for the new features ─────────────
 
 
-def test_privacy_panel_renders_turn_row():
+def test_privacy_panel_renders_configured_turn_readiness_not_policy_permit():
     html = (
         SRC_ROOT / "web" / "index.html"
     ).read_text(encoding="utf-8")
-    assert "turn_relay_preset" in html
-    assert "Use TURN relay" in html
+    assert "TURN relay route configured" in html
+    assert "feat.turn_relay && feat.turn_relay.configured" in html
+    assert "no relay configured" in html
+
+
+def test_privacy_panel_distinguishes_stun_and_rendezvous_readiness():
+    html = (
+        SRC_ROOT / "web" / "index.html"
+    ).read_text(encoding="utf-8")
+    assert "STUN address discovery (not signaling or relay)" in html
+    assert "Rendezvous client active (configured route required)" in html
+    assert "feat.rendezvous && feat.rendezvous.active" in html
+    assert "no URL configured" in html
 
 
 def test_privacy_panel_renders_inherit_rendezvous_row():

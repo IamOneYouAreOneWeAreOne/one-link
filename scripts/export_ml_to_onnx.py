@@ -1,7 +1,8 @@
 """Export the vendored PyTorch checkpoints to ONNX.
 
-ONNX Runtime ships in ~20 MB vs PyTorch's 200 MB, so this is the
-single biggest install-size win. The exported .onnx files keep
+For explicitly opted-in research artifacts, ONNX Runtime is ~20 MB vs
+PyTorch's ~200 MB. Stable product artifacts ship neither runtime. The exported
+.onnx files keep
 byte-equivalent inference to the .pt checkpoints (verified by
 this script with a numerical-parity check).
 
@@ -46,7 +47,10 @@ PARITY_TOL = 1e-5
 
 
 def _export_voice(ckpt_path: Path, out_path: Path) -> None:
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    # Checkpoints contain only tensors plus primitive config values. Keep
+    # PyTorch's restricted unpickler enabled so a replaced model file cannot
+    # execute arbitrary pickle payloads during export.
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     cfg = VoicePredictorConfig(**ckpt["config"])
     model = VoicePredictor(cfg)
     model.load_state_dict(ckpt["state_dict"])
@@ -112,7 +116,7 @@ def _export_voice(ckpt_path: Path, out_path: Path) -> None:
 
 
 def _export_scene(ckpt_path: Path, out_path: Path) -> None:
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     cfg = ScenePredictorConfig(**ckpt["config"])
     model = ScenePredictor(cfg)
     model.load_state_dict(ckpt["state_dict"])

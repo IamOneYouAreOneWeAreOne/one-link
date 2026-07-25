@@ -1,6 +1,6 @@
 # ADR-0017: PQ-hybrid KEM — ML-KEM-768 + X25519 with BLAKE3 combiner
 
-**Status:** ACCEPTED (Phase C acceptance number)
+**Status:** ACCEPTED; live daemon-channel activation added 2026-07-23
 **Phase:** C (item #7: PQ-hybrid by default)
 **Depends on:** ADR-0006 (BLAKE3 derive scheme), ADR-0010 (identity-bound TLS)
 
@@ -12,13 +12,24 @@ The Phase C gate (line 290 of `FILE_ENGINE_V2_PLAN.md`):
 
 > ML-KEM-768 + X25519 hybrid completes handshake at PQ-conservative parameters.
 
-The shipping daemon's `pq_hybrid.NullKEM` is a placeholder — it claims hybrid semantics but performs no PQ operations. Replacing it with a real ML-KEM-768 KEM is **the smallest scope / biggest security delta** in Phase C: a working post-quantum hybrid eliminates an entire class of "harvest now, decrypt later" attacks against the engine's session-key derivation.
+Historical context: the original daemon exposed `pq_hybrid.NullKEM`, which
+performs no PQ operation. The native ML-KEM-768 implementation replaced that
+placeholder for production selection, and the live v3 channel handshake now
+uses the native ABI directly. `NullKEM` remains only for explicitly authorized
+legacy/test construction and is never advertised as post-quantum.
 
 Hybrid KEMs are the conservative path: combine a classical KEM (X25519) with a post-quantum KEM (ML-KEM-768) such that an adversary needs to break **both** to recover the shared secret. If ML-KEM is broken (cryptanalysis advances), X25519 still protects. If X25519 is broken (large-scale quantum), ML-KEM still protects.
 
 ## Decision
 
 **Ship `ol_pqkem`: a hybrid KEM crate combining ML-KEM-768 + X25519 via a BLAKE3-derived combiner.**
+
+The live channel composes this KEM with a separate ephemeral X25519 exchange,
+an Ed25519-authenticated complete version/suite/key transcript, HKDF-SHA256
+extraction, and bidirectional key confirmation. It never silently retries a
+failed v3 handshake as classical. This activation protects daemon session-key
+establishment against harvest-now-decrypt-later; it does not by itself make the
+Ed25519 identity signature post-quantum.
 
 ### Algorithm choices
 

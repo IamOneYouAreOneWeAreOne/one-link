@@ -1,10 +1,9 @@
 """v0.20.7 — Sealed Sender (Signal-style sender-identity hiding).
 
-Today the relay sees both ends of a NAT-traversed conversation and
-can build a social graph of "who talks to whom" — metadata is the
-substance of intelligence collection. Sealed Sender hides the
-SENDER identity from the relay; only the recipient learns who sent
-what.
+The legacy relay route exposed its destination identity; the live v2 route
+uses a rotating pairwise tag. These tests isolate the sealed envelope that
+hides the sender identity inside recipient-only ciphertext. Socket, timing,
+size, and rotating-tag metadata remain outside this primitive's scope.
 
 These tests pin:
   - Ed25519 ↔ X25519 conversion is correct for sealed-sender ECDH
@@ -90,6 +89,33 @@ def test_blob_changes_per_call():
         sender_ed_pub=sender_pub, recipient_ed_pub=recipient_pub,
     )
     assert a != b
+
+
+def test_embedding_context_is_cryptographically_domain_separated():
+    sender_seed, sender_pub = _gen_ed25519()
+    recipient_seed, recipient_pub = _gen_ed25519()
+    blob = ss.seal(
+        body=b"identity-bearing first flight",
+        sender_ed_priv_seed=sender_seed,
+        sender_ed_pub=sender_pub,
+        recipient_ed_pub=recipient_pub,
+        aad_context=b"OL/relay-handshake/initiator/v1",
+    )
+    opened = ss.unseal(
+        blob=blob,
+        my_ed_priv_seed=recipient_seed,
+        paired_ed_pubs=[sender_pub],
+        aad_context=b"OL/relay-handshake/initiator/v1",
+    )
+    assert opened.body == b"identity-bearing first flight"
+
+    with pytest.raises(ValueError, match="decrypt failed"):
+        ss.unseal(
+            blob=blob,
+            my_ed_priv_seed=recipient_seed,
+            paired_ed_pubs=[sender_pub],
+            aad_context=b"OL/relay-handshake/responder/v1",
+        )
 
 
 # ── failure modes ──────────────────────────────────────────────────

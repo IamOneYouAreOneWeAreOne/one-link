@@ -39,10 +39,8 @@ chat card, request/response correlation, timeout handling.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -56,7 +54,23 @@ from one_link.peer_rtc import (
     PEER_DC_PROTOCOL_VERSION,
 )
 from one_link.server import UIServer
-from one_link.state import MessageRecord, PeerRecord, State
+from one_link.state import State
+
+
+@pytest.fixture(autouse=True)
+def _isolate_bridge_behavior_from_roster_admission(monkeypatch):
+    """Bridge unit tests start after a browser peer was admitted.
+
+    The real roster/certificate/revocation boundary has its own integration
+    and live Chromium suite; synthetic bridge peers intentionally bypass only
+    that prerequisite here.
+    """
+
+    monkeypatch.setattr(
+        BrowserPeerManager,
+        "peer_authorization_is_live",
+        lambda _manager, _peer: True,
+    )
 
 
 def _identity() -> Identity:
@@ -1234,6 +1248,213 @@ async def test_send_file_init_rejects_oversized(server_with_state):
 
 
 @pytest.mark.asyncio
+async def test_send_file_init_rejects_boolean_size_spoof(server_with_state):
+    server, _ = server_with_state
+    peer, captured = _capture_peer(server)
+
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_init",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "send_file_init",
+            "rid": "bool-size",
+            "peer_fp": "sha256:abc",
+            "filename": "spoof.bin",
+            "size_bytes": True,
+        },
+    )
+
+    assert captured[0]["t"] == "error"
+    assert captured[0]["code"] == "bad_size"
+    assert server._upload_reservations.snapshot() == ()
+
+
+@pytest.mark.asyncio
+async def test_phone_upload_global_admission_is_atomic_and_released(
+    server_with_state,
+):
+    from one_link.transfer_safety import TransferAdmissionPolicy
+
+    server, _ = server_with_state
+    assert server._upload_reservations is (
+        server.daemon._transfer_reservation_ledger()
+    )
+    server._upload_admission_policy = TransferAdmissionPolicy(
+        max_declared_bytes=1024,
+        min_free_reserve_bytes=0,
+        free_reserve_ratio=0,
+        max_active_inbound_transfers_per_peer=4,
+        max_active_inbound_bytes_per_peer=4096,
+        max_active_inbound_transfers=1,
+        max_active_inbound_bytes=4096,
+    )
+    peer, captured = _capture_peer(server)
+    first = {
+        "v": PEER_DC_PROTOCOL_VERSION,
+        "t": "send_file_init",
+        "rid": "global-one",
+        "peer_fp": "sha256:one",
+        "filename": "one.bin",
+        "size_bytes": 10,
+    }
+    second = {
+        **first,
+        "rid": "global-two",
+        "peer_fp": "sha256:two",
+        "filename": "two.bin",
+    }
+
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_init", first,
+    )
+    first_id = captured[-1]["upload_id"]
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_init", second,
+    )
+
+    assert captured[-1]["t"] == "error"
+    assert captured[-1]["code"] == "upload_admission_global_inbound_transfer_quota"
+    assert len(server._upload_reservations.snapshot()) == 1
+    assert await server._discard_phone_upload(first_id)
+    assert server._upload_reservations.snapshot() == ()
+
+    captured.clear()
+    await server._handle_browser_peer_request(
+        peer, "control", "send_file_init", second,
+    )
+    assert captured[-1]["t"] == "send_file_init_ack"
+    await server._discard_phone_upload(captured[-1]["upload_id"])
+
+
+@pytest.mark.asyncio
+async def test_phone_upload_target_rotation_cannot_evade_source_quota(
+    server_with_state,
+):
+    from one_link.transfer_safety import TransferAdmissionPolicy
+
+    server, _ = server_with_state
+    server._upload_admission_policy = TransferAdmissionPolicy(
+        max_declared_bytes=1024,
+        min_free_reserve_bytes=0,
+        free_reserve_ratio=0,
+        max_active_inbound_transfers_per_peer=1,
+        max_active_inbound_bytes_per_peer=4096,
+        max_active_inbound_transfers=10,
+        max_active_inbound_bytes=4096,
+    )
+    peer, captured = _capture_peer(server)
+    base = {
+        "v": PEER_DC_PROTOCOL_VERSION,
+        "t": "send_file_init",
+        "filename": "one.bin",
+        "size_bytes": 10,
+    }
+    await server._handle_browser_peer_request(
+        peer,
+        "control",
+        "send_file_init",
+        {**base, "rid": "rotate-one", "peer_fp": "sha256:target-one"},
+    )
+    upload_id = captured[-1]["upload_id"]
+    await server._handle_browser_peer_request(
+        peer,
+        "control",
+        "send_file_init",
+        {**base, "rid": "rotate-two", "peer_fp": "sha256:target-two"},
+    )
+
+    assert captured[-1]["code"] == "upload_admission_peer_inbound_transfer_quota"
+    reservations = server._upload_reservations.snapshot()
+    assert len(reservations) == 1
+    assert reservations[0].peer_fp == f"phone:{peer.fingerprint}"
+    await server._discard_phone_upload(upload_id)
+
+
+@pytest.mark.asyncio
+async def test_phone_upload_rejects_non_base64url_without_advancing(
+    server_with_state,
+):
+    server, _ = server_with_state
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer,
+        "control",
+        "send_file_init",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "send_file_init",
+            "rid": "b64-init",
+            "peer_fp": "sha256:abc",
+            "filename": "bad.bin",
+            "size_bytes": 10,
+        },
+    )
+    upload_id = captured[-1]["upload_id"]
+    captured.clear()
+
+    await server._handle_browser_peer_request(
+        peer,
+        "control",
+        "send_file_chunk",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "send_file_chunk",
+            "rid": "b64-chunk",
+            "upload_id": upload_id,
+            "offset": 0,
+            "data_b64": "!!!!",
+        },
+    )
+
+    assert captured[-1]["code"] == "bad_b64"
+    assert server._phone_uploads[upload_id]["received_size"] == 0
+    assert len(server._upload_reservations.snapshot()) == 1
+    await server._discard_phone_upload(upload_id)
+
+
+@pytest.mark.asyncio
+async def test_phone_upload_cancel_removes_bytes_handle_and_reservation(
+    server_with_state,
+):
+    server, _ = server_with_state
+    peer, captured = _capture_peer(server)
+    await server._handle_browser_peer_request(
+        peer,
+        "control",
+        "send_file_init",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "send_file_init",
+            "rid": "cancel-init",
+            "peer_fp": "sha256:target",
+            "filename": "cancel.bin",
+            "size_bytes": 10,
+        },
+    )
+    upload_id = captured[-1]["upload_id"]
+    staged = Path(server._phone_uploads[upload_id]["path"])
+    captured.clear()
+
+    await server._handle_browser_peer_request(
+        peer,
+        "control",
+        "send_file_cancel",
+        {
+            "v": PEER_DC_PROTOCOL_VERSION,
+            "t": "send_file_cancel",
+            "rid": "cancel-now",
+            "upload_id": upload_id,
+        },
+    )
+
+    assert captured[-1]["t"] == "send_file_cancel_result"
+    assert captured[-1]["ok"] is True
+    assert upload_id not in server._phone_uploads
+    assert not staged.exists()
+    assert server._upload_reservations.snapshot() == ()
+
+
+@pytest.mark.asyncio
 async def test_send_file_init_returns_upload_id_and_chunk_size(
     server_with_state, monkeypatch,
 ):
@@ -1418,8 +1639,10 @@ async def test_send_file_complete_size_mismatch_errors(
     )
     assert captured[0]["t"] == "error"
     assert captured[0]["code"] == "size_mismatch"
-    # And the in-flight record is gone (cleaned up on error).
-    assert uid not in server._phone_uploads
+    # A premature complete must not destroy already accepted bytes. The phone
+    # can continue from the authoritative received_size and retry completion.
+    assert server._phone_uploads[uid]["received_size"] == 10
+    assert await server._discard_phone_upload(uid)
 
 
 def test_phone_compose_has_paperclip_and_progress(peer_html: str):
@@ -1432,17 +1655,27 @@ def test_phone_compose_has_paperclip_and_progress(peer_html: str):
     assert 'id="daemon-chat-upload-progress"' in peer_html
     assert 'id="daemon-chat-upload-bar"' in peer_html
     assert 'id="btn-daemon-chat-upload-cancel"' in peer_html
+    assert '_daemonRequest("send_file_cancel"' in peer_html
+    assert "_phoneFileUploadId" in peer_html
 
 
 def test_phone_file_uploader_uses_chunked_protocol(peer_html: str):
-    """The phone-side uploader MUST hit send_file_init,
-    send_file_chunk, and send_file_complete in that order via
-    _daemonRequest. Any drift drops the chunked semantics and
-    would corrupt the staged file."""
-    snip = _snippet(peer_html, "async function _handleDaemonChatFilePicked(", 6000)
-    assert '_daemonRequest("send_file_init"' in snip
-    assert '_daemonRequest("send_file_chunk"' in snip
-    assert '_daemonRequest("send_file_complete"' in snip
+    """Phone uploads retain one stable intent across bounded retries."""
+    handler = _snippet(
+        peer_html,
+        "async function _handleDaemonChatFilePicked(",
+        14000,
+    )
+    window = _snippet(peer_html, "async function _sendPhoneFileChunksWindowed(", 5000)
+    assert "_daemonRequestWithRetry(" in handler
+    assert '"send_file_init"' in handler
+    assert '"send_file_complete"' in handler
+    assert '_daemonRequestWithRetry("send_file_chunk"' in window
+    assert "client_msg_id: optimisticId" in handler
+    assert "received_size" in handler
+    assert "_PHONE_FILE_WINDOW_MAX_CHUNKS" in window
+    assert "_PHONE_FILE_WINDOW_MAX_BYTES" in window
+    assert "result.ok === false" in peer_html
 
 
 # ───────── fetch_blob_chunk (file-RECEIVE on phone) ───────────────
@@ -1588,17 +1821,6 @@ def test_phone_file_bubble_renders_for_inbound_files(peer_html: str):
     assert "new Blob(" in snip
     assert "URL.createObjectURL" in snip
     assert "a.download" in snip
-
-
-# ───────── set_peer_alias + set_peer_mute (peer mgmt) ─────────────
-    """The phone-side uploader MUST hit send_file_init,
-    send_file_chunk, and send_file_complete in that order via
-    _daemonRequest. Any drift drops the chunked semantics and
-    would corrupt the staged file."""
-    snip = _snippet(peer_html, "async function _handleDaemonChatFilePicked(", 6000)
-    assert '_daemonRequest("send_file_init"' in snip
-    assert '_daemonRequest("send_file_chunk"' in snip
-    assert '_daemonRequest("send_file_complete"' in snip
 
 
 # ───────── set_peer_alias + set_peer_mute (peer mgmt) ─────────────
@@ -1825,15 +2047,19 @@ def test_phone_auto_reconnect_on_boot(peer_html: str):
     # The boot dispatcher routes through the returning-pair branch
     # when no fresh-pair query is active but a cert exists.
     assert "_hasReturningPair" in peer_html
-    # The relogin attempt: signs a 32-byte nonce, POSTs cert + nonce
-    # + sig to /api/setup/device-invite/relogin, runs the autopair
-    # bootstrap on success.
+    # The relogin attempt: requests a daemon-selected one-time challenge,
+    # signs its bound proof, then POSTs cert + challenge id + signature to
+    # /api/setup/device-invite/relogin and runs the autopair bootstrap.
     assert "async function _attemptReloginWithStoredCert(" in peer_html
+    assert "/api/setup/device-invite/relogin/challenge" in peer_html
     assert "/api/setup/device-invite/relogin" in peer_html
     assert "_signEd25519(" in peer_html
     # Failure surfaces a clear next step rather than silently
     # dropping the user on a blank welcome card.
     snip = _snippet(peer_html, "async function _attemptReloginWithStoredCert(", 3500)
+    assert "proof_b64" in snip
+    assert "challenge_id" in snip
+    assert "nonce_b64" not in snip
     assert "Scan a fresh pair QR" in snip
     assert "_runAutoPairFlow(" in peer_html  # called after success
 
@@ -1930,7 +2156,7 @@ def test_daemon_chat_card_hidden_until_row_tap(peer_html: str):
 def test_register_daemon_dc_helper_present(peer_html: str):
     """Single source of truth for "this DataChannel is the daemon."
     Stores the dc reference + wires close handler."""
-    snippet = _snippet(peer_html, "function _registerDaemonDc", 1500)
+    snippet = _snippet(peer_html, "function _registerDaemonDc", 4000)
     assert "state.daemon_dc = dc" in snippet
     assert 'addEventListener("close"' in snippet
 
@@ -1967,7 +2193,7 @@ def test_daemon_request_has_timeout(peer_html: str):
 def test_daemon_request_clears_on_channel_close(peer_html: str):
     """If the channel closes mid-request, every in-flight Promise
     rejects with "daemon channel closed." Otherwise the phone hangs."""
-    snippet = _snippet(peer_html, "function _registerDaemonDc", 1500)
+    snippet = _snippet(peer_html, "function _registerDaemonDc", 4000)
     assert "daemon channel closed" in snippet
     assert "state.daemon_pending.clear()" in snippet
 
@@ -2030,16 +2256,18 @@ def test_autopair_finalize_kicks_off_roster_fetch(peer_html: str):
     """The auto-pair flow's finalize() MUST register the daemon DC
     and call _refreshDaemonRoster — otherwise the phone is paired
     but shows nothing."""
-    snippet = _snippet(peer_html, "async function _runAutoPairFlow", 8000)
-    assert "_registerDaemonDc(controlDc, pair.daemon_fingerprint)" in snippet
+    snippet = _snippet(peer_html, "async function _runAutoPairFlow", 12000)
+    assert "_registerDaemonDc(" in snippet
+    assert "controlDc, pair.daemon_fingerprint" in snippet
     assert "_refreshDaemonRoster()" in snippet
 
 
 def test_autopair_wires_dc_message_routing(peer_html: str):
     """The controlDc.onmessage MUST route through
     _routeDaemonDcMessage so request/response correlation works."""
-    snippet = _snippet(peer_html, "async function _runAutoPairFlow", 8000)
-    assert "controlDc.onmessage = (event) => _routeDaemonDcMessage(event.data)" in snippet
+    snippet = _snippet(peer_html, "async function _runAutoPairFlow", 12000)
+    assert "controlDc.onmessage = (event) => _routeDaemonDcMessage(" in snippet
+    assert "event.data, controlDc" in snippet
 
 
 # ───────── test surface ───────────────────────────────────────────

@@ -1,12 +1,15 @@
-"""Adapter for the Coherence Mesh F3 onion-circuit primitive
+"""Adapter for the Coherence Mesh F3 onion-packet primitive
 (``ol_onion`` via ``one_link_native``).
 
-Per COHERENCE_MESH_PLAN.md row 5 — multi-hop onion routing where
-each relay only knows its predecessor and successor. Each layer is
-ChaCha20-Poly1305 AEAD-sealed under a per-layer key derived from
-one X25519 ECDH exchange.
+This module exposes construction and one-layer peeling for bounded packets.
+Each layer is ChaCha20-Poly1305 AEAD-sealed under a per-layer key derived from
+one X25519 ECDH exchange. No active One Link daemon message or file route
+imports this adapter, no relay-circuit control plane or mix network is deployed,
+and repository presence is not evidence of sender anonymity or
+traffic-analysis resistance. The static relay-key construction also is not
+forward secret against later compromise of that relay key.
 
-Typical daemon usage as sender:
+Primitive sender example (not current daemon wiring):
 
 .. code-block:: python
 
@@ -21,7 +24,7 @@ Typical daemon usage as sender:
     packet_bytes = on.build_onion(circuit, payload=b"hello")
     # Send packet_bytes to peer_a over the existing transport.
 
-Typical daemon usage as relay:
+Primitive relay example (not current daemon wiring):
 
 .. code-block:: python
 
@@ -136,10 +139,11 @@ def pad_to_transport(packet_bytes: bytes, pad_seed: bytes) -> bytes:
     32 bytes; pass a fresh value per packet, e.g.,
     BLAKE3(circuit_id || packet_counter)).
 
-    The transport layer (QUIC datagram / UDP) sends the PADDED bytes.
-    The receiving relay calls `unpad_from_transport` to recover the
-    original packet before peeling. Hop count and payload size are
-    invisible to a network observer at the wire level.
+    A future transport could send the padded bytes and let a receiving relay
+    call `unpad_from_transport` before peeling. This establishes one encoded
+    length for accepted packets only. It does not hide endpoints, route
+    topology, direction, timing, counts, connection linkage, retransmission,
+    or the fact that traffic exists, and it is not wired into a product route.
     """
     _require_native()
     if len(pad_seed) != 32:

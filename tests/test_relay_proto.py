@@ -10,10 +10,10 @@ from one_link.relay_proto import (
     DATA_FRAME_MAX_BYTES,
     FRAME_CLOSE,
     FRAME_DATA,
-    PROTOCOL_VERSION,
     REPLAY_WINDOW_MS,
     SESSION_ID_BYTES,
     ListenAuth,
+    bounded_json_loads,
     decode_frame,
     encode_close_frame,
     encode_data_frame,
@@ -30,6 +30,19 @@ from one_link.relay_proto import (
 def _new_key() -> tuple[Ed25519PrivateKey, bytes]:
     sk = Ed25519PrivateKey.generate()
     return sk, sk.public_key().public_bytes_raw()
+
+
+def test_bounded_json_parser_rejects_ambiguity_and_resource_bombs():
+    assert bounded_json_loads('{"t":"ready","session_id":"0011223344556677"}') == {
+        "t": "ready",
+        "session_id": "0011223344556677",
+    }
+    with pytest.raises(ValueError, match="duplicate"):
+        bounded_json_loads('{"t":"ready","t":"incoming"}')
+    with pytest.raises(ValueError, match="nesting"):
+        bounded_json_loads("[" * 65 + "0" + "]" * 65)
+    with pytest.raises(ValueError, match="non-finite"):
+        bounded_json_loads('{"value":NaN}')
 
 
 # ─── ListenAuth sign/verify ────────────────────────────────────────
@@ -68,9 +81,8 @@ def test_listen_auth_rejects_tampered_nonce():
 def test_listen_auth_rejects_signature_from_other_key():
     sk1, _ = _new_key()
     _, pk2 = _new_key()
-    auth = sign_listen_auth(private_key=sk1, pubkey=pk2)
-    with pytest.raises(ValueError, match="signature"):
-        auth.verify()
+    with pytest.raises(ValueError, match="does not match"):
+        sign_listen_auth(private_key=sk1, pubkey=pk2)
 
 
 # ─── ListenAuth wire round-trip ────────────────────────────────────
@@ -214,6 +226,66 @@ def test_parse_session_id_rejects_wrong_length():
 def test_parse_session_id_rejects_non_hex():
     with pytest.raises(ValueError):
         parse_session_id_from_msg({"t": "incoming", "session_id": "z" * 16})
+
+
+def test_listen_auth_rejects_unknown_missing_and_padded_fields():
+    sk, pk = _new_key()
+    baseline = sign_listen_auth(private_key=sk, pubkey=pk).to_wire()
+
+    unknown = dict(baseline, ignored="parser-confusion")
+    with pytest.raises(ValueError, match="fields invalid"):
+        ListenAuth.from_wire(unknown)
+
+    missing = dict(baseline)
+    del missing["nonce_b64"]
+    with pytest.raises(ValueError, match="fields invalid"):
+        ListenAuth.from_wire(missing)
+
+    for field in ("pubkey_b64", "nonce_b64", "signature"):
+        padded = dict(baseline)
+        padded[field] += "="
+        with pytest.raises(ValueError, match=field if field != "nonce_b64" else "nonce"):
+            ListenAuth.from_wire(padded)
+
+
+def test_listen_auth_rejects_boolean_and_out_of_range_timestamps():
+    sk, pk = _new_key()
+    baseline = sign_listen_auth(private_key=sk, pubkey=pk).to_wire()
+    for timestamp in (True, -1, 1 << 63, "123"):
+        wire = dict(baseline)
+        wire["timestamp_ms"] = timestamp
+        with pytest.raises(ValueError, match="timestamp_ms"):
+            ListenAuth.from_wire(wire)
+
+
+def test_control_message_parser_rejects_ambiguous_schema_and_type():
+    sid_hex = new_session_id().hex()
+    with pytest.raises(ValueError, match="fields invalid"):
+        parse_session_id_from_msg(
+            {"t": "incoming", "session_id": sid_hex, "ignored": True}
+        )
+    with pytest.raises(ValueError, match="control type"):
+        parse_session_id_from_msg({"t": "surprise", "session_id": sid_hex})
+    with pytest.raises(ValueError, match="lowercase"):
+        parse_session_id_from_msg({"t": "incoming", "session_id": sid_hex.upper()})
+
+
+def test_frame_encoders_reject_coercive_types():
+    sid = new_session_id()
+    with pytest.raises(ValueError, match="session_id"):
+        encode_data_frame(bytearray(sid), b"payload")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="payload"):
+        encode_data_frame(sid, bytearray(b"payload"))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="session_id"):
+        make_ready_msg(bytearray(sid))  # type: ignore[arg-type]
+
+
+def test_relay_replay_window_fails_closed_on_invalid_inputs():
+    now = 1_700_000_000_000
+    assert not timestamp_within_replay_window(True, server_now_ms=now)
+    assert not timestamp_within_replay_window(str(now), server_now_ms=now)  # type: ignore[arg-type]
+    assert not timestamp_within_replay_window(now, server_now_ms=True)
+    assert not timestamp_within_replay_window(now, server_now_ms=now, window_ms=-1)
 
 
 # ─── replay window ─────────────────────────────────────────────────

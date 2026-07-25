@@ -87,8 +87,10 @@ def build_provenance_for_file(
     """Sign a provenance tag for one outbound file.
 
     For Tier α-pre, voice messages v0.9.2 are the first surface; the
-    "segment" is the full opus blob and ``frame_kind`` is REAL
-    (live mic capture). Future tiers may produce REPAIRED or
+    "segment" is the full opus blob and ``frame_kind`` uses the legacy
+    ``REAL`` wire value to mean sender-declared original input.  The
+    signature binds bytes and declaration; it is not physical-sensor
+    attestation. Future tiers may produce REPAIRED or
     RECONSTRUCTED files from PLC / semantic deltas; those cases
     set ``frame_kind`` accordingly.
 
@@ -96,8 +98,37 @@ def build_provenance_for_file(
     chose for the *outbound* leg. The daemon knows this from its
     Route Brain state (Tier ε+); pre-α it defaults to LAN.
     """
-    return sign_provenance(
+    return build_provenance_for_hash(
+        identity=identity,
         segment_hash=make_segment_hash(file_bytes),
+        path_class=path_class,
+        recording_state=recording_state,
+        frame_kind=frame_kind,
+        produce_confidence=produce_confidence,
+    )
+
+
+def build_provenance_for_hash(
+    *,
+    identity: Identity,
+    segment_hash: bytes,
+    path_class: PathClass = PathClass.LAN,
+    recording_state: RecordingState = RecordingState.NOT_RECORDING,
+    frame_kind: FrameKind = FrameKind.REAL,
+    produce_confidence: float = 1.0,
+) -> FrameProvenance:
+    """Sign an already-computed canonical BLAKE3 content digest.
+
+    Live file transfer computes the whole-file BLAKE3 while building its
+    descriptor-bound manifest.  Reusing those exact 32 bytes avoids a second
+    full-file read solely to attach provenance and guarantees the attestation
+    and ``FILE_OFFER.blob`` identify the same content.
+    """
+
+    if not isinstance(segment_hash, bytes) or len(segment_hash) != 32:
+        raise ValueError("segment_hash must be a 32-byte BLAKE3 digest")
+    return sign_provenance(
+        segment_hash=segment_hash,
         device_id=identity.short_id,
         frame_kind=frame_kind,
         path_class=path_class,
@@ -117,13 +148,12 @@ def make_send_provenance_msg(
     """Wrap a FrameProvenance into the on-wire JSON envelope the
     daemon emits via ``channel.send(encode_msg(msg))``.
 
-    ``blob_hex`` is the file's hex SHA256 from the FILE_OFFER (the
-    daemon's existing content addressing). It associates the
-    provenance tag with a specific file transfer; the segment_hash
-    inside the provenance is BLAKE3, which is independent — we keep
-    both because the daemon's existing offer/chunk machinery uses
-    SHA256 and we want a single lookup key.
+    ``blob_hex`` is the file's canonical BLAKE3-256 from ``FILE_OFFER``.
+    It associates the provenance tag with a specific transfer and must
+    exactly equal the signed ``segment_hash``.
     """
+    if provenance.segment_hash.hex() != blob_hex:
+        raise ValueError("provenance segment hash must match FILE_OFFER blob")
     from one_link.wire import make_msg
 
     return make_msg(
@@ -142,9 +172,9 @@ def make_send_provenance_msg(
 class ParsedInbound:
     """Result of parsing a FILE_PROVENANCE wire message.
 
-    ``provenance`` is the dataclass form; ``blob_hex`` is the
-    file's SHA256 hex that the daemon's existing FILE_OFFER /
-    FILE_CHUNK pipeline uses for lookup.
+    ``provenance`` is the dataclass form; ``blob_hex`` is the file's
+    canonical BLAKE3-256 that the FILE_OFFER / FILE_CHUNK pipeline uses for
+    lookup.
     """
 
     blob_hex: str
@@ -166,7 +196,7 @@ def parse_inbound_provenance_msg(msg: dict[str, Any]) -> ParsedInbound:
     if not isinstance(blob_hex, str) or not blob_hex:
         raise ValueError(f"missing or invalid blob hex in {PROVENANCE_MSG_TYPE}")
     if len(blob_hex) != 64 or not all(c in "0123456789abcdef" for c in blob_hex.lower()):
-        # SHA256 hex is 64 lowercase chars. Reject anything else so a
+        # BLAKE3-256 hex is 64 lowercase chars. Reject anything else so a
         # malicious peer can't shove arbitrary strings into the
         # provenance store key space.
         raise ValueError(f"blob hex malformed: {blob_hex!r}")
@@ -174,6 +204,8 @@ def parse_inbound_provenance_msg(msg: dict[str, Any]) -> ParsedInbound:
     if not isinstance(prov_dict, dict):
         raise ValueError(f"missing prov dict in {PROVENANCE_MSG_TYPE}")
     provenance = from_wire_dict(prov_dict)
+    if provenance.segment_hash.hex() != blob_hex.lower():
+        raise ValueError("provenance segment hash does not match offered blob")
     return ParsedInbound(blob_hex=blob_hex.lower(), provenance=provenance)
 
 
@@ -201,10 +233,9 @@ class _Entry:
 class ProvenanceStore:
     """Thread-safe in-memory map of blob_hex → (provenance, verified).
 
-    Lives on the Daemon instance. Survives the lifetime of one daemon
-    process; the design does not persist across restarts in Tier α-pre
-    (a future tier may move this to SQLite alongside the message
-    history).
+    Lives on the Daemon instance and survives only that process.  Callers and
+    product truth surfaces must not describe the indicator as durable across
+    restart until this state is transactionally persisted alongside history.
 
     Used by:
       - the FILE_PROVENANCE inbound handler in daemon.py

@@ -4,7 +4,7 @@ The raw FTS5 MATCH expression treats user input as exact token
 queries, so typing 'k' only matches messages with the standalone
 token 'k' - not 'kanye', 'kjg', 'oksana'. Plain users expect
 substring-feeling search. Convert each typed token to a
-prefix-match (`token*`) so single-letter searches do something
+parser-safe prefix-match (`"token"*`) so single-letter searches do something
 useful.
 
 Power users can still phrase-search by wrapping their query in
@@ -13,7 +13,6 @@ shape and passes through to FTS5's literal-phrase syntax.
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 
@@ -25,19 +24,22 @@ from one_link.state import State, _normalize_user_query_to_fts5_prefix
 
 @pytest.mark.parametrize("raw,expected", [
     # Single letter: was the original bug ('k' matched nothing).
-    ("k", "k*"),
+    ("k", '"k"*'),
     # Multi-letter prefix: still prefix.
-    ("kan", "kan*"),
+    ("kan", '"kan"*'),
     # Multi-token: AND'd prefixes (FTS5 whitespace = implicit AND).
-    ("hello world", "hello* world*"),
+    ("hello world", '"hello"* "world"*'),
     # Mixed case: FTS5's default tokenizer is case-insensitive, so
     # we just pass tokens through verbatim - no extra normalization.
-    ("Kanye", "Kanye*"),
+    ("Kanye", '"Kanye"*'),
     # Tokens with internal apostrophes split (\\w+ excludes ').
-    ("don't", "don* t*"),
+    ("don't", '"don"* "t"*'),
     # Special chars stripped (the user typed 'C:\\path' or 'foo(bar)').
-    ("C:\\path", "C* path*"),
-    ("foo(bar)", "foo* bar*"),
+    ("C:\\path", '"C"* "path"*'),
+    ("foo(bar)", '"foo"* "bar"*'),
+    # FTS5 grammar words must remain literal searchable terms.
+    ("AND", '"AND"*'),
+    ("or", '"or"*'),
     # Empty / whitespace-only -> empty (caller returns [] without DB hit).
     ("", ""),
     ("   ", ""),
@@ -53,6 +55,12 @@ def test_normalizer_passes_through_quoted_phrase_for_power_users():
     syntax; pass it through unchanged so a user who knows FTS5 can
     still do exact-phrase searches."""
     assert _normalize_user_query_to_fts5_prefix('"hello world"') == '"hello world"'
+
+
+def test_quoted_input_cannot_escape_into_fts5_operator_syntax():
+    assert _normalize_user_query_to_fts5_prefix(
+        '"foo" OR "bar"'
+    ) == '"foo"" OR ""bar"'
 
 
 # ── integration: end-to-end search via State ───────────────────────
@@ -114,6 +122,30 @@ def test_multi_letter_prefix_still_works(populated_state):
     assert bodies == ["kanye dropped a new album"]
 
 
+@pytest.mark.parametrize("operator", ["AND", "OR", "NOT", "NEAR"])
+def test_fts5_operator_words_are_searchable_literals(tmp_path, operator):
+    state = State(tmp_path / f"reserved-{operator}.db")
+    state.upsert_peer(
+        fingerprint="aa" * 32,
+        short_id="alice",
+        pubkey=b"\x01" * 32,
+    )
+    state.record_message(
+        id=f"reserved-{operator}",
+        ts_ms=1000,
+        direction="in",
+        peer_fp="aa" * 32,
+        msg_type="TEXT",
+        body=operator,
+    )
+    try:
+        assert [row.id for row in state.search_messages(operator)] == [
+            f"reserved-{operator}"
+        ]
+    finally:
+        state.close()
+
+
 def test_empty_query_returns_empty_list_without_hitting_db(populated_state):
     """An empty query should return [] without raising the FTS5
     'malformed MATCH expression' error."""
@@ -146,7 +178,7 @@ def test_prefix_match_opt_out_falls_back_to_raw_fts5(populated_state):
 def test_existing_test_state_search_still_passes(populated_state):
     """Sanity: the existing test_state.py search assertions
     ('quick' finds two messages) still pass under prefix
-    normalization. 'quick' -> 'quick*' still matches 'quick'."""
+    normalization. 'quick' -> '"quick"*' still matches 'quick'."""
     s = populated_state
     s.record_message(
         id="m_q1", ts_ms=6000, direction="in", peer_fp="aa" * 32,

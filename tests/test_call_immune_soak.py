@@ -34,7 +34,6 @@ from one_link.call_immune import (
     GraduationMode,
     ImmuneAction,
     ImmuneSystem,
-    Thresholds,
 )
 from one_link.call_vitals import (
     CallVitals,

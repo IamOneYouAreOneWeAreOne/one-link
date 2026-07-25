@@ -30,7 +30,7 @@ phase 1: append chunk to chunk_log
   1.4 record (clog_file_id=NNNNNN, clog_offset=O, length_ciphertext=L) for phase 2
 
 phase 2: append manifest entry to manifest_log (with the chunk_log_anchor referencing phase 1's location)
-  2.1 serialize ManifestRecord {hlc + actor + chunk_log_anchor=(NNNNNN, O) + body + crc}
+  2.1 pack `(NNNNNN:u32, O:u32)` into the existing u64 anchor field, then serialize ManifestRecord {hlc + actor + chunk_log_anchor + body + crc}
   2.2 atomic append to manifest_log/NNNNNN.mlog
   2.3 fdatasync(manifest_log_fd)
 
@@ -48,7 +48,7 @@ phase 3 (memtable update; not durability-critical, rebuildable from logs):
 | 2.3 fdatasync manifest_log | Manifest record may be torn; CRC will fail | Reject torn record; matching chunk in chunk_log is now an orphan (same as above). Consistent. |
 | After 2.3 | Both records valid; recovery succeeds normally | Memtable rebuilt from logs. |
 
-**Key invariant**: a manifest record's `chunk_log_anchor` references a specific (clog_file_id, clog_offset) that was already fsync'd before the manifest record itself was appended. Recovery validates the anchor: if the chunk_log doesn't have a valid CRC'd record at that offset, the manifest record is rejected. This means no manifest record ever survives that points to a chunk that was lost.
+**Key invariant**: a manifest record's `chunk_log_anchor` references a specific `(clog_file_id, clog_offset)` that was already fsync'd before the manifest record itself was appended. The packed layout is `file_id:u32 || offset:u32`; old high-word-zero values are read as file-1 offsets. Recovery validates both components, so an equal offset in a different rotated file cannot satisfy the reference. If the chunk log lacks that exact valid CRC'd record, the manifest record is rejected.
 
 ### Group commit (performance):
 

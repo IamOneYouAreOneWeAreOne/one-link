@@ -18,20 +18,17 @@ Pin the contract:
 """
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.daemon import Daemon
-from one_link.discovery import Peer
 from one_link.identity import Identity, fingerprint_of
-from one_link.state import MessageRecord, State
-from one_link.wire import decode_msg, encode_msg, make_msg
+from one_link.state import State
+from one_link.wire import decode_msg, make_msg
 
 
 def _new_identity() -> Identity:
@@ -179,6 +176,14 @@ async def test_inbound_reaction_from_pinned_peer_persisted(tmp_path: Path):
         pubkey=them.public_bytes,
     )
     state.set_peer_trust(them.fingerprint, "pinned")
+    state.record_message(
+        id="m-target",
+        ts_ms=1_000,
+        direction="out",
+        peer_fp=them.fingerprint,
+        msg_type="TEXT",
+        body="react to me",
+    )
 
     chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
     msg = make_msg(
@@ -194,7 +199,12 @@ async def test_inbound_reaction_from_pinned_peer_persisted(tmp_path: Path):
     assert rows[0]["peer_fp"] == them.fingerprint
     assert rows[0]["emoji"] == "👍"
     # ACK was sent.
-    assert any(s.get("t") == "ACK" and not s.get("rejected") for s in chan.sent)
+    assert any(
+        s.get("t") == "ACK"
+        and not s.get("rejected")
+        and s.get("durable") is True
+        for s in chan.sent
+    )
     state.close()
 
 
@@ -237,6 +247,14 @@ async def test_inbound_reaction_remove_op(tmp_path: Path):
         pubkey=them.public_bytes,
     )
     state.set_peer_trust(them.fingerprint, "pinned")
+    state.record_message(
+        id="m1",
+        ts_ms=1_000,
+        direction="out",
+        peer_fp=them.fingerprint,
+        msg_type="TEXT",
+        body="react to me",
+    )
     state.record_reaction(
         target_msg_id="m1", peer_fp=them.fingerprint, emoji="👍",
     )

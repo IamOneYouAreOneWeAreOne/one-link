@@ -46,6 +46,18 @@ def _h(t: str) -> dict:
     return {"Authorization": f"Bearer {t}"}
 
 
+async def _wait_for_await_count(
+    mocked: AsyncMock,
+    expected: int,
+    *,
+    timeout: float = 2.0,
+) -> None:
+    """Wait for a tracked background send without a scheduler-speed race."""
+    async with asyncio.timeout(timeout):
+        while mocked.await_count < expected:
+            await asyncio.sleep(0.01)
+
+
 # ── _safe_transfer_rel_path sanitizer ───────────────────────────
 
 
@@ -253,7 +265,7 @@ async def test_per_file_mode_tags_transfers_with_folder_send_group(send_ctx):
         json={"peer_fp": send_ctx["peer_fp"], "per_file": True},
     )
     assert r.status == 200
-    await asyncio.sleep(0.05)
+    await _wait_for_await_count(send_ctx["daemon"].send_file, 1)
     calls = send_ctx["daemon"].send_file.await_args_list
     assert len(calls) >= 1
     for call in calls:
@@ -277,7 +289,7 @@ async def test_send_endpoint_per_file_mode_opt_in(send_ctx):
     assert body["started"] is True
     assert body["file_count"] == 2
     assert body["mode"] == "per_file"
-    await asyncio.sleep(0.05)
+    await _wait_for_await_count(send_ctx["daemon"].send_file, 2)
     assert send_ctx["daemon"].send_file.await_count == 2
     calls = send_ctx["daemon"].send_file.await_args_list
     rel_paths = sorted(c.kwargs["rel_path"] for c in calls)
@@ -295,7 +307,7 @@ async def test_send_endpoint_archive_mode_opt_in(send_ctx):
     assert r.status == 200, await r.text()
     body = await r.json()
     assert body["mode"] == "archive"
-    await asyncio.sleep(0.05)
+    await _wait_for_await_count(send_ctx["daemon"].send_file, 1)
     assert send_ctx["daemon"].send_file.await_count == 1
     kwargs = send_ctx["daemon"].send_file.await_args.kwargs
     assert kwargs["rel_path"] == "__one_link_folder__/papers.zip"

@@ -1,9 +1,9 @@
-//! Adversarial test vectors for ol_pair_qr.
+//! Adversarial test vectors for `ol_pair_qr`.
 //!
 //! Catches known-attack patterns + edge cases that random property
 //! tests might miss.
 
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 
 use ol_pair_qr::canon::{Reader, MAX_FIELD_BYTES};
@@ -28,7 +28,11 @@ fn adversarial_canon_zero_length_var_decodes_empty() {
 fn adversarial_canon_max_length_var_works() {
     let cap = MAX_FIELD_BYTES;
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(&(cap as u16).to_be_bytes());
+    let wire_cap = match u16::try_from(cap) {
+        Ok(len) => len,
+        Err(error) => panic!("MAX_FIELD_BYTES must fit the u16 wire prefix: {error}"),
+    };
+    bytes.extend_from_slice(&wire_cap.to_be_bytes());
     bytes.extend(std::iter::repeat_n(0u8, cap));
     let mut r = Reader::new(&bytes);
     let v = r.read_var().unwrap();
@@ -75,7 +79,6 @@ fn adversarial_invite_signature_substituted_rejected() {
     let mut encoded = invite.encode();
     // Replace last 64 bytes (signature) with another valid Ed25519 sig
     // from a DIFFERENT keypair over the same body.
-    use ed25519_dalek::Signer;
     let other_sk = SigningKey::generate(&mut OsRng);
     let body = invite.body_bytes();
     let bogus_sig: ed25519_dalek::Signature = other_sk.sign(&body);
@@ -119,8 +122,9 @@ fn adversarial_response_cross_invite_replay_blocked() {
     let (_, response_for_a) = Scanner::scan(scanner_sk, &bytes_a, 100, &mut OsRng).unwrap();
 
     // Attacker forwards the same response to inviter_b.
-    let invite_b = Invite::decode_and_verify(&bytes_b).unwrap();
-    let err = PairResponse::decode_and_verify(&response_for_a, &invite_b.body_bytes()).unwrap_err();
+    let decoded_second_invite = Invite::decode_and_verify(&bytes_b).unwrap();
+    let err = PairResponse::decode_and_verify(&response_for_a, &decoded_second_invite.body_bytes())
+        .unwrap_err();
     assert_eq!(err, PairError::BadSignature);
 
     // Sanity: also try receive_response on inviter_b (which calls

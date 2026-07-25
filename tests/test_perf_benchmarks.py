@@ -21,7 +21,6 @@ import secrets
 import time
 from pathlib import Path
 
-import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.capsule_at_rest import open_from_path, seal_to_path

@@ -28,9 +28,12 @@ import json
 import logging
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, asdict
 from typing import Callable, Optional
+
+from packaging.version import InvalidVersion, Version
 
 from one_link.safe_http import validated_urlopen
 
@@ -43,6 +46,9 @@ log = logging.getLogger("one_link.update_check")
 DEFAULT_OWNER = "IamOneYouAreOneWeAreOne"
 DEFAULT_REPO = "one-link"
 DEFAULT_TIMEOUT_SECONDS = 4.0
+MAX_RELEASE_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_RELEASE_NOTES_CHARS = 64 * 1024
+_REPO_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 
 
 @dataclass
@@ -83,39 +89,24 @@ class CheckResult:
 
 # ─── version parse + compare ───────────────────────────────────────────
 
-_VERSION_RE = re.compile(
-    r"^v?(\d+)\.(\d+)\.(\d+)(?:[-.]?(?P<pre>[a-zA-Z][\w.]*))?$"
-)
+def _parse_version(s: str) -> Optional[Version]:
+    """Parse one bounded PEP 440 version without ever raising.
 
-
-def _parse_version(s: str) -> Optional[tuple]:
-    """Parse a 'v0.21.0' / '0.21.0-alpha' / '0.21.0a1' style string into
-    a comparable tuple. Returns None if the input doesn't match.
-
-    Comparison rule: (major, minor, patch, pre_order). A release with
-    no pre-release segment beats every pre-release at the same triple
-    — Python's tuple ordering does the work as long as we put the
-    'has-pre' bit BEFORE the pre identifier itself.
-
-        0.21.0       -> (0, 21, 0, 1, '')      # 1 = is-release
-        0.21.0-alpha -> (0, 21, 0, 0, 'alpha') # 0 = is-pre
-        0.21.0a1     -> (0, 21, 0, 0, 'a1')
-
-    'alpha' < 'a1' alphabetically; we don't try to be cleverer than
-    that. Matches what packaging.Version does in practice.
+    Update ordering is a release-integrity decision: lexical prerelease
+    comparison gets values such as ``rc10`` versus ``rc2`` wrong.  Use the
+    packaging reference implementation so alpha/beta/RC/dev/post/local forms
+    have deterministic, standards-compliant ordering.
     """
-    if not s:
+
+    if not isinstance(s, str):
         return None
-    m = _VERSION_RE.match(s.strip())
-    if not m:
+    candidate = s.strip()
+    if not candidate or len(candidate) > 128:
         return None
-    major = int(m.group(1))
-    minor = int(m.group(2))
-    patch = int(m.group(3))
-    pre = m.group("pre")
-    if pre is None:
-        return (major, minor, patch, 1, "")
-    return (major, minor, patch, 0, pre.lower())
+    try:
+        return Version(candidate)
+    except InvalidVersion:
+        return None
 
 
 def compare_versions(local: str, remote: str) -> str:
@@ -136,6 +127,10 @@ def compare_versions(local: str, remote: str) -> str:
 # ─── HTTP fetch ────────────────────────────────────────────────────────
 
 def _build_url(owner: str, repo: str) -> str:
+    if not _REPO_COMPONENT_RE.fullmatch(str(owner)):
+        raise ValueError("invalid update repository owner")
+    if not _REPO_COMPONENT_RE.fullmatch(str(repo)):
+        raise ValueError("invalid update repository name")
     return f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
 
 
@@ -159,12 +154,15 @@ def _default_fetch(url: str, timeout: float) -> dict:
             "Accept": "application/vnd.github+json",
         },
     )
-    with validated_urlopen(req, timeout=timeout, allow_loopback_http=True) as resp:
+    with validated_urlopen(req, timeout=timeout) as resp:
         if resp.status != 200:
             raise urllib.error.HTTPError(
                 url, resp.status, resp.reason, resp.headers, None
             )
-        return json.loads(resp.read().decode("utf-8"))
+        raw = resp.read(MAX_RELEASE_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RELEASE_RESPONSE_BYTES:
+            raise ValueError("GitHub release response exceeds 2 MiB")
+        return json.loads(raw.decode("utf-8", "strict"))
 
 
 def fetch_latest(
@@ -179,8 +177,9 @@ def fetch_latest(
     its tag to `local_version`. Always returns a CheckResult — never
     raises. Pass a `fetch` callable to mock the HTTP layer in tests.
     """
-    url = _build_url(owner, repo)
+    url = ""
     try:
+        url = _build_url(owner, repo)
         payload = fetch(url, timeout)
     except urllib.error.HTTPError as e:
         # 404 = repo has no published releases yet (common during
@@ -202,31 +201,61 @@ def fetch_latest(
             local_version=local_version,
             error=f"network: {e.reason if hasattr(e, 'reason') else e}",
         )
-    except (json.JSONDecodeError, TimeoutError) as e:
+    except (json.JSONDecodeError, TimeoutError, UnicodeError, ValueError) as e:
         log.info("update_check: bad/late response from %s: %s", url, e)
         return CheckResult(
             status="unknown",
             local_version=local_version,
             error=f"parse: {e}",
         )
-
-    tag = (payload.get("tag_name") or "").strip()
-    if not tag:
+    except Exception as e:
+        log.info("update_check: unexpected fetch failure: %s", e)
         return CheckResult(
             status="unknown",
             local_version=local_version,
-            error="no tag_name in latest release",
+            error=f"fetch: {type(e).__name__}",
         )
+
+    if not isinstance(payload, dict):
+        return CheckResult(
+            status="unknown",
+            local_version=local_version,
+            error="latest release payload is not an object",
+        )
+    tag_value = payload.get("tag_name")
+    tag = tag_value.strip() if isinstance(tag_value, str) else ""
+    if not tag or len(tag) > 128 or _parse_version(tag) is None:
+        return CheckResult(
+            status="unknown",
+            local_version=local_version,
+            error="missing or invalid tag_name in latest release",
+        )
+
+    assets = payload.get("assets")
+    if not isinstance(assets, list) or len(assets) > 5_000:
+        return CheckResult(
+            status="unknown",
+            local_version=local_version,
+            error="malformed or excessive release assets",
+        )
+
+    def _bounded_text(value: object, limit: int) -> str:
+        return value[:limit] if isinstance(value, str) else ""
+
+    release_url = (
+        f"https://github.com/{owner}/{repo}/releases/tag/"
+        f"{urllib.parse.quote(tag, safe='')}"
+    )
 
     info = ReleaseInfo(
         tag=tag,
-        name=payload.get("name") or tag,
-        html_url=payload.get("html_url") or "",
-        published_at=payload.get("published_at") or "",
-        body=payload.get("body") or "",
+        name=_bounded_text(payload.get("name"), 512) or tag,
+        html_url=release_url,
+        published_at=_bounded_text(payload.get("published_at"), 64),
+        body=_bounded_text(payload.get("body"), MAX_RELEASE_NOTES_CHARS),
         prerelease=bool(payload.get("prerelease")),
         draft=bool(payload.get("draft")),
-        asset_count=len(payload.get("assets") or []),
+        asset_count=len(assets),
     )
 
     return CheckResult(

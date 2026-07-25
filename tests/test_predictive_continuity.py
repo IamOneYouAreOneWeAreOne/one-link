@@ -8,15 +8,12 @@ import pytest
 
 from one_link.frame_provenance import FrameKind
 from one_link.predictive_continuity import (
-    DEFAULT_CONFIRM_NOVELTY_AUDIO,
-    DEFAULT_CONFIRM_NOVELTY_VIDEO,
     MAX_LOOKAHEAD_AUDIO_FRAMES,
     MAX_LOOKAHEAD_VIDEO_FRAMES,
     CorrectionEvent,
     HoldLastExtrapolator,
     MediaFrame,
     MediaKind,
-    PredictionResult,
     PredictiveContinuity,
     _content_novelty,
 )

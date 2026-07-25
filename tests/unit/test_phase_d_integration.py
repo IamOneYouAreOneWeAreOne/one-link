@@ -22,7 +22,6 @@ the Rust unit-test surface or skips with a TODO marker.
 
 from __future__ import annotations
 
-import pytest
 
 
 def test_phase_d_modules_importable_from_python_in_principle():
@@ -76,6 +75,6 @@ def test_phase_d_formal_spec_present():
     import pathlib
 
     formal = pathlib.Path(__file__).resolve().parents[2] / "docs" / "formal"
-    assert (formal / "capability.tla").exists()
+    assert (formal / "Capability.tla").exists()
     assert (formal / "Capability.cfg").exists()
     assert (formal / "README.md").exists()

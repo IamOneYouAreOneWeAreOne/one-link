@@ -1,8 +1,8 @@
-//! Property tests for NodeId XOR-distance + routing-table invariants.
+//! Property tests for `NodeId` XOR-distance + routing-table invariants.
 //!
 //! Gate ladder matching Phase C / F1 conventions:
 //!   - CI default: 50k iters per property
-//!   - Nightly (ONE_LINK_F1_GATE=1): 500k iters
+//!   - Nightly (`ONE_LINK_F1_GATE=1`): 500k iters
 
 use proptest::prelude::*;
 
@@ -155,7 +155,8 @@ proptest! {
     ) {
         let mut t = RoutingTable::new(NodeId::from_bytes(own));
         for (i, p) in peers.iter().enumerate() {
-            let _ = t.insert(NodeId::from_bytes(*p), i as u64);
+            let timestamp = u64::try_from(i).expect("property peer index fits in u64");
+            let _ = t.insert(NodeId::from_bytes(*p), timestamp);
         }
         let closest = t.closest_to(&NodeId::from_bytes(target));
         prop_assert!(closest.len() <= K_BUCKET_DEFAULT);
@@ -170,7 +171,8 @@ proptest! {
     ) {
         let mut t = RoutingTable::new(NodeId::from_bytes(own));
         for (i, p) in peers.iter().enumerate() {
-            let _ = t.insert(NodeId::from_bytes(*p), i as u64);
+            let timestamp = u64::try_from(i).expect("property peer index fits in u64");
+            let _ = t.insert(NodeId::from_bytes(*p), timestamp);
         }
         let nt = NodeId::from_bytes(target);
         let closest = t.closest_to(&nt);

@@ -64,8 +64,8 @@ pub fn derive_layer_key_sender(
     relay_static_pk: &PublicKey,
 ) -> LayerKey {
     let shared = sender_ephemeral_sk.diffie_hellman(relay_static_pk);
-    let sender_ephemeral_pk = PublicKey::from(sender_ephemeral_sk);
-    finalize(shared, &sender_ephemeral_pk)
+    let ephemeral_public = PublicKey::from(sender_ephemeral_sk);
+    finalize(&shared, &ephemeral_public)
 }
 
 /// Relay-side: derive this layer's AEAD key.
@@ -78,7 +78,7 @@ pub fn derive_layer_key_relay(
     sender_ephemeral_pk: &PublicKey,
 ) -> LayerKey {
     let shared = relay_static_sk.diffie_hellman(sender_ephemeral_pk);
-    finalize(shared, sender_ephemeral_pk)
+    finalize(&shared, sender_ephemeral_pk)
 }
 
 /// Check if a [`SharedSecret`]'s bytes are all-zero (small-order
@@ -88,7 +88,7 @@ pub fn is_zero_shared(shared: &SharedSecret) -> bool {
     shared.as_bytes().iter().all(|&b| b == 0)
 }
 
-fn finalize(shared: SharedSecret, sender_ephemeral_pk: &PublicKey) -> LayerKey {
+fn finalize(shared: &SharedSecret, sender_ephemeral_pk: &PublicKey) -> LayerKey {
     let mut h = Hasher::new();
     h.update(PROTOCOL_DOMAIN);
     h.update(b"-layer-key-v1");
@@ -110,27 +110,27 @@ mod tests {
 
     #[test]
     fn sender_and_relay_derive_same_key() {
-        let sender_esk = StaticSecret::from([7u8; 32]);
-        let relay_sk = StaticSecret::from([42u8; 32]);
-        let relay_pk = PublicKey::from(&relay_sk);
+        let sender_secret = StaticSecret::from([7u8; 32]);
+        let relay_secret = StaticSecret::from([42u8; 32]);
+        let relay_public = PublicKey::from(&relay_secret);
 
-        let k_sender = derive_layer_key_sender(&sender_esk, &relay_pk);
+        let k_sender = derive_layer_key_sender(&sender_secret, &relay_public);
 
-        let sender_epk = PublicKey::from(&sender_esk);
-        let k_relay = derive_layer_key_relay(&relay_sk, &sender_epk);
+        let sender_public = PublicKey::from(&sender_secret);
+        let k_relay = derive_layer_key_relay(&relay_secret, &sender_public);
 
         assert_eq!(k_sender, k_relay);
     }
 
     #[test]
     fn different_ephemerals_yield_different_keys() {
-        let relay_sk = StaticSecret::from([42u8; 32]);
-        let relay_pk = PublicKey::from(&relay_sk);
+        let relay_secret = StaticSecret::from([42u8; 32]);
+        let relay_public = PublicKey::from(&relay_secret);
         let esk1 = StaticSecret::from([1u8; 32]);
         let esk2 = StaticSecret::from([2u8; 32]);
 
-        let k1 = derive_layer_key_sender(&esk1, &relay_pk);
-        let k2 = derive_layer_key_sender(&esk2, &relay_pk);
+        let k1 = derive_layer_key_sender(&esk1, &relay_public);
+        let k2 = derive_layer_key_sender(&esk2, &relay_public);
         assert_ne!(k1, k2);
     }
 

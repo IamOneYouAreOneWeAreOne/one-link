@@ -1,17 +1,19 @@
-# Wire Compatibility — different versions must always talk
+# Wire Compatibility — negotiated mixed-version baseline
 
 One Link installs update independently. Two paired devices are
 routinely on **different builds** — one took the update, one didn't,
-or one runs the installer build while the other runs from source. The
-product promise is:
+or one runs a packaged build while the other runs from source. The engineering
+goal is:
 
-> **Any two One Link builds can always at least chat and send a file
-> to each other. A version difference may disable a fancy feature, but
-> it must never sever the connection.**
+> **Preserve a tested chat/file baseline across supported adjacent versions,
+> and negotiate optional behavior explicitly.**
 
-This document is the contract that keeps that true. It is enforced by
-`tests/test_wire_compat_contract.py` and `tests/test_protocol_compat.py`.
-If one of those tests fails, do not "fix" the test — read this first.
+This is a compatibility policy and source-level negotiation contract, not proof
+that any two historical or future builds interoperate. Shared capability names
+do not prove identical frame semantics. Exact build pairs still need daemon-to-
+daemon message/file tests, migration fixtures, and packaged-network evidence.
+`tests/test_wire_compat_contract.py` and `tests/test_protocol_compat.py` pin the
+bounded negotiation behavior below.
 
 ---
 
@@ -19,7 +21,7 @@ If one of those tests fails, do not "fix" the test — read this first.
 
 | Version | Example | Governs |
 |---|---|---|
-| **App / marketing version** | `0.21.4`, `1.0.0` | Nothing on the wire. Display + update checks only. |
+| **App / marketing version** | `0.21.4`, `1.0.0` | Display/update checks; legacy fallback only when a peer omits a wire version. |
 | **Wire protocol version** | `OL1.2` (`PROTOCOL_VERSION`) | Frame shape. The real compatibility boundary. |
 | **Capabilities** | `chat`, `files`, `file_cdc`, `folder_sync_bidi_v1`, … | Which optional features two peers may use together. |
 
@@ -31,28 +33,33 @@ app semver only for legacy peers that don't advertise a wire version.
 
 ## Rules every wire-touching change MUST follow
 
-1. **Never remove or rename a capability string.** A peer that still
+1. **Do not remove or rename a supported capability string without a staged
+   migration.** A peer that still
    expects the old name silently loses that feature. Add new caps;
    never repurpose old ones. (Pinned: `test_advertised_caps_include_core_features`.)
 
-2. **New behavior is always gated behind a capability.** Before using
+2. **New optional wire behavior must be gated behind a capability.** Before using
    a feature, check the peer advertised it: `if FEATURE in peer_features`.
    Never assume a peer understands a frame just because you sent it.
 
-3. **New fields on an existing message are always OPTIONAL.** The
+3. **New fields on an existing message must be OPTIONAL while older supported
+   peers remain in the compatibility window.** The
    receiver must tolerate their absence (old sender) and their presence
    (new sender). Never make an existing message type require a field
    an older build doesn't send.
 
-4. **New message types are safe.** The dispatch loop silently ignores
+4. **Unknown message types are ignored by the current dispatch loop.** This
+   bounded behavior makes an unknown type a no-op; it does not make every
+   possible semantic change compatible. The loop silently ignores
    unknown message types (there is no terminal `else` that raises), so
    a newer peer sending a frame an older peer doesn't know about is a
    no-op on the old side. Keep it that way.
 
-5. **Version differences DOWNGRADE, never REFUSE.** `negotiate()` may
-   only drop the negotiated mode (e.g. to `baseline_cross_major`) on a
-   version difference. The single legitimate hard-incompatible is
-   *genuinely zero shared user capability* (can't even chat). (Pinned:
+5. **The negotiation function does not refuse solely on a version
+   difference.** It may drop the selected mode (for example, to
+   `baseline_cross_major`). Missing required/shared user capabilities can make
+   this decision incompatible, and handshake/frame validation can fail later.
+   (Pinned:
    `test_version_difference_alone_never_refuses`,
    `test_no_shared_capability_is_the_only_hard_incompatible`.)
 
@@ -64,8 +71,10 @@ app semver only for legacy peers that don't advertise a wire version.
    ratchet wire format:
    - add a new capability (e.g. `double_ratchet_v2`),
    - only emit v2 frames when BOTH peers advertise it,
-   - keep accepting v1 for **at least one full release cycle**,
-   - then drop v1 only after telemetry shows ~no v1 peers remain.
+   - keep accepting v1 through a declared supported compatibility window,
+   - remove it only after the exact supported build matrix and migration gates
+     establish that doing so is safe. One Link ships no product-analytics
+     telemetry that could prove the installed population has upgraded.
 
    (Pinned: `test_ratchet_header_frozen_at_v1`.)
 
@@ -75,18 +84,19 @@ app semver only for legacy peers that don't advertise a wire version.
    provide a negotiated path the same way as the ratchet (rule 6).
    (Pinned: `test_protocol_version_is_present_and_parseable`.)
 
-## What "always work" actually delivers across a boundary
+## What negotiation currently selects (not end-to-end proof)
 
-- **Same wire major, any app versions** → full feature negotiation.
-  A `2.0.0` app and a `0.21.0` app both on `OL1.2` use CDC/swarm/etc.
-  normally.
+- **Same wire major** → intersect advertised capabilities and select the best
+  known mode. Actual interoperation still depends on matching semantics.
 - **Different wire major** (a real, deliberate framing break) →
-  `baseline_cross_major`: chat + baseline file transfer keep working;
-  advanced framing is disabled until both sides share a wire major.
-- **Peer advertises no version** (ancient build) → `legacy_unknown`:
-  conservative baseline, still compatible.
-- **Zero shared capability** → the only hard `incompatible`. In
-  practice unreachable, because every build advertises `chat` + `files`.
+  `baseline_cross_major`: attempt chat + baseline file transfer when both sides
+  advertise those capabilities; advanced framing is disabled.
+- **A peer omits wire version** → fall back to parseable app-version majors for
+  the conservative decision; if those are also unavailable, no cross-major
+  downgrade is inferred.
+- **Missing required capability or zero shared capability** →
+  `incompatible`. Current tested builds advertise `chat` + `files`, but that is
+  not a statement about every historical/future or modified build.
 
 ## Where this lives in code
 

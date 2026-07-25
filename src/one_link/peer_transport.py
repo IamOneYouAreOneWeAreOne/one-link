@@ -32,6 +32,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
+from one_link.fault_observability import report_best_effort_failure
+
 log = logging.getLogger(__name__)
 
 
@@ -280,8 +282,13 @@ class QuicTransport:
             close_fn = getattr(self.session, "close", None)
             if callable(close_fn):
                 close_fn()
-        except Exception:
-            pass
+        except Exception as exc:
+            report_best_effort_failure(
+                log,
+                "peer_transport_close",
+                exc,
+                level=logging.DEBUG,
+            )
 
 
 def make_transport_for_peer(

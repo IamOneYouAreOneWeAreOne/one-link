@@ -67,7 +67,8 @@ def build_reliability_soak_scenario(seed: int) -> ReliabilitySoakScenario:
     Each call gets a unique call_id so backend throttling cannot hide an
     incident that should be captured for that scenario.
     """
-    rng = random.Random(seed)
+    # Deterministic synthetic soak data; never used for a security decision.
+    rng = random.Random(seed)  # nosec B311
     call_id = f"reliability-soak-{seed}"
     family = seed % 4
     relay_ready = rng.random() < 0.75

@@ -1,34 +1,28 @@
-"""Tests for one_link.updater — wheel selection, SHA-256 verification,
-updater script generation, and the /api/update/install endpoint gate.
+"""Tests for release verification and the transactional app updater.
 
-Phase 3 of the production-install plan. The /api/update/install
-destructive path is GATED OFF by default (ONE_LINK_EXPERIMENTAL_AUTOINSTALL
-env var must be set), so most of these tests exercise the building
-blocks individually rather than calling the live install handler.
+Legacy wheel selection remains tested as release-tooling compatibility. The
+runtime install boundary is now the complete standalone bundle plus a
+separately frozen, authenticated A/B replacement helper.
 
 What we DO test:
     * host_wheel_tag returns sane platform strings
     * select_wheel_for_host picks the right wheel for each OS
     * parse_sha256sums tolerates the format-zoo sha256sum emits
     * download_to_temp handles size guards
-    * write_updater_script generates a syntactically-valid Python
-      file that includes the right literals
+    * updater-script generation and detached spawn fail closed
     * build_install_plan with mocked GitHub responses produces the
       expected InstallPlan for each branch
-    * /api/update/install returns 503 when the gate is off (regression
-      guard: nobody should be able to silently flip this on)
-    * /api/update/install with the gate ON refuses unverified wheels
-      and hash mismatches (defense-in-depth)
+    * /api/update/install is dynamic, explicit, quiescent, and fail-closed
 """
 
 from __future__ import annotations
 
-import ast
+import hashlib
 import json
 import sys
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -100,6 +94,33 @@ def test_select_wheel_returns_none_when_no_match():
     assert pick is None
 
 
+def test_select_wheel_rejects_musllinux_for_glibc_host():
+    from one_link.updater import select_wheel_for_host
+
+    assets = [
+        _asset("one_link_native-0.22.0-cp311-abi3-musllinux_1_2_x86_64.whl"),
+    ]
+    assert (
+        select_wheel_for_host(assets, host_tag="cp311-abi3-linux_x86_64")
+        is None
+    )
+
+
+@pytest.mark.parametrize("python_tag", ["cp27", "cp310", "cp312", "py3"])
+def test_select_wheel_rejects_wrong_python_floor(python_tag):
+    from one_link.updater import select_wheel_for_host
+
+    assets = [
+        _asset(
+            f"one_link_native-0.22.0-{python_tag}-abi3-win_amd64.whl",
+        ),
+    ]
+    assert (
+        select_wheel_for_host(assets, host_tag="cp311-abi3-win_amd64")
+        is None
+    )
+
+
 def test_select_wheel_ignores_non_one_link_native_files():
     """A release might also have SHA256SUMS, *.sigstore bundles, the
     pure-Python wheel etc. Those must not be matched."""
@@ -169,7 +190,7 @@ def test_download_to_temp_rejects_oversized_response(tmp_path):
     def fake_fetch(url, timeout):
         return big_body
 
-    with pytest.raises(ValueError, match="refusing"):
+    with pytest.raises(ValueError, match="length does not match"):
         download_to_temp(
             "https://example.test/wheel.whl",
             expected_size=100,  # 5x guard makes 500 the cap
@@ -196,59 +217,73 @@ def test_download_to_temp_writes_file(tmp_path):
         import hashlib
         assert sha256_file(path) == hashlib.sha256(body).hexdigest()
     finally:
-        path.unlink(missing_ok=True)
+        from one_link.updater import remove_staged_file
+
+        remove_staged_file(path)
+
+
+def test_download_to_temp_preserves_verified_wheel_basename():
+    from one_link.updater import download_to_temp, remove_staged_file
+
+    body = b"wheel bytes"
+    wheel_name = "one_link_native-0.22.0-cp311-abi3-win_amd64.whl"
+    path = download_to_temp(
+        "https://example.test/wheel.whl",
+        expected_size=len(body),
+        fetch=lambda url, timeout: body,
+        artifact_filename=wheel_name,
+    )
+    try:
+        assert path.name == wheel_name
+        assert path.parent.name.startswith("ol_update_")
+    finally:
+        stage_dir = path.parent
+        remove_staged_file(path)
+        assert not stage_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["../engine.whl", "nested/engine.whl", "nested\\engine.whl", "\x00.whl"],
+)
+def test_download_to_temp_rejects_unsafe_artifact_filename(filename):
+    from one_link.updater import download_to_temp
+
+    with pytest.raises(ValueError, match="safe basename"):
+        download_to_temp(
+            "https://example.test/wheel.whl",
+            expected_size=1,
+            fetch=lambda url, timeout: b"x",
+            artifact_filename=filename,
+        )
 
 
 # ─── updater script generation ─────────────────────────────────────────
 
-def test_write_updater_script_emits_valid_python(tmp_path):
+def test_write_updater_script_is_fail_closed(tmp_path):
     from one_link.updater import write_updater_script
     wheel = tmp_path / "fake.whl"
     wheel.write_bytes(b"PK\x03\x04")  # zip header (whl = zip)
 
-    script = write_updater_script(
-        wheel,
-        parent_pid=42,
-        python_exe="/usr/bin/python3",
-    )
-    try:
-        src = script.read_text(encoding="utf-8")
-        # 1. Must parse as Python
-        ast.parse(src)
-        # 2. Must embed our literals
-        assert "42" in src                # parent_pid
-        assert str(wheel) in src or wheel.name in src
-        # 3. Calls pip install in the script body
-        assert "pip" in src and "install" in src
-        # 4. Relaunches the daemon
-        assert "one_link.cli" in src and "daemon" in src
-        # 5. Waits for parent BEFORE running pip (file-lock concern)
-        wait_idx = src.find("_alive(PARENT_PID)")
-        pip_idx = src.find("pip")
-        assert wait_idx >= 0 and pip_idx > wait_idx, (
-            "pip install must come AFTER the wait-for-parent loop"
+    with pytest.raises(RuntimeError, match="transactional full-app rollback"):
+        write_updater_script(
+            wheel,
+            parent_pid=42,
+            python_exe=sys.executable,
         )
-    finally:
-        script.unlink(missing_ok=True)
 
 
-def test_write_updater_script_accepts_custom_relaunch_cmd(tmp_path):
+def test_write_updater_script_rejects_custom_relaunch_cmd(tmp_path):
     from one_link.updater import write_updater_script
     wheel = tmp_path / "fake.whl"
     wheel.write_bytes(b"x")
 
-    script = write_updater_script(
-        wheel,
-        parent_pid=1,
-        relaunch_cmd=["/opt/python", "-m", "one_link.cli", "app"],
-    )
-    try:
-        src = script.read_text(encoding="utf-8")
-        # Custom command flows through literally.
-        assert "/opt/python" in src
-        assert "'app'" in src or '"app"' in src
-    finally:
-        script.unlink(missing_ok=True)
+    with pytest.raises(RuntimeError, match="transactional full-app rollback"):
+        write_updater_script(
+            wheel,
+            parent_pid=1,
+            relaunch_cmd=[sys.executable, "-m", "one_link.cli", "app"],
+        )
 
 
 # ─── build_install_plan with mocked GitHub responses ───────────────────
@@ -261,7 +296,7 @@ def test_build_install_plan_happy_path(monkeypatch):
             "tag_name": "v0.22.0",
             "assets": [
                 {
-                    "name": "one_link_native-0.22.0a0-cp311-abi3-win_amd64.whl",
+                    "name": "one_link_native-0.22.0-cp311-abi3-win_amd64.whl",
                     "size": 2_400_000,
                     "browser_download_url": "https://example.test/wheel.whl",
                 },
@@ -270,12 +305,25 @@ def test_build_install_plan_happy_path(monkeypatch):
                     "size": 200,
                     "browser_download_url": "https://example.test/SHA256SUMS",
                 },
+                {
+                    "name": "SHA256SUMS.sigstore",
+                    "size": 300,
+                    "browser_download_url": "https://example.test/SHA256SUMS.sigstore",
+                },
+                {
+                    "name": (
+                        "one_link_native-0.22.0-cp311-abi3-win_amd64.whl"
+                        ".sigstore"
+                    ),
+                    "size": 300,
+                    "browser_download_url": "https://example.test/wheel.whl.sigstore",
+                },
             ],
         }
     expected_hash = "a" * 64
     sha_body = (
         f"{expected_hash}  "
-        "one_link_native-0.22.0a0-cp311-abi3-win_amd64.whl\n"
+        "one_link_native-0.22.0-cp311-abi3-win_amd64.whl\n"
     ).encode()
 
     def fake_fetch_bytes(url, timeout):
@@ -284,8 +332,9 @@ def test_build_install_plan_happy_path(monkeypatch):
         raise AssertionError(f"unexpected fetch: {url}")
 
     # Force host tag so this passes on any OS.
+    from packaging.tags import Tag
     monkeypatch.setattr(
-        u_mod, "host_wheel_tag", lambda: "cp311-abi3-win_amd64"
+        u_mod, "sys_tags", lambda: iter([Tag("cp311", "abi3", "win_amd64")]),
     )
     plan = u_mod.build_install_plan(
         fetch_json=fake_fetch_json,
@@ -296,6 +345,7 @@ def test_build_install_plan_happy_path(monkeypatch):
     assert plan.wheel is not None
     assert "win_amd64" in plan.wheel.filename
     assert plan.wheel.expected_sha256 == expected_hash
+    assert plan.wheel.has_signature_contract is True
 
 
 def test_build_install_plan_no_release_when_fetch_fails(monkeypatch):
@@ -335,9 +385,7 @@ def test_build_install_plan_no_match_when_wheel_missing(monkeypatch):
 
 
 def test_build_install_plan_unverified_when_no_sha256sums(monkeypatch):
-    """A release without a SHA256SUMS file leaves the wheel
-    unverified; plan.wheel exists but its expected_sha256 is None.
-    The install endpoint refuses unverified wheels."""
+    """A SHA-only/signature-incomplete release is never ready to install."""
     from one_link import updater as u_mod
 
     def fake_fetch_json(url, timeout):
@@ -354,174 +402,574 @@ def test_build_install_plan_unverified_when_no_sha256sums(monkeypatch):
     monkeypatch.setattr(u_mod, "host_wheel_tag", lambda: "cp311-abi3-win_amd64")
 
     plan = u_mod.build_install_plan(fetch_json=fake_fetch_json)
-    assert plan.status == "ready"
+    assert plan.status == "unverified"
     assert plan.wheel is not None
     assert plan.wheel.expected_sha256 is None
 
 
-# ─── /api/update/install gate ─────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_api_update_install_env_hard_disable(monkeypatch):
-    """v0.21.x: the env var is now a HARD DISABLE override, not an
-    opt-in gate. When the operator pins it to '0', the endpoint must
-    return 503 with a clear message and never touch the filesystem."""
-    monkeypatch.setenv("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", "0")
-    from one_link.server import UIServer
-
-    daemon = SimpleNamespace(
-        state=None, discovery=None,
-        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa",
-                           hostname="me"),
-    )
-    server = UIServer(daemon)
-    resp = await server.api_update_install(SimpleNamespace(query={}))
-    assert resp.status == 503
-    body = json.loads(resp.text)
-    assert body["status"] == "disabled"
-    assert "ONE_LINK_EXPERIMENTAL_AUTOINSTALL" in body["error"]
-
-
-@pytest.mark.asyncio
-async def test_api_update_install_default_proceeds_past_gate(monkeypatch):
-    """v0.21.x: with env unset + no user opt-out, the endpoint should
-    advance past the gate and return 409 'not prepared' (because no
-    plan was built in this test fixture) — NOT 503 disabled."""
-    monkeypatch.delenv("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", raising=False)
-    from one_link.server import UIServer
-
-    daemon = SimpleNamespace(
-        state=None, discovery=None,
-        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa",
-                           hostname="me"),
-    )
-    server = UIServer(daemon)
-    resp = await server.api_update_install(SimpleNamespace(query={}))
-    assert resp.status != 503, (
-        "v0.21.x default should be ENABLED — the gate must let the "
-        "request through to the install-plan path"
-    )
-    assert resp.status == 409
-    body = json.loads(resp.text)
-    assert body["status"] == "no_match"
-
-
-@pytest.mark.asyncio
-async def test_api_update_install_refuses_unverified_wheel(monkeypatch):
-    """When enabled, the endpoint downloads the wheel — but if its
-    expected SHA-256 wasn't published in SHA256SUMS, refuse to
-    install. Hash verification is mandatory."""
-    monkeypatch.setenv("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", "1")
-    from one_link.server import UIServer
+def test_build_install_plan_rejects_duplicate_asset_names(monkeypatch):
     from one_link import updater as u_mod
 
-    fake_wheel = MagicMock()
-    fake_wheel.expected_sha256 = None
-    fake_wheel.asset_url = "https://example.test/w.whl"
-    fake_wheel.filename = "fake.whl"
-    fake_wheel.size = 100
-    fake_plan = u_mod.InstallPlan(
-        status="ready", tag="v0.22.0", latest_version="v0.22.0",
-        wheel=fake_wheel,
+    wheel_name = "one_link_native-0.22.0a0-cp311-abi3-win_amd64.whl"
+    duplicate = _asset(wheel_name)
+    monkeypatch.setattr(u_mod, "host_wheel_tag", lambda: "cp311-abi3-win_amd64")
+    plan = u_mod.build_install_plan(
+        fetch_json=lambda url, timeout: {
+            "tag_name": "v0.22.0",
+            "assets": [duplicate, dict(duplicate)],
+        },
     )
-    monkeypatch.setattr(u_mod, "build_install_plan", lambda: fake_plan)
-
-    fake_path = MagicMock()
-    monkeypatch.setattr(u_mod, "download_to_temp", lambda *a, **kw: fake_path)
-    # If we accidentally got past the unverified check, this would
-    # be called; the test asserts otherwise.
-    monkeypatch.setattr(
-        u_mod, "spawn_detached",
-        lambda *a, **kw: pytest.fail("spawn_detached called for unverified wheel"),
-    )
-
-    daemon = SimpleNamespace(
-        state=None, discovery=None,
-        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa",
-                           hostname="me"),
-    )
-    server = UIServer(daemon)
-    resp = await server.api_update_install(SimpleNamespace(query={}))
-    assert resp.status == 409
-    body = json.loads(resp.text)
-    assert body["status"] == "unverified"
+    assert plan.status == "unverified"
+    assert "duplicate" in (plan.error or "").lower()
 
 
-@pytest.mark.asyncio
-async def test_api_update_install_refuses_hash_mismatch(monkeypatch, tmp_path):
-    """If the SHA-256 of the downloaded wheel doesn't match the
-    expected hash, we abort. This is the line of defense against a
-    compromised or in-transit-modified wheel."""
-    monkeypatch.setenv("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", "1")
-    from one_link.server import UIServer
+@pytest.mark.parametrize(
+    ("tag", "draft", "prerelease"),
+    [
+        ("../../main", False, False),
+        ("v01.2.3", False, False),
+        ("v0.22.0", True, False),
+        ("v0.22.0", False, True),
+    ],
+)
+def test_build_install_plan_rejects_noncanonical_release(
+    tag,
+    draft,
+    prerelease,
+):
     from one_link import updater as u_mod
 
-    # Plan claims expected hash is all-a; actual file we download
-    # will hash to something else.
-    expected = "a" * 64
-    fake_wheel = MagicMock()
-    fake_wheel.expected_sha256 = expected
-    fake_wheel.asset_url = "https://example.test/w.whl"
-    fake_wheel.filename = "fake.whl"
-    fake_wheel.size = 100
-    fake_plan = u_mod.InstallPlan(
-        status="ready", tag="v0.22.0", latest_version="v0.22.0",
-        wheel=fake_wheel,
+    plan = u_mod.build_install_plan(
+        fetch_json=lambda url, timeout: {
+            "tag_name": tag,
+            "draft": draft,
+            "prerelease": prerelease,
+            "assets": [],
+        },
     )
-    monkeypatch.setattr(u_mod, "build_install_plan", lambda: fake_plan)
-
-    real_path = tmp_path / "downloaded.whl"
-    real_path.write_bytes(b"definitely not the expected bytes")
-    monkeypatch.setattr(u_mod, "download_to_temp", lambda *a, **kw: real_path)
-    monkeypatch.setattr(
-        u_mod, "spawn_detached",
-        lambda *a, **kw: pytest.fail("spawn_detached called on hash mismatch"),
-    )
-
-    daemon = SimpleNamespace(
-        state=None, discovery=None,
-        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa",
-                           hostname="me"),
-    )
-    server = UIServer(daemon)
-    resp = await server.api_update_install(SimpleNamespace(query={}))
-    assert resp.status == 409
-    body = json.loads(resp.text)
-    assert body["status"] == "hash_mismatch"
-    assert expected in body["error"]
+    assert plan.status == "unverified"
 
 
-@pytest.mark.asyncio
-async def test_api_update_plan_returns_plan_shape(monkeypatch):
-    """The read-only /api/update/plan endpoint mirrors the InstallPlan
-    dataclass shape. UI uses it to decide whether to enable the
-    'Update now' button."""
-    from one_link.server import UIServer
+def test_verify_signed_update_authenticates_manifest_then_artifact(
+    monkeypatch,
+    tmp_path,
+):
     from one_link import updater as u_mod
 
-    fake_plan = u_mod.InstallPlan(
-        status="ready",
+    artifact = tmp_path / "engine.whl"
+    artifact.write_bytes(b"authenticated wheel")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    manifest = tmp_path / "SHA256SUMS"
+    manifest.write_text(f"{digest}  {artifact.name}\n", encoding="utf-8")
+    artifact_bundle = tmp_path / "engine.whl.sigstore"
+    manifest_bundle = tmp_path / "SHA256SUMS.sigstore"
+    artifact_bundle.write_bytes(b"artifact bundle")
+    manifest_bundle.write_bytes(b"manifest bundle")
+    calls = []
+
+    def fake_verify(*, artifact, bundle, tag):
+        calls.append((Path(artifact).name, Path(bundle).name, tag))
+
+    monkeypatch.setattr(u_mod, "_run_sigstore_identity_verify", fake_verify)
+    authenticated = u_mod.verify_signed_update(
+        artifact=artifact,
+        artifact_bundle=artifact_bundle,
+        manifest=manifest,
+        manifest_bundle=manifest_bundle,
+        artifact_filename=artifact.name,
         tag="v0.22.0",
-        latest_version="v0.22.0",
-        wheel=u_mod.WheelMatch(
-            asset_url="https://example.test/w.whl",
-            filename="one_link_native-0.22.0a0-cp311-abi3-win_amd64.whl",
-            size=2_400_000,
-            expected_sha256="a" * 64,
+    )
+    assert authenticated == digest
+    assert calls == [
+        ("SHA256SUMS", "SHA256SUMS.sigstore", "v0.22.0"),
+        ("engine.whl", "engine.whl.sigstore", "v0.22.0"),
+    ]
+
+
+def test_verify_signed_update_rejects_duplicate_manifest_entry(
+    monkeypatch,
+    tmp_path,
+):
+    from one_link import updater as u_mod
+
+    artifact = tmp_path / "engine.whl"
+    artifact.write_bytes(b"wheel")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    manifest = tmp_path / "SHA256SUMS"
+    manifest.write_text(
+        f"{digest}  {artifact.name}\n{digest} *{artifact.name}\n",
+        encoding="utf-8",
+    )
+    bundle = tmp_path / "bundle"
+    bundle.write_bytes(b"bundle")
+    monkeypatch.setattr(
+        u_mod,
+        "_run_sigstore_identity_verify",
+        lambda **kwargs: None,
+    )
+    with pytest.raises(ValueError, match="exactly one"):
+        u_mod.verify_signed_update(
+            artifact=artifact,
+            artifact_bundle=bundle,
+            manifest=manifest,
+            manifest_bundle=bundle,
+            artifact_filename=artifact.name,
+            tag="v0.22.0",
+        )
+
+
+def test_sigstore_verifier_pins_exact_workflow_tag(monkeypatch, tmp_path):
+    from one_link import updater as u_mod
+
+    artifact = tmp_path / "engine.whl"
+    bundle = tmp_path / "engine.whl.sigstore"
+    artifact.write_bytes(b"wheel")
+    bundle.write_bytes(b"bundle")
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(u_mod.subprocess, "run", fake_run)
+    u_mod._run_sigstore_identity_verify(
+        artifact=artifact,
+        bundle=bundle,
+        tag="v0.22.0",
+    )
+    command = captured["command"]
+    identity_index = command.index("--cert-identity") + 1
+    assert command[identity_index] == (
+        "https://github.com/IamOneYouAreOneWeAreOne/one-link/"
+        ".github/workflows/release.yml@refs/tags/v0.22.0"
+    )
+    assert captured["kwargs"]["shell"] is False
+    assert captured["kwargs"]["timeout"] == u_mod.SIGSTORE_VERIFY_TIMEOUT_S
+
+
+def _write_test_native_wheel(path: Path, *, root="one_link_native-0.22.0.dist-info"):
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("one_link_native/__init__.py", "VALUE = 1\n")
+        archive.writestr(f"{root}/METADATA", "Name: one-link-native\n")
+        archive.writestr(f"{root}/WHEEL", "Wheel-Version: 1.0\n")
+        archive.writestr(f"{root}/RECORD", "")
+
+
+def test_validate_native_wheel_accepts_complete_archive(tmp_path):
+    from one_link.updater import validate_native_wheel
+
+    filename = "one_link_native-0.22.0-cp311-abi3-win_amd64.whl"
+    wheel = tmp_path / filename
+    _write_test_native_wheel(wheel)
+    validate_native_wheel(wheel, filename)
+
+
+def test_validate_native_wheel_rejects_wrong_distribution(tmp_path):
+    from one_link.updater import validate_native_wheel
+
+    filename = "one_link_native-0.22.0-cp311-abi3-win_amd64.whl"
+    wheel = tmp_path / filename
+    _write_test_native_wheel(wheel, root="other_package-1.0.dist-info")
+    with pytest.raises(ValueError, match="not one_link_native"):
+        validate_native_wheel(wheel, filename)
+
+
+def test_validate_native_wheel_rejects_traversal_member(tmp_path):
+    from one_link.updater import validate_native_wheel
+
+    filename = "one_link_native-0.22.0-cp311-abi3-win_amd64.whl"
+    wheel = tmp_path / filename
+    _write_test_native_wheel(wheel)
+    with zipfile.ZipFile(wheel, "a") as archive:
+        archive.writestr("../escape.py", "bad")
+    with pytest.raises(ValueError, match="unsafe archive member"):
+        validate_native_wheel(wheel, filename)
+
+
+# ─── /api/update/install transactional helper gate ────────────────────
+
+
+class _UpdateRequest:
+    query: dict[str, str] = {}
+    transport = None
+    remote = "127.0.0.1"
+
+    def __init__(self, body):
+        self._body = body
+
+    async def json(self):
+        return self._body
+
+
+def _update_server(*, lockbox=None):
+    from one_link.server import UIServer
+
+    state = None if lockbox is None else SimpleNamespace(_lockbox=lockbox)
+    daemon = SimpleNamespace(
+        state=state,
+        discovery=None,
+        _cap_root_key=b"c" * 32,
+        _update_handoff_draining=False,
+        me=SimpleNamespace(
+            fingerprint="aa" * 32,
+            short_id="aaaaaaaa",
+            hostname="me",
         ),
     )
-    monkeypatch.setattr(u_mod, "build_install_plan", lambda: fake_plan)
+    return UIServer(daemon), daemon
 
-    daemon = SimpleNamespace(
-        state=None, discovery=None,
-        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa",
-                           hostname="me"),
+
+def _available_capability(tmp_path: Path):
+    from one_link.update_helper import ExternalUpdateCapability
+
+    install = tmp_path / "installed"
+    data = tmp_path / "home" / "data"
+    install.mkdir(parents=True)
+    data.mkdir(parents=True)
+    return ExternalUpdateCapability(
+        True,
+        "available",
+        platform="windows-x86_64",
+        install_root=install.resolve(),
+        data_root=data.resolve(),
+        expected_executable="one-link.exe",
     )
-    server = UIServer(daemon)
-    resp = await server.api_update_plan(SimpleNamespace(query={}))
-    assert resp.status == 200
-    body = json.loads(resp.text)
-    assert body["status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_api_update_install_requires_exact_confirmation():
+    server, _daemon = _update_server()
+
+    missing = await server.api_update_install(_UpdateRequest({}))
+    extra = await server.api_update_install(_UpdateRequest({
+        "confirmed_install": True,
+        "expected_tag": "v999.0.0",
+    }))
+
+    assert missing.status == 409
+    assert extra.status == 409
+    assert json.loads(extra.text)["code"] == "install_confirmation_required"
+
+
+@pytest.mark.asyncio
+async def test_api_update_install_source_runtime_fails_before_network(monkeypatch):
+    from one_link import standalone_updater
+
+    monkeypatch.setenv("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", "1")
+    monkeypatch.setattr(
+        standalone_updater,
+        "build_standalone_install_plan",
+        lambda **_kwargs: pytest.fail("source runtime reached release discovery"),
+    )
+    server, _daemon = _update_server()
+
+    response = await server.api_update_install(
+        _UpdateRequest({"confirmed_install": True})
+    )
+
+    assert response.status == 409
+    body = json.loads(response.text)
+    assert body["status"] == "install_unavailable"
+    assert body["reason"] == "not_frozen_standalone_bundle"
+
+
+@pytest.mark.asyncio
+async def test_api_update_plan_returns_standalone_plan_shape(monkeypatch, tmp_path):
+    from one_link import standalone_updater
+    from one_link.standalone_updater import ReleaseAsset, StandaloneInstallPlan
+
+    server, _daemon = _update_server()
+    capability = _available_capability(tmp_path)
+
+    async def inspect(*, fresh=False):
+        return capability
+
+    server._external_update_capability = inspect
+    server._update_check_policy_enabled = lambda: True
+    fake_plan = StandaloneInstallPlan(
+        status="ready_for_authentication",
+        tag="v0.22.0",
+        release_id=77,
+        platform=capability.platform,
+        artifact=ReleaseAsset(
+            "one-link-windows-x86_64.zip",
+            "https://example.test/one-link-windows-x86_64.zip",
+            2_400_000,
+        ),
+    )
+    monkeypatch.setattr(
+        standalone_updater,
+        "build_standalone_install_plan",
+        lambda **_kwargs: fake_plan,
+    )
+
+    response = await server.api_update_plan(SimpleNamespace(query={}))
+    body = json.loads(response.text)
+
+    assert response.status == 200
+    assert body["status"] == "ready_for_authentication"
     assert body["tag"] == "v0.22.0"
-    assert body["wheel"]["filename"].endswith(".whl")
-    assert body["wheel"]["sha256_known"] is True
+    assert body["release_id"] == 77
+    assert body["artifact"]["filename"].endswith(".zip")
+    assert body["install_available"] is True
+
+
+@pytest.mark.asyncio
+async def test_api_update_install_unverified_release_never_spawns(
+    monkeypatch,
+    tmp_path,
+):
+    from one_link import standalone_updater, update_helper
+    from one_link.standalone_updater import StandaloneInstallPlan
+
+    server, _daemon = _update_server()
+    capability = _available_capability(tmp_path)
+
+    async def inspect(*, fresh=False):
+        return capability
+
+    server._external_update_capability = inspect
+    server._update_check_policy_enabled = lambda: True
+    monkeypatch.setattr(
+        standalone_updater,
+        "build_standalone_install_plan",
+        lambda **_kwargs: StandaloneInstallPlan(
+            status="unverified",
+            tag="v0.22.0",
+            error="missing exact-tag evidence",
+        ),
+    )
+    monkeypatch.setattr(
+        update_helper,
+        "spawn_external_update_helper",
+        lambda *_args, **_kwargs: pytest.fail("unverified release spawned helper"),
+    )
+
+    response = await server.api_update_install(
+        _UpdateRequest({"confirmed_install": True})
+    )
+
+    assert response.status == 502
+    assert json.loads(response.text)["status"] == "unverified"
+
+
+@pytest.mark.asyncio
+async def test_api_update_install_discovery_failure_is_bounded_and_never_spawns(
+    monkeypatch,
+    tmp_path,
+):
+    from one_link import standalone_updater, update_helper
+
+    server, _daemon = _update_server()
+    capability = _available_capability(tmp_path)
+
+    async def inspect(*, fresh=False):
+        return capability
+
+    server._external_update_capability = inspect
+    server._update_check_policy_enabled = lambda: True
+    monkeypatch.setattr(
+        standalone_updater,
+        "build_standalone_install_plan",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("private diagnostic")),
+    )
+    monkeypatch.setattr(
+        update_helper,
+        "spawn_external_update_helper",
+        lambda *_args, **_kwargs: pytest.fail("failed discovery spawned helper"),
+    )
+
+    response = await server.api_update_install(
+        _UpdateRequest({"confirmed_install": True})
+    )
+    body = json.loads(response.text)
+
+    assert response.status == 502
+    assert body["status"] == "failed_closed"
+    assert body["error"] == (
+        "the authenticated release could not be discovered safely"
+    )
+    assert len(body["incident"]) == 12
+    assert "private diagnostic" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_api_update_install_defers_while_transfer_active(
+    monkeypatch,
+    tmp_path,
+):
+    import contextlib
+
+    from one_link import recovery_api, standalone_updater, update_helper
+    from one_link.lockbox import LockBox
+    from one_link.standalone_updater import StandaloneInstallPlan
+
+    server, daemon = _update_server(lockbox=LockBox(b"k" * 32))
+    capability = _available_capability(tmp_path)
+
+    async def inspect(*, fresh=False):
+        return capability
+
+    server._external_update_capability = inspect
+    server._update_check_policy_enabled = lambda: True
+    daemon.begin_update_handoff = lambda: {"active_transfers": 1}
+    daemon.cancel_update_handoff = lambda: None
+    monkeypatch.setattr(
+        standalone_updater,
+        "build_standalone_install_plan",
+        lambda **_kwargs: StandaloneInstallPlan(
+            status="ready_for_authentication",
+            tag="v0.22.0",
+            release_id=77,
+            platform=capability.platform,
+        ),
+    )
+
+    @contextlib.contextmanager
+    def guard(_root):
+        yield
+
+    monkeypatch.setattr(recovery_api, "recovery_transaction_guard", guard)
+    monkeypatch.setattr(
+        update_helper,
+        "prepare_external_helper_launch",
+        lambda **_kwargs: pytest.fail("busy daemon prepared helper"),
+    )
+
+    response = await server.api_update_install(
+        _UpdateRequest({"confirmed_install": True})
+    )
+
+    assert response.status == 409
+    assert json.loads(response.text)["blockers"] == {"active_transfers": 1}
+
+
+@pytest.mark.asyncio
+async def test_api_update_install_launches_authenticated_helper_and_shutdown(
+    monkeypatch,
+    tmp_path,
+):
+    import asyncio
+    import contextlib
+
+    from one_link import recovery_api, standalone_updater, update_helper, update_transaction
+    from one_link.lockbox import LockBox
+    from one_link.standalone_updater import StandaloneInstallPlan
+
+    server, daemon = _update_server(lockbox=LockBox(b"k" * 32))
+    capability = _available_capability(tmp_path)
+    observed: dict[str, object] = {}
+
+    async def inspect(*, fresh=False):
+        observed.setdefault("capability_fresh", []).append(fresh)
+        return capability
+
+    async def request_shutdown(*, delay_s):
+        observed["shutdown_delay"] = delay_s
+
+    server._external_update_capability = inspect
+    server._update_check_policy_enabled = lambda: True
+    daemon.begin_update_handoff = lambda: {}
+    daemon.cancel_update_handoff = lambda: observed.setdefault("cancelled", True)
+    daemon.request_shutdown = request_shutdown
+    plan = StandaloneInstallPlan(
+        status="ready_for_authentication",
+        tag="v0.22.0",
+        release_id=77,
+        platform=capability.platform,
+    )
+    monkeypatch.setattr(
+        standalone_updater,
+        "build_standalone_install_plan",
+        lambda **_kwargs: plan,
+    )
+
+    @contextlib.contextmanager
+    def guard(root):
+        observed["recovery_guard"] = root
+        yield
+
+    monkeypatch.setattr(recovery_api, "recovery_transaction_guard", guard)
+    monkeypatch.setattr(
+        update_transaction,
+        "acquire_update_state_authority",
+        lambda root, lockbox: observed.setdefault("authority", (root, lockbox)) and b"a" * 32,
+    )
+
+    launch = SimpleNamespace(handoff=SimpleNamespace())
+
+    def prepare(**kwargs):
+        observed["prepare"] = kwargs
+        return launch
+
+    monkeypatch.setattr(update_helper, "prepare_external_helper_launch", prepare)
+    monkeypatch.setattr(
+        update_helper,
+        "spawn_external_update_helper",
+        lambda received: observed.setdefault("spawn", received) and 4444,
+    )
+
+    response = await server.api_update_install(
+        _UpdateRequest({"confirmed_install": True})
+    )
+    await asyncio.sleep(0)
+    body = json.loads(response.text)
+
+    assert response.status == 202
+    assert body["status"] == "handoff_started"
+    assert body["helper_pid"] == 4444
+    assert observed["spawn"] is launch
+    assert observed["prepare"]["expected_tag"] == "v0.22.0"
+    assert observed["prepare"]["expected_release_id"] == 77
+    assert observed["prepare"]["parent_pid"] > 0
+    assert observed["shutdown_delay"] == 0.75
+    assert server._update_handoff_committed is True
+
+
+def test_daemon_update_drain_is_atomic_and_blocks_new_local_work():
+    from one_link.daemon import Daemon
+
+    daemon = object.__new__(Daemon)
+    daemon.state = SimpleNamespace(
+        update_handoff_safety_counts=lambda: {"active_transfers": 0}
+    )
+    daemon._call_registry = SimpleNamespace(active_call_ids=lambda: [])
+    daemon._incoming_files = {}
+    daemon._incoming_blobs = {}
+    daemon._pending_file_offers = {}
+    daemon._outbound_file_gates = {}
+    daemon._capsule_inbound_meta = {}
+    daemon._shutdown_requested = False
+    daemon._update_handoff_draining = False
+
+    assert daemon.begin_update_handoff() == {}
+    assert daemon._update_handoff_draining is True
+    with pytest.raises(RuntimeError, match="authenticated update"):
+        daemon._assert_update_handoff_accepting_work()
+    assert daemon.begin_update_handoff() == {
+        "update_handoff_already_in_progress": 1,
+    }
+
+    daemon.cancel_update_handoff()
+    assert daemon._update_handoff_draining is False
+
+
+def test_daemon_update_drain_defers_active_transfer():
+    from one_link.daemon import Daemon
+
+    daemon = object.__new__(Daemon)
+    daemon.state = SimpleNamespace(
+        update_handoff_safety_counts=lambda: {"active_transfers": 2}
+    )
+    daemon._call_registry = SimpleNamespace(active_call_ids=lambda: [])
+    daemon._incoming_files = {}
+    daemon._incoming_blobs = {}
+    daemon._pending_file_offers = {}
+    daemon._outbound_file_gates = {}
+    daemon._capsule_inbound_meta = {}
+    daemon._shutdown_requested = False
+    daemon._update_handoff_draining = False
+
+    assert daemon.begin_update_handoff() == {"active_transfers": 2}
+    assert daemon._update_handoff_draining is False

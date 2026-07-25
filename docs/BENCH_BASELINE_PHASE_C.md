@@ -108,12 +108,15 @@ Chunk-level Reed-Solomon stripe encode + decode on top of `ol_fec`. Three pre-re
 
 ## ol_bandit (ADR-0019)
 
-Beta-Bernoulli Thompson sampling bandit. Per (peer-pair, knob).
+Policy-neutral Beta-Bernoulli Thompson-sampling primitive. The only
+production-active controller maps candidate routes to arms through
+`BanditRouteSelector`. Proposed chunk-size, parallelism, FEC-ratio,
+prefetch, pacing, and compression controllers remain deferred.
 
 **Phase C acceptance gate (plan line 288):**
-> Bandit converges on known-optimum peer-pair within ≤200 interactions in simulation.
+> The generic bandit converges on a known-optimum synthetic arm within ≤200 interactions in simulation.
 
-**PASSED:** 5-arm bandit with probabilities `{0.20, 0.40, 0.55, 0.70, 0.85}` converges on arm-4 in ≥95% of 100 seeds within 200 interactions. ≥60% of pulls in the second half go to the optimal arm (exploitation regime).
+**PASSED:** 5-arm bandit with probabilities `{0.20, 0.40, 0.55, 0.70, 0.85}` converges on arm-4 in ≥95% of 100 seeds within 200 interactions. ≥60% of pulls in the second half go to the optimal arm (exploitation regime). This proves the sampler, not wiring for the deferred control loops.
 
 Bonus: 4-arm small-gap bandit `{0.55, 0.60, 0.65, 0.70}` converges in 500 rounds at ≥75% (tighter problem).
 

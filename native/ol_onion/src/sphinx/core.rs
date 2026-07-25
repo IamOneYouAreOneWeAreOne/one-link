@@ -1,7 +1,7 @@
 //! Sphinx Coherence core — packet build + peel with Ristretto255
 //! alpha blinding.
 //!
-//! Ties together [`primitives`] (key derivation, filler, ChaCha20)
+//! Ties together [`primitives`] (key derivation, filler, `ChaCha20`)
 //! and [`header`] (slot construction + shift) with the Ristretto255
 //! group operations. Each hop's `alpha` is blinded so a global
 //! passive adversary sees uncorrelated random group elements at
@@ -10,6 +10,7 @@
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
+use curve25519_dalek::traits::Identity;
 use rand_core::{CryptoRng, RngCore};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
@@ -29,7 +30,7 @@ pub const SPHINX_VERSION: u8 = 3;
 pub const RISTRETTO_POINT_LEN: usize = 32;
 
 /// Total fixed packet size:
-/// version(1) + alpha(32) + mac(16) + header(HEADER_LEN) + payload(PAYLOAD_LEN).
+/// version(1) + alpha(32) + mac(16) + header(`HEADER_LEN`) + payload(`PAYLOAD_LEN`).
 pub const SPHINX_PACKET_LEN: usize =
     1 + RISTRETTO_POINT_LEN + SLOT_MAC_LEN + HEADER_LEN + PAYLOAD_LEN;
 
@@ -54,6 +55,9 @@ impl SphinxHop {
             .map_err(|_| OnionError::SmallOrderPubkey)?
             .decompress()
             .ok_or(OnionError::SmallOrderPubkey)?;
+        if pk == RistrettoPoint::identity() {
+            return Err(OnionError::SmallOrderPubkey);
+        }
         Ok(Self {
             id: HopId::from_bytes(id),
             static_pk: pk,
@@ -231,7 +235,7 @@ pub fn build_sphinx_onion<R: RngCore + CryptoRng>(
     let mut hop_keys: Vec<HopKeys> = Vec::with_capacity(n);
     let mut alpha_i = alpha_0;
 
-    for hop in circuit.iter() {
+    for hop in circuit {
         let alpha_bytes = alpha_i.compress().to_bytes();
         // Shared secret: sender_eph_sk * cumulative_blind * hop.pk.
         let shared_point = (sender_eph_sk * cumulative_blind) * hop.static_pk;
@@ -263,7 +267,7 @@ pub fn build_sphinx_onion<R: RngCore + CryptoRng>(
     let mut random_pad = vec![0u8; pad_len];
     rng.fill_bytes(&mut random_pad);
 
-    let built = build_header(&hop_keys, &next_hop_ids, &random_pad);
+    let built = build_header(&hop_keys, &next_hop_ids, &random_pad)?;
 
     // ── Step 3: build the encrypted payload (right-to-left).
     let mut payload_buf = [0u8; PAYLOAD_LEN];
@@ -397,7 +401,7 @@ pub fn peel_sphinx_layer(
 
     // Verify + peel header.
     let mac = packet.mac();
-    let outcome = peel_header(&keys, packet.header(), &mac).map_err(|_| OnionError::AeadFail)?;
+    let outcome = peel_header(&keys, packet.header(), &mac).map_err(|()| OnionError::AeadFail)?;
 
     // Decrypt one payload layer in-place — no separate keystream Vec.
     let mut payload = vec![0u8; PAYLOAD_LEN];
@@ -407,7 +411,7 @@ pub fn peel_sphinx_layer(
     match outcome {
         HeaderPeelOutcome::Deliver => {
             // Extract user payload via length prefix.
-            let plen = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+            let plen = usize::from(u16::from_be_bytes([payload[0], payload[1]]));
             if plen > SPHINX_MAX_USER_PAYLOAD {
                 return Err(OnionError::Internal("destination payload length oversize"));
             }
@@ -588,14 +592,18 @@ mod tests {
         let packet =
             build_sphinx_onion(&eph_sk, &[r0.clone(), r1.clone(), dest], b"x", &mut OsRng).unwrap();
         assert_eq!(packet.as_bytes().len(), SPHINX_PACKET_LEN);
-        let next = match peel_sphinx_layer(&r0_sk, &packet).unwrap() {
-            SphinxPeelOutcome::Forward { next_packet, .. } => next_packet,
-            _ => panic!(),
+        let SphinxPeelOutcome::Forward {
+            next_packet: next, ..
+        } = peel_sphinx_layer(&r0_sk, &packet).unwrap()
+        else {
+            panic!();
         };
         assert_eq!(next.as_bytes().len(), SPHINX_PACKET_LEN);
-        let next = match peel_sphinx_layer(&r1_sk, &next).unwrap() {
-            SphinxPeelOutcome::Forward { next_packet, .. } => next_packet,
-            _ => panic!(),
+        let SphinxPeelOutcome::Forward {
+            next_packet: next, ..
+        } = peel_sphinx_layer(&r1_sk, &next).unwrap()
+        else {
+            panic!();
         };
         assert_eq!(next.as_bytes().len(), SPHINX_PACKET_LEN);
     }
@@ -608,14 +616,18 @@ mod tests {
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
         let p0 = build_sphinx_onion(&eph_sk, &[r0, r1, dest], b"x", &mut OsRng).unwrap();
         let a0 = p0.alpha();
-        let p1 = match peel_sphinx_layer(&r0_sk, &p0).unwrap() {
-            SphinxPeelOutcome::Forward { next_packet, .. } => next_packet,
-            _ => panic!(),
+        let SphinxPeelOutcome::Forward {
+            next_packet: p1, ..
+        } = peel_sphinx_layer(&r0_sk, &p0).unwrap()
+        else {
+            panic!();
         };
         let a1 = p1.alpha();
-        let p2 = match peel_sphinx_layer(&r1_sk, &p1).unwrap() {
-            SphinxPeelOutcome::Forward { next_packet, .. } => next_packet,
-            _ => panic!(),
+        let SphinxPeelOutcome::Forward {
+            next_packet: p2, ..
+        } = peel_sphinx_layer(&r1_sk, &p1).unwrap()
+        else {
+            panic!();
         };
         let a2 = p2.alpha();
         assert_ne!(a0, a1, "alpha must change after r0");

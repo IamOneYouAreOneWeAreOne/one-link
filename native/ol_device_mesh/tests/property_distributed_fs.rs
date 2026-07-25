@@ -1,7 +1,7 @@
 //! Property tests for Row 8 Layer 4 distributed FS.
 //!
 //! Two tiers:
-//!   - Pure derivation (file_id, manifest canonical bytes,
+//!   - Pure derivation (`file_id`, manifest canonical bytes,
 //!     placement / repair planning): 1M iters CI default.
 //!   - Keygen-bound storage-attestation round-trips: 1k iters.
 
@@ -35,7 +35,7 @@ fn keygen_cases() -> u32 {
 fn policy_strategy() -> impl Strategy<Value = ErasurePolicy> {
     (1u8..=8u8, 0u8..=8u8, 1u8..=8u8)
         .prop_filter("k+m within MAX_K_PLUS_M", |(k, m, _)| {
-            (*k as u16) + (*m as u16) <= 32
+            u16::from(*k) + u16::from(*m) <= 32
         })
         .prop_map(|(k, m, min)| ErasurePolicy::new(k, m, min).unwrap())
 }
@@ -59,7 +59,7 @@ proptest! {
         created in any::<u64>(),
         policy in policy_strategy(),
     ) {
-        let stripe = policy.total_shards() as u32;
+        let stripe = u32::from(policy.total_shards());
         let count = ((chunk_count / stripe.max(1)) * stripe.max(1)).max(stripe);
         let chunks: Vec<ChunkHash> = (0..count)
             .map(|i| {
@@ -87,11 +87,11 @@ proptest! {
         flip_idx in 0usize..32usize,
         policy in policy_strategy(),
     ) {
-        let stripe = policy.total_shards() as usize;
+        let stripe = usize::from(policy.total_shards());
         let chunks: Vec<ChunkHash> = (0..stripe)
             .map(|i| {
                 let mut h = [0u8; 32];
-                h[0] = i as u8;
+                h[0] = u8::try_from(i).expect("the erasure stripe has at most 16 shards");
                 h
             })
             .collect();
@@ -119,7 +119,7 @@ proptest! {
         let placements: Vec<ChunkPlacement> = (0..n_chunks)
             .map(|i| {
                 let mut h = [0u8; 32];
-                h[0] = i as u8;
+                h[0] = u8::try_from(i).expect("the generator creates at most 31 chunks");
                 ChunkPlacement::empty(h)
             })
             .collect();
@@ -207,7 +207,8 @@ proptest! {
         let chunks: Vec<ChunkHash> = (0..n_chunks)
             .map(|i| {
                 let mut h = [0u8; 32];
-                h[..4].copy_from_slice(&(i as u32).to_be_bytes());
+                let index = u32::try_from(i).expect("the generator creates at most 15 chunks");
+                h[..4].copy_from_slice(&index.to_be_bytes());
                 h
             })
             .collect();

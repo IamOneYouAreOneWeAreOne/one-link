@@ -13,7 +13,7 @@ pub struct PrngState {
 }
 
 impl PrngState {
-    /// Construct from a 64-bit seed via SplitMix64 lane expansion.
+    /// Construct from a 64-bit seed via `SplitMix64` lane expansion.
     #[must_use]
     pub fn new(seed: u64) -> Self {
         Self {

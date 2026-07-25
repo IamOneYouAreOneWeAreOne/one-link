@@ -18,19 +18,16 @@
 //! This Sphinx layer only plumbs the bytes through. The actual field
 //! sampling + freshness window are the daemon's concern.
 //!
-//! ## Why this matters
+//! ## Security scope
 //!
-//! Standard Sphinx + PQ-hybrid still relies entirely on cryptographic
-//! key material to prevent decryption. A future cryptanalytic break
-//! (post-quantum compute + ML-KEM weakness) could decrypt historical
-//! traffic given a recording.
-//!
-//! Field-bound blinding adds a physical-environment requirement:
-//! the adversary must ALSO have observed the relay's coherence-
-//! field state at construction time. The state is environmental
-//! (RF + topology) and not reconstructable from network captures.
-//! Recording-attack defense becomes physics-bound, not just
-//! cryptography-bound.
+//! This function domain-separates and mixes 32 caller-supplied bytes.
+//! It proves no physical provenance, entropy, secrecy, or
+//! non-reconstructability. In the design where relays publish the
+//! witness, a recorder can record it as public context. A public or
+//! low-entropy field digest therefore does not add cryptographic secrecy
+//! or survive a break of the underlying key agreement. Any future design
+//! that needs an independent security factor must supply separately
+//! managed CSPRNG-grade secret material and specify its lifecycle.
 
 use crate::sphinx::primitives::{derive_hop_keys, HopKeys};
 

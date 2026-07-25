@@ -58,7 +58,7 @@ def main() -> int:
             break
         time.sleep(min(interval, max(0.0, deadline - time.time())))
 
-    report = {
+    report: dict[str, Any] = {
         "created_at": int(time.time()),
         "duration_s": duration,
         "interval_s": interval,

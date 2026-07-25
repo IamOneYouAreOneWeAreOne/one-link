@@ -13,10 +13,53 @@ where practical (`NATIVE_TRANSFER_V1`, `DOUBLE_RATCHET_V1`).
 
 ## [0.21.0-alpha] — 2026-05-11 — File engine v2
 
-**Headline**: complete implementation of [`FILE_ENGINE_V2_PLAN.md`](docs/FILE_ENGINE_V2_PLAN.md)
-Phase A1 + A2 + B + C + D + Coherence ↔ Rust codegen scaffold.
-16 Rust crates in `native/`; production-ready native chunk-store
-transport pipeline with full daemon cutover.
+**Headline**: implementation of the shipped scope in
+[`FILE_ENGINE_V2_PLAN.md`](docs/FILE_ENGINE_V2_PLAN.md) across Phase A1 + A2 +
+B + C + D, plus the Coherence ↔ Rust codegen scaffold. Deferred hardware gates
+and non-route bandit controllers are called out explicitly below and in the
+plan scorecard.
+16 Rust crates were present in `native/` at that milestone. The native
+chunk-store transport gained daemon integration, but this alpha changelog does
+not establish production readiness, full platform parity, or a verified
+release.
+
+### 2026-07-23 live post-quantum daemon-channel handshake
+
+- Current daemon channels use a distinct v3 wire handshake with a signed,
+  canonical suite offer/selection for X25519 + ML-KEM-768, full transcript
+  binding, an independent X25519 contribution, and mutual key confirmation
+  before the channel is returned to application code.
+- The native PQ capability is advertised only after the exact ABI passes an
+  in-process encapsulation/decapsulation self-test. Missing or unhealthy native
+  code fails closed before the initiator emits a handshake frame.
+- Legacy/classical channels are rejected by default. Migration requires an
+  explicit downgrade policy and those channels report `pq_protected=False`.
+- This protects daemon session establishment against harvest-now-decrypt-later;
+  it is not a claim that Ed25519 identity signatures, browser/WebRTC channels,
+  or every shipped platform artifact are post-quantum qualified.
+
+### 2026-07-21 large-transfer reliability and storage closure
+
+- Desktop and phone uploads now mint stable idempotency keys, durably stage
+  before returning `202 Accepted`, and replay the exact admitted result after
+  response loss. Browser retries coalesce; completed phone retries re-hash
+  content before replay so equal name/size cannot impersonate different bytes.
+- Receiver completion is proven by an authenticated, durable `FILE_COMMIT`
+  receipt. Sender retries preserve one delivery nonce and reconcile ambiguous
+  legacy outcomes without emitting another offer.
+- Chunk receipt replay, restart-safe resume ownership, exact staged-file
+  identity, and bounded adaptive high-RTT windows eliminate duplicate writes
+  and the 250 KiB/16-chunk bandwidth-delay-product collapse seen on the
+  reported 596 ms route.
+- Relay forwarding now has an exact 512 MiB process-wide payload budget plus a
+  protected 4 MiB control reserve. Browser DataChannel work and phone uploads
+  are likewise bounded, tracked, and drained before shutdown.
+- Folder equality probes no longer create transfer/activity rows. Storage
+  lifecycle tooling now performs content-verified graph audit, recoverable
+  quarantine, rollback, and a separately approved 30-day-grace purge.
+- Added adversarial lost-ACK, duplicate-init, concurrent-finalization,
+  malformed-frame, crash-recovery, relay-overload, storage-orphan, browser
+  call, media-soak, and 385 MiB transfer regression gates.
 
 ### Phase A1: chunk store foundation (ADRs 0001–0008)
 
@@ -34,15 +77,20 @@ transport pipeline with full daemon cutover.
 ### Phase A2: transport (ADR-0009, ADR-0010)
 
 - `ol_quic` — QUIC transport via `quinn` 0.11. Self-signed identity-
-  bound TLS via `rustls` + `aws-lc-rs`. Multi-stream, multi-path, 0-
-  RTT, connection migration. Replaces WebRTC/DTLS-SRTP for daemon↔
-  daemon; WebRTC retained for browser-as-peer.
+  bound TLS via `rustls` + `aws-lc-rs`. The current daemon uses
+  capability- and runtime-gated QUIC file lanes with authenticated peer
+  binding. Multi-stream, 0-RTT, and connection-migration support in the
+  transport primitive do not establish a whole-session cutover: daemon
+  control/message traffic retains its authenticated channel, and WebRTC is
+  retained for browser-as-peer.
 
 ### Phase B: genius layer (ADRs 0011–0016)
 
 - `ol_bloom` — Bloom-filter transfer init. Receiver sends Bloom of
   chunk hashes; sender XORs against manifest; ships only the true delta.
-- `ol_fountain` — RaptorQ fountain codes (RFC 6330).
+- `ol_fountain` — LT (Luby Transform) fountain codes using the robust
+  soliton distribution (ADR-0015). RaptorQ (RFC 6330) remains deferred
+  pending IPR review and a versioned wire-format upgrade.
 - `ol_fec` — Reed-Solomon FEC over GF(2^8) with SSSE3 PSHUFB SIMD.
 - `ol_erasure` — Erasure-coded durability with stripe descriptor
   metadata.
@@ -51,8 +99,10 @@ transport pipeline with full daemon cutover.
 
 - **ADR-0017** PQ-hybrid KEM (ML-KEM-768 + X25519 via BLAKE3 X-Wing
   combiner). `ol_pqkem` crate.
-- **ADR-0019** Multi-armed bandit auto-tuning (Beta-Bernoulli Thompson
-  sampling). `ol_bandit` crate.
+- **ADR-0019** Multi-armed bandit route selection (Beta-Bernoulli
+  Thompson sampling). `ol_bandit` is generic, but only route selection
+  is production-active; chunk-size, parallelism, FEC, prefetch, pacing,
+  and compression controllers remain deferred.
 - **ADR-0020** Per-chunk forward-secret ratchet (BLAKE3 keyed-hash
   chain). `ol_ratchet` crate.
 - **ADR-0021** Capability layer — macaroon-style HMAC-chained caveats
@@ -70,8 +120,10 @@ transport pipeline with full daemon cutover.
   Bench: native is **1.14–1.44× faster than legacy** at every size
   16 KiB → 64 MiB after the BoringSSL fast-path default.
 - **ADR-0026** `NATIVE_TRANSFER_V1` capability + `FILE_NATIVE_CHUNK`
-  wire format. Capability-gated; default-on for capable peers
-  (rollback via `ONE_LINK_NATIVE_TRANSFER=0`).
+  wire format. The current indexed native file lane is capability-gated and
+  default-on only when the native runtime and peer negotiation qualify it
+  (rollback via `ONE_LINK_NATIVE_TRANSFER=0`); it is not a universal session
+  transport claim.
 - **ADR-0027** Shadow → authoritative cutovers: bandit drives route
   picks in `AdaptiveTransferBrain.decide()`; folder mirror active
   cross-check + divergence counter; macaroon advertised on
@@ -125,9 +177,9 @@ Every native crate the daemon needs to call surfaces as
 - `routing_native.py`, `prefetch_native.py`, `homology_native.py`
   (Phase D, new in 0.21.0)
 
-PEP 561 type stubs ship at `stubs/one_link_native-stubs/`.
+PEP 561 type stubs ship from the canonical inline `native/one_link_native/` package.
 
-### Daemon production integrations (this release)
+### Daemon integrations in this development milestone
 
 - `Daemon._observe_prefetch(peer_fp, blob_hex)` hook in `send_file()`
   success path + receiver-side ACK so the prefetch predictor sees

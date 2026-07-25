@@ -57,7 +57,9 @@ fn structural_eq(a: &Folder, b: &Folder) -> bool {
 
 fn build_folder(input: &mut &[u8]) -> Folder {
     let mut f = Folder::new();
-    let Some(n_ops) = take_byte(input) else { return f };
+    let Some(n_ops) = take_byte(input) else {
+        return f;
+    };
     for _ in 0..(n_ops % 16) {
         let Some(op) = take_byte(input) else { break };
         let Some(rb) = take_byte(input) else { break };

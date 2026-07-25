@@ -17,12 +17,14 @@ proptest! {
     fn fountain_packet_round_trip(
         chunk_id in prop::array::uniform32(any::<u8>()),
         k in 1u32..512,
-        symbol_id in any::<u32>(),
-        source_length in any::<u32>(),
+        symbol_id in 0u32..2048,
+        source_seed in any::<u32>(),
         payload in prop::collection::vec(any::<u8>(), 1..2048),
     ) {
+        let padded_len = (k as usize) * payload.len();
+        let source_length = 1 + source_seed % u32::try_from(padded_len).unwrap();
         let p = FountainPacket::new(chunk_id, k, symbol_id, source_length, payload.clone());
-        let encoded = p.encode();
+        let encoded = p.encode().expect("bounded packet encodes");
         let decoded = FountainPacket::decode(&encoded).expect("encoded form decodes");
         prop_assert_eq!(decoded.chunk_id, chunk_id);
         prop_assert_eq!(decoded.k, k);

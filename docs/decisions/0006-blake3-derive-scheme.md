@@ -43,7 +43,7 @@ This ADR specifies the **single canonical scheme** for every BLAKE3 use in the e
 "ol-folder-crdt-actor-v1"         -> CRDT actor_id derivation (peer fingerprint -> actor_id)
 "ol-share-link-id-v1"             -> share-link fingerprint (canonical-encoded share body)
 "ol-bloom-init-key-v1"            -> Bloom filter hash-function seed (Phase B; reserved here)
-"ol-fountain-symbol-id-v1"        -> RaptorQ encoded-symbol identifier (Phase B; reserved)
+"ol-fountain-symbol-id-v1"        -> LT encoded-symbol identifier (Phase B v1; RaptorQ requires a version bump)
 "ol-network-coding-id-v1"         -> XOR network-coding combined-symbol identifier (Phase B; reserved)
 "ol-pq-hybrid-derive-v1"          -> ML-KEM + X25519 hybrid combiner KDF (Phase C; reserved)
 ```

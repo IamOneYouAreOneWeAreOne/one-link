@@ -30,8 +30,10 @@ pub mod caveat;
 pub mod context;
 pub mod error;
 
-pub use capability::{Capability, RootKey, CAP_ID_LEN, ROOT_KEY_LEN, SIGNATURE_LEN};
-pub use caveat::Caveat;
+pub use capability::{
+    Capability, RootKey, CAP_ID_LEN, MAX_CAVEATS, MAX_WIRE_BYTES, ROOT_KEY_LEN, SIGNATURE_LEN,
+};
+pub use caveat::{Caveat, MAX_OPERATION_NAMES};
 pub use context::Context;
 pub use error::CapError;
 

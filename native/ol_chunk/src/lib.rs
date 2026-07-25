@@ -3,9 +3,9 @@
 //!
 //! This crate implements the foundational chunk-layer primitives:
 //!
-//! 1. **FastCDC kernel** with parameters fixed by [ADR-0001]: 8 KiB minimum,
+//! 1. **`FastCDC` kernel** with parameters fixed by [ADR-0001]: 8 KiB minimum,
 //!    64 KiB average, 256 KiB maximum chunk size. Gear-256 rolling hash
-//!    with the standard FastCDC published mask parameters.
+//!    with the standard `FastCDC` published mask parameters.
 //!
 //! 2. **BLAKE3 chunk addressing** in two flavours per [ADR-0006]:
 //!    - **raw address**: plain `BLAKE3.hash(plaintext)` — content-addressed

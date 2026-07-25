@@ -1,0 +1,24 @@
+# PyO3 synthesizes an ``__all__`` list for each registered submodule.  The
+# companion contract test verifies every entry against the canonical stub AST;
+# the metadata object itself has no useful static type beyond ``list[str]``.
+one_link_native\.[^.]+\.__all__
+
+# Public static-only aliases used by Python callers.  These intentionally do
+# not exist as runtime objects; their referenced values are ordinary builtins.
+one_link_native\.aead\.AeadKind
+one_link_native\.aead\.ChunkInput
+one_link_native\.aead\.EncryptedChunkInput
+one_link_native\.confidential\.AttestationTuple
+one_link_native\.quic\.Frame
+one_link_native\.quic\.InboundFrame
+one_link_native\.quic\.Response
+
+# Private implementation module nested inside the PyO3 package.  The public
+# package and all 32 public submodules are fully stubbed and parity-checked.
+one_link_native\.one_link_native
+
+# ``maturin develop`` adds the Rust crate directory to the editable import
+# search path, where the crate's non-Python ``src/`` folder looks like a
+# namespace candidate to stubtest.  It is absent from built wheels and is not a
+# runtime export.
+one_link_native\.src

@@ -123,19 +123,20 @@ def test_swap_to_same_pub_is_idempotent():
     assert reg.peers["alice"].address == "192.168.1.20"
 
 
-def test_predicate_exception_is_safe():
-    """A buggy is_pinned_pubkey predicate that raises must not crash
-    the registry (best-effort defense)."""
+def test_predicate_exception_refuses_identity_swap(caplog):
+    """Trust lookup failure retains the known identity fail-closed."""
     def _boom(pub):
         raise RuntimeError("predicate bug")
 
     reg = discovery.Registry(is_pinned_pubkey=_boom)
     reg.upsert(_make_peer("alice", PUB_A))
-    # The swap WOULD be refused if the predicate said yes, but since it
-    # raised the registry falls through to the legacy permissive
-    # behavior. No crash.
-    reg.upsert(_make_peer("alice", PUB_B))
-    assert "alice" in reg.peers
+    with caplog.at_level("ERROR", logger="one_link.discovery"):
+        reg.upsert(_make_peer("alice", PUB_B))
+    assert reg.peers["alice"].ed_pub_hex == PUB_A
+    assert any(
+        "refusing pub-hex swap (fail-closed)" in r.message
+        for r in caplog.records
+    )
 
 
 def test_invalid_pub_drops_existing_entry():

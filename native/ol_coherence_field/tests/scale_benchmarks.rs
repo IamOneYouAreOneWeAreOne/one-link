@@ -35,71 +35,70 @@ fn synthetic_sources(n: usize, fragile_band: std::ops::Range<usize>) -> Vec<f64>
 
 #[test]
 fn scale_1000_peers_converges_under_100ms() {
-    let n = 1_000;
-    let g = small_world(n, 7);
-    let s = synthetic_sources(n, 400..600);
-    let cfg = CgConfig {
+    let node_count = 1_000;
+    let graph = small_world(node_count, 7);
+    let source = synthetic_sources(node_count, 400..600);
+    let config = CgConfig {
         max_iter: 5_000,
         tolerance: 1e-6,
     };
-    let t = Instant::now();
-    let r = solve_helmholtz(&g, 1.0, 0.5, &s, cfg).expect("converges");
-    let elapsed = t.elapsed();
+    let started_at = Instant::now();
+    let result = solve_helmholtz(&graph, 1.0, 0.5, &source, config).expect("converges");
+    let elapsed = started_at.elapsed();
     eprintln!(
         "1k peers: {} CG iters, residual {:.3e}, wall time {:.3?}",
-        r.iterations, r.residual, elapsed
+        result.iterations, result.residual, elapsed
     );
-    assert!(r.converged, "did not converge");
-    assert!(r.residual < 1e-6);
+    assert!(result.converged, "did not converge");
+    assert!(result.residual < 1e-6);
     assert!(
         elapsed.as_millis() < 1000,
-        "1k peer solve took {:.3?} — production hot path budget is 1 second",
-        elapsed
+        "1k peer solve took {elapsed:.3?} — production hot path budget is 1 second"
     );
 }
 
 #[test]
 fn scale_5000_peers_converges() {
-    let n = 5_000;
-    let g = small_world(n, 11);
-    let s = synthetic_sources(n, 2000..3000);
-    let cfg = CgConfig {
+    let node_count = 5_000;
+    let graph = small_world(node_count, 11);
+    let source = synthetic_sources(node_count, 2000..3000);
+    let config = CgConfig {
         max_iter: 20_000,
         tolerance: 1e-6,
     };
-    let t = Instant::now();
-    let r = solve_helmholtz(&g, 1.0, 0.5, &s, cfg).expect("converges");
-    let elapsed = t.elapsed();
+    let started_at = Instant::now();
+    let result = solve_helmholtz(&graph, 1.0, 0.5, &source, config).expect("converges");
+    let elapsed = started_at.elapsed();
     eprintln!(
         "5k peers: {} CG iters, residual {:.3e}, wall time {:.3?}",
-        r.iterations, r.residual, elapsed
+        result.iterations, result.residual, elapsed
     );
-    assert!(r.converged);
-    assert!(r.residual < 1e-6);
+    assert!(result.converged);
+    assert!(result.residual < 1e-6);
 }
 
 #[test]
 fn scale_10000_peers_meets_plan_gate() {
     // Phase E plan gate: converge on swarms up to 10,000 peers with
     // spectral residual < 1e-6.
-    let n = 10_000;
-    let g = small_world(n, 17);
-    let s = synthetic_sources(n, 4000..6000);
-    let cfg = CgConfig {
+    let node_count = 10_000;
+    let graph = small_world(node_count, 17);
+    let source = synthetic_sources(node_count, 4000..6000);
+    let config = CgConfig {
         max_iter: 50_000,
         tolerance: 1e-6,
     };
-    let t = Instant::now();
-    let r = solve_helmholtz(&g, 1.0, 0.5, &s, cfg).expect("converges");
-    let elapsed = t.elapsed();
+    let started_at = Instant::now();
+    let result = solve_helmholtz(&graph, 1.0, 0.5, &source, config).expect("converges");
+    let elapsed = started_at.elapsed();
     eprintln!(
         "10k peers: {} CG iters, residual {:.3e}, wall time {:.3?}",
-        r.iterations, r.residual, elapsed
+        result.iterations, result.residual, elapsed
     );
-    assert!(r.converged, "10k peer solve did not converge");
+    assert!(result.converged, "10k peer solve did not converge");
     assert!(
-        r.residual < 1e-6,
+        result.residual < 1e-6,
         "Phase E gate: residual {:.3e} must be < 1e-6",
-        r.residual
+        result.residual
     );
 }

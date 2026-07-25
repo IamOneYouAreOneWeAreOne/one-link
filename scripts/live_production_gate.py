@@ -18,9 +18,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import random
-import socket
 import subprocess
 import sys
 import tempfile
@@ -30,29 +30,23 @@ from typing import Any
 
 import aiohttp
 
+from one_link import app as app_mod
+from one_link import control_ipc
 from one_link import daemon as daemon_mod
-from one_link.paths import data_dir
+from one_link.fault_observability import report_best_effort_failure
 
 
 RESULTS_DIR = Path("benchmarks") / "results"
+log = logging.getLogger(__name__)
 
 
 def _request(cmd: str, *, timeout: float = 3600.0, **kwargs: Any) -> dict[str, Any]:
     port = daemon_mod.read_control_port()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    try:
-        sock.connect(("127.0.0.1", port))
-        sock.sendall((json.dumps({"cmd": cmd, **kwargs}) + "\n").encode("utf-8"))
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = sock.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf.decode("utf-8").strip() or "{}")
-    finally:
-        sock.close()
+    return control_ipc.request_control(
+        port,
+        {"cmd": cmd, **kwargs},
+        timeout=timeout,
+    )
 
 
 def _wait_status(timeout_s: float = 45.0) -> dict[str, Any]:
@@ -138,8 +132,8 @@ def _process_memory_bytes(pid: int) -> int | None:
     try:
         import psutil  # type: ignore
         return int(psutil.Process(pid).memory_info().rss)
-    except Exception:
-        pass
+    except Exception as exc:
+        report_best_effort_failure(log, "live_gate_psutil_memory_probe", exc)
     if os.name == "nt":
         try:
             out = subprocess.check_output(
@@ -202,8 +196,11 @@ def _send_row(
 
 
 async def _http_upload(peer: str, size_mib: int, *, seed: int) -> dict[str, Any]:
-    port = int((data_dir() / "server.port").read_text(encoding="utf-8").strip())
-    token = (data_dir() / "ui.token").read_text(encoding="utf-8").strip()
+    daemon = app_mod._resolve_running_daemon(timeout=10.0)
+    if daemon is None:
+        raise RuntimeError("authenticated One Link daemon/UI is not available")
+    port = daemon.server_port
+    token = daemon.token
     rng = random.Random(seed)
     payload = rng.randbytes(int(size_mib) * 1024 * 1024)
     filename = f"http-live-{size_mib}MiB-{int(time.time())}.bin"
@@ -221,7 +218,7 @@ async def _http_upload(peer: str, size_mib: int, *, seed: int) -> dict[str, Any]
             f"http://127.0.0.1:{port}/api/send-file",
             data=form,
             headers={"Authorization": f"Bearer {token}"},
-            timeout=max(120, size_mib * 10),
+            timeout=aiohttp.ClientTimeout(total=max(120, size_mib * 10)),
         ) as resp:
             text = await resp.text()
             body = json.loads(text or "{}")
@@ -242,8 +239,8 @@ async def _http_upload(peer: str, size_mib: int, *, seed: int) -> dict[str, Any]
 def _shutdown_daemon() -> None:
     try:
         _request("shutdown", timeout=5.0)
-    except Exception:
-        pass
+    except Exception as exc:
+        report_best_effort_failure(log, "live_gate_daemon_shutdown", exc)
     time.sleep(2.0)
 
 

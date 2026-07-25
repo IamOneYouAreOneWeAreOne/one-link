@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Produce a deterministic perf snapshot of ``ol_coherence_field`` for
-the per-PR regression gate.
+"""Produce a repeatable end-to-end snapshot of ``ol_coherence_field``.
 
 Drives the Python adapter through a fixed set of operations (the same
 ones the daemon hits in production), measures wall-clock per call, and
-emits a JSON file compatible with ``scripts/bench_gate.py``.
+emits a JSON file consumed by ``scripts/coherence_field_slo_gate.py``.
+The legacy throughput-shaped field remains compatible with
+``scripts/bench_gate.py`` for environment-qualified laboratory comparisons.
 
-Output format matches the existing bench gate:
+Each result includes both its directly measured median latency and the legacy
+throughput-shaped field expected by the relative benchmark tool:
 
     {"results": [{"name": "...", "bytes_per_second_median": <num>}, ...]}
 
-For non-throughput operations (CG solves, scalar BE-RAR evaluations) we
-emit ``operations_per_second_median`` as the metric, treating each call
-as one "byte" for ratio purposes. The gate's comparison logic doesn't
-care about the unit — only the ratio between fresh and baseline.
+For non-throughput operations (CG solves, scalar BE-RAR evaluations), one
+operation is represented as one legacy "byte". The portable production gate
+uses ``median_ns`` and does not compare snapshots from unlike environments.
 
 Usage:
     python scripts/coherence_field_perf_snapshot.py --out perf.json
@@ -24,8 +25,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-import statistics
+import platform
 import sys
 import time
 from pathlib import Path
@@ -34,6 +36,34 @@ from typing import Any, Callable
 
 SAMPLES = 200
 WARMUP = 20
+
+
+def _native_artifact_metadata(module: Any) -> dict[str, Any]:
+    """Return verifiable identity data without exposing an absolute path."""
+
+    raw_path = getattr(module, "__file__", None)
+    if not isinstance(raw_path, str) or not raw_path:
+        return {
+            "file_name": None,
+            "size_bytes": None,
+            "sha256": None,
+        }
+
+    artifact = Path(raw_path)
+    metadata: dict[str, Any] = {
+        "file_name": artifact.name,
+        "size_bytes": None,
+        "sha256": None,
+    }
+    try:
+        metadata["size_bytes"] = artifact.stat().st_size
+        with artifact.open("rb") as stream:
+            metadata["sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
+    except OSError:
+        # The benchmark remains usable for exotic import loaders. Null fields
+        # honestly record that artifact identity could not be established.
+        pass
+    return metadata
 
 
 def _bench(name: str, fn: Callable[[], Any]) -> dict[str, Any]:
@@ -58,7 +88,10 @@ def _bench(name: str, fn: Callable[[], Any]) -> dict[str, Any]:
 
 
 def run_snapshot() -> dict[str, Any]:
+    import one_link_native
     from one_link_native import coherence_field as cf
+
+    native_extension = getattr(one_link_native, "one_link_native", one_link_native)
 
     results = []
 
@@ -91,12 +124,14 @@ def run_snapshot() -> dict[str, Any]:
         source = [0.0] * n_peers
         source[n_peers // 2] = 1.0
         cf.solve_helmholtz(g, 1.0, 0.1, source, 2000, 1e-6)
+
+        def solve_once() -> Any:
+            return cf.solve_helmholtz(g, 1.0, 0.1, source, 2000, 1e-6)
+
         results.append(
             _bench(
                 f"solve/helmholtz_{n_peers}",
-                lambda g=g, s=source: cf.solve_helmholtz(
-                    g, 1.0, 0.1, s, 2000, 1e-6
-                ),
+                solve_once,
             )
         )
 
@@ -118,8 +153,30 @@ def run_snapshot() -> dict[str, Any]:
     )
 
     return {
+        "schema_version": 2,
         "version": "ol_coherence_field",
         "samples_per_bench": SAMPLES,
+        "measurement": {
+            "contract": "python_ffi_end_to_end",
+            "clock": "perf_counter_ns",
+            "clock_resolution_ns": max(
+                1,
+                round(time.get_clock_info("perf_counter").resolution * 1e9),
+            ),
+            "warmup_calls": WARMUP,
+            "samples_per_bench": SAMPLES,
+            "statistic": "upper_middle_median_of_individual_calls",
+        },
+        "environment": {
+            "operating_system": platform.system(),
+            "operating_system_release": platform.release(),
+            "machine": platform.machine(),
+            "processor": platform.processor(),
+            "python_implementation": platform.python_implementation(),
+            "python_version": platform.python_version(),
+            "native_version": getattr(cf, "__version__", None),
+            "native_artifact": _native_artifact_metadata(native_extension),
+        },
         "results": results,
     }
 

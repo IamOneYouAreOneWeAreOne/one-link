@@ -1,7 +1,7 @@
 //! Adversarial vectors for Row 8 Layer 1.
 //!
-//! Exhaustive coverage of every known attack pattern against
-//! per-device identity stacks.
+//! Bounded regression vectors for the identity-stack cases implemented
+//! below. This is not exhaustive coverage of every attack pattern.
 
 use ol_device_mesh::derivation::{derive_field_bound_subkey_seed, derive_subkey_seed};
 use ol_device_mesh::{
@@ -148,12 +148,10 @@ fn adversarial_hardware_wrapper_truncated_ciphertext_rejected() {
 // ── Field-binding attacks ─────────────────────────────────────────
 
 #[test]
-fn adversarial_field_bound_seed_unrecoverable_without_witness() {
-    // The plain-derivation seed and the field-bound seed must differ
-    // for any non-trivial witness, AND the field-bound seed must not
-    // appear in plaintext-recoverable form. (We check the strict
-    // property: knowing the master + transcript + plain raw seed does
-    // NOT reveal the field-bound seed without the witness.)
+fn changing_field_context_changes_derived_subkey_seed() {
+    // Input-binding regression only: different non-trivial witness
+    // bytes must change this deterministic derivation. This comparison
+    // does not prove entropy, non-recoverability, or field provenance.
     let master = [0x42; MASTER_SEED_LEN];
     let id = [0x55; DEVICE_ID_LEN];
     let plain = derive_subkey_seed(&master, DeviceClass::Phone, &id, 0);
@@ -169,9 +167,10 @@ fn adversarial_field_bound_seed_unrecoverable_without_witness() {
 // ── Ratchet attacks ───────────────────────────────────────────────
 
 #[test]
-fn adversarial_ratchet_cannot_recover_prior_day() {
-    // Take a subkey at day=5, advance to day=6, confirm day-5 seed
-    // is not recoverable from day-6 alone (one-way property).
+fn ratchet_step_changes_seed_and_master_can_redrive_prior_day() {
+    // Take a subkey at day=5, advance to day=6, and confirm the bytes
+    // change while the master can deterministically re-derive day 5.
+    // Equality checks are not an inversion-resistance proof.
     let master = MasterIdentity::generate(&mut OsRng);
     let id = [0x88; DEVICE_ID_LEN];
     let (mut sk, _att) = mint_subkey(&master, DeviceClass::Phone, id, 5, 365).unwrap();

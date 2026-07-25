@@ -14,7 +14,7 @@
 
 use std::hint::black_box;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[path = "../../test_support/timing_gate.rs"]
 mod timing_gate;
@@ -54,8 +54,8 @@ fn fingerprint_ct_compare_timing_uniform() {
     let mut diff_last = expected;
     diff_last[31] ^= 0xFF;
 
-    let iters_per_burst = 100_000;
-    let bursts = 10;
+    let iters_per_burst: u32 = 100_000;
+    let bursts: u32 = 10;
 
     // Warm up.
     for _ in 0..iters_per_burst {
@@ -63,29 +63,30 @@ fn fingerprint_ct_compare_timing_uniform() {
         let _ = black_box(registry.is_paired_peer(black_box(&diff_last)));
     }
 
-    let mut t_first = 0u128;
-    let mut t_last = 0u128;
+    let mut t_first = Duration::ZERO;
+    let mut t_last = Duration::ZERO;
     for _ in 0..bursts {
         let s = Instant::now();
         for _ in 0..iters_per_burst {
             let _ = black_box(registry.is_paired_peer(black_box(&diff_first)));
         }
-        t_first += s.elapsed().as_nanos();
+        t_first += s.elapsed();
 
         let s = Instant::now();
         for _ in 0..iters_per_burst {
             let _ = black_box(registry.is_paired_peer(black_box(&diff_last)));
         }
-        t_last += s.elapsed().as_nanos();
+        t_last += s.elapsed();
     }
 
-    let avg_first = t_first as f64 / (iters_per_burst * bursts) as f64;
-    let avg_last = t_last as f64 / (iters_per_burst * bursts) as f64;
+    let measured_calls = f64::from(iters_per_burst * bursts);
+    let avg_first = t_first.as_secs_f64() * 1_000_000_000.0 / measured_calls;
+    let avg_last = t_last.as_secs_f64() * 1_000_000_000.0 / measured_calls;
     let ratio = avg_first.max(avg_last) / avg_first.min(avg_last);
 
-    eprintln!("ct_eq diff@0:  {:.1} ns/call", avg_first);
-    eprintln!("ct_eq diff@31: {:.1} ns/call", avg_last);
-    eprintln!("ratio: {:.4}", ratio);
+    eprintln!("ct_eq diff@0:  {avg_first:.1} ns/call");
+    eprintln!("ct_eq diff@31: {avg_last:.1} ns/call");
+    eprintln!("ratio: {ratio:.4}");
 
     // The straight-line XOR-accumulator code is constant-time at the
     // CPU level. Allow up to 1.20× wall-clock variance for OS noise.
@@ -112,7 +113,7 @@ fn fingerprint_ct_compare_semantic() {
     }
 }
 
-/// Sanity: every PeerRegistry impl shipped in `ol_quic`'s own test
+/// Sanity: every `PeerRegistry` impl shipped in `ol_quic`'s own test
 /// fixtures uses `is_paired_peer` with constant-time semantics
 /// (this test exists primarily to anchor the spec).
 #[tokio::test]

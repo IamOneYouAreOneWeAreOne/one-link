@@ -1,4 +1,4 @@
-//! `ol_fuse` — FUSE filesystem surface scaffold.
+//! `ol_fuse` — bounded filesystem backend plus the Linux FUSE adapter.
 //!
 //! Per `FILE_ENGINE_V2_PLAN.md` Phase B item #6:
 //!
@@ -10,31 +10,22 @@
 //! This crate ships the Linux side. The other two surfaces ship in
 //! separate per-platform crates (`ol_fskit`, `ol_winfs`).
 //!
-//! ## Scope of this scaffold
+//! ## Shipped scope
 //!
-//! The plan calls for a full read/write FUSE binding that mounts a
-//! `Folder` (the `ol_crdt` lattice + `ol_chunk_store` content-addressed
-//! backing) as a regular Linux directory. The full implementation is
-//! substantial (libfuse callback wiring, lookup cache, ENOENT/EAGAIN
-//! semantics under churn, write-through to chunk store with WAL
-//! coupling). This scaffold ships:
+//! Linux builds with `linux-mount` ship a real callback-backed
+//! `fuser::Filesystem` and owned background mount session. The packaged Python
+//! binding mounts an immutable manifest over a verified, bounded CAS reader
+//! and deliberately refuses read-write operation until WAL-coupled writes are
+//! implemented. This crate provides:
 //!
-//! 1. A platform-agnostic [`FilesystemBackend`] trait — every method a
-//!    FUSE callback could call, expressed in terms the daemon already
-//!    has (file_path → blob_hash, read at offset, write at offset).
-//! 2. A platform-agnostic [`MountOptions`] / [`MountError`] surface so
-//!    consumers can build the mount call site today.
-//! 3. A [`mount`] entry point that on Linux will (eventually) call
-//!    `fuser::mount2` with a wrapper that adapts [`FilesystemBackend`]
-//!    to libfuse's callback shape; on every other platform it returns
-//!    [`MountError::UnsupportedPlatform`] immediately.
-//! 4. A trivial in-memory [`MemoryBackend`] for unit tests + the
-//!    daemon's smoke tests.
+//! 1. A platform-agnostic [`FilesystemBackend`] trait.
+//! 2. Strict manifest, path, metadata, size, and bounded-read enforcement.
+//! 3. A Linux [`mount`] / [`spawn_mount`] path backed by `fuser` callbacks.
+//! 4. Explicit fail-closed status/errors on unsupported or disabled builds.
+//! 5. A bounded [`MemoryBackend`] used by adversarial unit tests.
 //!
-//! The slot in the plan ([Layer 9 in the architecture stack]) is
-//! taken. When the daemon's FUSE mount endpoint goes live, the real
-//! `fuser` wiring lands as a focused PR against this crate without
-//! changing the surface.
+//! macOS FSKit and Windows WinFsp/Dokan live in separate crates and remain
+//! unimplemented; their presence never manufactures a successful mount.
 
 // `deny` (not `forbid`) so the one place that calls libc::getuid /
 // getgid in the FUSE adapter can locally lift it with
@@ -51,9 +42,13 @@ mod adapter;
 
 pub use backend::{
     BlobReader, DirEntry, EntryKind, FilesystemBackend, FolderManifestBackend, FsError,
-    ManifestRow, MemoryBackend, Stat,
+    ManifestRow, MemoryBackend, Stat, MAX_FS_IO_BYTES, MAX_FS_PATH_BYTES, MAX_MEMORY_FILES,
+    MAX_MEMORY_FILE_BYTES, MAX_MEMORY_TOTAL_BYTES,
 };
-pub use mount::{mount, mount_platform_status, MountError, MountOptions, PlatformMountStatus};
+pub use mount::{
+    mount, mount_platform_status, spawn_mount, MountError, MountOptions, MountedFilesystem,
+    PlatformMountStatus,
+};
 
 /// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

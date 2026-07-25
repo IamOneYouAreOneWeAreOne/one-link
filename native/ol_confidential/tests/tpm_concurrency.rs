@@ -1,6 +1,6 @@
 //! Concurrency stress on the real Windows TPM.
 //!
-//! NCrypt handles are documented thread-safe by MSDN, but consumer
+//! `NCrypt` handles are documented thread-safe by MSDN, but consumer
 //! TPMs have a single internal command pipeline — under heavy
 //! concurrent load they return `TPM_RC_CANCELED` rather than block.
 //! These tests verify:
@@ -46,14 +46,14 @@ fn sign_with_retry(key: &TpmAttestationKey, digest: &[u8; 32]) -> Vec<u8> {
 fn tpm_4_threads_concurrent_sign() {
     let key = Arc::new(TpmAttestationKey::acquire_or_create(KEY_NAME).expect("acquire"));
     let mut handles = Vec::new();
-    for thread_idx in 0..4 {
+    for thread_idx in 0u8..4 {
         let k = Arc::clone(&key);
         handles.push(thread::spawn(move || {
             let mut sigs = Vec::new();
-            for op_idx in 0..5 {
+            for op_idx in 0u8..5 {
                 let mut digest = [0u8; 32];
-                digest[0] = thread_idx as u8;
-                digest[1] = op_idx as u8;
+                digest[0] = thread_idx;
+                digest[1] = op_idx;
                 let sig = sign_with_retry(&k, &digest);
                 sigs.push((digest, sig));
             }
@@ -85,11 +85,11 @@ fn tpm_4_threads_concurrent_sign() {
 fn tpm_concurrent_attestation_quotes_all_verify() {
     let key = Arc::new(TpmAttestationKey::acquire_or_create(KEY_NAME).expect("acquire"));
     let mut handles = Vec::new();
-    for thread_idx in 0..4 {
+    for thread_idx in 0u8..4 {
         let k = Arc::clone(&key);
         handles.push(thread::spawn(move || {
             let mut nonce = [0u8; 32];
-            nonce[0] = thread_idx as u8;
+            nonce[0] = thread_idx;
             let digest = canonical_platform_quote_subtranscript(
                 ProviderTag::WindowsTpm,
                 &VK_PLACEHOLDER,

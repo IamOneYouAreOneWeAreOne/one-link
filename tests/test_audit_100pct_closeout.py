@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -366,7 +365,6 @@ def test_m8_cover_handler_silent_when_no_relay_sk():
 def test_i3_error_constants_present():
     """The native confidential module must export the new I3
     clock-skew + max-age constants so callers can introspect."""
-    from one_link import confidential_native as cn
     # These are imported via the native module; if the wheel
     # is old, this test xfails gracefully.
     pytest.importorskip("one_link_native.confidential")

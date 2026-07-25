@@ -1,9 +1,10 @@
-//! In-memory TOFU store — the always-available fallback.
+//! In-memory TOFU store — a bounded prototype and test fallback.
 //!
-//! Real platform backends (Secure Enclave, StrongBox, TPM) are added behind
+//! Real platform backends (Secure Enclave, `StrongBox`, TPM) are added behind
 //! Cargo features as separate modules. The default build uses this software
-//! TOFU store, which still gives the plan's "first-use record + rotation
-//! detection" guarantee without a hardware root.
+//! TOFU store. It detects a mismatch during one store lifetime, but does not
+//! persist first-use pins across process restarts. Production callers need a
+//! durable authenticated store or a platform hardware backend.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -14,12 +15,29 @@ use crate::error::{HwKeyError, Result};
 use crate::store::{KeyHandle, KeyStore, PublicKey};
 use crate::KeyGuarantee;
 
+/// Maximum UTF-8 byte length accepted for a key label. This bounds both the
+/// keyed-hash input and persistent in-memory metadata controlled by callers.
+pub const MAX_KEY_LABEL_BYTES: usize = 256;
+/// Maximum number of labels retained by the in-memory fallback store.
+pub const MAX_TOFU_ENTRIES: usize = 65_536;
+
+fn validate_label(label: &str) -> Result<()> {
+    if label.is_empty() {
+        return Err(HwKeyError::InvalidLabel("label must not be empty"));
+    }
+    if label.len() > MAX_KEY_LABEL_BYTES {
+        return Err(HwKeyError::InvalidLabel("label exceeds 256 UTF-8 bytes"));
+    }
+    Ok(())
+}
+
 /// Generates a "public key" from a label by hashing the label with a per-store
-/// random root. This is NOT cryptographically a real keypair — the TofuStore
+/// random root. This is NOT cryptographically a real keypair — the `TofuStore`
 /// is for testing the trait surface, the rotation-detection invariant, and as
 /// a fallback when no hardware backend is reachable. Real keypairs come from
-/// platform backends (Secure Enclave / StrongBox / TPM) that implement
-/// `KeyStore` separately.
+/// platform backends (Secure Enclave / `StrongBox` / TPM) that implement
+/// `KeyStore` separately. The derived value is not a signing key and this
+/// type must not be presented as hardware-backed key generation.
 #[derive(Debug)]
 pub struct TofuStore {
     root: [u8; 32],
@@ -50,8 +68,15 @@ impl KeyStore for TofuStore {
     }
 
     fn get_or_create(&self, label: &str) -> Result<KeyHandle> {
-        let mut inner = self.inner.lock().expect("poisoned");
+        validate_label(label)?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| HwKeyError::StateUnavailable)?;
         if !inner.contains_key(label) {
+            if inner.len() >= MAX_TOFU_ENTRIES {
+                return Err(HwKeyError::CapacityExceeded);
+            }
             let pk = self.derive_pk(label);
             inner.insert(label.to_string(), pk);
         }
@@ -59,7 +84,11 @@ impl KeyStore for TofuStore {
     }
 
     fn public_key(&self, handle: &KeyHandle) -> Result<PublicKey> {
-        let inner = self.inner.lock().expect("poisoned");
+        validate_label(&handle.0)?;
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| HwKeyError::StateUnavailable)?;
         inner
             .get(&handle.0)
             .cloned()
@@ -67,7 +96,11 @@ impl KeyStore for TofuStore {
     }
 
     fn check_tofu(&self, label: &str, presented: &PublicKey) -> Result<()> {
-        let inner = self.inner.lock().expect("poisoned");
+        validate_label(label)?;
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| HwKeyError::StateUnavailable)?;
         let stored = inner
             .get(label)
             .ok_or_else(|| HwKeyError::NotFound(label.into()))?;
@@ -154,5 +187,58 @@ mod tests {
     fn guarantee_is_tofu_only() {
         let s = store();
         assert_eq!(s.guarantee(), KeyGuarantee::TofuOnly);
+    }
+
+    #[test]
+    fn labels_are_bounded_and_nonempty() {
+        let s = store();
+        assert!(matches!(
+            s.get_or_create("").unwrap_err(),
+            HwKeyError::InvalidLabel(_)
+        ));
+        let oversized = "a".repeat(MAX_KEY_LABEL_BYTES + 1);
+        assert!(matches!(
+            s.get_or_create(&oversized).unwrap_err(),
+            HwKeyError::InvalidLabel(_)
+        ));
+        assert!(matches!(
+            s.public_key(&KeyHandle(oversized)).unwrap_err(),
+            HwKeyError::InvalidLabel(_)
+        ));
+    }
+
+    #[test]
+    fn store_capacity_is_enforced_but_existing_handles_remain_available() {
+        let s = store();
+        {
+            let mut inner = s.inner.lock().unwrap();
+            for i in 0..MAX_TOFU_ENTRIES {
+                inner.insert(format!("key-{i}"), PublicKey([0u8; 32]));
+            }
+        }
+        assert_eq!(
+            s.get_or_create("new-key"),
+            Err(HwKeyError::CapacityExceeded)
+        );
+        assert_eq!(s.get_or_create("key-0"), Ok(KeyHandle("key-0".into())));
+    }
+
+    #[test]
+    fn poisoned_store_fails_closed_without_panicking() {
+        let s = store();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = s.inner.lock().unwrap();
+            panic!("deliberately poison the test mutex");
+        }));
+
+        assert_eq!(s.get_or_create("alice"), Err(HwKeyError::StateUnavailable));
+        assert_eq!(
+            s.public_key(&KeyHandle("alice".into())),
+            Err(HwKeyError::StateUnavailable)
+        );
+        assert_eq!(
+            s.check_tofu("alice", &PublicKey([0u8; 32])),
+            Err(HwKeyError::StateUnavailable)
+        );
     }
 }

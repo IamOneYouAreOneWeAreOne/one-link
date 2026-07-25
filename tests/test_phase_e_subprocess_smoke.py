@@ -13,10 +13,6 @@ daemon, not just inside the test harness.
 
 from __future__ import annotations
 
-import json
-import socket
-import time
-
 import pytest
 
 from tests.harness import daemon_pair, request
@@ -52,20 +48,8 @@ pytestmark = pytest.mark.timeout(120)
 
 
 def _control_request(control_port: int, **req) -> dict:
-    """Wraps tests.harness.request because some control verbs aren't
-    in the standard harness alphabet — we hand-roll the JSON."""
-    sock = socket.create_connection(("127.0.0.1", control_port), timeout=10.0)
-    try:
-        sock.sendall((json.dumps(req) + "\n").encode("utf-8"))
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf.decode("utf-8").strip())
-    finally:
-        sock.close()
+    """All verbs share the authenticated harness transport."""
+    return request(control_port, timeout=10.0, **req)
 
 
 def test_daemon_reports_coherence_field_available():

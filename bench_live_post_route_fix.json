@@ -1,0 +1,308 @@
+{
+  "files": [
+    {
+      "size": 524288,
+      "trial": 0,
+      "ok": true,
+      "elapsed_ms": 243.16809998708777,
+      "MiB_s": 2.056190758683191,
+      "error": null
+    },
+    {
+      "size": 524288,
+      "trial": 1,
+      "ok": false,
+      "elapsed_ms": 120200.57960000122,
+      "MiB_s": 0.0041597137190509436,
+      "error": "TransferPausedError: file send to fc9f0a5f: peer did not ACK within 120.0s \u2014 transfer aborted"
+    },
+    {
+      "size": 524288,
+      "trial": 2,
+      "ok": true,
+      "elapsed_ms": 307.98170002526604,
+      "MiB_s": 1.623473082845446,
+      "error": null
+    },
+    {
+      "size": 524288,
+      "trial": 3,
+      "ok": false,
+      "elapsed_ms": 120161.75709999516,
+      "MiB_s": 0.004161057661498028,
+      "error": "TransferPausedError: file send to fc9f0a5f: peer did not ACK within 120.0s \u2014 transfer aborted"
+    },
+    {
+      "size": 524288,
+      "trial": 4,
+      "ok": true,
+      "elapsed_ms": 193.92220000736415,
+      "MiB_s": 2.578353587062299,
+      "error": null
+    },
+    {
+      "size": 16777216,
+      "trial": 0,
+      "ok": true,
+      "elapsed_ms": 522.7479999884963,
+      "MiB_s": 30.607481999648204,
+      "error": null
+    },
+    {
+      "size": 16777216,
+      "trial": 1,
+      "ok": true,
+      "elapsed_ms": 549.6198000037111,
+      "MiB_s": 29.111032753718053,
+      "error": null
+    },
+    {
+      "size": 16777216,
+      "trial": 2,
+      "ok": true,
+      "elapsed_ms": 605.661899986444,
+      "MiB_s": 26.417379069672556,
+      "error": null
+    },
+    {
+      "size": 67108864,
+      "trial": 0,
+      "ok": true,
+      "elapsed_ms": 1408.841600001324,
+      "MiB_s": 45.42739226321813,
+      "error": null
+    },
+    {
+      "size": 67108864,
+      "trial": 1,
+      "ok": true,
+      "elapsed_ms": 1348.7209999875631,
+      "MiB_s": 47.45236412911948,
+      "error": null
+    }
+  ],
+  "quic": [
+    {
+      "ok": true,
+      "rtt_ms": 6.938,
+      "response_frame": 241,
+      "response_len": 2
+    },
+    {
+      "ok": true,
+      "rtt_ms": 4.061,
+      "response_frame": 241,
+      "response_len": 2
+    },
+    {
+      "ok": true,
+      "rtt_ms": 4.275,
+      "response_frame": 241,
+      "response_len": 2
+    },
+    {
+      "ok": true,
+      "rtt_ms": 3.769,
+      "response_frame": 241,
+      "response_len": 2
+    },
+    {
+      "ok": true,
+      "rtt_ms": 5.916,
+      "response_frame": 241,
+      "response_len": 2
+    },
+    {
+      "ok": true,
+      "rtt_ms": 6.235,
+      "response_frame": 241,
+      "response_len": 2
+    },
+    {
+      "ok": true,
+      "rtt_ms": 4.124,
+      "response_frame": 241,
+      "response_len": 2
+    },
+    {
+      "ok": true,
+      "rtt_ms": 4.022,
+      "response_frame": 241,
+      "response_len": 2
+    },
+    {
+      "ok": true,
+      "rtt_ms": 5.385,
+      "response_frame": 241,
+      "response_len": 2
+    },
+    {
+      "ok": true,
+      "rtt_ms": 3.867,
+      "response_frame": 241,
+      "response_len": 2
+    },
+    {
+      "ok": true,
+      "rtt_ms": 5.784,
+      "response_frame": 241,
+      "response_len": 3
+    },
+    {
+      "ok": true,
+      "rtt_ms": 1231.492,
+      "response_frame": 241,
+      "response_len": 3
+    },
+    {
+      "ok": true,
+      "rtt_ms": 6.482,
+      "response_frame": 241,
+      "response_len": 3
+    },
+    {
+      "ok": true,
+      "rtt_ms": 3.903,
+      "response_frame": 241,
+      "response_len": 3
+    },
+    {
+      "ok": true,
+      "rtt_ms": 7.753,
+      "response_frame": 241,
+      "response_len": 3
+    },
+    {
+      "ok": true,
+      "rtt_ms": 4.977,
+      "response_frame": 241,
+      "response_len": 3
+    },
+    {
+      "ok": true,
+      "rtt_ms": 6.75,
+      "response_frame": 241,
+      "response_len": 3
+    },
+    {
+      "ok": true,
+      "rtt_ms": 5.82,
+      "response_frame": 241,
+      "response_len": 3
+    },
+    {
+      "ok": true,
+      "rtt_ms": 5.616,
+      "response_frame": 241,
+      "response_len": 3
+    },
+    {
+      "ok": true,
+      "rtt_ms": 5.269,
+      "response_frame": 241,
+      "response_len": 3
+    }
+  ],
+  "chat": [
+    {
+      "ok": true,
+      "elapsed_ms": 43.273799994494766,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 62.55040000542067,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 68.55619998532347,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 56.97350000264123,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 77.14469998609275,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 82.0776000036858,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 57.43630000506528,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 62.39659999846481,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 85.64529998693615,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 54.735500016249716,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 56.08420001226477,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 83.98389999638312,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 70.97039997461252,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 71.28810000722297,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 82.7360000112094,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 58.53390000993386,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 62.86199999158271,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 67.08380000782199,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 82.26349999313243,
+      "error": null
+    },
+    {
+      "ok": true,
+      "elapsed_ms": 59.173000016016886,
+      "error": null
+    }
+  ]
+}

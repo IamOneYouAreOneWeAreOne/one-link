@@ -21,14 +21,14 @@ manifest-then-chunks path. The capability advertised on the wire
 (``BLOOM_INIT_V1``) gates the entire handshake, so this is a pure
 feature-flag with no protocol break.
 
-Sizing:
-- For ``n`` chunks the receiver-side Bloom is sized at ``n`` elements
-  with a target false-positive rate of 5%. This is the sweet spot
-  between filter size and savings — see
+Sizing and correctness:
+- The production target false-positive rate is 0.1% (operator-tunable); see
   ``scripts/bloom_init_savings_measure.py``.
-- The 5% FP rate means ~5% of chunks the receiver actually has will
-  appear "missing" to the sender and get re-transferred. That's the
-  honest trade-off: 5% over-transfer vs ~80% under-transfer savings.
+- Bloom membership alone is never treated as an exact receive decision.  The
+  daemon builds the filter, queries every truly missing manifest entry against
+  that exact instance, and carries the false-positive indexes in the same
+  manifest-bound response.  Filter + corrections reconstruct the lossless
+  delta while retaining the compressed common case.
 
 Threading:
 - Build / filter are pure functions. No state. Thread-safe.
@@ -108,17 +108,19 @@ def _resolve_fp_rate(override: float | None) -> float:
 
 
 def bloom_honor_enabled() -> bool:
-    """True when production daemons should drop FILE_WANTS frames in
-    favour of Bloom-only mode for BLOOM_INIT_V1-advertising peers.
+    """Return whether negotiated lossless Bloom responses may be honored.
 
-    Default OFF for safety: production cutover happens by setting
-    ``ONE_LINK_BLOOM_HONOR=1`` on the daemon. Until then both wire
-    formats fly and operators monitor disagreement / savings telemetry
-    in ``/api/metrics``.
+    The exact-v2 protocol is default-on because its manifest binding and
+    explicit false-positive corrections make it equivalent to FILE_WANTS.
+    Operators can still force the compatibility path with
+    ``ONE_LINK_BLOOM_HONOR=0``. V1-only peers never take the default-on path.
     """
     import os
 
-    return os.environ.get("ONE_LINK_BLOOM_HONOR", "0") in ("1", "true", "yes")
+    value = os.environ.get("ONE_LINK_BLOOM_HONOR")
+    if value is None:
+        return True
+    return value.strip().lower() not in ("", "0", "false", "no", "off")
 
 
 def build_receiver_bloom(
@@ -186,9 +188,9 @@ def filter_manifest_against_bloom(
     the receiver actually doesn't have; that's the design trade-off
     documented at module top).
 
-    The sender calls this after receiving the receiver's Bloom and
-    iterating its outgoing manifest. Resulting list is the "true
-    delta" to transmit.
+    This low-level helper is intentionally probabilistic. Production protocol
+    callers MUST union its result with the response's exact false-positive
+    correction indexes before deciding what to transmit.
     """
     out: list[bytes] = []
     for cid in manifest_chunk_ids:

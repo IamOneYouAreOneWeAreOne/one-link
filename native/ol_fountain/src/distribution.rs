@@ -28,11 +28,13 @@ pub const DELTA: f64 = 0.05;
 /// up to and including degree `d`.
 #[must_use]
 pub fn robust_soliton_cdf(k: u32) -> Vec<f64> {
+    if k == 0 {
+        return Vec::new();
+    }
     let k_f = f64::from(k);
     // R = c * ln(K/δ) * sqrt(K)
     let r = C * (k_f / DELTA).ln() * k_f.sqrt();
-    let r_int = r.round().max(1.0) as u32;
-    let r_int = r_int.min(k); // cap
+    let r_int = bounded_rounded_u32(r.max(1.0), k);
 
     // Compute (ρ + τ) per degree, then normalize.
     let mut weights = vec![0.0f64; k as usize];
@@ -45,12 +47,10 @@ pub fn robust_soliton_cdf(k: u32) -> Vec<f64> {
             1.0 / (f64::from(d) * f64::from(d - 1))
         };
         // τ(d)
-        let tau = if d < r_int {
-            r / (f64::from(d) * k_f)
-        } else if d == r_int {
-            r * (r / DELTA).ln() / k_f
-        } else {
-            0.0
+        let tau = match d.cmp(&r_int) {
+            std::cmp::Ordering::Less => r / (f64::from(d) * k_f),
+            std::cmp::Ordering::Equal => r * (r / DELTA).ln() / k_f,
+            std::cmp::Ordering::Greater => 0.0,
         };
         weights[i] = rho + tau;
     }
@@ -80,11 +80,36 @@ pub fn sample_degree(cdf: &[f64], rng: &mut SplitMix64) -> u32 {
     // Linear scan — K is small (≤ 256) so binary search is overkill.
     for (i, &c) in cdf.iter().enumerate() {
         if u <= c {
-            return (i + 1) as u32;
+            return u32::try_from(i + 1).unwrap_or(u32::MAX);
         }
     }
     // Float overflow safety: return max degree.
-    cdf.len() as u32
+    u32::try_from(cdf.len()).unwrap_or(u32::MAX)
+}
+
+/// Round a non-negative floating-point value and clamp it to `1..=upper`
+/// without relying on an unchecked float-to-integer cast.
+fn bounded_rounded_u32(value: f64, upper: u32) -> u32 {
+    debug_assert!(upper > 0);
+    let target = value.round();
+    if !target.is_finite() || target >= f64::from(upper) {
+        return upper;
+    }
+    if target <= 1.0 {
+        return 1;
+    }
+
+    let mut low = 1_u32;
+    let mut high = upper;
+    while low < high {
+        let midpoint = low + (high - low) / 2;
+        if f64::from(midpoint) < target {
+            low = midpoint.saturating_add(1);
+        } else {
+            high = midpoint;
+        }
+    }
+    low
 }
 
 /// Sample `d` distinct source-symbol indices in `[0, k)` using `rng`.

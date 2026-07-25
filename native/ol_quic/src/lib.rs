@@ -23,8 +23,8 @@
 //! - It does not coordinate connection lifetime with the daemon's peer
 //!   registry — that's a higher-level binding concern.
 //! - It does not parse or interpret `ChunkResponse` / `ManifestRecord`
-//!   payloads; those are passed through verbatim and the chunk_store /
-//!   manifest_log on the receiving end consume them.
+//!   payloads; those are passed through verbatim and the `chunk_store` /
+//!   `manifest_log` on the receiving end consume them.
 //! - It does not (yet) implement 0-RTT replay protection beyond
 //!   "0-RTT only carries idempotent reads." That layer ships in Phase B
 //!   alongside the per-chunk ratchet.

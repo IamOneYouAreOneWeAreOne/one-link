@@ -8,9 +8,10 @@ can exchange "which chunks do you already have?" before sending bytes.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import BinaryIO, Iterable
 
 import blake3
 
@@ -128,6 +129,28 @@ def index_path(path: Path, *, read_size: int = 1024 * 1024) -> FileIndex:
     if native is not None:
         return native
 
+    with open(path, "rb") as handle:
+        return index_file(
+            handle,
+            size=int(os.fstat(handle.fileno()).st_size),
+            read_size=read_size,
+        )
+
+
+def index_file(
+    handle: BinaryIO,
+    *,
+    size: int,
+    read_size: int = 1024 * 1024,
+) -> FileIndex:
+    """Hash and CDC-index one already-open, identity-bound file handle."""
+
+    if read_size <= 0:
+        raise ValueError("read_size must be positive")
+    expected_size = int(size)
+    if expected_size < 0:
+        raise ValueError("size must be non-negative")
+
     chunks: list[Chunk] = []
     file_hasher = blake3.blake3()
     chunk_buf = bytearray()
@@ -136,25 +159,25 @@ def index_path(path: Path, *, read_size: int = 1024 * 1024) -> FileIndex:
     mask = _MASK_64
     offset = 0
 
-    with open(path, "rb") as f:
-        for part in iter(lambda: f.read(read_size), b""):
-            file_hasher.update(part)
-            for b in part:
-                rolling = ((rolling << 1) + gear[b]) & mask
-                chunk_buf.append(b)
-                if _should_cut(len(chunk_buf), rolling):
-                    end = offset + len(chunk_buf)
-                    chunks.append(
-                        Chunk(
-                            index=len(chunks),
-                            start=offset,
-                            end=end,
-                            hash=blake3.blake3(chunk_buf).hexdigest(),
-                        )
+    handle.seek(0)
+    for part in iter(lambda: handle.read(read_size), b""):
+        file_hasher.update(part)
+        for b in part:
+            rolling = ((rolling << 1) + gear[b]) & mask
+            chunk_buf.append(b)
+            if _should_cut(len(chunk_buf), rolling):
+                end = offset + len(chunk_buf)
+                chunks.append(
+                    Chunk(
+                        index=len(chunks),
+                        start=offset,
+                        end=end,
+                        hash=blake3.blake3(chunk_buf).hexdigest(),
                     )
-                    offset = end
-                    chunk_buf = bytearray()
-                    rolling = 0
+                )
+                offset = end
+                chunk_buf = bytearray()
+                rolling = 0
 
     if chunk_buf or not chunks:
         end = offset + len(chunk_buf)
@@ -166,9 +189,15 @@ def index_path(path: Path, *, read_size: int = 1024 * 1024) -> FileIndex:
                 hash=blake3.blake3(chunk_buf).hexdigest(),
             )
         )
+    observed_size = offset + len(chunk_buf)
+    if chunks:
+        observed_size = chunks[-1].end
+    if observed_size != expected_size:
+        raise OSError("file size changed while building CDC index")
+    handle.seek(0)
     return FileIndex(
         blob_hash=file_hasher.hexdigest(),
-        size=path.stat().st_size,
+        size=expected_size,
         chunks=tuple(chunks),
     )
 
@@ -209,6 +238,32 @@ def fixed_index_path(
     if read_size <= 0:
         raise ValueError("read_size must be positive")
 
+    with open(path, "rb") as handle:
+        return fixed_index_file(
+            handle,
+            size=int(os.fstat(handle.fileno()).st_size),
+            chunk_size=chunk_size,
+            read_size=read_size,
+        )
+
+
+def fixed_index_file(
+    handle: BinaryIO,
+    *,
+    size: int,
+    chunk_size: int = MAX_CHUNK_BYTES,
+    read_size: int = 4 * 1024 * 1024,
+) -> FileIndex:
+    """Build a fixed manifest from one already-open, stable file handle."""
+
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if read_size <= 0:
+        raise ValueError("read_size must be positive")
+    expected_size = int(size)
+    if expected_size < 0:
+        raise ValueError("size must be non-negative")
+
     chunks: list[Chunk] = []
     file_hasher = blake3.blake3()
     chunk_buf = bytearray()
@@ -230,23 +285,27 @@ def fixed_index_path(
         offset = end
         chunk_buf = bytearray()
 
-    with open(path, "rb") as f:
-        for part in iter(lambda: f.read(read_size), b""):
-            file_hasher.update(part)
-            view = memoryview(part)
-            pos = 0
-            while pos < len(view):
-                take = min(chunk_size - len(chunk_buf), len(view) - pos)
-                chunk_buf.extend(view[pos: pos + take])
-                pos += take
-                if len(chunk_buf) == chunk_size:
-                    flush()
+    handle.seek(0)
+    for part in iter(lambda: handle.read(read_size), b""):
+        file_hasher.update(part)
+        view = memoryview(part)
+        pos = 0
+        while pos < len(view):
+            take = min(chunk_size - len(chunk_buf), len(view) - pos)
+            chunk_buf.extend(view[pos: pos + take])
+            pos += take
+            if len(chunk_buf) == chunk_size:
+                flush()
 
     if chunk_buf or not chunks:
         flush()
+    observed_size = chunks[-1].end if chunks else 0
+    if observed_size != expected_size:
+        raise OSError("file size changed while building fixed index")
+    handle.seek(0)
     return FileIndex(
         blob_hash=file_hasher.hexdigest(),
-        size=path.stat().st_size,
+        size=expected_size,
         chunks=tuple(chunks),
     )
 

@@ -1,0 +1,62 @@
+name: formal verification
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: formal-verification-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  model_check:
+    name: all TLA+ safety models
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: setup pinned Java runtime
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: "21.0.11+10"
+
+      - name: download and authenticate pinned TLC
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            --proto '=https' --tlsv1.2 --retry 4 --retry-all-errors \
+            --output tla2tools.jar \
+            'https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar'
+          printf '%s  %s\n' \
+            '936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88' \
+            'tla2tools.jar' | sha256sum --check --strict
+
+      - name: exhaustively model-check committed specifications
+        run: >-
+          python3 scripts/run_formal_models.py
+          --manifest docs/formal/models.json
+          --jar tla2tools.jar
+          --output-dir .formal-results
+          --workers 2
+
+      - name: retain commit-bound formal evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: formal-verification-${{ github.sha }}
+          path: |
+            .formal-results/
+            docs/formal/models.json
+          if-no-files-found: error
+          retention-days: 90

@@ -4,10 +4,10 @@ Composes the file-engine v2 native primitives into a single Python
 surface so the daemon (and tests) can drive a full send → receive flow
 against the new stack:
 
-  1. **Session establishment** via :func:`pq_hybrid.default_kem` — gives
-     ML-KEM-768 + X25519 hybrid (ADR-0017) when ``one_link_native`` is
-     installed, falls back to Python ``HybridKEM(NullKEM)`` for old
-     peers. Same outer surface either way.
+  1. **Session establishment** via :func:`pq_hybrid.default_kem` — requires
+     the verified native ML-KEM-768 + X25519 backend (ADR-0017) and fails
+     closed by default.  Classical-only test/migration use is an explicit
+     caller option and is never advertised as post-quantum.
 
   2. **Per-chunk key derivation** via :class:`chunk_ratchet.ChunkRatchet`
      (ADR-0020) — symmetric BLAKE3 chain rooted in the session's
@@ -882,23 +882,22 @@ def establish_session_pair(
     sender_store_root: Optional[Path] = None,
     receiver_store_root: Optional[Path] = None,
     cipher_backend: str = "fast",
+    allow_classical_downgrade: bool = False,
 ) -> tuple[NativeTransferSession, NativeTransferSession]:
     """Fresh-keypair session establishment for in-process testing.
 
     Spins up a hybrid KEM, derives a 32-byte shared secret via
     ``default_kem().encapsulate(pk)``, and constructs paired
-    sender + receiver sessions. Used by the round-trip tests; the
-    daemon's real flow plugs in the channel-handshake secret via
-    :func:`session_from_shared_secret`.
+    sender + receiver sessions. Used by the round-trip tests; the daemon's
+    real flow plugs in the confirmed channel-handshake secret via
+    :func:`session_from_shared_secret`.  Classical-only construction requires
+    an explicit ``allow_classical_downgrade=True`` argument.
     """
     from . import pq_hybrid
 
-    # In-process test helper: accept the classical-only KEM when the native
-    # engine is absent (CI without the maturin wheel) so the round-trip still
-    # exercises. The daemon's real flow derives its secret from the channel
-    # handshake (session_from_shared_secret), not this helper, and must NOT
-    # pass allow_classical_downgrade -- there a missing PQ engine fails closed.
-    kem = pq_hybrid.default_kem(allow_classical_downgrade=True)
+    kem = pq_hybrid.default_kem(
+        allow_classical_downgrade=allow_classical_downgrade,
+    )
     sk, pk = kem.keypair()
     ct, shared_send = kem.encapsulate(pk)
     shared_recv = kem.decapsulate(ct, sk)

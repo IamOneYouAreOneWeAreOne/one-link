@@ -2,6 +2,10 @@
 
 `FILE_ENGINE_V2_PLAN.md` lists 12 Phase C items. Phase C-1 and C-2 ship items **1, 2, 5, 6, 7, 9**. The remaining six are documented here with explicit status, blockers, and acceptance gates.
 
+Truth review: 2026-07-24. “Shipped” in this document means the named
+primitive or integration scope, not product-wide post-quantum protection,
+packaged-platform qualification, or a verified production release.
+
 ---
 
 ## Status summary
@@ -12,16 +16,22 @@
 | 2 | Erasure-coded durability | ✅ shipped | C-2 |
 | 3 | Capability layer wiring | ⏳ blocked (codegen + intrinsics) | C-3 |
 | 4 | CRDT shared folders | ⏳ blocked (codegen + intrinsics) | C-3 |
-| 5 | Multi-armed bandit auto-tuning | ✅ shipped | C-2 |
+| 5 | Multi-armed bandit auto-tuning | 🟡 route selection shipped; non-route knob controllers deferred | C-2 + future |
 | 6 | Per-chunk forward-secret ratchet | ✅ shipped (symmetric chain) | C-2 |
-| 7 | PQ-hybrid by default | ✅ shipped | C-1 |
+| 7 | PQ-hybrid daemon session KEM | ✅ current signed v3 daemon channel when native ABI qualifies; Ed25519 identity and browser/WebRTC remain non-PQ | C-1 + current integration |
 | 8 | Hardware-bound keys (TOFU-degrading) | ⏳ platform-specific side track | C-N |
 | 9 | Constant-time crypto + cap checks | 🟡 Python ratchet done; full sweep pending | C-3 |
 | 10 | Continuous structure-aware fuzzing in CI | 🟡 proptest equivalent in place; cargo-fuzz pending | C-3 |
 | 11 | Property-based testing — full surface | 🟡 wire formats + KEM + ratchet covered; lattice + cap gated on 3/4 | C-3 |
 | 12 | Reproducible builds + multi-party signing | ⏳ CI infra | C-N |
 
-**Shipped: 6 of 12.** Remaining items either need infrastructure not in scope for a single session (CI matrix, Sigstore setup) or are blocked on the **`coherence_lang` → Rust codegen tool** which is itself a substantial separate workstream.
+**Historical primitive/milestone count: 5 of 12 fully landed; item 5 partial.**
+This is not a product qualification count. The generic bandit and
+route-choice controller are live, while chunk-size, parallelism, FEC-ratio,
+prefetch, pacing, and compression controllers remain deferred. Other remaining
+items either need infrastructure not in scope for a single session (CI matrix,
+Sigstore setup) or are blocked on the **`coherence_lang` → Rust codegen tool**
+which is itself a substantial separate workstream.
 
 ---
 
@@ -143,14 +153,15 @@ Each is its own SDK integration. The plan acknowledges this by tagging the item 
 
 ---
 
-## What's NOT deferred
+## Verified primitive gates
 
-Per the Phase C plan's stress-tests, every item that has a falsifiable acceptance number has been verified to pass:
+The following primitive-level acceptance numbers have been verified. Passing a
+primitive gate does not imply that every proposed production consumer is wired:
 
 | Plan acceptance number | Status |
 |---|---|
 | RS(10,4) survives any 4-erasure × 10K seeds | ✅ PASSED (ADR-0016, `ol_fec`) |
-| Bandit converges ≤200 interactions × 100 seeds (≥95%) | ✅ PASSED (ADR-0019, `ol_bandit`) |
+| Generic bandit converges ≤200 interactions × 100 seeds (≥95%) | ✅ PASSED (ADR-0019, `ol_bandit`); production consumer is route selection only |
 | ML-KEM-768 + X25519 hybrid handshake completes | ✅ PASSED (ADR-0017, `ol_pqkem`) |
 | Macaroon attenuation property × ≥1M chains | ⏳ pending item #3 |
 | Constant-time variance < 1% of mean | 🟡 Python ratchet rewritten; full sweep pending |

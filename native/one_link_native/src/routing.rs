@@ -12,7 +12,11 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
-#[pyclass(name = "AdjacencyGraph", module = "one_link_native.routing")]
+#[pyclass(
+    from_py_object,
+    name = "AdjacencyGraph",
+    module = "one_link_native.routing"
+)]
 #[derive(Debug, Clone)]
 pub struct PyGraph {
     inner: RustGraph,
@@ -32,7 +36,7 @@ impl PyGraph {
     }
 
     fn neighbors<'py>(&self, py: Python<'py>, node: &str) -> PyResult<Bound<'py, PyList>> {
-        let out = PyList::empty_bound(py);
+        let out = PyList::empty(py);
         for (to, cost) in self.inner.neighbors(node) {
             out.append((to.clone(), *cost))?;
         }

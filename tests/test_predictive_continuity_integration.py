@@ -26,9 +26,7 @@ import blake3
 from one_link.call_immune import (
     Arbitrator,
     ImmuneAction,
-    Thresholds,
 )
-from one_link.call_session import Rung
 from one_link.call_vitals import (
     CallVitals,
     CapabilitySnapshot,

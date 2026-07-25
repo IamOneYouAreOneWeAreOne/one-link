@@ -22,11 +22,15 @@ install).
 """
 from __future__ import annotations
 
+import logging
 import os
-import subprocess
-import sys
 from pathlib import Path
 from typing import Optional
+
+from one_link.fault_observability import report_best_effort_failure
+from one_link.process_security import launch_system_opener
+
+log = logging.getLogger(__name__)
 
 BG_COLOR = "#0e1117"
 PANEL_COLOR = "#161b25"
@@ -42,13 +46,8 @@ def _reveal_in_file_manager(path: Path) -> None:
     """Open the OS file manager pointed at ``path``. Best-effort —
     nothing here is critical to the user's recovery flow."""
     try:
-        if os.name == "nt":
-            os.startfile(str(path))  # type: ignore[attr-defined]
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", str(path)])
-        else:
-            subprocess.Popen(["xdg-open", str(path)])
-    except Exception:
+        launch_system_opener(path)
+    except (OSError, ValueError):
         pass
 
 
@@ -183,8 +182,15 @@ def show_startup_failure(
 
     def _pick(value: str) -> None:
         choice["value"] = value
-        try: root.destroy()
-        except Exception: pass
+        try:
+            root.destroy()
+        except Exception as exc:
+            report_best_effort_failure(
+                log,
+                "error_dialog_destroy",
+                exc,
+                level=logging.DEBUG,
+            )
 
     target_dir = (
         log_path.parent if log_path is not None and log_path.exists()

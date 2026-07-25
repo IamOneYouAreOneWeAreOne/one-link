@@ -15,7 +15,6 @@ so tests focus on:
 """
 from __future__ import annotations
 
-import pytest
 
 from one_link import device_info
 from one_link.device_info import DeviceInfo, detect

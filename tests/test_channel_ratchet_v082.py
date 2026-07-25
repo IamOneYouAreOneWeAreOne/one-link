@@ -26,19 +26,23 @@ layer integration:
   - When peer doesn't advertise DR_CAP, channel sticks on legacy
     and frames keep using the original tx_aead/rx_aead.
 """
+
 from __future__ import annotations
 
 import asyncio
-import os
-from typing import Any
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 import pytest
+import pytest_asyncio
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from one_link import channel as ch
-from one_link.channel import Channel, DR_CAP, DR_HEADER_LEN
+from one_link.channel import Channel, DR_CAP
 from one_link.identity import Identity, fingerprint_of
+
+
+ChannelPairFactory = Callable[[Identity, Identity], Awaitable[tuple[Channel, Channel]]]
 
 
 def _new_identity() -> Identity:
@@ -47,13 +51,18 @@ def _new_identity() -> Identity:
     pub_bytes = pub_obj.public_bytes_raw()
     fp = fingerprint_of(pub_bytes)
     return Identity(
-        private=sk, public=pub_obj, public_bytes=pub_bytes,
-        fingerprint=fp, short_id=fp[:8], hostname="x",
+        private=sk,
+        public=pub_obj,
+        public_bytes=pub_bytes,
+        fingerprint=fp,
+        short_id=fp[:8],
+        hostname="x",
     )
 
 
-def _connected_pipe() -> tuple[asyncio.StreamReader, asyncio.StreamWriter,
-                                asyncio.StreamReader, asyncio.StreamWriter]:
+def _connected_pipe() -> tuple[
+    asyncio.StreamReader, asyncio.StreamWriter, asyncio.StreamReader, asyncio.StreamWriter
+]:
     """Build two paired in-memory stream pairs so writes on one show
     up as reads on the other. Used to run a real handshake without
     a real socket."""
@@ -69,6 +78,7 @@ def _make_stream_pair(loop):
     reader = asyncio.StreamReader(loop=loop)
     proto = asyncio.StreamReaderProtocol(reader, loop=loop)
     transport = _MemoryTransport(reader, proto, loop)
+    proto.connection_made(transport)
     writer = asyncio.StreamWriter(transport, proto, reader, loop)
     return reader, writer
 
@@ -88,7 +98,7 @@ class _MemoryTransport(asyncio.Transport):
     def close(self) -> None:
         if not self._closed:
             self._closed = True
-            self._reader.feed_eof()
+            self._proto.connection_lost(None)
 
     def is_closing(self) -> bool:
         return self._closed
@@ -103,16 +113,55 @@ class _MemoryTransport(asyncio.Transport):
         self.close()
 
 
+@pytest_asyncio.fixture
+async def channel_pair() -> AsyncIterator[ChannelPairFactory]:
+    """Own every in-memory channel and close it before its loop is torn down."""
+    channels: list[Channel] = []
+
+    async def _open(me: Identity, them: Identity) -> tuple[Channel, Channel]:
+        alice_reader, alice_writer, bob_reader, bob_writer = _connected_pipe()
+        tasks = (
+            asyncio.create_task(
+                ch.initiate(
+                    alice_reader,
+                    alice_writer,
+                    me,
+                    expected_responder_ed_pub=them.public_bytes,
+                )
+            ),
+            asyncio.create_task(ch.respond(bob_reader, bob_writer, them)),
+        )
+        try:
+            alice_channel, bob_channel = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            alice_writer.close()
+            bob_writer.close()
+            await asyncio.gather(
+                alice_writer.wait_closed(),
+                bob_writer.wait_closed(),
+                return_exceptions=True,
+            )
+            raise
+        channels.extend((alice_channel, bob_channel))
+        return alice_channel, bob_channel
+
+    try:
+        yield _open
+    finally:
+        await asyncio.gather(*(channel.close() for channel in reversed(channels)))
+
+
 # ─── handshake plumbs ratchet bootstrap material ──────────────────
 
+
 @pytest.mark.asyncio
-async def test_initiate_stashes_dr_bootstrap():
+async def test_initiate_stashes_dr_bootstrap(channel_pair: ChannelPairFactory):
     me = _new_identity()
     them = _new_identity()
-    ar, aw, br, bw = _connected_pipe()
-    a_task = asyncio.create_task(ch.initiate(ar, aw, me))
-    b_task = asyncio.create_task(ch.respond(br, bw, them))
-    a_chan, b_chan = await asyncio.gather(a_task, b_task)
+    a_chan, b_chan = await channel_pair(me, them)
     # Alice's bootstrap material populated.
     assert a_chan._dr_role == "alice"
     assert isinstance(a_chan._dr_x_priv, X25519PrivateKey)
@@ -131,15 +180,14 @@ async def test_initiate_stashes_dr_bootstrap():
 
 # ─── activation gating ─────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
-async def test_activation_requires_both_caps_sent_and_received():
+async def test_activation_requires_both_caps_sent_and_received(
+    channel_pair: ChannelPairFactory,
+):
     me = _new_identity()
     them = _new_identity()
-    ar, aw, br, bw = _connected_pipe()
-    a_chan, b_chan = await asyncio.gather(
-        ch.initiate(ar, aw, me),
-        ch.respond(br, bw, them),
-    )
+    a_chan, _b_chan = await channel_pair(me, them)
     # Only sent — not enough.
     a_chan.note_caps_sent()
     assert a_chan.maybe_activate_ratchet() is False
@@ -151,13 +199,12 @@ async def test_activation_requires_both_caps_sent_and_received():
 
 
 @pytest.mark.asyncio
-async def test_activation_requires_dr_cap_in_peer_features():
+async def test_activation_requires_dr_cap_in_peer_features(
+    channel_pair: ChannelPairFactory,
+):
     me = _new_identity()
     them = _new_identity()
-    ar, aw, br, bw = _connected_pipe()
-    a_chan, _ = await asyncio.gather(
-        ch.initiate(ar, aw, me), ch.respond(br, bw, them),
-    )
+    a_chan, _b_chan = await channel_pair(me, them)
     a_chan.note_caps_sent()
     a_chan.note_caps_received(["chat", "files", "groups"])  # no DR
     assert a_chan.maybe_activate_ratchet() is False
@@ -165,13 +212,12 @@ async def test_activation_requires_dr_cap_in_peer_features():
 
 
 @pytest.mark.asyncio
-async def test_activation_succeeds_when_both_advertise():
+async def test_activation_succeeds_when_both_advertise(
+    channel_pair: ChannelPairFactory,
+):
     me = _new_identity()
     them = _new_identity()
-    ar, aw, br, bw = _connected_pipe()
-    a_chan, b_chan = await asyncio.gather(
-        ch.initiate(ar, aw, me), ch.respond(br, bw, them),
-    )
+    a_chan, b_chan = await channel_pair(me, them)
     a_chan.note_caps_sent()
     a_chan.note_caps_received([DR_CAP, "chat"])
     assert a_chan.maybe_activate_ratchet() is True
@@ -183,13 +229,10 @@ async def test_activation_succeeds_when_both_advertise():
 
 
 @pytest.mark.asyncio
-async def test_activation_is_idempotent():
+async def test_activation_is_idempotent(channel_pair: ChannelPairFactory):
     me = _new_identity()
     them = _new_identity()
-    ar, aw, br, bw = _connected_pipe()
-    a_chan, _ = await asyncio.gather(
-        ch.initiate(ar, aw, me), ch.respond(br, bw, them),
-    )
+    a_chan, _b_chan = await channel_pair(me, them)
     a_chan.note_caps_sent()
     a_chan.note_caps_received([DR_CAP])
     first = a_chan.maybe_activate_ratchet()
@@ -200,15 +243,37 @@ async def test_activation_is_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_activation_clears_bootstrap_material():
+async def test_activation_propagates_unexpected_local_ratchet_failure(
+    monkeypatch, channel_pair: ChannelPairFactory
+):
+    """A local implementation defect must not silently downgrade security."""
+    me = _new_identity()
+    them = _new_identity()
+    a_chan, _b_chan = await channel_pair(me, them)
+    a_chan.note_caps_sent()
+    a_chan.note_caps_received([DR_CAP])
+
+    import one_link.double_ratchet as double_ratchet
+
+    monkeypatch.setattr(
+        double_ratchet,
+        "init_alice",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("ratchet implementation failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="ratchet implementation failed"):
+        a_chan.maybe_activate_ratchet()
+
+
+@pytest.mark.asyncio
+async def test_activation_clears_bootstrap_material(
+    channel_pair: ChannelPairFactory,
+):
     """Once the ratchet is rolling, the legacy x_priv / shared
     secret are no longer needed and should be dropped from memory."""
     me = _new_identity()
     them = _new_identity()
-    ar, aw, br, bw = _connected_pipe()
-    a_chan, _ = await asyncio.gather(
-        ch.initiate(ar, aw, me), ch.respond(br, bw, them),
-    )
+    a_chan, _b_chan = await channel_pair(me, them)
     a_chan.note_caps_sent()
     a_chan.note_caps_received([DR_CAP])
     a_chan.maybe_activate_ratchet()
@@ -219,14 +284,12 @@ async def test_activation_clears_bootstrap_material():
 
 # ─── post-activation send/recv round-trip ─────────────────────────
 
+
 @pytest.mark.asyncio
-async def test_round_trip_after_activation():
+async def test_round_trip_after_activation(channel_pair: ChannelPairFactory):
     me = _new_identity()
     them = _new_identity()
-    ar, aw, br, bw = _connected_pipe()
-    a_chan, b_chan = await asyncio.gather(
-        ch.initiate(ar, aw, me), ch.respond(br, bw, them),
-    )
+    a_chan, b_chan = await channel_pair(me, them)
     # Both sides activate symmetrically.
     for ch_ in (a_chan, b_chan):
         ch_.note_caps_sent()
@@ -250,15 +313,14 @@ async def test_round_trip_after_activation():
 
 
 @pytest.mark.asyncio
-async def test_ratchet_frames_carry_42_byte_header():
+async def test_ratchet_frames_carry_42_byte_header(
+    channel_pair: ChannelPairFactory,
+):
     """Smoke check: a ratchet-mode frame on the wire is exactly
     42 (DR_HEADER_LEN) bytes of header followed by the ciphertext."""
     me = _new_identity()
     them = _new_identity()
-    ar, aw, br, bw = _connected_pipe()
-    a_chan, b_chan = await asyncio.gather(
-        ch.initiate(ar, aw, me), ch.respond(br, bw, them),
-    )
+    a_chan, b_chan = await channel_pair(me, them)
     for ch_ in (a_chan, b_chan):
         ch_.note_caps_sent()
         ch_.note_caps_received([DR_CAP])
@@ -276,16 +338,16 @@ async def test_ratchet_frames_carry_42_byte_header():
 
 # ─── legacy fallback when peer can't ratchet ──────────────────────
 
+
 @pytest.mark.asyncio
-async def test_legacy_round_trip_when_peer_omits_dr_cap():
+async def test_legacy_round_trip_when_peer_omits_dr_cap(
+    channel_pair: ChannelPairFactory,
+):
     """Peer doesn't advertise DOUBLE_RATCHET_V1 → channel stays on
     legacy AEAD. Round-trip still works."""
     me = _new_identity()
     them = _new_identity()
-    ar, aw, br, bw = _connected_pipe()
-    a_chan, b_chan = await asyncio.gather(
-        ch.initiate(ar, aw, me), ch.respond(br, bw, them),
-    )
+    a_chan, b_chan = await channel_pair(me, them)
     # Both sides "exchange CAPS" but neither advertises DR.
     for ch_ in (a_chan, b_chan):
         ch_.note_caps_sent()
@@ -300,19 +362,16 @@ async def test_legacy_round_trip_when_peer_omits_dr_cap():
 
 # ─── forward secrecy at the channel layer ────────────────────────
 
+
 @pytest.mark.asyncio
-async def test_channel_layer_forward_secrecy():
+async def test_channel_layer_forward_secrecy(channel_pair: ChannelPairFactory):
     """After a DH round-trip, capturing a message_key for an old
     chain doesn't decrypt new traffic. We re-use the FS contract
     from test_double_ratchet_v072; this check just confirms the
     channel-level wire path inherits it."""
-    from one_link import double_ratchet as dr
     me = _new_identity()
     them = _new_identity()
-    ar, aw, br, bw = _connected_pipe()
-    a_chan, b_chan = await asyncio.gather(
-        ch.initiate(ar, aw, me), ch.respond(br, bw, them),
-    )
+    a_chan, b_chan = await channel_pair(me, them)
     for ch_ in (a_chan, b_chan):
         ch_.note_caps_sent()
         ch_.note_caps_received([DR_CAP])
@@ -331,12 +390,14 @@ async def test_channel_layer_forward_secrecy():
 
 # ─── activation requires bootstrap material ──────────────────────
 
+
 @pytest.mark.asyncio
 async def test_activation_refuses_without_bootstrap():
     """A Channel built without going through initiate/respond
     (e.g., a unit-test stub) lacks the X25519 priv key — activation
     must safely refuse rather than panic."""
     from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
     naked = Channel(
         reader=asyncio.StreamReader(),
         writer=None,  # type: ignore[arg-type]
@@ -354,6 +415,8 @@ async def test_activation_refuses_without_bootstrap():
 
 # ─── DR_CAP capability constant matches the canonical name ───────
 
+
 def test_dr_cap_matches_capabilities_module():
     from one_link.capabilities import DOUBLE_RATCHET_V1
+
     assert DR_CAP == DOUBLE_RATCHET_V1

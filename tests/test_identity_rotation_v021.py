@@ -8,9 +8,7 @@ rotations are rejected). This file pins every detail.
 """
 from __future__ import annotations
 
-import hashlib
 import json
-from copy import deepcopy
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -446,10 +444,15 @@ def test_rotation_announcement_summary_counts(tmp_path):
 # ── perform_local_rotation orchestration ────────────────────────────
 
 
-def test_perform_local_rotation_persists_new_seed_and_clears_identity(tmp_path, monkeypatch):
-    """End-to-end of the orchestration: new seed written, identity.key
-    + DRK cleared, new phrase returned, cert minted under the OLD key."""
-    from one_link import identity_rotation, master_seed, paths
+def test_perform_local_rotation_stages_then_replays_atomically(tmp_path, monkeypatch):
+    """Live authority is unchanged until boot replay commits the journal."""
+    from one_link import (
+        identity_rotation,
+        master_seed,
+        mnemonic,
+        paths,
+        recovery_api,
+    )
     # Layout the daemon expects: seed lives in data_dir; identity.key
     # lives in config_dir (which paths.key_path() resolves to).
     data_dir = tmp_path / "data"
@@ -457,11 +460,17 @@ def test_perform_local_rotation_persists_new_seed_and_clears_identity(tmp_path, 
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     monkeypatch.setattr(paths, "key_path", lambda: config_dir / "identity.key")
-    # Plant an "old" identity + seed.
+    # Establish fully converged old authority, as daemon boot does.
     old_seed = master_seed.load_or_create_seed(data_dir)[0]
     old_priv = master_seed.derive_identity_priv(old_seed)
-    (config_dir / "identity.key").write_bytes(b"sentinel-identity")
-    (data_dir / "data-root-key.bin").write_bytes(b"sentinel-drk")
+    master_seed.install_seed_derived_authority(
+        data_dir,
+        identity_path=config_dir / "identity.key",
+        seed=old_seed,
+        previous_seed=old_seed,
+    )
+    old_identity_blob = (config_dir / "identity.key").read_bytes()
+    old_drk_blob = (data_dir / "data-root-key.bin").read_bytes()
 
     result = identity_rotation.perform_local_rotation(
         data_dir=data_dir,
@@ -472,30 +481,45 @@ def test_perform_local_rotation_persists_new_seed_and_clears_identity(tmp_path, 
 
     # New phrase round-trips.
     assert len(result.new_phrase.split()) == 24
-    # Seed file replaced.
-    seed_on_disk = master_seed.load_seed(data_dir)
-    assert seed_on_disk is not None
-    assert seed_on_disk != old_seed
-    # Identity.key + DRK gone.
-    assert not (config_dir / "identity.key").exists()
-    assert not (data_dir / "data-root-key.bin").exists()
+    # Staging never mutates or pre-deletes current authority.
+    assert master_seed.load_seed(data_dir) == old_seed
+    assert (config_dir / "identity.key").read_bytes() == old_identity_blob
+    assert (data_dir / "data-root-key.bin").read_bytes() == old_drk_blob
+    assert result.staged_peer_count == 0
+    assert result.queued_peer_count == 0
+    assert recovery_api.pending_recovery_summary(data_dir)["kind"] == "rotation"
     # Cert verifies under the OLD pubkey (proving the cert was signed
     # with the old private key, NOT the new one).
     identity_rotation.verify_certificate(
         cert=result.cert,
         expected_old_pubkey=old_priv.public_key().public_bytes_raw(),
     )
-    # And the cert names the NEW pubkey derived from the new seed.
-    new_priv = master_seed.derive_identity_priv(seed_on_disk)
+    # And the cert names the NEW pubkey from the phrase/journal.
+    new_seed = mnemonic.decode(result.new_phrase)
+    new_priv = master_seed.derive_identity_priv(new_seed)
     expected_new_pub = new_priv.public_key().public_bytes_raw()
     assert result.cert.new_pub_hex == expected_new_pub.hex()
 
+    applied = recovery_api.complete_pending_recovery(
+        data_dir=data_dir,
+        identity_path=config_dir / "identity.key",
+    )
+    assert applied["pending_finalization"] is True
+    assert master_seed.load_seed(data_dir) == new_seed
+    assert recovery_api.has_pending_recovery(data_dir) is True
+    state = _open_state(data_dir)
+    finalized = recovery_api.finalize_pending_rotation(
+        data_dir=data_dir,
+        state=state,
+        identity_path=config_dir / "identity.key",
+    )
+    assert finalized == {"completed": True, "queued_peer_count": 0}
+    assert recovery_api.has_pending_recovery(data_dir) is False
 
-def test_perform_local_rotation_queues_per_peer_announcements(tmp_path, monkeypatch):
-    """When state is passed, one row per pinned peer is queued, and
-    the cert blob in each row reconstructs to the SAME cert
-    perform_local_rotation returned."""
-    from one_link import identity_rotation, master_seed, paths
+
+def test_perform_local_rotation_queues_peer_snapshot_only_at_boot(tmp_path, monkeypatch):
+    """The complete peer snapshot lands atomically after authority replay."""
+    from one_link import identity_rotation, master_seed, paths, recovery_api
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     config_dir = tmp_path / "config"
@@ -503,6 +527,12 @@ def test_perform_local_rotation_queues_per_peer_announcements(tmp_path, monkeypa
     monkeypatch.setattr(paths, "key_path", lambda: config_dir / "identity.key")
     old_seed = master_seed.load_or_create_seed(data_dir)[0]
     old_priv = master_seed.derive_identity_priv(old_seed)
+    master_seed.install_seed_derived_authority(
+        data_dir,
+        identity_path=config_dir / "identity.key",
+        seed=old_seed,
+        previous_seed=old_seed,
+    )
 
     state = _open_state(tmp_path)
     peers = ["aa" * 32, "bb" * 32, "cc" * 32]
@@ -512,7 +542,20 @@ def test_perform_local_rotation_queues_per_peer_announcements(tmp_path, monkeypa
         pinned_peer_fingerprints=peers,
         state=state,
     )
-    assert result.queued_peer_count == 3
+    assert result.staged_peer_count == 3
+    assert result.queued_peer_count == 0
+    # Passing live State cannot mutate it; the compatibility argument is inert.
+    assert state.list_pending_rotation_announcements() == []
+    recovery_api.complete_pending_recovery(
+        data_dir=data_dir,
+        identity_path=config_dir / "identity.key",
+    )
+    finalized = recovery_api.finalize_pending_rotation(
+        data_dir=data_dir,
+        state=state,
+        identity_path=config_dir / "identity.key",
+    )
+    assert finalized == {"completed": True, "queued_peer_count": 3}
     rows = state.list_pending_rotation_announcements()
     assert {r["peer_fp"] for r in rows} == set(peers)
     # Reconstruct cert from a row and verify it under the old pubkey.
@@ -728,7 +771,7 @@ def test_rotate_card_shows_current_identity_fingerprint():
     html = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "web" / "index.html").read_text(encoding="utf-8")
     idx = html.find("async function _recwizRenderRotateCard()")
     assert idx > 0
-    body = html[idx:idx + 5000]
+    body = html[idx:idx + 7000]
     assert "state.me?.fingerprint" in body
     assert "Current identity" in body
     # Truncated for readability so the row fits.
@@ -815,7 +858,7 @@ def test_index_html_rotate_card_renders_per_peer_ack_list():
     html = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "web" / "index.html").read_text(encoding="utf-8")
     idx = html.find("async function _recwizRenderRotateCard()")
     assert idx > 0
-    body = html[idx:idx + 5000]
+    body = html[idx:idx + 7000]
     # Renders peer rows from status.rows.
     assert "status.rows" in body
     assert "peer_label" in body
@@ -845,20 +888,26 @@ def test_index_html_rotate_modal_demands_confirm_checkbox_and_reason():
 
 
 def test_index_html_rotate_success_shows_new_phrase_and_restart_prompt():
-    """After a successful rotation the modal renders the new 24
-    words AND prompts a restart - same UX shape the restore flow
-    uses so users learn one mental model."""
+    """A staged rotation reports the live/boot boundary truthfully."""
     from pathlib import Path
     html = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "web" / "index.html").read_text(encoding="utf-8")
-    idx = html.find("async function _recwizRotateSubmit(")
+    submit_idx = html.find("async function _recwizRotateSubmit(")
+    assert submit_idx > 0
+    submit_body = html[submit_idx:submit_idx + 1800]
+    assert "api.recoveryRotate" in submit_body
+    assert "_recwizRenderRotationPhrase" in submit_body
+    idx = html.find("function _recwizRenderRotationPhrase(")
     assert idx > 0
-    body = html[idx:idx + 4000]
-    assert "api.recoveryRotate" in body
+    body = html[idx:idx + 5000]
     # Renders the new 24 words.
     assert "new_words" in body
     assert "recwiz-words" in body
     # Restart prompt.
     assert "Restart One Link" in body
+    assert "Identity rotation staged" in body
+    assert "No live key or queue changed yet" in body
+    assert "staged_peer_count" in body
+    assert "Identity rotated." not in body
     # Print path reuses the existing phrase-print helper from the
     # setup wizard so we don't duplicate the print HTML.
     assert "_recwizPhrasePrint" in body
@@ -1096,7 +1145,6 @@ def test_handle_rotation_cert_ack_marks_queue_row_acked(tmp_path):
     peer must mark the matching pending_rotation_announcements row
     acknowledged so the drain doesn't re-send."""
     import asyncio
-    from types import SimpleNamespace
     from one_link.state import State
 
     sender_state = State(tmp_path / "s.db")
@@ -1166,27 +1214,18 @@ def test_drain_sends_one_cert_per_pending_row(tmp_path):
 
 
 def test_rotate_endpoint_refuses_double_rotate_without_restart():
-    """The rotate handler must refuse a second rotation in the same
-    session because:
-      1. self.me.private (used to sign cert#2) is still the ORIGINAL
-         identity, not the post-rotation-#1 identity.
-      2. perform_local_rotation would overwrite the on-disk seed,
-         losing the intermediate identity entirely.
-      3. The new cert names original->C while peers' pinned fp moves
-         to B after applying cert#1; cert#2 is then refused as a
-         rollback attempt and peers stay at B while the local daemon
-         loads C on restart - irrecoverable desync.
+    """A pending journal or legacy signer/seed mismatch blocks rotation.
 
-    Guard: compare derive_identity_priv(load_seed()) vs the in-memory
-    pubkey; if they differ, refuse with restart_required_before_rotate.
-    This source-text gate pins the guard so a refactor that removes
-    it surfaces immediately."""
+    The journal guard is primary; the signer-vs-disk comparison retains
+    defense in depth for pre-journal partial state or manual replacement.
+    """
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "server.py").read_text(encoding="utf-8")
     idx = src.find("async def api_recovery_rotate(")
     assert idx > 0
     body = src[idx:idx + 6000]
     assert "restart_required_before_rotate" in body
+    assert "pending_recovery_summary" in body
     assert "on_disk_seed" in body
     assert "master_seed.load_seed" in body
     assert "derive_identity_priv" in body
@@ -1224,10 +1263,15 @@ def test_rotate_endpoint_registered_guarded_rate_limited():
         assert "self._guarded(" in line, f"{path} not guarded: {line!r}"
     handler_idx = src.find("async def api_recovery_rotate(")
     assert handler_idx > 0
-    # 7000-char window covers the handler even after the double-
-    # rotation safety guard was added (which lives between the
-    # confirmed_rotate check and the perform_local_rotation call).
-    body = src[handler_idx:handler_idx + 7000]
+    # Bound the source contract by the next handler declaration instead of a
+    # brittle character count. Security comments and defensive branches are
+    # expected to grow without silently moving the final no-store header out
+    # of the assertion window.
+    next_handler_idx = src.find(
+        "async def api_recovery_rotate_status(", handler_idx,
+    )
+    assert next_handler_idx > handler_idx
+    body = src[handler_idx:next_handler_idx]
     assert "_rate_limited(" in body
     assert '"recovery_rotate"' in body
     assert "confirmed_rotate" in body

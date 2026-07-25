@@ -126,10 +126,10 @@ async def test_index_csp_keeps_style_src_inline(client):
 async def test_index_304_carries_same_csp(client):
     """A conditional GET (If-None-Match) must still carry the CSP so the
     reused cached body is enforced."""
-    c, token = client
-    first = await c.get(f"/?t={token}")
+    c, _token = client
+    first = await c.get("/")
     etag = first.headers.get("ETag")
     assert etag
-    second = await c.get(f"/?t={token}", headers={"If-None-Match": etag})
+    second = await c.get("/", headers={"If-None-Match": etag})
     assert second.status == 304
     assert "script-src" in _csp(second)

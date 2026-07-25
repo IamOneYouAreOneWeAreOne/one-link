@@ -1,17 +1,18 @@
 {
-  "name": "js",
+  "name": "one-link-ui-static-analysis",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Locked JavaScript tooling for One Link UI contract checks",
+  "private": true,
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node check_undefined_calls.js ../../src/one_link/web/index.html && node check_undefined_calls.js ../../src/one_link/web/peer.html && node --check ../../src/one_link/web/assets/argon2id-worker.js",
+    "audit": "npm audit --audit-level=moderate"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "UNLICENSED",
   "type": "commonjs",
   "dependencies": {
-    "acorn": "^8.16.0",
-    "acorn-walk": "^8.3.5"
+    "acorn": "8.17.0",
+    "acorn-walk": "8.3.5"
   }
 }

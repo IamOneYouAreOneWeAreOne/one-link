@@ -144,7 +144,7 @@ fn bench_master_pin_handle(c: &mut Criterion) {
 
 fn bench_quorum_mint_policy(c: &mut Criterion) {
     let master = MasterIdentity::generate(&mut OsRng);
-    let devices: Vec<[u8; DEVICE_ID_LEN]> = (0..5).map(|i| [i as u8; DEVICE_ID_LEN]).collect();
+    let devices: Vec<[u8; DEVICE_ID_LEN]> = (0u8..5).map(|i| [i; DEVICE_ID_LEN]).collect();
     c.bench_function("device_mesh::quorum_mint_policy_3_of_5", |b| {
         b.iter(|| {
             let p = mint_policy(
@@ -421,16 +421,17 @@ fn bench_dfs_repair_plan(c: &mut Criterion) {
 fn bench_fan_out_plan(c: &mut Criterion) {
     let policy = ErasurePolicy::new(10, 4, 1).unwrap();
     let n_stripes = 8usize;
-    let stripe = policy.total_shards() as usize;
+    let stripe = usize::from(policy.total_shards());
     let chunks: Vec<ChunkHash> = (0..(n_stripes * stripe))
         .map(|i| {
             let mut h = [0u8; 32];
-            h[..2].copy_from_slice(&(i as u16).to_be_bytes());
+            let index = u16::try_from(i).expect("the benchmark creates fewer than u16::MAX chunks");
+            h[..2].copy_from_slice(&index.to_be_bytes());
             h
         })
         .collect();
     let m = FileManifest {
-        file_size: chunks.len() as u64,
+        file_size: u64::try_from(chunks.len()).expect("supported Rust pointer widths fit in u64"),
         chunk_size: 8192,
         chunks: chunks.clone(),
         mime: b"x".to_vec(),
@@ -547,7 +548,11 @@ fn bench_self_routing_pick_best_route(c: &mut Criterion) {
             .filter(|j| *j != i)
             .map(|j| PeerLink {
                 peer_device_id: ids[j],
-                tau_score: (((i + j) as u32) * 13) % 200 + 1,
+                tau_score: (u32::try_from(i + j)
+                    .expect("the benchmark mesh has only eight devices")
+                    * 13)
+                    % 200
+                    + 1,
                 last_seen_unix: 1,
                 direct: true,
             })
@@ -873,43 +878,64 @@ fn bench_active_routing_observe(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_derive_subkey_seed,
-    bench_field_bound_seed,
-    bench_ratchet,
-    bench_mint_subkey,
-    bench_liveness_issue,
-    bench_liveness_verify,
-    bench_hardware_wrap,
-    bench_master_pin_handle,
-    bench_quorum_mint_policy,
-    bench_quorum_propose_and_approve,
-    bench_quorum_certificate_verify_2_of_3,
-    bench_mesh_state_auth_op_sign,
-    bench_mesh_state_auth_op_verify,
-    bench_mesh_state_root,
-    bench_mesh_state_sync_ingest,
-    bench_dfs_manifest_canonical_bytes,
-    bench_dfs_storage_attest_sign,
-    bench_dfs_storage_attest_verify,
-    bench_dfs_repair_plan,
-    bench_fan_out_plan,
-    bench_fan_out_fetch_request,
-    bench_fan_out_chunk_ack,
-    bench_self_routing_announcement_sign,
-    bench_self_routing_pick_best_route,
-    bench_self_onion_derive_identity,
-    bench_self_onion_build_2_hop,
-    bench_self_onion_peel,
-    bench_duress_envelope_create,
-    bench_duress_envelope_unlock_real,
-    bench_duress_pair_commitment,
-    bench_compute_capability_attestation_sign,
-    bench_compute_task_request_sign,
-    bench_compute_pick_executor,
-    bench_active_routing_context_hash,
-    bench_active_routing_pick_device,
-    bench_active_routing_observe,
-);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{
+        bench_active_routing_context_hash, bench_active_routing_observe,
+        bench_active_routing_pick_device, bench_compute_capability_attestation_sign,
+        bench_compute_pick_executor, bench_compute_task_request_sign, bench_derive_subkey_seed,
+        bench_dfs_manifest_canonical_bytes, bench_dfs_repair_plan, bench_dfs_storage_attest_sign,
+        bench_dfs_storage_attest_verify, bench_duress_envelope_create,
+        bench_duress_envelope_unlock_real, bench_duress_pair_commitment, bench_fan_out_chunk_ack,
+        bench_fan_out_fetch_request, bench_fan_out_plan, bench_field_bound_seed,
+        bench_hardware_wrap, bench_liveness_issue, bench_liveness_verify, bench_master_pin_handle,
+        bench_mesh_state_auth_op_sign, bench_mesh_state_auth_op_verify, bench_mesh_state_root,
+        bench_mesh_state_sync_ingest, bench_mint_subkey, bench_quorum_certificate_verify_2_of_3,
+        bench_quorum_mint_policy, bench_quorum_propose_and_approve, bench_ratchet,
+        bench_self_onion_build_2_hop, bench_self_onion_derive_identity, bench_self_onion_peel,
+        bench_self_routing_announcement_sign, bench_self_routing_pick_best_route, criterion_group,
+    };
+
+    criterion_group!(
+        benches,
+        bench_derive_subkey_seed,
+        bench_field_bound_seed,
+        bench_ratchet,
+        bench_mint_subkey,
+        bench_liveness_issue,
+        bench_liveness_verify,
+        bench_hardware_wrap,
+        bench_master_pin_handle,
+        bench_quorum_mint_policy,
+        bench_quorum_propose_and_approve,
+        bench_quorum_certificate_verify_2_of_3,
+        bench_mesh_state_auth_op_sign,
+        bench_mesh_state_auth_op_verify,
+        bench_mesh_state_root,
+        bench_mesh_state_sync_ingest,
+        bench_dfs_manifest_canonical_bytes,
+        bench_dfs_storage_attest_sign,
+        bench_dfs_storage_attest_verify,
+        bench_dfs_repair_plan,
+        bench_fan_out_plan,
+        bench_fan_out_fetch_request,
+        bench_fan_out_chunk_ack,
+        bench_self_routing_announcement_sign,
+        bench_self_routing_pick_best_route,
+        bench_self_onion_derive_identity,
+        bench_self_onion_build_2_hop,
+        bench_self_onion_peel,
+        bench_duress_envelope_create,
+        bench_duress_envelope_unlock_real,
+        bench_duress_pair_commitment,
+        bench_compute_capability_attestation_sign,
+        bench_compute_task_request_sign,
+        bench_compute_pick_executor,
+        bench_active_routing_context_hash,
+        bench_active_routing_pick_device,
+        bench_active_routing_observe,
+    );
+}
+criterion_main!(criterion_benchmark_harness::benches);

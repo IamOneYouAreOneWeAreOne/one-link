@@ -1,8 +1,8 @@
-//! `FieldObservations` — per-peer τ_c observation buffer with
+//! `FieldObservations` — per-peer `τ_c` observation buffer with
 //! trust-weighted EWMA updates + coherence-gradient computation.
 //!
 //! This module is the OBSERVATION SUBSTRATE that feeds the PDE solver:
-//! the daemon writes per-peer τ_c samples here (D23 in the integration
+//! the daemon writes per-peer `τ_c` samples here (D23 in the integration
 //! map, line 3367 / 9268 / 10307 write sites), and the selector +
 //! relay-picker read scalar field values + the gradient signal here
 //! (D21 + D07 + D24).
@@ -10,7 +10,7 @@
 //! ## Why trust-weighted (Gap 4 — field poisoning defense)
 //!
 //! A naive EWMA absorbs every observation equally. A compromised peer
-//! feeding bad τ_c values can drag the field into a sinkhole (Gap 4:
+//! feeding bad `τ_c` values can drag the field into a sinkhole (Gap 4:
 //! 15% attacker fraction drove the naive field ~12% off truth). The
 //! trust weight scales the update:
 //!
@@ -27,7 +27,7 @@
 //!
 //! ## The gradient signal (D24, RESEARCH-GRADE)
 //!
-//! `gradient_at(peer)` returns |∇τ_c|² approximated on the local graph
+//! `gradient_at(peer)` returns `|∇τ_c|²` approximated on the local graph
 //! neighborhood (variance of neighbor τ + self-deviation from the
 //! neighborhood mean). High values mark "coherence boundaries" where
 //! the field is changing rapidly — useful as an anticipatory signal
@@ -42,7 +42,7 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
-/// Errors that may arise from FieldObservations operations.
+/// Errors that may arise from `FieldObservations` operations.
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum ObservationError {
     /// Learning rate α must be in (0, 1].
@@ -67,7 +67,7 @@ pub enum ObservationError {
     },
 }
 
-/// Per-peer τ_c observation buffer with trust-weighted EWMA + gradient.
+/// Per-peer `τ_c` observation buffer with trust-weighted EWMA + gradient.
 ///
 /// Stateful (holds per-peer values and adjacency); construct once and
 /// share across the daemon.
@@ -78,7 +78,7 @@ pub enum ObservationError {
 ///   - `len() == values.len()`
 #[derive(Debug, Clone)]
 pub struct FieldObservations {
-    /// EWMA per-peer τ_c values.
+    /// EWMA per-peer `τ_c` values.
     values: HashMap<String, f32>,
     /// Per-peer neighbor lists used by gradient computation.
     /// Daemon populates this from its mesh topology.
@@ -166,13 +166,13 @@ impl FieldObservations {
         Ok(())
     }
 
-    /// Current EWMA τ_c value for a peer, or None if never observed.
+    /// Current EWMA `τ_c` value for a peer, or `None` if never observed.
     #[must_use]
     pub fn tau_at(&self, peer_id: &str) -> Option<f32> {
         self.values.get(peer_id).copied()
     }
 
-    /// Replace the neighbor list for a peer (used by gradient_at).
+    /// Replace the neighbor list for a peer (used by `gradient_at`).
     ///
     /// Empty list disables gradient computation for that peer.
     pub fn set_neighbors(&mut self, peer_id: &str, neighbors: Vec<String>) {
@@ -192,7 +192,7 @@ impl FieldObservations {
     ///   `None` if no neighbors are configured or none have been seen.
     ///
     /// The formula is the discrete graph-Laplacian variance:
-    ///   ∇²τ ≈ var(τ_neighbors) + (self_τ − mean(τ_neighbors))²
+    ///   `∇²τ ≈ var(τ_neighbors) + (self_τ − mean(τ_neighbors))²`
     ///
     /// Per Gap 25: this is RESEARCH-GRADE. Selector should not gate
     /// decisions on it as a binary signal until calibrated.
@@ -206,12 +206,13 @@ impl FieldObservations {
         if observed.is_empty() {
             return None;
         }
-        let mean = observed.iter().sum::<f32>() / observed.len() as f32;
+        let observed_count = observed.iter().fold(0.0_f32, |count, _| count + 1.0);
+        let mean = observed.iter().sum::<f32>() / observed_count;
         let variance = observed
             .iter()
             .map(|t| (t - mean) * (t - mean))
             .sum::<f32>()
-            / observed.len() as f32;
+            / observed_count;
         let self_dev = self
             .values
             .get(peer_id)
@@ -309,7 +310,7 @@ mod tests {
         let before = o.tau_at("p1").unwrap();
         o.update("p1", 0.0, 0.0).unwrap(); // try to drag to 0
         let after = o.tau_at("p1").unwrap();
-        assert_eq!(before, after);
+        assert_eq!(before.to_bits(), after.to_bits());
     }
 
     #[test]

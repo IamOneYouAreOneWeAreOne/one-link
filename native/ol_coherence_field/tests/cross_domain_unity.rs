@@ -19,13 +19,13 @@ fn solve_for_domain(cal: &Calibration) -> (Vec<f64>, Vec<f64>) {
     // Small structured swarm: 8 nodes in a ring with one "fragile"
     // band of 2 nodes. Same topology across all three domains so we
     // can verify the math operates consistently.
-    let n = 8;
-    let mut g = GraphLaplacian::new(n);
-    for i in 0..n {
-        let j = (i + 1) % n;
-        g.add_edge(i, j, 1.0).unwrap();
+    let node_count = 8;
+    let mut graph = GraphLaplacian::new(node_count);
+    for i in 0..node_count {
+        let j = (i + 1) % node_count;
+        graph.add_edge(i, j, 1.0).unwrap();
     }
-    let fragile: Vec<bool> = (0..n).map(|i| (3..5).contains(&i)).collect();
+    let fragile: Vec<bool> = (0..node_count).map(|i| (3..5).contains(&i)).collect();
     let density: Vec<f64> = fragile
         .iter()
         .map(|&f| if f { 0.05 } else { 1.0 })
@@ -34,24 +34,28 @@ fn solve_for_domain(cal: &Calibration) -> (Vec<f64>, Vec<f64>) {
         .iter()
         .map(|&f| if f { 0.02 } else { 0.6 })
         .collect();
-    let s = identity_dual_source(&density, &flux, cal.alpha_density, cal.beta_flux).unwrap();
+    let source = identity_dual_source(&density, &flux, cal.alpha_density, cal.beta_flux).unwrap();
     let cfg = CgConfig {
         max_iter: 5_000,
         tolerance: 1e-9,
     };
-    let r = solve_helmholtz(&g, cal.d, cal.gamma, &s, cfg).unwrap();
-    let f_min = r.field.iter().cloned().fold(f64::INFINITY, f64::min);
-    let f_max = r.field.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let span = (f_max - f_min).max(1e-9);
-    let nu: Vec<f64> = r
+    let result = solve_helmholtz(&graph, cal.d, cal.gamma, &source, cfg).unwrap();
+    let field_min = result.field.iter().copied().fold(f64::INFINITY, f64::min);
+    let field_max = result
+        .field
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let span = (field_max - field_min).max(1e-9);
+    let routing_scores: Vec<f64> = result
         .field
         .iter()
         .map(|&v| {
-            let y = ((v - f_min) / span).max(1e-9);
-            be_rar(y).unwrap()
+            let normalized = ((v - field_min) / span).max(1e-9);
+            be_rar(normalized).unwrap()
         })
         .collect();
-    (r.field, nu)
+    (result.field, routing_scores)
 }
 
 #[test]
@@ -60,17 +64,20 @@ fn same_algebra_solves_all_three_domains() {
     let one_field = one_field_calibration();
     let bio_mesh = bio_mesh_calibration();
 
-    let (ol_field, ol_nu) = solve_for_domain(&one_link);
-    let (of_field, of_nu) = solve_for_domain(&one_field);
-    let (bm_field, bm_nu) = solve_for_domain(&bio_mesh);
+    let (one_link_field, one_link_scores) = solve_for_domain(&one_link);
+    let (one_field_values, one_field_scores) = solve_for_domain(&one_field);
+    let (bio_mesh_field, bio_mesh_scores) = solve_for_domain(&bio_mesh);
 
     eprintln!("One Link: domain={:?}", one_link.domain);
     eprintln!("  ell_screen = {:?}", one_link.screening_length());
     eprintln!("  g_A = {:?}", one_link.apparent_horizon_anchor());
     eprintln!(
         "  field range: {:.3e} .. {:.3e}",
-        ol_field.iter().cloned().fold(f64::INFINITY, f64::min),
-        ol_field.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        one_link_field.iter().copied().fold(f64::INFINITY, f64::min),
+        one_link_field
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max)
     );
 
     eprintln!("OneField:  domain={:?}", one_field.domain);
@@ -84,9 +91,9 @@ fn same_algebra_solves_all_three_domains() {
     // 1. All three solves must have produced a numerically-stable
     //    field: finite, real, non-trivial.
     for (name, field) in [
-        ("One Link", &ol_field),
-        ("OneField", &of_field),
-        ("BioMesh", &bm_field),
+        ("One Link", &one_link_field),
+        ("OneField", &one_field_values),
+        ("BioMesh", &bio_mesh_field),
     ] {
         for (i, v) in field.iter().enumerate() {
             assert!(v.is_finite(), "{name} field[{i}] is not finite: {v}");
@@ -108,9 +115,9 @@ fn same_algebra_solves_all_three_domains() {
     let fragile_indices = [3usize, 4];
     let safe_indices = [0usize, 1, 6, 7];
     for (name, nu) in [
-        ("One Link", &ol_nu),
-        ("OneField", &of_nu),
-        ("BioMesh", &bm_nu),
+        ("One Link", &one_link_scores),
+        ("OneField", &one_field_scores),
+        ("BioMesh", &bio_mesh_scores),
     ] {
         let frag_min = fragile_indices
             .iter()
@@ -128,10 +135,11 @@ fn same_algebra_solves_all_three_domains() {
 
     // 3. The three domains' anchor scales must legitimately differ
     //    — that's the whole point of separate calibrations.
-    let ol_g = one_link.apparent_horizon_anchor().unwrap();
-    let of_g = one_field.apparent_horizon_anchor().unwrap();
-    let bm_g = bio_mesh.apparent_horizon_anchor().unwrap();
-    let scale_spread = ol_g.max(of_g).max(bm_g) / ol_g.min(of_g).min(bm_g);
+    let one_link_anchor = one_link.apparent_horizon_anchor().unwrap();
+    let one_field_anchor = one_field.apparent_horizon_anchor().unwrap();
+    let bio_mesh_anchor = bio_mesh.apparent_horizon_anchor().unwrap();
+    let scale_spread = one_link_anchor.max(one_field_anchor).max(bio_mesh_anchor)
+        / one_link_anchor.min(one_field_anchor).min(bio_mesh_anchor);
     assert!(
         scale_spread > 100.0,
         "anchor scales should span at least 100× across domains; got {scale_spread:.3}"

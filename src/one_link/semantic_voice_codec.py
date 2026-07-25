@@ -1,4 +1,8 @@
-"""Semantic voice codec — Tier ζ articulatory codec at ~1 kbps.
+"""Research-only semantic voice codec — Tier ζ design at ~1 kbps.
+
+The stable daemon does not advertise or route browser media through this
+codec. It is a tested preview substrate pending capture, negotiated transport,
+receiver playout, model identity/signing, and physical quality qualification.
 
 Uses the trained LibriSpeech voice predictor + Klatt-style formant
 synthesizer to compress speech down to a phoneme stream + pitch
@@ -26,10 +30,9 @@ The predictor's role here is selection of WHICH residual components
 to send — it sees what the receiver-side decoder will get right for
 free, so only divergences need wire bytes.
 
-Capability gate: ``SEMANTIC_VOICE_V1``. Both peers must advertise
-``model_pack_hash`` matching the trained checkpoint hash; otherwise
-the Compiler refuses the SEMANTIC_DELTA_AV rung and falls back to
-the OPUS_VIDEO / AUDIO_ONLY rungs.
+Intended capability gate: ``SEMANTIC_VOICE_V1``. Before graduation, both peers
+must advertise a signed ``model_pack_hash`` matching the trained checkpoint;
+the stable capability registry intentionally does not advertise this gate yet.
 
 Companion: docs/LIVING_PRESENCE_ARCHITECTURE.md §4.8 (Semantic Engine)
 """
@@ -219,7 +222,6 @@ class SemanticVoiceEncoder:
           - the model directory (auto-prefers .onnx if present)
         """
         from one_link.ml.onnx_oracles import load_voice_oracle
-        from one_link.ml.trained_voice_oracle import TrainedVoiceOracle
         self._lock = threading.Lock()
         ckpt_path = Path(ckpt_path)
         if ckpt_path.is_dir():
@@ -227,7 +229,10 @@ class SemanticVoiceEncoder:
         elif ckpt_path.suffix == ".onnx":
             self._oracle = load_voice_oracle(ckpt_path.parent)
         else:
-            # Explicit .pt path → use torch oracle directly.
+            # Explicit .pt path is a source-tree training/research path. Keep
+            # this import lazy so an ONNX-only preview artifact never requires
+            # or accidentally bundles PyTorch.
+            from one_link.ml.trained_voice_oracle import TrainedVoiceOracle
             self._oracle = TrainedVoiceOracle(ckpt_path, device=device)
         self._mfcc_buffer: list[np.ndarray] = []
         self._frame_counter = 0

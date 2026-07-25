@@ -1,10 +1,10 @@
-//! KeyStore trait: the platform-agnostic surface that callers code against.
+//! `KeyStore` trait: the platform-agnostic surface that callers code against.
 
 use crate::error::Result;
 use crate::KeyGuarantee;
 
 /// Opaque handle to a key inside a backend. The backend chooses how to
-/// represent the handle (a path, a CryptoKit ref, a TPM blob, etc.).
+/// represent the handle (a path, a `CryptoKit` ref, a TPM blob, etc.).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeyHandle(pub String);
 

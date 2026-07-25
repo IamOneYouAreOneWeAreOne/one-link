@@ -13,7 +13,6 @@ These tests pin the surface contract.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -60,6 +59,17 @@ def test_voice_recording_helpers_present(index_html: str):
     assert "function _voiceFilenameFor(" in index_html
     assert "async function startVoiceRecording(" in index_html
     assert "function stopVoiceRecording(" in index_html
+
+
+def test_voice_upload_has_one_stable_intent_and_inflight_mutex(index_html: str):
+    idx = index_html.find("async function _sendVoiceBlob(")
+    assert idx > 0
+    snippet = index_html[idx:idx + 2600]
+    assert "const _voiceUploadIntents = new WeakMap()" in index_html
+    assert "clientDeliveryId: _newClientMsgId()" in snippet
+    assert "if (intent.inFlight) return await intent.inFlight" in snippet
+    assert "api.upload(intent.peerId, intent.file" in snippet
+    assert "clientDeliveryId: intent.clientDeliveryId" in snippet
 
 
 def test_pick_voice_mime_prefers_opus(index_html: str):

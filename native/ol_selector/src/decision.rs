@@ -30,7 +30,7 @@ pub enum Path {
 /// Onion-circuit hop count.
 ///
 /// Hop counts are quantized: 1 (minimal privacy), 3 (standard onion),
-/// 5 (paranoid). Other values would require ol_onion API extension.
+/// 5 (paranoid). Other values would require an `ol_onion` API extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OnionHops {
     /// Single relay hop. Minimal privacy but lowest latency.
@@ -81,9 +81,9 @@ pub enum BatchDecision {
 ///
 /// Every field is independently consumed by a different part of the
 /// daemon's send path: transport picks the socket, path picks the
-/// pipeline, onion_hops + cover_traffic configure ol_onion, batch
-/// decides timing, anchor_lay configures ol_coherence_field anchors,
-/// predictor_warm hints ol_prefetch.
+/// pipeline, `onion_hops` + `cover_traffic` configure `ol_onion`, `batch`
+/// decides timing, `anchor_lay` configures `ol_coherence_field` anchors,
+/// and `predictor_warm` hints `ol_prefetch`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Decision {
     /// Which transport to use.
@@ -103,7 +103,7 @@ pub struct Decision {
 }
 
 impl Decision {
-    /// The "always-safe" Decision used when context is incomplete or
+    /// The "always-safe" `Decision` used when context is incomplete or
     /// smart logic errors. Per Design Rule R3.
     ///
     /// Privacy = maximum (5-hop onion + cover ON), recovery = anchor on,
@@ -127,13 +127,15 @@ impl Decision {
     ///
     /// Mode contracts (from Gap 20 / Gap 28 of the forge shootouts):
     ///
-    ///   Normal:         no specific structural requirements
-    ///   Paranoid:       onion_hops >= 3 AND cover_traffic == true
-    ///   BatterySave:    cover_traffic == false
-    ///                   AND batch_decision != UrgentBypass (for any
-    ///                       non-Msg kind)
-    ///   LatencyStrict:  batch_decision != Batch
-    ///                   AND transport != Relay (relay path doubles RTT)
+    /// ```text
+    /// Normal:         no specific structural requirements
+    /// Paranoid:       onion_hops >= 3 AND cover_traffic == true
+    /// BatterySave:    cover_traffic == false
+    ///                 AND batch_decision != UrgentBypass (for any
+    ///                     non-Msg kind)
+    /// LatencyStrict:  batch_decision != Batch
+    ///                 AND transport != Relay (relay path doubles RTT)
+    /// ```
     ///
     /// The contract is a runtime invariant the selector should
     /// uphold. This method is the gate the daemon can use to assert
@@ -207,11 +209,11 @@ impl ContractMode {
 /// A specific violation of a mode contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContractViolation {
-    /// Paranoid mode: onion_hops < 3.
+    /// Paranoid mode: `onion_hops < 3`.
     ParanoidUnderHops,
-    /// Paranoid mode: cover_traffic disabled.
+    /// Paranoid mode: `cover_traffic` disabled.
     ParanoidNoCover,
-    /// Battery save: cover_traffic enabled (wastes bandwidth + energy).
+    /// Battery save: `cover_traffic` enabled (wastes bandwidth + energy).
     BatterySaveCover,
     /// Latency strict: batched (adds wake-window latency).
     LatencyStrictBatched,

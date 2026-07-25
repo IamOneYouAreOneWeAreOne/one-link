@@ -1,4 +1,4 @@
-"""End-to-end integration test for the auto-install path.
+"""End-to-end integration test for authenticated update artifacts.
 
 Phase 4 verification. The unit tests in test_updater_v0210.py mock
 every external surface; this test runs against a real local HTTP
@@ -6,22 +6,10 @@ server pretending to be GitHub Releases, and exercises:
 
     1. build_install_plan reading the latest-release JSON
     2. download_to_temp fetching the wheel
-    3. SHA-256 verify against the published SHA256SUMS
-    4. write_updater_script emitting a script with the right
-       embedded literals
+    3. authenticate the manifest + wheel Sigstore ceremony and SHA-256
+    4. executable handoff refusing to generate or spawn an installer
 
-What this test does NOT do:
-    * Actually pip-install the wheel. The updater script is
-      generated and inspected; running it would replace the
-      user's installed one_link_native, which we don't want in
-      a test run.
-    * Spawn the detached subprocess. spawn_detached() is the
-      thin wrapper around subprocess.Popen + DETACHED_PROCESS;
-      already covered by unit tests.
-
-Together, this gives us complete confidence that the path works
-end-to-end except for the final pip-install + respawn — which is
-the part that needs per-OS verification by actually running.
+No in-place pip/respawn path is represented as implemented.
 """
 
 from __future__ import annotations
@@ -30,11 +18,29 @@ import hashlib
 import http.server
 import json
 import socket
+import sys
 import threading
-import urllib.request
 from pathlib import Path
 
 import pytest
+from packaging.utils import parse_wheel_filename
+
+from one_link.safe_http import validated_urlopen
+
+
+def _local_fetch_bytes(url: str, timeout: float) -> bytes:
+    """Explicit test-only opt-in for the loopback release double."""
+    with validated_urlopen(
+        url,
+        timeout=timeout,
+        allow_https=False,
+        allow_loopback_http=True,
+    ) as response:
+        return response.read()
+
+
+def _local_fetch_json(url: str, timeout: float) -> dict:
+    return json.loads(_local_fetch_bytes(url, timeout).decode("utf-8"))
 
 
 # ─── tiny GitHub Releases mock server ──────────────────────────────────
@@ -61,6 +67,7 @@ class _ReleasesMock(http.server.BaseHTTPRequestHandler):
     release_json: dict = {}
     wheel_path: Path = Path()
     sha256sums: bytes = b""
+    sigstore_bundle: bytes = b"test-only bundle"
 
     def log_message(self, fmt, *args):  # silence
         pass
@@ -80,6 +87,14 @@ class _ReleasesMock(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(self.__class__.sha256sums)))
             self.end_headers()
             self.wfile.write(self.__class__.sha256sums)
+            return
+        if self.path.endswith(".sigstore"):
+            body = self.__class__.sigstore_bundle
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if self.path.endswith(self.__class__.wheel_path.name):
             data = self.__class__.wheel_path.read_bytes()
@@ -115,8 +130,12 @@ def mock_releases(tmp_path):
 
     port = _free_port()
     base = f"http://127.0.0.1:{port}"
+    _distribution, wheel_version, _build, _tags = parse_wheel_filename(
+        wheel.name,
+    )
+    release_tag = f"v{wheel_version}"
     _ReleasesMock.release_json = {
-        "tag_name": "v0.99.0",
+        "tag_name": release_tag,
         "name": "Test release",
         "html_url": f"{base}/releases/tag/v0.99.0",
         "published_at": "2026-05-12T00:00:00Z",
@@ -133,6 +152,16 @@ def mock_releases(tmp_path):
                 "size": len(sums_text),
                 "browser_download_url": f"{base}/assets/SHA256SUMS",
             },
+            {
+                "name": "SHA256SUMS.sigstore",
+                "size": len(_ReleasesMock.sigstore_bundle),
+                "browser_download_url": f"{base}/assets/SHA256SUMS.sigstore",
+            },
+            {
+                "name": f"{wheel.name}.sigstore",
+                "size": len(_ReleasesMock.sigstore_bundle),
+                "browser_download_url": f"{base}/assets/{wheel.name}.sigstore",
+            },
         ],
     }
 
@@ -146,15 +175,13 @@ def mock_releases(tmp_path):
     finally:
         srv.shutdown()
         t.join(timeout=2.0)
+        srv.server_close()
 
 
 # ─── the integration test itself ───────────────────────────────────────
 
 def test_install_path_end_to_end_against_mock_releases(mock_releases, tmp_path, monkeypatch):
-    """Plan -> download -> verify -> script-generate, all hitting a
-    real (local) HTTP server. The only thing we DON'T do is run
-    the updater script + pip install — those would mutate the
-    user's installed environment."""
+    """Plan, download, and verify locally; executable handoff stays blocked."""
     base, wheel, expected_hash = mock_releases
     from one_link import updater as u_mod
     from one_link import update_check as uc_mod
@@ -182,60 +209,59 @@ def test_install_path_end_to_end_against_mock_releases(mock_releases, tmp_path, 
     monkeypatch.setattr(u_mod, "host_wheel_tag", lambda: host_tag)
 
     # 1. Plan
-    plan = u_mod.build_install_plan()
+    plan = u_mod.build_install_plan(
+        current_version="0.0.0",
+        fetch_json=_local_fetch_json,
+        fetch_bytes=_local_fetch_bytes,
+    )
     assert plan.status == "ready", f"plan failed: {plan.error}"
-    assert plan.tag == "v0.99.0"
+    assert plan.tag == _ReleasesMock.release_json["tag_name"]
     assert plan.wheel is not None
     assert plan.wheel.filename == wheel.name
     assert plan.wheel.expected_sha256 == expected_hash, (
         "SHA256SUMS lookup didn't find the wheel's hash"
     )
+    assert plan.wheel.has_signature_contract is True
 
-    # 2. Download (real HTTP fetch from our local mock)
-    downloaded = u_mod.download_to_temp(
-        plan.wheel.asset_url,
-        expected_size=plan.wheel.size,
+    # The loopback server uses inert test bundles. The verifier invocation and
+    # pinned identity are covered independently; here we exercise the complete
+    # network/download/cleanup/hash orchestration with that boundary stubbed.
+    monkeypatch.setattr(
+        u_mod,
+        "_run_sigstore_identity_verify",
+        lambda **kwargs: None,
     )
-    try:
-        # 3. SHA-256 verify
-        assert u_mod.sha256_file(downloaded) == expected_hash, (
-            "downloaded wheel's hash differs from SHA256SUMS — would have "
-            "refused install (good)"
+
+    def local_download(url, *, expected_size, timeout, artifact_filename):
+        return u_mod.download_to_temp(
+            url,
+            expected_size=expected_size,
+            timeout=timeout,
+            fetch=_local_fetch_bytes,
+            artifact_filename=artifact_filename,
         )
+
+    prepared = u_mod.prepare_signed_update(
+        plan.wheel,
+        tag=plan.tag or "",
+        download=local_download,
+    )
+    downloaded = prepared.artifact_path
+    try:
+        assert prepared.authenticated_sha256 == expected_hash
+        assert u_mod.sha256_file(downloaded) == expected_hash
         # And the downloaded file is identical to the source wheel.
         assert downloaded.read_bytes() == wheel.read_bytes()
 
-        # 4. Script generation
-        script = u_mod.write_updater_script(
-            downloaded,
-            parent_pid=12345,
-            python_exe=r"C:\Python313\python.exe",
-        )
-        try:
-            src = script.read_text(encoding="utf-8")
-            # The script references the downloaded wheel path,
-            # the parent PID, the Python interpreter, and runs pip.
-            # repr() double-escapes Windows paths so we can't search
-            # for str(downloaded) directly — check the filename
-            # component, which is constant across platforms.
-            assert "12345" in src
-            assert downloaded.name in src, (
-                f"wheel filename {downloaded.name!r} not embedded in script"
+        with pytest.raises(RuntimeError, match="transactional full-app rollback"):
+            u_mod.write_updater_script(
+                downloaded,
+                parent_pid=12345,
+                python_exe=sys.executable,
+                expected_sha256=prepared.authenticated_sha256,
             )
-            assert "Python313" in src
-            assert "pip" in src and "install" in src
-            # And — defense-in-depth — the wait-for-parent loop comes
-            # BEFORE the pip install call so Windows file locking
-            # on the loaded .pyd can't break the install.
-            wait_idx = src.find("_alive(PARENT_PID)")
-            pip_idx = src.find("'pip'")
-            assert wait_idx >= 0 and pip_idx > wait_idx, (
-                "pip install must come AFTER the wait-for-parent loop"
-            )
-        finally:
-            script.unlink(missing_ok=True)
     finally:
-        downloaded.unlink(missing_ok=True)
+        u_mod.remove_staged_file(downloaded)
 
 
 def test_install_refuses_when_real_hash_disagrees(mock_releases, monkeypatch):
@@ -265,18 +291,33 @@ def test_install_refuses_when_real_hash_disagrees(mock_releases, monkeypatch):
         host_tag = "cp311-abi3-linux_x86_64"
     monkeypatch.setattr(u_mod, "host_wheel_tag", lambda: host_tag)
 
-    plan = u_mod.build_install_plan()
+    plan = u_mod.build_install_plan(
+        current_version="0.0.0",
+        fetch_json=_local_fetch_json,
+        fetch_bytes=_local_fetch_bytes,
+    )
     assert plan.status == "ready"
     assert plan.wheel is not None
-
-    downloaded = u_mod.download_to_temp(
-        plan.wheel.asset_url, expected_size=plan.wheel.size,
+    monkeypatch.setattr(
+        u_mod,
+        "_run_sigstore_identity_verify",
+        lambda **kwargs: None,
     )
-    try:
-        real_hash = u_mod.sha256_file(downloaded)
-        # SHA256SUMS says bad_hash; real hash is the actual file
-        # hash. They differ — install endpoint would refuse.
-        assert plan.wheel.expected_sha256 == bad_hash
-        assert real_hash != plan.wheel.expected_sha256
-    finally:
-        downloaded.unlink(missing_ok=True)
+
+    def local_download(url, *, expected_size, timeout, artifact_filename):
+        return u_mod.download_to_temp(
+            url,
+            expected_size=expected_size,
+            timeout=timeout,
+            fetch=_local_fetch_bytes,
+            artifact_filename=artifact_filename,
+        )
+
+    with pytest.raises(ValueError, match="signed manifest"):
+        # The signed manifest names a hash that the real wheel bytes do not
+        # have. No prepared artifact is returned and all temp inputs are gone.
+        u_mod.prepare_signed_update(
+            plan.wheel,
+            tag=plan.tag or "",
+            download=local_download,
+        )

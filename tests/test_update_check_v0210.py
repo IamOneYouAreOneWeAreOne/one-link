@@ -17,7 +17,6 @@ mocked GitHub API. They do NOT make real network calls.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import urllib.error
 from pathlib import Path
@@ -35,10 +34,14 @@ import pytest
     ("0.21.0", "1.0.0", "newer"),
     ("0.21.0-alpha", "0.21.0", "newer"),
     ("0.21.0a1", "0.21.0", "newer"),
+    ("0.21.0rc2", "0.21.0rc10", "newer"),
+    ("0.21.0.dev9", "0.21.0a1", "newer"),
+    ("0.21.0", "0.21.0.post1", "newer"),
     # Same
     ("0.21.0", "0.21.0", "same"),
     ("0.21.0", "v0.21.0", "same"),  # 'v' prefix tolerated
     ("v0.21.0", "0.21.0", "same"),
+    ("0.21.0-alpha", "0.21.0a0", "same"),
     # Older remote (dev build ahead of release)
     ("0.22.0", "0.21.0", "older"),
     ("0.21.1", "0.21.0", "older"),
@@ -48,6 +51,7 @@ import pytest
     ("0.21.0", "not-a-version", "unknown"),
     ("", "0.21.0", "unknown"),
     ("0.21.0", "", "unknown"),
+    ("0.21.0", "1." + "0" * 200 + ".0", "unknown"),
 ])
 def test_compare_versions(local, remote, expected):
     from one_link.update_check import compare_versions
@@ -168,6 +172,71 @@ def test_fetch_latest_missing_tag_field_returns_unknown():
 
     result = fetch_latest("0.21.0", fetch=fake_fetch)
     assert result.status == "unknown"
+
+
+@pytest.mark.parametrize("payload", [None, [], "not an object", 42])
+def test_fetch_latest_non_object_payload_returns_unknown(payload):
+    from one_link.update_check import fetch_latest
+
+    result = fetch_latest("0.21.0", fetch=lambda url, timeout: payload)
+    assert result.status == "unknown"
+
+
+def test_fetch_latest_unexpected_fetch_exception_never_escapes():
+    from one_link.update_check import fetch_latest
+
+    def explode(url, timeout):
+        raise RuntimeError("surprise transport failure")
+
+    result = fetch_latest("0.21.0", fetch=explode)
+    assert result.status == "unknown"
+    assert result.error == "fetch: RuntimeError"
+
+
+def test_fetch_latest_rejects_invalid_repository_coordinates():
+    from one_link.update_check import fetch_latest
+
+    called = False
+
+    def fake_fetch(url, timeout):
+        nonlocal called
+        called = True
+        return _gh_payload()
+
+    result = fetch_latest(
+        "0.21.0",
+        owner="owner/../../escape",
+        fetch=fake_fetch,
+    )
+    assert result.status == "unknown"
+    assert called is False
+
+
+def test_fetch_latest_uses_canonical_release_url_not_payload_url():
+    from one_link.update_check import fetch_latest
+
+    payload = _gh_payload()
+    payload["html_url"] = "javascript:alert(1)"
+    result = fetch_latest("0.21.0", fetch=lambda url, timeout: payload)
+    assert result.latest is not None
+    assert result.latest.html_url == (
+        "https://github.com/IamOneYouAreOneWeAreOne/"
+        "one-link/releases/tag/v0.22.0"
+    )
+
+
+def test_fetch_latest_bounds_release_notes_and_asset_count():
+    from one_link.update_check import MAX_RELEASE_NOTES_CHARS, fetch_latest
+
+    payload = _gh_payload()
+    payload["body"] = "x" * (MAX_RELEASE_NOTES_CHARS + 100)
+    result = fetch_latest("0.21.0", fetch=lambda url, timeout: payload)
+    assert result.latest is not None
+    assert len(result.latest.body) == MAX_RELEASE_NOTES_CHARS
+
+    payload["assets"] = [{}] * 5_001
+    refused = fetch_latest("0.21.0", fetch=lambda url, timeout: payload)
+    assert refused.status == "unknown"
 
 
 def test_fetch_latest_prerelease_flag_preserved():
@@ -325,21 +394,21 @@ async def test_api_update_check_fresh_bypasses_cache(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_api_update_check_disabled_by_default(monkeypatch):
-    """With NO opt-in (no env var, no setting), the endpoint must
-    return status='disabled' without touching the network. This is
-    One Link's "no calls home" promise — the GitHub Releases poll
-    is the ONLY external call surface in the daemon and it is now
-    opt-in."""
+async def test_api_update_check_uses_disclosed_just_works_default(monkeypatch):
+    """The default preset and API must resolve to the same policy."""
     monkeypatch.delenv("ONE_LINK_UPDATE_CHECK", raising=False)
     from one_link.server import UIServer
     from one_link import update_check as uc_mod
 
     network_calls = {"n": 0}
-    def should_never_be_called(*a, **kw):
+    def fake_fetch(*a, **kw):
         network_calls["n"] += 1
-        raise AssertionError("update-check disabled — must not poll GitHub")
-    monkeypatch.setattr(uc_mod, "fetch_latest", should_never_be_called)
+        return uc_mod.CheckResult(
+            status="same",
+            local_version=a[0],
+            latest_version=a[0],
+        )
+    monkeypatch.setattr(uc_mod, "fetch_latest", fake_fetch)
 
     daemon = SimpleNamespace(
         state=None,
@@ -352,8 +421,41 @@ async def test_api_update_check_disabled_by_default(monkeypatch):
     resp = await server.api_update_check(SimpleNamespace(query={}))
     assert resp.status == 200
     body = json.loads(resp.text)
-    assert body["status"] == "disabled"
-    assert "sovereignty" in body.get("reason", "").lower()
+    assert body["status"] == "same"
+    assert network_calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_api_update_check_quiet_mode_makes_no_network_call(monkeypatch):
+    monkeypatch.delenv("ONE_LINK_UPDATE_CHECK", raising=False)
+    from one_link.server import UIServer
+    from one_link import update_check as uc_mod
+
+    network_calls = {"n": 0}
+    monkeypatch.setattr(
+        uc_mod,
+        "fetch_latest",
+        lambda *a, **kw: network_calls.__setitem__("n", network_calls["n"] + 1),
+    )
+    state = SimpleNamespace(
+        get_setting=lambda key: (
+            "quiet" if key == "sovereignty_preset" else None
+        ),
+    )
+    daemon = SimpleNamespace(
+        state=state,
+        discovery=None,
+        me=SimpleNamespace(
+            fingerprint="aa" * 32,
+            short_id="aaaaaaaa",
+            hostname="me",
+        ),
+    )
+    server = UIServer(daemon)
+    server._update_cache = None
+
+    resp = await server.api_update_check(SimpleNamespace(query={}))
+    assert json.loads(resp.text)["status"] == "disabled"
     assert network_calls["n"] == 0
 
 

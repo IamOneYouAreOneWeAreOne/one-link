@@ -10,7 +10,6 @@ from one_link.priority_engine import (
     QoSClass,
     StreamAllocation,
     allocate,
-    stream_by_class,
     total_allocated,
 )
 

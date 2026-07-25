@@ -1,6 +1,6 @@
 //! The α = 1/2 exponent in the BE-RAR is forced, not fit.
 //!
-//! ## Derivation sketch (from S_One galaxy chain)
+//! ## Derivation sketch (from `S_One` galaxy chain)
 //!
 //! The interpolation function
 //!
@@ -34,7 +34,7 @@
 //! the *unique* function that both saturates at high coherence AND
 //! reproduces the empirical "transfer at v⁴ ∝ M" behaviour at galaxy
 //! scale + the directly analogous "throughput at goodput⁴ ∝
-//! peer_count" at network scale.
+//! `peer_count`" at network scale.
 //!
 //! ## Tests
 //!

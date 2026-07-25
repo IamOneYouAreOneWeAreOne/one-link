@@ -83,7 +83,7 @@ def _time(fn: Callable[[], dict]) -> BenchResult:
 
 def bench_hash_only(*, size_mib: int, seed: int) -> BenchResult:
     def run() -> dict:
-        rng = random.Random(seed)
+        rng = random.Random(seed)  # nosec B311
         with tempfile.TemporaryDirectory(prefix="ol_perf_hash_") as td:
             path = Path(td) / "payload.bin"
             path.write_bytes(rng.randbytes(size_mib * MiB))
@@ -103,7 +103,7 @@ def bench_hash_only(*, size_mib: int, seed: int) -> BenchResult:
 
 def bench_fixed_indexing(*, size_mib: int, seed: int) -> BenchResult:
     def run() -> dict:
-        rng = random.Random(seed)
+        rng = random.Random(seed)  # nosec B311
         with tempfile.TemporaryDirectory(prefix="ol_perf_fixed_") as td:
             path = Path(td) / "payload.bin"
             path.write_bytes(rng.randbytes(size_mib * MiB))
@@ -125,7 +125,7 @@ def bench_fixed_indexing(*, size_mib: int, seed: int) -> BenchResult:
 
 def bench_cdc_indexing(*, size_mib: int, seed: int) -> BenchResult:
     def run() -> dict:
-        rng = random.Random(seed)
+        rng = random.Random(seed)  # nosec B311
         with tempfile.TemporaryDirectory(prefix="ol_perf_cdc_") as td:
             path = Path(td) / "payload.bin"
             path.write_bytes(rng.randbytes(size_mib * MiB))
@@ -149,7 +149,7 @@ def bench_cdc_indexing(*, size_mib: int, seed: int) -> BenchResult:
 
 def bench_prior_knowledge(*, size_mib: int, mutation_bytes: int, seed: int) -> BenchResult:
     def run() -> dict:
-        rng = random.Random(seed)
+        rng = random.Random(seed)  # nosec B311
         with tempfile.TemporaryDirectory(prefix="ol_perf_prior_") as td:
             root = Path(td)
             base = root / "base.bin"
@@ -184,7 +184,7 @@ def bench_swarm_scheduler(*, chunks: int, sources: int, seed: int) -> BenchResul
             size=chunks * MiB,
             chunk_size=MiB,
         )
-        rng = random.Random(seed)
+        rng = random.Random(seed)  # nosec B311
         srcs = []
         all_hashes = [c.hash for c in manifest.chunks]
         for i in range(sources):

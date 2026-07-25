@@ -7,7 +7,6 @@ vitals composer can read.
 
 from __future__ import annotations
 
-import pytest
 
 from one_link.predictive_continuity import MediaKind
 from one_link.predictive_continuity_runtime import PredictiveContinuityRuntime

@@ -167,7 +167,8 @@ class SceneGen:
 
 
 def build_scene_sequence(n_frames: int, seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
-    rng = random.Random(seed)
+    # Reproducible training corpus, not keying or protocol randomness.
+    rng = random.Random(seed)  # nosec B311
     gen = SceneGen(rng=rng)
     # Seed with 1-3 objects
     for _ in range(rng.randint(1, 3)):
@@ -230,7 +231,8 @@ def build_scene_corpus(out_dir: Path, n_sequences: int = 2000,
     n_val = int(n_sequences * val_frac)
     n_test = n_sequences - n_train - n_val
     splits = (["train"] * n_train) + (["val"] * n_val) + (["test"] * n_test)
-    random.Random(seed + 1).shuffle(splits)
+    # Stable ML train/validation split, not a security boundary.
+    random.Random(seed + 1).shuffle(splits)  # nosec B311
     regime_counts = {r: 0 for r in REGIME_NAMES}
     total_frames = 0
     t0 = time.time()

@@ -1,10 +1,12 @@
 One Link - for the people
 =========================
 
-One Link is a peer-to-peer LAN chat and file-sync tool that runs
-without accounts, without servers, and without telemetry. It is
-released under the GNU Affero General Public License version 3 or
-later (AGPLv3) starting with v0.20.7. See LICENSE for details.
+One Link is a direct-first chat and file-sync tool that requires no
+user account and ships no product analytics. Devices can use optional
+discovery and encrypted relay services when a direct route is unavailable;
+those services necessarily process the network metadata documented in
+docs/SECURITY.md. It is released under the GNU Affero General Public License
+version 3 or later (AGPLv3) starting with v0.20.7. See LICENSE for details.
 
 Why AGPLv3 and not MIT
 ----------------------
@@ -45,13 +47,15 @@ One Link commits to:
 
   - No accounts. Identity is a local Ed25519 keypair, period.
   - No phone number. No email. No SMS verification.
-  - No telemetry, no analytics, no third-party SDK, no
-    phone-home of any kind. (See docs/SECURITY.md "We promise"
-    section; the codebase is auditable and the test suite pins
-    this.)
+  - No product analytics, advertising telemetry, or third-party tracking
+    SDK. Network functions such as user-configured discovery, relay, and
+    update checks are disclosed and are not mislabeled as nonexistent. (See
+    docs/SECURITY.md; the codebase is auditable and the test suite pins this
+    boundary.)
   - No advertising. Ever.
-  - No selling user data. There is no user data on any server
-    we control to sell - the architecture forbids it.
+  - No selling user data. Optional infrastructure never receives message/file
+    plaintext or end-to-end keys, but its operators can observe the presence,
+    address, timing, size, and route metadata documented in the threat model.
   - No corporate substrate dependency that the user can't opt
     out of. Hardware secure-element APIs (Secure Enclave,
     StrongBox, TPM) are local primitives and are used; cloud

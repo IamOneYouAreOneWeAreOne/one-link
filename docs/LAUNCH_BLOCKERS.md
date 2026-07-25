@@ -1,6 +1,6 @@
 # Launch blockers — what's left, and how we solve it ourselves
 
-One Link is for the people. No accounts. No corporate
+One Link is for the people. No required hosted accounts. No corporate
 gatekeepers. We build everything ourselves. This doc enumerates
 what's left before launch and the sovereign-by-design path
 through each one — not "go pay a corporation to bless us."
@@ -45,9 +45,10 @@ A non-technical user may close the dialog thinking it's malware.
   you got past the SmartScreen warning. Here's why we don't
   pay Microsoft to remove it. (Read more)" — turn the
   friction into a moment of trust-building.
-- **`one-link verify-this-install` command** already ships
-  (rollup hash + Sigstore verify instructions). Users who
-  want to verify before running can.
+- **`one-link verify-this-install` command** ships as a fail-closed complete
+  package inventory. It requires an independently authenticated expected
+  rollup for comparison; `--inventory-only` is explicitly non-verifying.
+  Artifact authenticity still requires the exact-tag Sigstore bundle path.
 
 We accept the install-rate cost of the warning in exchange for
 the property that no corporation can revoke our right to ship.

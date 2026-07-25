@@ -37,7 +37,7 @@ pub const HYBRID_CIPHERTEXT_LEN: usize = ML_KEM_CT_LEN + X25519_LEN;
 /// Length of the derived shared secret in bytes (AEAD-key sized).
 pub const SHARED_SECRET_LEN: usize = 32;
 
-/// BLAKE3 derive_key context for the hybrid KEM combiner (ADR-0006 registry).
+/// BLAKE3 `derive_key` context for the hybrid KEM combiner (ADR-0006 registry).
 const COMBINER_CONTEXT: &str = "ol-pqkem-hybrid-v1";
 
 /// A hybrid 32-byte shared secret derived from the BLAKE3 combiner.
@@ -197,26 +197,26 @@ impl HybridCiphertext {
 pub fn keypair<R: RngCore + CryptoRng>(rng: &mut R) -> (HybridPublicKey, HybridSecretKey) {
     // ML-KEM-768.
     let (dk, ek) = MlKem768::generate(rng);
-    let ml_kem_ek_bytes_generic = ek.as_bytes();
-    let mut ml_kem_ek_bytes = [0u8; ML_KEM_EK_LEN];
-    ml_kem_ek_bytes.copy_from_slice(&ml_kem_ek_bytes_generic);
+    let encoded_public = ek.as_bytes();
+    let mut public_key_bytes = [0u8; ML_KEM_EK_LEN];
+    public_key_bytes.copy_from_slice(&encoded_public);
 
-    let ml_kem_dk_bytes_generic = dk.as_bytes();
-    let mut ml_kem_dk_bytes = Zeroizing::new([0u8; ML_KEM_DK_LEN]);
-    ml_kem_dk_bytes[..].copy_from_slice(&ml_kem_dk_bytes_generic);
+    let encoded_secret = dk.as_bytes();
+    let mut secret_key_bytes = Zeroizing::new([0u8; ML_KEM_DK_LEN]);
+    secret_key_bytes[..].copy_from_slice(&encoded_secret);
 
     // X25519.
-    let x25519_sk = X25519StaticSecret::random_from_rng(&mut *rng);
-    let x25519_pk = X25519PublicKey::from(&x25519_sk);
+    let responder_dh_secret = X25519StaticSecret::random_from_rng(&mut *rng);
+    let responder_dh_public = X25519PublicKey::from(&responder_dh_secret);
 
     (
         HybridPublicKey {
-            ml_kem_ek_bytes,
-            x25519_pk,
+            ml_kem_ek_bytes: public_key_bytes,
+            x25519_pk: responder_dh_public,
         },
         HybridSecretKey {
-            ml_kem_dk_bytes,
-            x25519_sk,
+            ml_kem_dk_bytes: secret_key_bytes,
+            x25519_sk: responder_dh_secret,
         },
     )
 }
@@ -234,7 +234,7 @@ pub fn encapsulate<R: RngCore + CryptoRng>(
     let ek_bytes_arr: hybrid_array::Array<u8, MlKem768EkEncoded> =
         hybrid_array::Array::from(pk.ml_kem_ek_bytes);
     let ek = <ml_kem::MlKem768 as KemCore>::EncapsulationKey::from_bytes(&ek_bytes_arr);
-    let (ct, mlkem_ss) = ek.encapsulate(rng).map_err(|_| PqKemError::MlKemFailed {
+    let (ct, mlkem_ss) = ek.encapsulate(rng).map_err(|()| PqKemError::MlKemFailed {
         reason: "encapsulate",
     })?;
     let mut ml_kem_ct_bytes = [0u8; ML_KEM_CT_LEN];
@@ -243,19 +243,19 @@ pub fn encapsulate<R: RngCore + CryptoRng>(
     mlkem_ss_bytes[..].copy_from_slice(&mlkem_ss);
 
     // X25519 side: ephemeral keypair, DH against the responder's static pk.
-    let eph_sk = X25519StaticSecret::random_from_rng(&mut *rng);
-    let eph_pk = X25519PublicKey::from(&eph_sk);
-    let x25519_ss = eph_sk.diffie_hellman(&pk.x25519_pk);
+    let sender_ephemeral_secret = X25519StaticSecret::random_from_rng(&mut *rng);
+    let sender_ephemeral_public = X25519PublicKey::from(&sender_ephemeral_secret);
+    let x25519_ss = sender_ephemeral_secret.diffie_hellman(&pk.x25519_pk);
 
     let ciphertext = HybridCiphertext {
         ml_kem_ct_bytes,
-        x25519_eph_pk: eph_pk,
+        x25519_eph_pk: sender_ephemeral_public,
     };
 
     let shared = combine(
         &ml_kem_ct_bytes,
         &mlkem_ss_bytes,
-        eph_pk.as_bytes(),
+        sender_ephemeral_public.as_bytes(),
         x25519_ss.as_bytes(),
     );
     Ok((ciphertext, shared))
@@ -276,7 +276,7 @@ pub fn decapsulate(
         hybrid_array::Array::from(ct.ml_kem_ct_bytes);
     let mlkem_ss = dk
         .decapsulate(&ct_bytes_arr)
-        .map_err(|_| PqKemError::MlKemFailed {
+        .map_err(|()| PqKemError::MlKemFailed {
             reason: "decapsulate",
         })?;
     let mut mlkem_ss_bytes = Zeroizing::new([0u8; X25519_LEN]);

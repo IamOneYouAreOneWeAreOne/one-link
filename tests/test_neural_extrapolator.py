@@ -1,8 +1,10 @@
-"""Tests for the Tier η neural extrapolator.
+"""Research-substrate tests for the Tier η neural extrapolator.
 
 Verifies the voice-predictor-backed extrapolator produces
 plausible continuations + falls back gracefully when seed data
 isn't available.
+
+Passing these isolated tests does not establish browser media-wire/playout E2E.
 """
 
 from __future__ import annotations

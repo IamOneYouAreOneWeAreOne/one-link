@@ -11,7 +11,11 @@ Companion docs:
 - [`ROADMAP.md`](./ROADMAP.md) — ship ordering.
 - [`PHONE_TIER.md`](./PHONE_TIER.md) — phone surface specification.
 
-Last updated: 2026-05-08.
+Last truth review: 2026-07-23.
+
+Milestone headings describe the target sequence. A section is not evidence of
+current capability unless it states `complete` and names executable release
+evidence; unqualified future sections remain specifications.
 
 ---
 
@@ -138,9 +142,11 @@ passphrase-to-wrap-key derivation).
 
 ## v0.16.0 — OPFS storage layer + at-rest encryption
 
-**Frontier:** every byte One Link writes to disk in the browser is
-AES-GCM encrypted with a per-device key never visible to the OS or
-to JS unless the user has unlocked the app in this session.
+**Target frontier:** private identity and application records newly committed
+by the browser are authenticated-encrypted at rest. While unlocked, browser
+crypto code and the host OS necessarily participate in key use; this does not
+claim immunity from a compromised OS, browser engine, extension, or active
+same-origin script.
 
 **Primitives:**
 - OPFS API (`navigator.storage.getDirectory()`) for blobs, chunks,
@@ -234,87 +240,68 @@ not corporate-recovery-dependent.
 
 ---
 
-## v0.18.0 — WebRTC DataChannel transport (the biggest single ship)
+## v0.18.0 — WebRTC DataChannel foundation (`partial`)
 
-**Frontier:** browser-to-browser direct P2P encrypted transport with
-NAT traversal, sub-second handshake on LAN, sub-3-second handshake
-across networks via STUN.
+The browser peer implements signed manual offer/answer exchange and two
+DataChannels: a reliable ordered control channel and an unordered bulk channel.
+The QR-to-daemon flow uses a daemon-local signaling WebSocket. Both paths load
+the daemon's disclosed STUN-only public ICE configuration *before* constructing
+the peer connection. When outside STUN/TURN is disabled, the daemon also offers
+a rate-limited local RFC 8489 Binding responder and the address observed on the
+accepted HTTPS socket for signed numeric-candidate augmentation. A loopback
+client also receives at most eight locally assigned addresses so two isolated
+same-host Firefox profiles can reach the browser-owned ICE socket. This keeps Firefox's randomized
+`.local` candidates intact while avoiding an mDNS-resolution dead end without
+contacting outside infrastructure. The authenticated owner call-media stack
+consumes the same strictly scoped address evidence when it trickles ICE: it
+sends the original browser candidate first, then bounded numeric equivalents
+through the existing call API. It does not inspect the browser user agent or
+introduce another signaling authority.
 
-**Primitives:**
-- `RTCPeerConnection` with our own ICE candidate handling
-- Multi-vendor STUN list (6 orgs, rotated)
-- DataChannel(s): 1 control channel (reliable, ordered) + 1 bulk
-  channel (unreliable, unordered) for chunk traffic
-- Signaling: project-hosted rendezvous OR manual QR-mode (zero servers)
-- WebRTC's encryption (DTLS-SRTP) is the outer layer; our Double
-  Ratchet (v0.7.2 primitive) is the inner layer. Defense in depth.
+Boundaries that must not be described as shipped capability:
 
-**Wire-format additions:**
-- All existing wire kinds run identically over WebRTC DataChannel as
-  they did over WebSocket; no protocol change. The DataChannel is
-  framed-message; same JSON encoding (with binary FILE_BIN_CHUNK).
-- New ICE-related kinds: `ICE_OFFER`, `ICE_ANSWER`, `ICE_CANDIDATE`
-  (relay over signaling).
+- The project rendezvous register/lookup API publishes signed presence; it does
+  not exchange browser WebRTC signaling and does not make a browser dialable.
+- The public browser ICE endpoint intentionally exposes no TURN credentials, so
+  the QR/manual browser flow has no relay fallback.
+- There is no six-organization rotating STUN implementation or measured
+  sub-second/sub-three-second production SLA in this repository.
+- The browser manual flow uses one bounded ICE-complete SDP blob. A timed-out
+  optional STUN server falls back to already gathered direct candidates.
 
-**State migration:** none persisted; live state only.
-
-**Test contract:** `tests/test_webrtc_transport_v0180.py`
-- LAN-only handshake completes in <1s p95
-- Cross-network with STUN handshake completes in <3s p95
-- Manual-QR signaling completes (no rendezvous touched)
-- Same-LAN mode skips STUN entirely (verify no STUN packets sent)
-
-**Defang shipped:** multi-vendor STUN (defangs single-STUN
-observation); manual-QR mode (total elision). See `SOVEREIGNTY.md`.
-
-**Stdlib reuse:** session-type patterns from
-`std/session/binary/channel.cl` inform the DataChannel framing
-abstraction (typed messages, in-order delivery contracts).
-
----
-
-## v0.19.0 — WebTransport bulk path + adaptive transport selector
-
-**Frontier:** large file transfers use HTTP/3 + QUIC's built-in
-connection migration so a Wi-Fi → cellular → Wi-Fi handoff doesn't
-drop the transfer. Adaptive selector picks the fastest live path
-per peer per chunk.
-
-**Primitives:**
-- `WebTransport` API for HTTP/3 streams (iOS Safari 17.4+, Android
-  Chrome 97+)
-- Adaptive bandit (multi-armed bandit; ε-greedy with decay) over
-  available paths per peer: BLE, LAN, WebRTC, WebTransport, relay
-- Path quality: EWMA over recent throughput + recent failure rate
-- Optional Web Push for "wake on incoming" (off by default)
-
-**Wire-format additions:** `transport_caps` field in CAPS frame
-advertising which paths the peer supports. Backward compatible.
-
-**State migration:** new IDB store `path_stats.v1`:
-`{peer_fp, path_kind, ewma_throughput_bps, ewma_failure_rate,
- last_used_ms, samples}`.
-
-**Test contract:** `tests/test_webtransport_v0190.py`
-- WebTransport handshake completes for browsers that support it
-- Adaptive selector chooses fastest path on a synthetic 3-path
-  test (LAN fast, WiFi slow, relay slowest)
-- Path stats persist across restart
-- Handoff: simulate Wi-Fi → cellular interface change; transfer
-  resumes without restart
-
-**Defang shipped:** Web Push optional (off by default). Encrypted
-payloads + per-device rotating pseudonym.
-
-**Stdlib reuse:**
-- Adaptive bandit reuses patterns from `std/concurrent/async/scheduler.cl`
-  task-priority semantics (architectural inspiration)
+`tests/test_webrtc_transport_v0180.py` is the structural regression suite;
+`tests/test_local_stun.py` covers the responder at the byte and UDP boundaries;
+and `tests/e2e/test_peer_live_transport.py` opens two independent real browser
+profiles, verifies both signed SDP envelopes, opens the control DataChannel,
+and exchanges probes in Chromium and Firefox. The separate owner call path is
+pinned by `tests/test_call_ui_media.py`; `tests/e2e/test_call_local_candidate_live.py`
+loads the shipped main UI and transforms an actual browser-gathered mDNS ICE
+candidate in Chromium and Firefox with public STUN disabled. Real multi-machine
+NAT diversity, TURN, WebKit-on-macOS/iOS, latency, and handoff claims still
+require separate physical-lab evidence.
 
 ---
 
-## v0.20.0 — BLE proximity + ultrasonic pairing
+## v0.19.0 — WebTransport/selector experiment (`partial`)
 
-**Frontier:** "hold two phones close, both see each other and
+`peer.html` contains isolated WebTransport opening, path-score, EWMA, and IDB
+storage helpers. They currently have no production send-path call sites, no
+WebTransport server endpoint, and no live handoff proof. The browser therefore
+does **not** advertise `webtransport_v1`; its OL-RDZ-1 registration uses only the
+existing signed `capabilities` vector and advertises paths that are actually
+usable.
+
+`tests/test_webtransport_selector_v0190.py` checks these experimental helper
+contracts only. It does not prove a WebTransport handshake, per-chunk adaptive
+routing, interface migration, persistent restart behavior, BLE selection,
+relay selection, or Web Push. Those remain missing until wired into a real
+transfer path and covered by executable browser/network tests.
+
+---
+
+## Planned — BLE proximity + evaluated pairing fallbacks
+
+**Target:** "hold two phones close, both see each other and
 offer to pair" — AirDrop-style on Android via Web Bluetooth; on iOS
 fallback to QR + ultrasonic chirp pairing in <2s.
 
@@ -333,14 +320,14 @@ v0.18.0.
 
 **State migration:** none.
 
-**Test contract:** `tests/test_proximity_pairing_v0200.py`
+**Required test contract (not present yet):** `tests/test_proximity_pairing_v0200.py`
 - Mock Web Bluetooth → pairing succeeds
 - Ultrasonic encode/decode round-trip on synthetic audio
 - QR encode/decode round-trip
 - Token expires after 60s
 
-**Defang shipped:** total elision of network for pairing — proximity
-modes use no internet at all. Air-gap tier ready.
+**Not shipped:** no BLE/ultrasonic implementation or physical-device E2E
+evidence exists in this repository, so no offline or air-gap claim is made.
 
 **Stdlib reuse:** `std/identity/anti_deception.cl` informs the
 risk-model that decides whether SAS is required (BLE proximity =
@@ -349,7 +336,13 @@ demand SAS).
 
 ---
 
-## v0.21.0 — MLS group ratchet (RFC 9420)
+## v0.21.0 — MLS group ratchet (RFC 9420) (`planned`; primitive only)
+
+**Current boundary:** `one_link.mls_treekem` and its tests exercise a local
+TreeKEM-style research primitive. There is no interoperable daemon MLS group
+protocol, no `mls_v1` capability advertisement, no MLS wire-message handler,
+and no MLS UI. The bullets below are target requirements, not current product
+behavior.
 
 **Frontier:** properly forward-secret group chat at scale.
 Replaces the v0.6.x sender-key scheme with deniable, post-compromise
@@ -373,7 +366,7 @@ secure, scalable group encryption.
 - `mls_groups.v1`: TreeKEM state, current epoch, member roster
 - `mls_keys.v1`: pending key packages
 
-**Test contract:** `tests/test_mls_group_v0210.py`
+**Required test contract (not present):** `tests/test_mls_group_v0210.py`
 - 3-member group; commit; epoch advances; old keys can't decrypt
   new messages
 - Member removal: removed member can't decrypt subsequent epoch
@@ -381,7 +374,7 @@ secure, scalable group encryption.
 - Cross-version compat: an MLS group with all-MLS members works
   alongside legacy groups in the same UI
 
-**Defang shipped:** post-quantum hybrid in the HPKE layer (defangs
+**Target defang:** post-quantum hybrid in the HPKE layer (defangs
 harvest-now-decrypt-later future quantum threats).
 
 **Stdlib reuse:**
@@ -392,14 +385,30 @@ harvest-now-decrypt-later future quantum threats).
 
 ---
 
-## v0.22.0 — Sealed sender + cover traffic
+## v0.22.0 — Sealed sender + cover traffic (`partial`)
 
-**Frontier:** even an adversary with full traffic visibility cannot
+**Current boundary:** the optional native v2 relay uses authenticated rotating
+pairwise route tags and recipient-seals both identity-bearing channel first
+flights. Live two-daemon relay tests prove that neither Ed25519 public key is
+present in the relay URL, control maps, or forwarded first-flight bytes. The
+legacy migration route is explicit and reports that it exposes destination and
+channel identity keys.
+
+That implemented boundary is **not sender anonymity** or traffic-analysis
+resistance. A relay still sees connecting IPs/sockets, timing, sizes, counts,
+rotating-tag linkage, and listener route-set cardinality; the colocated
+presence service may attempt IP/timing correlation. Ordinary message and file
+frames are protected by the end-to-end channel but are not individually
+wrapped in the `sealed_sender` envelope. Constant-rate cover scheduling and an
+independent multi-hop mix-net are not implemented as product routes. The
+target requirements below remain open.
+
+**Target frontier:** even an adversary with full traffic visibility cannot
 build a contact graph. Recipients can decrypt who a message is from;
 nobody else can. Plus per-link cover traffic + mix-net hop routing
 makes traffic timing/shape uninformative.
 
-**Primitives:**
+**Target primitives beyond the current relay boundary:**
 - Sealed sender (Signal-style): outer envelope identifies only the
   recipient; sender identity is in the encrypted-to-recipient inner
   envelope. The rendezvous and any observer see "someone sent peer
@@ -413,17 +422,20 @@ makes traffic timing/shape uninformative.
   messages route through 2-3 hops of volunteer peers; each hop
   sees only previous + next; payload onion-encrypted at each hop.
 
-**Wire-format additions:**
+**Target wire-format additions (not live):**
 - All messages now wrapped in sealed-sender envelope
 - New wire kinds: `MIX_HOP` (relay frame for mix-net), `COVER_DUMMY`
   (indistinguishable from real)
 - Backward compatible: peers without `sealed_sender_v1` cap fall
   back to plaintext-sender envelopes for messages between them.
 
-**State migration:** v22 schema:
+**Target state migration:** v22 schema:
 - `mix_volunteers.v1`: peers willing to relay (consent-gated)
 
-**Test contract:** `tests/test_sealed_sender_v0220.py`
+**Required full-product test contract (not present):**
+`tests/test_sealed_sender_v0220.py`. Current narrower evidence lives in
+`tests/test_sealed_sender_v0207.py`, `tests/test_sealed_relay_v0207.py`,
+`tests/test_relay_blinded_routing.py`, and `tests/test_relay_e2e.py`.
 - A passive observer between rendezvous and recipient cannot
   determine the sender from the wire
 - Cover traffic emits at Poisson rate when idle; real msgs slot in
@@ -431,7 +443,7 @@ makes traffic timing/shape uninformative.
   source identity not visible to hop B
 - All messages padded to fixed sizes (256B, 1KB, 4KB, 16KB buckets)
 
-**Defang shipped:** sealed sender + cover traffic + mix-net (defangs
+**Target defang:** sealed sender + cover traffic + mix-net (defangs
 rendezvous metadata; defangs traffic-shape analysis).
 
 **Stdlib reuse:**
@@ -581,11 +593,10 @@ journey:
   matrix in `SOVEREIGNTY.md`.
 - Reproducible build: clone source, build, hash matches signed release.
 
-**Defang shipped:** v1.0.0 is the **complete defang ladder fully
-deployed**:
+**Target v1.0.0 closure (not current):** the intended defang ladder is:
 - IPFS distribution + `.onion` mirror + signed `.html` archive
 - OPFS-stored identity, no OS keychain by default
-- Multi-vendor STUN + same-LAN mode + manual-QR mode
+- preset-resolved STUN + same-LAN mode + manual-QR mode
 - Sealed sender + cover traffic + mix-net (hardened tier on)
 - HLC for ordering
 - Multi-source entropy

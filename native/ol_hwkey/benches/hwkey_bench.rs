@@ -4,7 +4,7 @@
 //! backends will replace the BLAKE3-derived pubkey with a real
 //! attestation, but `check_tofu` itself stays at the same shape.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_main, Criterion};
 use ol_hwkey::{KeyStore, PublicKey, TofuStore};
 
 fn bench_check_tofu_match(c: &mut Criterion) {
@@ -42,10 +42,11 @@ fn bench_get_or_create(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_check_tofu_match,
-    bench_check_tofu_mismatch,
-    bench_get_or_create
-);
-criterion_main!(benches);
+fn benchmarks() {
+    let mut criterion = Criterion::default().configure_from_args();
+    bench_check_tofu_match(&mut criterion);
+    bench_check_tofu_mismatch(&mut criterion);
+    bench_get_or_create(&mut criterion);
+}
+
+criterion_main!(benchmarks);

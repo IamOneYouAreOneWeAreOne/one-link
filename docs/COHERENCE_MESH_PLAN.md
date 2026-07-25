@@ -1,7 +1,25 @@
 # Coherence Mesh Plan — sovereign-network track
 
 > Status: planning-of-record. Living document.
-> Last updated: 2026-05-12.
+> Last truth review: 2026-07-24.
+>
+> “Shipped” dates in the historical table below primarily record a Rust/Python
+> primitive landing. They do **not** establish daemon integration, default
+> activation, anonymity, post-quantum protection, hardware binding, production
+> readiness, or release evidence. Current product truth is reported by
+> `/api/audit`, the in-app feature truth matrix, and
+> `TRANSFER_RELIABILITY_AUDIT_2026-07-21.md`. Current daemon-to-daemon channels
+> now require the signed, key-confirmed v3 X25519 + ML-KEM-768 handshake when
+> the verified native ABI is present; classical interoperability is an explicit
+> migration override and is reported as non-PQ. This does **not** establish
+> post-quantum signatures/identity, browser-WebRTC PQ protection, onion
+> anonymity, DHT discovery, coherence-field multi-hop routing, or
+> hardware-attested transport. The optional native v2 relay now uses rotating
+> pairwise route tags and seals both identity-bearing channel first flights,
+> but that narrow wire property is not sender anonymity or traffic-analysis
+> resistance; a single relay still observes endpoints, timing, sizes, counts,
+> and tag linkage. No live message/file route uses onion routing or an
+> independent mix-net.
 
 ## What this is
 
@@ -21,13 +39,14 @@ contact (to friends) and SEPARATE addressable peers (to themselves).
 
 ## The single load-bearing insight
 
-> **Three trust tiers, three default privacy modes.** Self-traffic
-> is direct + fast because there's no metadata to hide. Friend-traffic
-> is 1-hop-onion + sealed-sender because the network observer must
-> not learn the social graph. Paranoid mode is 3-hop-onion + cover
-> traffic for users in hostile environments. The user never picks
-> which tier — pair-by-QR puts your devices in self-mesh, the
-> friend's contact lands in pinned, and paranoid is an explicit opt-in.
+> **Target architecture — three trust tiers, three default privacy modes.**
+> Self-traffic is direct-first for performance, an explicit tradeoff that still
+> exposes device endpoints, timing, and location changes to route observers.
+> Friend traffic targets multi-hop identifier blinding and cover scheduling
+> because the social graph is sensitive. A hardened mode targets independent
+> multi-hop routing and shape-matched cover for hostile environments. None of
+> those targets is an anonymity guarantee until the complete path survives its
+> global-passive-observer and multi-operator qualification gates.
 
 This is the only architectural decision that makes "insanely
 secure" and "insanely fast" compatible.
@@ -36,13 +55,13 @@ secure" and "insanely fast" compatible.
 
 | # | Layer | Status | What it delivers |
 |---|---|---|---|
-| 1 | **Post-quantum identity** | ✓ SHIPPED 2026-05-13 (`ol_pqsig` Ed25519 + ML-DSA-65 hybrid; PQ KEM already in `ol_pqkem` + Sphinx) | Ed25519 + Dilithium hybrid master key; ML-KEM-768 + X25519 hybrid per-device KEM; hardware-bound (Secure Enclave / StrongBox / TPM) where available; TOFU-degrading where not. Survives quantum. |
-| 2 | **Pair-by-QR + channel-reciprocity 2FA** | ✓ SHIPPED 2026-05-12 (Phase F2) | `ol_pair_qr` crate: Ed25519-signed Invite + transcript-bound PairResponse + PairConfirm + 5-word SAS over 30 bits + X25519 chain-key derivation. Optional Factor-2 mix-in via `ol_proximity_pair`. Refuses cross-invite replay + key-substitution + transcript-swap. Daemon-side via `pair_qr_native.{Inviter,Scanner}`. |
-| 3 | **Sovereign discovery** | ✓ SHIPPED 2026-05-13 | `ol_discovery` Kademlia DHT + `DhtNode` production orchestrator + Row 3 maintenance loops (`refresh_stale_buckets`, `republish_records`, `tick_maintenance`) + Python `run_maintenance_loop` asyncio helper. |
-| 4 | **Coherence-field routing** | ✓ SHIPPED 2026-05-11 (Phase E) | τ_c PDE-routed mesh transport. Routes through high-coherence peers; auto-avoids fragility before partition. Phase E ships full Helmholtz solver + Green-function nonlocal kernel + BE-RAR loss penalty. Production wiring complete this session. |
-| 5 | **Onion circuits** | ✓ SHIPPED 2026-05-12 (Phase F3) | `ol_onion` crate: nested ChaCha20-Poly1305 AEAD with per-layer ephemeral X25519 keys. Each hop only knows predecessor + successor. 1-hop, 3-hop, and up to 5-hop circuits supported. `build_onion` + `peel_one_layer` primitives wired into daemon via `onion_native.{build_onion,peel_one_layer,derive_pubkey}`. Sphinx-style single-pubkey blinding deferred to F3-polish v2; transport-layer padding addresses hop-count leak. |
-| 6 | **Cover traffic** | 🟡 PRIMITIVE SHIPPED 2026-05-12 (`afd3478`) | `ol_onion::sphinx::cover`: build_cover_packet (sentinel + random pad, indistinguishable size from real Sphinx) + CoverScheduler (Poisson-rate emission, BLAKE3-seeded for determinism). Daemon-side timer wiring + active-inference adaptive rate (Tier 2) deferred. |
-| 7 | **Hardware-attested transport** | ✓ SHIPPED 2026-05-13 | QUIC over TLS 1.3 (Phase A2) + `ol_onion::transport_obfs` complete: primitive byte XOR + obfs4-style handshake (BridgeKeypair + ClientHandshake + ServerHandshake with epoch-bound HMAC binding + 1-epoch skew tolerance) + bidirectional Session with per-direction keys. JA3-perfect TLS-fingerprint mimicry on top is a separate ship (the keys + nonces are here). |
+| 1 | **Post-quantum sessions / identity** | 🟡 SESSION KEM LIVE; PQ IDENTITY PARTIAL | Native ML-KEM-768 + X25519 protects current daemon channel establishment through a signed v3 transcript and mutual key confirmation. Identity authentication is still Ed25519 on this wire path; `ol_pqsig`/ML-DSA primitives are not yet the authoritative live identity signature. No product-wide “survives quantum” identity claim until every transport and rotation/recovery path uses and interoperates with the hybrid signature. |
+| 2 | **Pair-by-QR + channel-reciprocity 2FA** | 🟡 PRIMITIVES / NOT DAEMON-WIRED | `ol_pair_qr` implements signed Invite/Response/Confirm, SAS, X25519 derivation, and explicit bidirectional confirmation for externally supplied Factor-2 candidates. The Python adapters have no daemon caller. `ol_proximity_pair` is research-only: no probe acquisition, real interactive reconciliation, entropy proof, or hardware evidence; its old high-level secret API now fails closed. Physical-proximity / remote-relay resistance is not shipped. |
+| 3 | **Sovereign discovery** | 🟡 PRIMITIVE / DAEMON DHT ROUTE ABSENT | `ol_discovery` contains tested Kademlia records, lookup, UDP, and maintenance primitives. The current product route still uses mDNS plus configured rendezvous; it does not advertise decentralized DHT reachability. |
+| 4 | **Coherence-field routing** | 🟡 PRIMITIVE / SINGLE-HOP COUPLINGS ONLY | Helmholtz, Green-function, BE-RAR, and route-scoring primitives are Python-callable and selected metrics feed daemon decisions. There is no deployed multi-hop coherence-field relay graph, so “PDE-routed mesh transport” is still a target. |
+| 5 | **Onion circuits** | 🟡 PRIMITIVE / PRODUCT ROUTE ABSENT | `ol_onion` and Python adapters test nested AEAD, Sphinx, padding, and peel/build operations. Cover-frame experiments call parts of that substrate, but no live message/file route uses onion routing; no anonymity or default 1-hop/3-hop claim is active. |
+| 6 | **Cover traffic** | 🟡 EXPERIMENTAL WIRE SUBSTRATE | Sphinx cover packets, schedulers, adaptive-rate logic, and browser-peer cover-frame dispatch have tests. They are not a constant-rate production anonymity layer, do not make real and dummy traffic globally indistinguishable, and are not active across normal native relay traffic. |
+| 7 | **Obfuscated/attested transport** | 🟡 QUIC + OBFS PRIMITIVES; HARDWARE ATTESTATION PARTIAL | Identity-bound QUIC and obfs-style handshake/session primitives exist and have targeted gates. They do not establish universal hardware-backed identity, remote attestation on every channel, DPI indistinguishability, or JA3-perfect camouflage. |
 | 8 | **Personal Device Mesh** | 🟡 IN PROGRESS 2026-05-14 (F5 mobile handoff + telemetry budget slice) | Core planner, State schema v18/v19/v20, `/api/self-mesh`, root create/import, cert mint/enroll/revoke, invite deep-link/QR, daemon self-mesh presence, live secure-channel remote-instruct, per-action capabilities, replay protection, scoped path policy, audit/activity events, Activity-panel controls, trusted-folder management, self-route resolution (`self:<root>`), persisted performance telemetry, launcher/backend build-fingerprint binding, phone-first `/peer` self-mesh invite preview/claim shell, in-process two-daemon E2E, and real subprocess daemon E2E are wired. Next: native-device OS handoff polish and long-run soak evidence. |
 | 9 | **Threshold recovery** | ✓ SHIPPED 2026-05-13 | `ol_threshold_recovery` Shamir(K,N) over GF(2^8) + field-bound layer + WIRED into daemon's `social_recovery.py` via `split_compat`/`combine_compat` helpers. Pure-Python `threshold.py` stays as fallback. |
 | 10 | **Confidential-compute daemon** | ❌ NEW BUILD | Where hardware supports (Intel SGX, AMD SEV-SNP, Apple Secure Memory, ARM TrustZone), daemon runs in an enclave so even local malware can't extract keys. Beyond Signal. Beyond what any consumer messenger ships. |
@@ -52,7 +71,12 @@ secure" and "insanely fast" compatible.
 > Your phone, laptop, tablet, desktop are ONE identity to your friends
 > and SEPARATE addressable peers to you. Both at the same time.
 
-### Identity hierarchy
+### Target identity hierarchy
+
+The diagram below is the intended hybrid/hardware-bound end state. Current
+self-mesh authority uses the implemented Ed25519 root/device-certificate path;
+it does not yet make ML-DSA/Dilithium or hardware-backed key storage
+authoritative across platforms.
 
 ```
 Master identity (Ed25519 + Dilithium hybrid, hardware-bound when possible)
@@ -87,23 +111,26 @@ to whichever wakes first.
 
 ### Self-mesh routing
 
-Traffic between YOUR OWN devices is **self-traffic** — different
-routing semantics from friend-traffic:
+The table below is the **target routing policy**, not the current daemon route
+matrix. Today self-mesh instructions and file sends use the available direct or
+configured single-relay path; friend traffic does not automatically enter an
+onion circuit or constant-rate cover schedule.
 
 | | Self-traffic | Friend-traffic |
 |---|---|---|
 | Encryption | E2E AEAD (always) | E2E AEAD (always) |
-| Onion routing | **Skipped** (no metadata to hide — it's you talking to you) | 1-hop default, 3-hop paranoid |
-| Cover traffic | **Skipped** | On between pinned contacts |
+| Onion routing | **Skipped by direct-first default; endpoint/timing linkability is accepted, not absent** | Target: independent multi-hop route; hardened mode uses a larger anonymity set |
+| Cover traffic | **Skipped by direct-first default; traffic shape remains observable** | Target: real and dummy traffic share one measured schedule and size distribution |
 | NAT traversal | UDP hole punching via STUN-by-paired-peer | Same |
 | Path selection | Direct or circuit-relay via paired peer if NATs hostile | Coherence-field routing via paired peers |
 | Latency budget | Network speed only (~10-50ms) | +30-80ms onion (1-hop) or +100-200ms (3-hop) |
 
-The user said it best: **"can we also somehow be separate, like if
+The target experience is: **"can we also somehow be separate, like if
 you want to grab a file from your computer to send but on your phone
 in another state?"** That's self-traffic. No onion, no cover, no
-latency penalty. Just a direct encrypted transfer between two of
-your devices, NAT-traversed, at full network speed.
+latency penalty. The current source proves scoped remote instructions and
+daemon file dispatch, but not an across-state paired-peer STUN path, full
+network-speed SLA, or physical mobile handoff.
 
 ### Two flavors of cross-device file access
 
@@ -167,23 +194,27 @@ device of yours knows the lost subkey is dead. Inbound messages
 to it are rejected; the device, if it ever comes back online, can
 no longer participate.
 
-## How it stays insanely fast under all the security
+## Target performance design (not current qualification)
 
-Five mechanisms hide the security overhead from perceived latency:
+Five proposed mechanisms are intended to hide security overhead. The latency
+figures below are acceptance targets; the repository has no deployed onion
+circuit set from which to measure them.
 
-1. **Tiered routing.** Self-mesh skips onion + cover entirely.
-   Pinned-contact friend-chat uses 1-hop, not 3-hop. 3-hop is
-   explicit paranoid-mode opt-in for activists/journalists. Most
-   users never pay the heavy overhead.
+1. **Tiered routing.** Direct-first self-mesh skips onion + cover and accepts
+   observable endpoint/timing metadata. A one-relay friend path can blind a
+   stable recipient identifier but is not anonymity. The hardened target uses
+   at least two independently operated hops plus shape-matched cover; its
+   latency and anonymity-set gates must pass before it is enabled or claimed.
 
-2. **Pre-established circuits.** Active inference + bandit (Phase D,
-   shipped) learns who you message often. Pre-warms onion circuits
-   to those friends in idle time so first-hop is hot when you send.
+2. **Pre-established circuits (target).** The repository has transfer-oriented
+   predictor and route-bandit primitives, but no daemon circuit manager. A
+   future privacy-reviewed predictor may prewarm circuits without exposing or
+   retaining an avoidable contact-frequency graph.
 
-3. **Coherence-field path selection.** The τ_c routing (Phase E,
-   shipped) picks high-coherence (= low loss + low latency) paths.
-   Onion through high-τ_c peers is barely slower than direct
-   because the chosen paths are the fastest available.
+3. **Coherence-field path selection (target).** τ_c/coherence route-scoring
+   primitives exist, but no deployed multi-hop graph proves the proposed
+   latency. Any claim that an onion route is close to direct speed requires a
+   physical, independently operated circuit benchmark.
 
 4. **Multi-path racing.** Critical messages send over 2-3 paths
    simultaneously; whichever arrives first wins. Trades bandwidth
@@ -193,7 +224,7 @@ Five mechanisms hide the security overhead from perceived latency:
    means returning circuits resume instantly with no handshake.
    Sub-50ms warm-cache latency.
 
-### End-state perceived latency
+### Target end-state perceived latency
 
 - **Self-mesh (phone↔laptop):** network speed only (~30-60ms
   cross-country). Indistinguishable from a raw QUIC connection.
@@ -215,29 +246,36 @@ Three OneField Mesh primitives port straight over:
 |---|---|---|
 | `ol_threshold_recovery` | `OneField/onefield/privacy/sharding.cl` (Tier 15 production) | Port Shamir(k,n) over GF(2^8) to Rust crate; wire to identity master-key seed; UI for "Add this friend as a recovery contact" |
 | `ol_discovery` scaffold | `OneField/onefield/bridge/discovery.cl` | Port TTL + announce cadence logic; add Kademlia DHT layer with signed-peer-announcement entries on top |
-| `ol_proximity_pair` | `OneField/onefield/mesh/bootstrap.cl` | Port channel-reciprocity 128-probe protocol; wire as optional Factor-2 alongside QR-scan Factor-1 |
+| `ol_proximity_pair` | `OneField/onefield/mesh/bootstrap.cl` | Research primitives only. Remaining: aligned physical probes, authenticated interactive reconciliation, entropy/leakage analysis, explicit daemon wiring, and adversarial hardware validation before enabling as Factor-2. |
 
 **Phase F1 acceptance gate:**
 - Lose 2 of 5 trusted devices, recover identity from remaining 3 (Shamir round-trip test ≥ 1000 random seeds)
 - Two daemons find each other via DHT without any rendezvous server (LAN + cross-NAT both)
-- Captured-QR + remote-actor attack fails the channel-reciprocity gate
+- **UNMET:** captured-QR + remote-actor rejection needs a real probe protocol and adversarial hardware evidence; deterministic unit fixtures do not prove it
 
 ### Phase F2 — Pair-by-QR (foundation under everything else)
 
-Replace the `--lan` token URL with a proper Ed25519 + Dilithium pair
-handshake initiated by QR scan. Eliminates the entire class of
-remote-pair vulnerabilities.
+Target: replace the `--lan` token URL with a daemon-wired authenticated
+pairing handshake initiated by QR scan. The Rust/Python pair-by-QR primitive
+exists, but repository search finds no daemon caller; Dilithium is also not in
+this pair protocol. The replacement and remote-pair security claim therefore
+remain unshipped.
 
 **Phase F2 acceptance gate:**
-- Scan QR with phone → phone becomes paired peer of laptop
-- Laptop UI port is NEVER bound to LAN during the entire flow
-- Adversary on same WiFi cannot replay or MITM the pair handshake
-- Adversary with the captured QR but no proximity fails channel-reciprocity Factor 2
+- **UNMET E2E:** scan QR with phone → phone becomes paired peer of laptop
+- **UNPROVEN E2E:** laptop UI port is never bound to LAN during the flow
+- Primitive tests cover transcript/signature replay and substitution cases;
+  daemon/network red-team evidence is still required
+- **UNMET:** captured-QR/no-proximity rejection requires the unfinished
+  channel-reciprocity protocol and physical-device tests
 
-### Phase F3 — Onion circuits
+### Phase F3 — Onion circuits (`partial`: primitive only)
 
-1-hop default for pinned-contact friend-traffic; 3-hop for paranoid
-mode. Path selection via Phase E coherence-field routing.
+The target is 1-hop default for pinned-contact friend-traffic and 3-hop for
+paranoid mode, selected through coherence-field routing. Current code has
+tested onion/Sphinx build-and-peel primitives and limited cover-frame calls,
+but no live message/file route, relay circuit manager, default activation, or
+physical latency evidence.
 
 **Phase F3 acceptance gate:**
 - 1-hop circuit added latency < 80ms over LAN; < 200ms over cross-country WAN
@@ -246,11 +284,15 @@ mode. Path selection via Phase E coherence-field routing.
   no hop can decrypt destination metadata)
 - Path selection prefers high-τ_c relays (measurable via Phase E metrics)
 
-### Phase F4 — Sealed sender + cover traffic
+### Phase F4 — Sealed sender + cover traffic (`partial`)
 
-Hide sender identity from observers (sealed sender like Signal's,
-extended to the mesh). Add Loopix-style constant-rate cover traffic
-between pinned contacts.
+The implemented native v2 single-relay boundary uses rotating pairwise route
+tags and recipient-seals the identity-bearing HELLO/REPLY flights. It does not
+put either identity public key on that relay wire. It does not hide endpoint
+IPs, timing, size, count, tag linkage, or presence correlation and therefore
+does not satisfy the target of sender anonymity. Loopix-style constant-rate
+cover traffic and independent multi-hop mixing remain unimplemented product
+routes.
 
 **Phase F4 acceptance gate:**
 - Observer sniffing WiFi cannot determine who-talks-to-whom from
@@ -334,9 +376,12 @@ subkeys + device-presence CRDT + remote-instruct command channel.
 - Native URL handoff has per-user installers for Windows, macOS, and Linux:
   `install_url_protocol.ps1`, `install_url_protocol_macos.sh`, and
   `install_url_protocol_linux.sh`.
-- Browser-peer app traffic can be hardened behind the Row-10 attestation gate
-  (`ONE_LINK_REQUIRE_ATTESTED_PEERS=required`); control-plane handshake frames
-  bypass the gate, and daemon status reports the drop counter.
+- Browser-peer app traffic can require a fresh, channel-bound proof of the
+  enrolled Ed25519 device key
+  (`ONE_LINK_REQUIRE_BROWSER_IDENTITY_POSSESSION=required`). The legacy
+  `ONE_LINK_REQUIRE_ATTESTED_PEERS` spelling remains a compatibility alias,
+  but this browser proof is identity possession, not hardware or platform
+  attestation. Daemon status names that distinction and reports gate drops.
 - Row 6/7 browser-peer cover traffic is now wire-capable: control-channel
   open announces each side's Sphinx onion pubkey, inbound cover packets are
   peeled and sentinel-checked before being dropped, and daemon cover emission
@@ -427,30 +472,34 @@ corporate substrate.
 either has no external dependency or degrades gracefully to a
 sovereign substitute.
 
-## What this enables for real users
+## Target user outcomes after the open phases pass
 
 Cross-references the audit in this plan's conversation transcript:
 
-- **Individual users:** Talk to anyone, anywhere, with no account,
+- **Individual users (target):** Talk to anyone, anywhere, with no account,
   no phone number, no email. Lose your phone, recover from 3
   friends. All devices = one contact to friends; separate to you.
   Send any file size. Survives quantum. Works on hostile networks.
 
-- **Journalists / sources / activists:** The metadata is the threat.
-  Onion routing hides who-talks-to-whom. Cover traffic hides when.
-  No central party exists to subpoena. DPI can't fingerprint the
-  protocol.
+- **Journalists / sources / activists (target):** The metadata is the threat.
+  Independently operated multi-hop routing and shape-matched cover are intended
+  to reduce who-talks-to-whom and when leakage. The product must not claim that
+  those facts are hidden, that no party can be subpoenaed, or that DPI cannot
+  fingerprint it until the complete deployment and adversarial evidence exist.
 
-- **Refugees / displaced people:** Channel-reciprocity pair-trust
-  defeats remote-relay impersonation. DTN + disaster-bootstrap
-  primitives (from OneField) let the mesh self-organize without
-  pre-existing infrastructure.
+- **Refugees / displaced people (target):** validated channel-reciprocity
+  pair-trust could reduce remote-relay impersonation after the unmet protocol
+  and hardware gates above. DTN/disaster bootstrap also remains subject to
+  its own daemon and field-test evidence.
 
 - **Small ops (the strategic wedge):** Capability-based shares.
   CRDT folders. Enterprise infra for $0. No SaaS subscription, no
   per-seat pricing, no IT department needed.
 
 ## Feature comparison
+
+This is explicitly the **post-F target**, not a comparison of the current alpha
+or any released artifact.
 
 | Capability | One Link (post-F) | Signal | WhatsApp | iMessage | Telegram |
 |---|:-:|:-:|:-:|:-:|:-:|
@@ -493,9 +542,9 @@ once it lands.
 How each phase is validated end-to-end:
 
 1. **Per-phase acceptance gates** above. No ship without pass.
-2. **Per-PR adversarial fuzz**: inject packet loss, NAT changes,
-   captured-QR replay, channel-reciprocity spoofing — engine must
-   degrade gracefully.
+2. **Required adversarial fuzz / physical testing**: inject packet loss, NAT
+   changes, captured-QR replay, and (once a probe protocol exists)
+   channel-reciprocity spoofing. This is a gate, not current evidence.
 3. **Cross-platform soak**: 48h continuous mesh on Linux + macOS +
    Windows + iOS Safari + Android Chrome.
 4. **Sovereignty audit per release**: every dep verified against the
@@ -548,9 +597,9 @@ of the existing engine without re-architecting anything below.
    enclave?** Just the key handling (smallest TCB, easiest port)?
    Or the full crypto pipeline (more secure, larger TCB)? Lean:
    start with keys-only; expand.
-4. **Channel-reciprocity 2FA: is it mandatory or optional?**
-   Mandatory = harder for some users (need RF-capable devices);
-   optional = weaker. Lean: optional Factor 2 on hardware that
-   supports it; mandatory only in Hardened tier.
+4. **Channel-reciprocity 2FA: is it mandatory or optional?** This cannot be
+   enabled in either mode until the probe, reconciliation, entropy, daemon,
+   and hardware-validation gates above are complete. Current Factor-2 APIs
+   confirm candidate equality only; they do not prove physical provenance.
 
 These get resolved at ADR time as each phase starts.

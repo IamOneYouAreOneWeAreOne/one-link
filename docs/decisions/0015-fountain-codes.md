@@ -79,7 +79,10 @@ This is the gate. If the decoder fails more often than 1%, the parameters are wr
 
 **Positive:**
 - One-sender / K-receivers becomes O(N) source bandwidth instead of O(K×N). Big files distribute through a small swarm cleanly.
-- Lossy links recover without ARQ — every received packet is useful, no "retransmit slot X" round-trips. Big win on cellular handoff (Phase A2's connection migration plus fountain codes = unbreakable mid-transfer).
+- Lossy links can reduce explicit slot retransmission when enough independent
+  symbols arrive. This improves selected loss models but is not “unbreakable”:
+  bounded retries, integrity failure, resource exhaustion, path loss, process
+  death, and unqualified connection migration remain explicit failure modes.
 - Phase B v1 ships only the **LT path**; RaptorQ is a Phase B-2 upgrade if/when IPR is clean.
 - No new on-disk format changes; fountain-decoded chunks are stored exactly like fetched chunks (same `ChunkRecord` shape, including the `convergent` flag if applicable).
 

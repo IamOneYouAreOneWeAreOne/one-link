@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+import blake3
+
 from one_link.resume import (
     ResumeRegistry,
     ResumeSidecar,
@@ -57,6 +59,52 @@ def test_persist_and_load_round_trip(tmp_path: Path) -> None:
     assert loaded.schema_version == SCHEMA_VERSION
 
 
+def test_acceptance_granted_round_trips(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    partial = inbox / "accepted.bin"
+    partial.write_bytes(b"x")
+    sc = _make("e" * 64, "p" * 64, partial)
+    sc.acceptance_granted = True
+    persist_sidecar(inbox, sc)
+
+    loaded = load_sidecar(inbox, sc.blob_hex)
+
+    assert loaded is not None
+    assert loaded.acceptance_granted is True
+
+
+def test_old_digested_sidecar_survives_new_optional_field(tmp_path: Path) -> None:
+    """Adding acceptance_granted must not invalidate existing partials."""
+    inbox = tmp_path / "inbox"
+    partial = inbox / "legacy.bin"
+    partial.parent.mkdir()
+    partial.write_bytes(b"x")
+    raw = {
+        "blob_hex": "f" * 64,
+        "peer_fp": "p" * 64,
+        "name": "ACE.zip",
+        "size": 1,
+        "out_path": str(partial),
+        "cdc_chunks": [
+            {"index": 0, "hash": "a" * 64, "size": 1, "start": 0, "end": 1}
+        ],
+        "created_ms": 1,
+        "updated_ms": 2,
+        "schema_version": SCHEMA_VERSION,
+    }
+    canonical = json.dumps(raw, separators=(",", ":"), sort_keys=True).encode()
+    raw["digest"] = blake3.blake3(canonical).hexdigest()
+    p = sidecar_path(inbox, raw["blob_hex"])
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = load_sidecar(inbox, raw["blob_hex"])
+
+    assert loaded is not None
+    assert loaded.acceptance_granted is False
+
+
 def test_persist_is_atomic(tmp_path: Path) -> None:
     """A concurrent reader during a write must not see a torn JSON."""
     inbox = tmp_path / "inbox"
@@ -68,11 +116,12 @@ def test_persist_is_atomic(tmp_path: Path) -> None:
     # Now overwrite with a different payload; the os.replace path
     # means the on-disk file is always either the old or the new
     # version — never a partial write.
-    sc2 = _make("a" * 64, "p" * 64, partial, size=2048)
+    sc2 = _make("a" * 64, "p" * 64, partial)
+    sc2.name = "different.bin"
     persist_sidecar(inbox, sc2)
     loaded = load_sidecar(inbox, sc2.blob_hex)
     assert loaded is not None
-    assert loaded.size == 2048
+    assert loaded.name == "different.bin"
 
 
 def test_delete_is_idempotent(tmp_path: Path) -> None:
@@ -105,6 +154,50 @@ def test_load_returns_none_on_corrupt(tmp_path: Path) -> None:
     bad = inbox / ".resume" / ("c" * 64 + ".json")
     bad.write_text("{not valid json", encoding="utf-8")
     assert load_sidecar(inbox, "c" * 64) is None
+
+
+def test_load_rejects_non_object_and_wrong_scalar_types(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    resume_dir = inbox / ".resume"
+    resume_dir.mkdir(parents=True)
+    blob = "a" * 64
+    p = resume_dir / f"{blob}.json"
+    p.write_text("[]", encoding="utf-8")
+    assert load_sidecar(inbox, blob) is None
+
+    raw = {
+        "blob_hex": blob,
+        "peer_fp": "p" * 64,
+        "name": "bad.bin",
+        "size": True,
+        "out_path": str(inbox / "bad.bin"),
+        "cdc_chunks": [],
+        "schema_version": SCHEMA_VERSION,
+    }
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    assert load_sidecar(inbox, blob) is None
+
+
+def test_load_rejects_non_partition_manifest(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    partial = inbox / "bad.bin"
+    partial.write_bytes(b"x")
+    raw = {
+        "blob_hex": "b" * 64,
+        "peer_fp": "p" * 64,
+        "name": "bad.bin",
+        "size": 2,
+        "out_path": str(partial),
+        "cdc_chunks": [
+            {"index": 1, "hash": "c" * 64, "size": 1, "start": 1, "end": 2}
+        ],
+        "schema_version": SCHEMA_VERSION,
+    }
+    p = sidecar_path(inbox, raw["blob_hex"])
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    assert load_sidecar(inbox, raw["blob_hex"]) is None
 
 
 def test_load_returns_none_on_wrong_schema(tmp_path: Path) -> None:
@@ -210,6 +303,50 @@ def test_registry_load_from_empty_inbox(tmp_path: Path) -> None:
     assert len(reg) == 0
 
 
+def test_private_metadata_root_is_outside_remotely_writable_inbox(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    private = tmp_path / "data" / "transfer_resume"
+    inbox.mkdir()
+    partial = inbox / "real.bin"
+    partial.write_bytes(b"x")
+    sc = ResumeSidecar(
+        blob_hex="a" * 64,
+        peer_fp="p" * 64,
+        name="real.bin",
+        size=1,
+        out_path=str(partial),
+        cdc_chunks=[
+            {"index": 0, "hash": "b" * 64, "size": 1, "start": 0, "end": 1}
+        ],
+    )
+
+    persist_sidecar(inbox, sc, metadata_root=private)
+
+    assert not (inbox / ".resume").exists()
+    assert sidecar_path(inbox, sc.blob_hex, metadata_root=private).is_file()
+    reg = ResumeRegistry(inbox, metadata_root=private)
+    assert reg.load_from_inbox() == 1
+
+
+def test_legacy_inbox_sidecar_migration_resets_consent(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    private = tmp_path / "data" / "transfer_resume"
+    inbox.mkdir()
+    partial = inbox / "legacy.bin"
+    partial.write_bytes(b"x" * 1024)
+    sc = _make("a" * 64, "p" * 64, partial)
+    sc.acceptance_granted = True
+    persist_sidecar(inbox, sc)
+
+    reg = ResumeRegistry(inbox, metadata_root=private)
+    assert reg.load_from_inbox() == 1
+
+    migrated = load_sidecar(inbox, sc.blob_hex, metadata_root=private)
+    assert migrated is not None
+    assert migrated.acceptance_granted is False
+    assert not sidecar_path(inbox, sc.blob_hex).exists()
+
+
 def test_sidecar_touch_advances_updated_ms(tmp_path: Path) -> None:
     import time
     sc = _make("a" * 64, "P" * 64, tmp_path / "x.bin")
@@ -291,12 +428,12 @@ def test_sidecar_tampered_payload_rejected(tmp_path: Path) -> None:
     inbox.mkdir()
     partial = inbox / "x.bin"
     partial.write_bytes(b"x" * 32)
-    sc = _make("a" * 64, "P" * 64, partial, size=100)
+    sc = _make("a" * 64, "P" * 64, partial, size=1024)
     persist_sidecar(inbox, sc)
     p = sidecar_path(inbox, sc.blob_hex)
     # Flip a byte in the size field without touching the digest.
     raw = p.read_text(encoding="utf-8")
-    tampered = raw.replace('"size":100', '"size":9999')
+    tampered = raw.replace('"size":1024', '"size":9999')
     assert tampered != raw, "test setup: size substitution did not match"
     p.write_text(tampered, encoding="utf-8")
     assert load_sidecar(inbox, sc.blob_hex) is None
@@ -319,7 +456,9 @@ def test_sidecar_without_digest_treated_as_legacy(tmp_path: Path) -> None:
         "name": "legacy.bin",
         "size": 1024,
         "out_path": str(inbox / "x.bin"),
-        "cdc_chunks": [],
+        "cdc_chunks": [
+            {"index": 0, "hash": "a" * 64, "size": 1024, "start": 0, "end": 1024}
+        ],
         "schema_version": SCHEMA_VERSION,
     }
     p.write_text(_json.dumps(payload), encoding="utf-8")
@@ -336,7 +475,7 @@ def test_registry_snapshot_shape(tmp_path: Path) -> None:
     inbox.mkdir()
     partial = inbox / "x.bin"
     partial.write_bytes(b"x" * 64)
-    sc = _make("a" * 64, "P" * 64, partial, size=2048)
+    sc = _make("a" * 64, "P" * 64, partial, size=1024)
     persist_sidecar(inbox, sc)
 
     reg = ResumeRegistry(inbox)
@@ -347,7 +486,7 @@ def test_registry_snapshot_shape(tmp_path: Path) -> None:
     entry = snap[0]
     assert entry["blob"] == "a" * 64
     assert entry["peer_fp"] == "P" * 64
-    assert entry["size"] == 2048
+    assert entry["size"] == 1024
     assert entry["cdc_chunks_total"] == 2  # _make builds 2 chunks
     assert "cdc_chunks" not in entry  # the full manifest must NOT be inlined
     # JSON round-trip must succeed (catches accidentally non-serialisable values).
@@ -387,7 +526,9 @@ def test_registry_snapshot_enriched_with_cache_progress(tmp_path: Path) -> None:
     assert "cdc_chunks_cached" not in bare
 
 
-def test_registry_snapshot_cache_check_failure_isolated(tmp_path: Path) -> None:
+def test_registry_snapshot_cache_check_failure_isolated(
+    tmp_path: Path, caplog,
+) -> None:
     """If cache_check_fn raises, the snapshot must still ship —
     just without the progress enrichment. A broken cache lookup
     should not take down the control endpoint."""
@@ -395,7 +536,7 @@ def test_registry_snapshot_cache_check_failure_isolated(tmp_path: Path) -> None:
     inbox.mkdir()
     partial = inbox / "x.bin"
     partial.write_bytes(b"x" * 16)
-    persist_sidecar(inbox, _make("a" * 64, "P" * 64, partial, size=100))
+    persist_sidecar(inbox, _make("a" * 64, "P" * 64, partial, size=1024))
 
     reg = ResumeRegistry(inbox)
     reg.load_from_inbox()
@@ -403,9 +544,17 @@ def test_registry_snapshot_cache_check_failure_isolated(tmp_path: Path) -> None:
     def broken(hashes: list[str]) -> list[str]:
         raise RuntimeError("cache lookup is broken")
 
-    snap = reg.snapshot(cache_check_fn=broken)
+    with caplog.at_level("WARNING", logger="one_link.resume"):
+        snap = reg.snapshot(cache_check_fn=broken)
     assert len(snap) == 1
     # Basic fields survive...
     assert snap[0]["blob"] == "a" * 64
     # ...but the enrichment fields are absent (broken callback).
     assert "progress_ratio" not in snap[0]
+    assert "resume cache progress lookup failed" in caplog.text
+
+    def exhausted(_hashes: list[str]) -> list[str]:
+        raise MemoryError("cache process exhausted")
+
+    with pytest.raises(MemoryError, match="cache process exhausted"):
+        reg.snapshot(cache_check_fn=exhausted)

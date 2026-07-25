@@ -14,9 +14,7 @@ Exercises:
 
 from __future__ import annotations
 
-import threading
 import time
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest

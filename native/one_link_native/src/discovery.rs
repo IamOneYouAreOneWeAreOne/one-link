@@ -1,12 +1,12 @@
 //! pyo3 wrapper for [`ol_discovery`] — Coherence Mesh Phase F1.3.
 //!
 //! Exposes the SYNC pieces of the sovereign-discovery layer to the
-//! Python daemon: NodeId, SignedRecord, RoutingTable. The async
+//! Python daemon: `NodeId`, `SignedRecord`, `RoutingTable`. The async
 //! iterative-lookup driver stays in pure Rust for now; the daemon
 //! orchestrates lookup at the Python level using these sync primitives
 //! + its own async I/O (asyncio + UDP socket). When we want to push
-//! lookup into Rust we'll add a pyo3-asyncio binding; not blocking
-//! for first production wiring.
+//!   lookup into Rust we'll add a pyo3-asyncio binding; not blocking
+//!   for first production wiring.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -14,21 +14,31 @@ use pyo3::types::PyBytes;
 
 use std::net::SocketAddr;
 
-use ol_discovery::dht_node::{DhtError, DhtNode as InnerDhtNode};
+use ol_discovery::dht_node::{
+    DhtError, DhtNode as InnerDhtNode, MAX_RECORD_FUTURE_SKEW_SECS, MAX_SEED_PEERS,
+    MAX_STORED_RECORDS,
+};
 use ol_discovery::node_id::{NodeId as InnerNodeId, NODE_ID_BITS, NODE_ID_BYTES};
 use ol_discovery::record::{
-    PeerRecord as InnerPeerRecord, RecordError, SignedRecord as InnerSignedRecord,
-    RECORD_DEFAULT_TTL_SECS,
+    PeerRecord as InnerPeerRecord, RecordError, SignedRecord as InnerSignedRecord, MAX_ENDPOINTS,
+    MAX_ENDPOINT_LEN, MAX_RECORD_TTL_SECS, RECORD_DEFAULT_TTL_SECS,
 };
 use ol_discovery::routing::{
     BucketEntry as InnerBucketEntry, InsertOutcome as InnerInsertOutcome,
-    RoutingTable as InnerRoutingTable, K_BUCKET_DEFAULT, MAX_BUCKETS,
+    RoutingTable as InnerRoutingTable, K_BUCKET_DEFAULT, MAX_BUCKETS, MAX_K_BUCKET_SIZE,
 };
 
 // ── NodeId ────────────────────────────────────────────────────────
 
-/// A 256-bit Kademlia NodeId (= BLAKE3 of an Ed25519 master pubkey).
-#[pyclass(module = "one_link_native.discovery", frozen, eq, ord, hash)]
+/// A 256-bit Kademlia `NodeId` (= BLAKE3 of an Ed25519 master pubkey).
+#[pyclass(
+    from_py_object,
+    module = "one_link_native.discovery",
+    frozen,
+    eq,
+    ord,
+    hash
+)]
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 struct PyNodeId {
     inner: InnerNodeId,
@@ -52,7 +62,7 @@ impl PyNodeId {
         })
     }
 
-    /// Derive a NodeId from an Ed25519 master pubkey (32 bytes).
+    /// Derive a `NodeId` from an Ed25519 master pubkey (32 bytes).
     #[staticmethod]
     fn from_pubkey(pubkey: &[u8]) -> PyResult<Self> {
         if pubkey.len() != 32 {
@@ -70,21 +80,21 @@ impl PyNodeId {
 
     /// The underlying 32 bytes.
     fn as_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, self.inner.as_bytes())
+        PyBytes::new(py, self.inner.as_bytes())
     }
 
-    /// XOR distance to another NodeId, as 32 raw bytes.
+    /// XOR distance to another `NodeId`, as 32 raw bytes.
     fn distance<'py>(&self, py: Python<'py>, other: &Self) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.distance(&other.inner))
+        PyBytes::new(py, &self.inner.distance(&other.inner))
     }
 
     /// Number of leading zeros in XOR distance (= K-bucket index, or
-    /// NODE_ID_BITS=256 when self == other).
+    /// `NODE_ID_BITS=256` when self == other).
     fn xor_leading_zeros(&self, other: &Self) -> u32 {
         self.inner.xor_leading_zeros(&other.inner)
     }
 
-    /// K-bucket index for `other` from this NodeId's perspective.
+    /// K-bucket index for `other` from this `NodeId`'s perspective.
     /// Returns None for self.
     fn bucket_index(&self, other: &Self) -> Option<usize> {
         self.inner.bucket_index(&other.inner)
@@ -98,7 +108,7 @@ impl PyNodeId {
 // ── PeerRecord + SignedRecord ────────────────────────────────────
 
 /// Unsigned peer-announcement payload.
-#[pyclass(module = "one_link_native.discovery", frozen)]
+#[pyclass(from_py_object, module = "one_link_native.discovery", frozen)]
 #[derive(Clone)]
 struct PyPeerRecord {
     inner: InnerPeerRecord,
@@ -122,18 +132,18 @@ impl PyPeerRecord {
         }
         let mut pk = [0u8; 32];
         pk.copy_from_slice(publisher_pubkey);
-        Ok(Self {
-            inner: InnerPeerRecord {
-                publisher_pubkey: pk,
-                endpoints,
-                publish_time_unix,
-                ttl_secs,
-            },
-        })
+        let inner = InnerPeerRecord {
+            publisher_pubkey: pk,
+            endpoints,
+            publish_time_unix,
+            ttl_secs,
+        };
+        inner.validate().map_err(map_record_err)?;
+        Ok(Self { inner })
     }
 
     fn publisher_pubkey<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.publisher_pubkey)
+        PyBytes::new(py, &self.inner.publisher_pubkey)
     }
 
     fn endpoints(&self) -> Vec<String> {
@@ -149,7 +159,7 @@ impl PyPeerRecord {
     }
 
     fn canonical_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.canonical_bytes())
+        PyBytes::new(py, &self.inner.canonical_bytes())
     }
 
     fn is_fresh(&self, now_unix: u64) -> bool {
@@ -163,8 +173,8 @@ impl PyPeerRecord {
     }
 }
 
-/// A signed peer record (PeerRecord + Ed25519 signature).
-#[pyclass(module = "one_link_native.discovery", frozen)]
+/// A signed peer record (`PeerRecord` + Ed25519 signature).
+#[pyclass(from_py_object, module = "one_link_native.discovery", frozen)]
 #[derive(Clone)]
 struct PySignedRecord {
     inner: InnerSignedRecord,
@@ -173,7 +183,7 @@ struct PySignedRecord {
 #[pymethods]
 impl PySignedRecord {
     /// Sign a record with a 32-byte Ed25519 signing-key seed. The
-    /// signing key's public component must match record.publisher_pubkey
+    /// signing key's public component must match `record.publisher_pubkey`
     /// (defensive; prevents accidentally signing for the wrong identity).
     #[staticmethod]
     fn sign(record: &PyPeerRecord, signing_key_seed: &[u8]) -> PyResult<Self> {
@@ -193,6 +203,7 @@ impl PySignedRecord {
     /// Construct from explicit components (e.g., received off the wire).
     #[new]
     fn from_parts(record: &PyPeerRecord, signature: &[u8]) -> PyResult<Self> {
+        record.inner.validate().map_err(map_record_err)?;
         if signature.len() != 64 {
             return Err(PyValueError::new_err(format!(
                 "signature must be 64 bytes, got {}",
@@ -216,17 +227,17 @@ impl PySignedRecord {
     }
 
     fn signature<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.signature)
+        PyBytes::new(py, &self.inner.signature)
     }
 
     /// Verify the Ed25519 signature against the record's canonical
-    /// bytes. Returns None on success; raises ValueError on failure.
+    /// bytes. Returns None on success; raises `ValueError` on failure.
     fn verify(&self) -> PyResult<()> {
         self.inner.verify().map_err(map_record_err)
     }
 
     /// Verify + check freshness in one call. Returns True if signed
-    /// AND fresh; False if signed but expired; raises ValueError
+    /// AND fresh; False if signed but expired; raises `ValueError`
     /// on signature failure.
     fn verify_and_check_freshness(&self, now_unix: u64) -> PyResult<bool> {
         self.inner
@@ -250,7 +261,7 @@ struct PyRoutingTable {
 }
 
 /// Insert-outcome enum value as a 0-arg tuple-style Python type.
-#[pyclass(module = "one_link_native.discovery", frozen, eq)]
+#[pyclass(from_py_object, module = "one_link_native.discovery", frozen, eq)]
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum PyInsertOutcome {
     Inserted,
@@ -263,10 +274,15 @@ enum PyInsertOutcome {
 impl PyRoutingTable {
     #[new]
     #[pyo3(signature = (own_id, k = K_BUCKET_DEFAULT))]
-    fn new(own_id: &PyNodeId, k: usize) -> Self {
-        Self {
-            inner: InnerRoutingTable::with_k(own_id.inner, k),
+    fn new(own_id: &PyNodeId, k: usize) -> PyResult<Self> {
+        if !(1..=MAX_K_BUCKET_SIZE).contains(&k) {
+            return Err(PyValueError::new_err(format!(
+                "k must be between 1 and {MAX_K_BUCKET_SIZE}"
+            )));
         }
+        Ok(Self {
+            inner: InnerRoutingTable::with_k(own_id.inner, k),
+        })
     }
 
     fn own_id(&self) -> PyNodeId {
@@ -288,8 +304,8 @@ impl PyRoutingTable {
     }
 
     /// Insert (or update) a peer. Returns a tuple (outcome,
-    /// bucket_full_head). When outcome != BucketFull, the second
-    /// element is None; otherwise it's the head NodeId the caller
+    /// `bucket_full_head`). When outcome != `BucketFull`, the second
+    /// element is None; otherwise it's the head `NodeId` the caller
     /// should PING to test for replacement eligibility.
     fn insert(
         &mut self,
@@ -365,12 +381,12 @@ struct PyDhtNode {
 
 #[pymethods]
 impl PyDhtNode {
-    /// Construct a new DhtNode.
+    /// Construct a new `DhtNode`.
     ///
     /// `bind_addr`: "host:port" (e.g. "0.0.0.0:7117" for the daemon's
     /// UDP port, or "127.0.0.1:0" for an ephemeral test port).
-    /// `own_id`: this node's NodeId.
-    /// `seed_peers`: list of (NodeId, "host:port") tuples for
+    /// `own_id`: this node's `NodeId`.
+    /// `seed_peers`: list of (`NodeId`, "host:port") tuples for
     /// bootstrap. May be empty for the first node in a fresh swarm.
     #[new]
     #[pyo3(signature = (bind_addr, own_id, seed_peers))]
@@ -379,6 +395,12 @@ impl PyDhtNode {
         own_id: &PyNodeId,
         seed_peers: Vec<(PyNodeId, String)>,
     ) -> PyResult<Self> {
+        if seed_peers.len() > MAX_SEED_PEERS {
+            return Err(PyValueError::new_err(format!(
+                "seed_peers has {} entries; maximum is {MAX_SEED_PEERS}",
+                seed_peers.len()
+            )));
+        }
         let addr: SocketAddr = bind_addr
             .parse()
             .map_err(|e| PyValueError::new_err(format!("bad bind_addr {bind_addr:?}: {e}")))?;
@@ -397,7 +419,7 @@ impl PyDhtNode {
         Ok(node.local_addr().to_string())
     }
 
-    /// The node's own NodeId.
+    /// The node's own `NodeId`.
     fn own_id(&self) -> PyResult<PyNodeId> {
         let node = self.require()?;
         Ok(PyNodeId {
@@ -408,22 +430,23 @@ impl PyDhtNode {
     /// Publish this node's own self-record.
     fn publish_self_record(&self, record: &PySignedRecord) -> PyResult<()> {
         let node = self.require()?;
-        node.publish_self_record(record.inner.clone());
+        node.publish_self_record(record.inner.clone())
+            .map_err(map_dht_err)?;
         Ok(())
     }
 
-    /// Add a seed peer (NodeId + "host:port" address) to the
+    /// Add a seed peer (`NodeId` + "host:port" address) to the
     /// resolver + routing table.
     fn add_seed_peer(&self, id: &PyNodeId, addr: &str) -> PyResult<()> {
         let node = self.require()?;
         let addr: SocketAddr = addr
             .parse()
             .map_err(|e| PyValueError::new_err(format!("bad addr {addr:?}: {e}")))?;
-        node.add_seed_peer(id.inner, addr);
+        node.add_seed_peer(id.inner, addr).map_err(map_dht_err)?;
         Ok(())
     }
 
-    /// Iterative FIND_NODE lookup. Returns the K closest NodeIds.
+    /// Iterative `FIND_NODE` lookup. Returns the K closest `NodeIds`.
     /// Blocking.
     fn lookup(&self, target: &PyNodeId) -> PyResult<Vec<PyNodeId>> {
         let node = self.require()?;
@@ -431,7 +454,7 @@ impl PyDhtNode {
         Ok(ids.into_iter().map(|i| PyNodeId { inner: i }).collect())
     }
 
-    /// Iterative FIND_VALUE lookup. Returns the SignedRecord if the
+    /// Iterative `FIND_VALUE` lookup. Returns the `SignedRecord` if the
     /// target's record was found anywhere in the swarm; None if the
     /// search converged without finding it.
     fn lookup_record(&self, target: &PyNodeId) -> PyResult<Option<PySignedRecord>> {
@@ -484,7 +507,7 @@ impl PyDhtNode {
     }
 
     /// Graceful shutdown. After this call the node is dead and any
-    /// further method call returns a RuntimeError.
+    /// further method call returns a `RuntimeError`.
     fn shutdown(&mut self) {
         if let Some(node) = self.inner.take() {
             node.shutdown();
@@ -501,13 +524,13 @@ impl PyDhtNode {
 }
 
 fn map_dht_err(e: DhtError) -> PyErr {
-    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+    pyo3::exceptions::PyRuntimeError::new_err(crate::errors::owned_error_message(e))
 }
 
 // ── Error mapping ────────────────────────────────────────────────
 
 fn map_record_err(e: RecordError) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    PyValueError::new_err(crate::errors::owned_error_message(e))
 }
 
 // ── Module registration ──────────────────────────────────────────
@@ -537,6 +560,13 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("NODE_ID_BITS", NODE_ID_BITS)?;
     m.add("K_BUCKET_DEFAULT", K_BUCKET_DEFAULT)?;
     m.add("MAX_BUCKETS", MAX_BUCKETS)?;
+    m.add("MAX_K_BUCKET_SIZE", MAX_K_BUCKET_SIZE)?;
     m.add("RECORD_DEFAULT_TTL_SECS", RECORD_DEFAULT_TTL_SECS)?;
+    m.add("MAX_RECORD_TTL_SECS", MAX_RECORD_TTL_SECS)?;
+    m.add("MAX_ENDPOINTS", MAX_ENDPOINTS)?;
+    m.add("MAX_ENDPOINT_LEN", MAX_ENDPOINT_LEN)?;
+    m.add("MAX_SEED_PEERS", MAX_SEED_PEERS)?;
+    m.add("MAX_STORED_RECORDS", MAX_STORED_RECORDS)?;
+    m.add("MAX_RECORD_FUTURE_SKEW_SECS", MAX_RECORD_FUTURE_SKEW_SECS)?;
     Ok(())
 }

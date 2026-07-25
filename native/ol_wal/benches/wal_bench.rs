@@ -5,7 +5,7 @@
 //! makes 10K+ logical writes/s/thread possible per ADR-0005.
 //!
 //! Run:
-//!   cargo bench -p ol_wal --bench wal_bench
+//!   cargo bench -p `ol_wal` --bench `wal_bench`
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use ol_wal::{LogKind, Record, Wal};
@@ -52,5 +52,12 @@ fn bench_group_commit(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_group_commit);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{bench_group_commit, criterion_group};
+
+    criterion_group!(benches, bench_group_commit);
+}
+criterion_main!(criterion_benchmark_harness::benches);

@@ -1,32 +1,37 @@
-//! Row 10 — Confidential-compute daemon.
+//! Row 10 — confidential-operation primitives.
 //!
-//! The other nine rows secure data and metadata in motion + at rest. Row
-//! 10 closes the last gap: making sure even local malware with root or
-//! kernel access can't extract the long-term identity key.
+//! This crate defines sealed-blob and signed-attestation-envelope surfaces.
+//! It does not place the One Link daemon inside a confidential-compute
+//! boundary and does not close local root/kernel compromise of the long-term
+//! identity key.
 //!
 //! ## The threat model this row closes
 //!
 //! - **T-LOCAL-MAL-USER**: user-mode malware on the device wants to
-//!   read the master key from process memory. Software baseline
-//!   defeats this by keeping the master sealed at rest and only
-//!   unsealing inside a ChaCha20-Poly1305-wrapped ephemeral slot.
+//!   read the master key from process memory. The software provider does
+//!   **not** defeat malware that can inspect or inject into its process;
+//!   both its sealing key and transient plaintext live in that process.
+//!   It narrows accidental at-rest exposure outside the live provider.
 //! - **T-LOCAL-MAL-ROOT**: root malware (Linux) / SYSTEM (Windows) /
 //!   kexec / cold-boot. Software baseline DOES NOT defeat this — only
-//!   real hardware enclaves do. The provider tier
+//!   a correctly integrated and remotely verified hardware boundary may
+//!   reduce this risk. The provider tier
 //!   ([`ConfidentialTier::HardwareBound`] / `HardwareAttested`) is
 //!   the production answer; this crate provides the trait so per-
 //!   platform back-ends slot in without breaking the API.
 //! - **T-REMOTE-IMPERSONATE**: a peer wants proof that you're running
-//!   in a genuine enclave before exchanging long-term secrets. Solved
-//!   by [`attestation::AttestationDoc`] — PQ-hybrid signed by the
-//!   master, optionally counter-signed by a hardware quote.
+//!   in a genuine enclave before exchanging long-term secrets. An
+//!   [`attestation::AttestationDoc`] proves a signed transcript and fresh
+//!   challenge response. Genuine hardware claims additionally require a
+//!   verified vendor/EK chain and platform measurements; a provider tag or
+//!   self-contained ECDSA public key is insufficient.
 //!
 //! ## What ships in Phase 1 (this crate)
 //!
 //! - The [`ConfidentialProvider`] trait — the platform-agnostic
 //!   sealed-op surface (sealed sign / sealed derive child / verifying
 //!   key / attestation).
-//! - [`software::SoftwareProvider`] — production-grade software
+//! - [`software::SoftwareProvider`] — software reference
 //!   baseline. ChaCha20-Poly1305 sealing under a per-process
 //!   ephemeral key, [`Zeroize`] on drop, attestation signed by the
 //!   master identity. Tier = [`ConfidentialTier::Software`].
@@ -50,7 +55,9 @@
 //!   in any caller that opts into Row 10.
 //! - Row 9 ([`ol_threshold_recovery`]): the same field-witness
 //!   machinery binds attestation docs to a coherence-field state, so
-//!   an attestation captured at one location is useless at another.
+//!   a signed commitment can require verifier-supplied bytes to match. It
+//!   does not prove that those bytes came from a physical field/location or
+//!   prevent copying the same bytes to another host.
 //! - [`ol_hwkey::KeyGuarantee`]: [`ConfidentialTier`] generalises
 //!   this. `Software` < `HardwareBound` < `HardwareAttested`.
 //!
@@ -83,6 +90,8 @@ pub mod tier;
 pub mod windows_hardened;
 #[cfg(all(target_os = "windows", feature = "windows-tpm"))]
 pub mod windows_tpm;
+#[cfg(all(target_os = "windows", feature = "windows-tpm"))]
+pub use windows_hardened::WindowsHardenedProvider;
 
 pub use attestation::{
     fresh_attestation_nonce, sign_attestation, verify_attestation, AttestationDoc,

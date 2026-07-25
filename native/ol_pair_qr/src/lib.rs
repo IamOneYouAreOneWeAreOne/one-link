@@ -29,10 +29,13 @@
 //!    string — from the transcript. Users compare the SAS out-of-band
 //!    (verbally / visually) to detect any MITM, telephoto, or relay
 //!    attack on the network channel.
-//! 4. Optional **Factor-2 channel reciprocity** via
-//!    [`ol_proximity_pair`] mixes a quantized-channel-bits secret
-//!    into the final chain key, defeating remote-relay attacks even
-//!    if the SAS check were skipped.
+//! 4. The optional Factor-2 API can mix externally supplied candidate
+//!    material into the chain key and performs bidirectional, transcript-
+//!    bound key confirmation. It therefore rejects mismatched candidates
+//!    before they enter ratchet state. The companion [`ol_proximity_pair`]
+//!    crate currently provides research reconciliation primitives only; it
+//!    does not yet establish the entropy or hardware-backed proximity needed
+//!    to claim remote-relay resistance.
 //!
 //! ## Determinism
 //!
@@ -93,7 +96,9 @@ pub mod sas_words;
 pub mod scanner;
 pub mod transcript;
 
-pub use chain_key::{derive_chain_key, mix_factor2_recip, ChainKey, CHAIN_KEY_LEN};
+pub use chain_key::{
+    derive_chain_key, mix_factor2_recip, ChainKey, CHAIN_KEY_LEN, FACTOR2_CONFIRMATION_TAG_LEN,
+};
 pub use confirm::PairConfirm;
 pub use errors::PairError;
 pub use invite::{CapabilityScope, Invite, INVITE_MAX_BYTES, INVITE_NONCE_LEN, INVITE_VERSION};

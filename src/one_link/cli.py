@@ -17,9 +17,17 @@ from typing import Any, Optional
 import click
 
 from one_link import __version__
+from one_link import control_ipc
 from one_link import crash_log
 from one_link import daemon as daemon_mod
 from one_link.identity import load_or_create
+from one_link.fault_observability import report_best_effort_failure
+from one_link.process_security import (
+    hidden_creationflags,
+    launch_loopback_url,
+    resolve_system_executable,
+    trusted_process_env,
+)
 from one_link.safe_http import validated_urlopen
 
 
@@ -33,25 +41,33 @@ def _flush_stdio() -> None:
     the residual window between the last log call and process exit on
     abrupt termination paths.
     """
+
+    def _flush_one(target: Any) -> bool:
+        try:
+            target.flush()
+            return True
+        except Exception:
+            # This helper runs from crash/exit paths. Logging here can recurse
+            # through the very handler that failed, so failure is deliberately
+            # represented by the return value instead of another log record.
+            return False
+
     try:
-        for h in logging.getLogger().handlers:
-            try: h.flush()
-            except Exception: pass
+        handlers = tuple(logging.getLogger().handlers)
     except Exception:
-        pass
-    try: sys.stderr.flush()
-    except Exception: pass
-    try: sys.stdout.flush()
-    except Exception: pass
+        # A third-party logging manager may be tearing itself down already.
+        handlers = ()
+    for handler in handlers:
+        _flush_one(handler)
+    _flush_one(sys.stderr)
+    _flush_one(sys.stdout)
 
 
 def _connect_control(timeout: float = 5.0) -> tuple[socket.socket, int]:
     try:
         port = daemon_mod.read_control_port()
     except RuntimeError as e:
-        raise click.ClickException(
-            f"daemon not running ({e}).\nstart it with:  one-link daemon"
-        )
+        raise click.ClickException(f"daemon not running ({e}).\nstart it with:  one-link daemon")
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(5.0)
     try:
@@ -69,23 +85,17 @@ def _force_kill_windows_pid(pid: int) -> None:
     """Terminate a stale daemon process on Windows without invoking a shell."""
     if pid <= 0:
         raise ValueError("pid must be positive")
-    # 2026-06-04: build the path with ntpath, not pathlib. This code
-    # only ever runs on Windows (caller guards on os.name == 'nt'), but
-    # pathlib.Path on a POSIX CI runner joins with '/', producing
-    # 'C:\\Windows/System32/taskkill.exe' — which broke the
-    # cross-platform unit test and obscured the real argv. ntpath.join
-    # always emits the correct Windows path regardless of host OS, so
-    # the produced argv is deterministic everywhere.
-    import ntpath
-    taskkill = ntpath.join(
-        os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe",
-    )
+    taskkill = resolve_system_executable("taskkill.exe", platform_name="windows")
     subprocess.run(
         [taskkill, "/F", "/PID", str(int(pid))],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         timeout=3,
         check=False,
+        creationflags=hidden_creationflags(),
+        cwd=str(Path(taskkill).parent),
+        env=trusted_process_env(platform_name="windows"),
+        shell=False,
     )
 
 
@@ -102,51 +112,60 @@ def _request(cmd: str, *, timeout: float = 5.0, **kwargs) -> dict:
     transient connection-churn cases retry.
     """
     import time as _time
-    last_buf = b""
+
     backoff_s = (0.1, 0.4, 1.6)
     max_attempts = len(backoff_s) + 1
     last_conn_exc: Exception | None = None
+    try:
+        control_port = daemon_mod.read_control_port(clear_stale=False)
+    except RuntimeError as exc:
+        raise click.ClickException(f"daemon not running ({exc})") from exc
+    try:
+        secret = control_ipc.read_control_secret()
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
     for attempt in range(max_attempts):
-        s, _ = _connect_control(timeout=timeout)
         try:
-            try:
-                s.sendall(
-                    (json.dumps({"cmd": cmd, **kwargs}) + "\n").encode("utf-8"),
-                )
-                buf = b""
-                while not buf.endswith(b"\n"):
-                    chunk = s.recv(65536)
-                    if not chunk:
-                        break
-                    buf += chunk
-            except (ConnectionAbortedError, ConnectionResetError, OSError) as e:
-                last_conn_exc = e
-                buf = b""
-        finally:
-            s.close()
-        last_buf = buf
-        if buf and buf.endswith(b"\n"):
-            try:
-                return json.loads(buf.decode("utf-8").strip() or "{}")
-            except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                raise click.ClickException(
-                    f"daemon returned an invalid response while handling {cmd}: {e}"
-                )
+            return control_ipc.request_control(
+                control_port,
+                {"cmd": cmd, **kwargs},
+                timeout=timeout,
+                secret=secret,
+            )
+        except (
+            control_ipc.ControlAuthenticationError,
+            control_ipc.ControlFrameTooLarge,
+            control_ipc.ControlProtocolError,
+        ) as exc:
+            raise click.ClickException(
+                f"daemon control authentication failed while handling {cmd}: {exc}"
+            ) from exc
+        except (ConnectionAbortedError, ConnectionResetError, OSError, RuntimeError) as exc:
+            last_conn_exc = exc
         if attempt < len(backoff_s):
             _time.sleep(backoff_s[attempt])
     # All attempts exhausted.
-    if last_conn_exc is not None and not last_buf:
+    if last_conn_exc is not None:
         raise click.ClickException(
             f"daemon connection dropped while handling {cmd}; "
             "One Link will keep durable transfer work and resume after restart "
             f"({last_conn_exc})"
         )
-    try:
-        return json.loads(last_buf.decode("utf-8").strip() or "{}")
-    except (UnicodeDecodeError, json.JSONDecodeError) as e:
-        raise click.ClickException(
-            f"daemon returned an invalid response while handling {cmd}: {e}"
-        )
+    raise click.ClickException(f"daemon returned no response while handling {cmd}")
+
+
+def _ui_launch_info(*, timeout: float = 5.0) -> tuple[int, str]:
+    """Resolve a mutually authenticated control daemon and HTTP listener."""
+
+    # Lazy import avoids the CLI/app import cycle during command registration.
+    # The launcher verifies an HMAC instance proof and sends the bearer only on
+    # that same keep-alive socket before returning the credential to callers.
+    from one_link.app import _resolve_running_daemon
+
+    info = _resolve_running_daemon(timeout=timeout)
+    if info is None:
+        raise click.ClickException("authenticated daemon UI is not available")
+    return info.server_port, info.token
 
 
 @click.group()
@@ -157,11 +176,18 @@ def cli() -> None:
 
 @cli.command()
 @click.option("-v", "--verbose", is_flag=True)
-@click.option("--tray/--no-tray", default=True,
-              help="Run a system tray icon alongside the daemon (default: on).")
-@click.option("--open/--no-open", "open_browser", default=False,
-              help="Auto-open the web UI in the default browser after "
-                   "the local server is ready (default: off). Set ONE_LINK_AUTO_OPEN=1 to enable.")
+@click.option(
+    "--tray/--no-tray",
+    default=True,
+    help="Run a system tray icon alongside the daemon (default: on).",
+)
+@click.option(
+    "--open/--no-open",
+    "open_browser",
+    default=False,
+    help="Auto-open the web UI in the default browser after "
+    "the local server is ready (default: off). Set ONE_LINK_AUTO_OPEN=1 to enable.",
+)
 def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
     """Run the One Link daemon (leave this in a terminal/service)."""
     logging.basicConfig(
@@ -207,6 +233,7 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
         try:
             from one_link.tray import TrayIcon
             from one_link.paths import inbox_dir
+
             tray_icon = TrayIcon(
                 on_quit=lambda: os.kill(os.getpid(), signal.SIGINT),
                 inbox_path=inbox_dir(),
@@ -224,7 +251,8 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
                     )
         except Exception as e:
             logging.getLogger("one_link.tray").info(
-                "tray init skipped: %s", e,
+                "tray init skipped: %s",
+                e,
             )
 
     if tray:
@@ -234,48 +262,38 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
             name="one-link-tray-loader",
         ).start()
 
-    # 2026-05-22 UX: once the daemon binds, push the actual URL
-    # (with LAN IP, not loopback) into the tray so the hover-title
-    # tells the user where their phone should connect.
+    # Once the daemon binds, push an authenticated loopback owner URL into the
+    # tray. Phone pairing has its own short-lived public invitation flow.
     def _push_tray_url_when_ready() -> None:
         import time as _t
-        import socket as _sk
-        from one_link.paths import data_dir as _data_dir
-        # Poll for server.port to appear, up to 10 s.
+
+        # Poll authenticated control IPC, up to 10 s. The tray always opens the
+        # owner UI through loopback; it never publishes the owner bearer in a
+        # LAN URL or hover title.
         deadline = _t.time() + 10.0
-        port = None
-        port_file = _data_dir() / "server.port"
+        launch: tuple[int, str] | None = None
         while _t.time() < deadline:
             try:
-                if port_file.exists():
-                    port = int(port_file.read_text(encoding="utf-8").strip())
-                    break
+                launch = _ui_launch_info(timeout=1.0)
+                break
             except Exception:
-                pass
+                launch = None
             _t.sleep(0.1)
-        if port is None:
+        if launch is None:
             return
-        # Detect a LAN IP if the daemon is LAN-bound.
-        lan = "127.0.0.1"
-        try:
-            s = _sk.socket(_sk.AF_INET, _sk.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 1))
-            lan = s.getsockname()[0]
-            s.close()
-        except Exception:
-            pass
-        token = ""
-        try:
-            token = (_data_dir() / "ui.token").read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
-        url = f"http://{lan}:{port}/" + (f"?t={token}" if token else "")
+        port, token = launch
+        url = f"http://127.0.0.1:{port}/?t={token}"
         tray_icon = tray_icon_holder.get("icon")
         if tray_icon is not None:
             try:
                 tray_icon.set_url(url)
-            except Exception:
-                pass
+            except Exception as exc:
+                report_best_effort_failure(
+                    logging.getLogger("one_link.cli"),
+                    "tray_url_update",
+                    exc,
+                    level=logging.DEBUG,
+                )
 
     threading.Thread(
         target=_push_tray_url_when_ready,
@@ -290,28 +308,28 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
         # with a small splash that auto-retries.
         def _open_when_ready() -> None:
             import time as _t
-            import webbrowser as _wb
-            from one_link.paths import data_dir as _data_dir
+
             _t.sleep(2.5)
-            # Read the auth-gated UI port + token. Opening the bare
-            # URL can strand the user on "sign-in needed" after a
-            # restart; the bootstrap token is the supported owner path.
-            port_file = _data_dir() / "server.port"
-            token_file = _data_dir() / "ui.token"
             url = "http://127.0.0.1:7117/"
             try:
-                if port_file.exists():
-                    port = int(port_file.read_text(encoding="utf-8").strip())
-                    token = token_file.read_text(encoding="utf-8").strip() if token_file.exists() else ""
-                    url = f"http://127.0.0.1:{port}/" + (f"?t={token}" if token else "")
-            except Exception:
-                pass
+                port, token = _ui_launch_info(timeout=5.0)
+                url = f"http://127.0.0.1:{port}/?t={token}"
+            except (OSError, RuntimeError, ValueError, click.ClickException) as exc:
+                report_best_effort_failure(
+                    logging.getLogger("one_link.cli"),
+                    "authenticated_ui_launch_info",
+                    exc,
+                    interval_s=30.0,
+                )
             try:
-                _wb.open(url)
-                logging.getLogger("one_link.cli").info("opened browser at %s", url)
+                launch_loopback_url(url)
+                logging.getLogger("one_link.cli").info(
+                    "opened authenticated browser UI on loopback"
+                )
             except Exception as e:
                 logging.getLogger("one_link.cli").info(
-                    "could not auto-open browser: %s; visit the URL manually", e,
+                    "could not auto-open browser: %s; visit the URL manually",
+                    e,
                 )
 
         threading.Thread(
@@ -328,7 +346,8 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
         # Anything else fell out of run() — fall through to the broad
         # crash-dump branch below so the operator gets a traceback file.
         logging.getLogger("one_link.daemon").critical(
-            "daemon exited with uncaught RuntimeError", exc_info=True,
+            "daemon exited with uncaught RuntimeError",
+            exc_info=True,
         )
         crash_log.dump_crash("daemon-uncaught", e)
         _flush_stdio()
@@ -343,7 +362,8 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
         # forensic crash file (survives stderr-buffer loss). Then flush
         # everything we can before re-raising.
         logging.getLogger("one_link.daemon").critical(
-            "daemon exited with uncaught exception", exc_info=True,
+            "daemon exited with uncaught exception",
+            exc_info=True,
         )
         crash_log.dump_crash("daemon-uncaught", e)
         _flush_stdio()
@@ -351,8 +371,15 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
     finally:
         tray_icon = tray_icon_holder.get("icon")
         if tray_icon is not None:
-            try: tray_icon.stop()
-            except Exception: pass
+            try:
+                tray_icon.stop()
+            except Exception as exc:
+                report_best_effort_failure(
+                    logging.getLogger("one_link.cli"),
+                    "tray_stop",
+                    exc,
+                    level=logging.DEBUG,
+                )
         _flush_stdio()
 
 
@@ -363,8 +390,8 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
     show_default=True,
     type=click.IntRange(1, 100),
     help="Trip the supervisor's circuit breaker after this many "
-         "crashes in --window-s seconds. A deterministic crash loop "
-         "needs human attention, not infinite respawn.",
+    "crashes in --window-s seconds. A deterministic crash loop "
+    "needs human attention, not infinite respawn.",
 )
 @click.option(
     "--window-s",
@@ -409,6 +436,7 @@ def autostart():
 def autostart_status() -> None:
     """Print whether One Link is registered to start at login."""
     from one_link import autostart as autostart_mod
+
     enabled = autostart_mod.is_enabled()
     path = autostart_mod.artifact_path()
     click.echo("autostart: " + ("ENABLED" if enabled else "disabled"))
@@ -425,6 +453,7 @@ def autostart_enable() -> None:
     launcher path (so upgrading the binary picks up the new path
     automatically when you re-enable)."""
     from one_link import autostart as autostart_mod
+
     path = autostart_mod.enable()
     click.echo(f"autostart enabled. Wrote: {path}")
     click.echo("One Link will start at your next login under the supervisor.")
@@ -434,6 +463,7 @@ def autostart_enable() -> None:
 def autostart_disable() -> None:
     """Remove the auto-start registration."""
     from one_link import autostart as autostart_mod
+
     removed = autostart_mod.disable()
     if removed:
         click.echo("autostart disabled.")
@@ -470,6 +500,7 @@ def backup_show():
     """Print the 24-word recovery phrase. Write it down on paper."""
     from one_link import master_seed, mnemonic
     from one_link.paths import data_dir
+
     seed = master_seed.load_seed(data_dir())
     if seed is None:
         click.echo(
@@ -482,13 +513,13 @@ def backup_show():
     phrase = mnemonic.encode(seed)
     click.echo("=" * 64)
     click.echo("WRITE THESE 24 WORDS DOWN ON PAPER. KEEP THE PAPER SAFE.")
-    click.echo("This is the ONLY way to recover your One Link identity")
-    click.echo("if you lose this device.")
+    click.echo("This is your paper recovery path if you lose this device.")
+    click.echo("Trusted-contact shares are a separate recovery alternative.")
     click.echo("=" * 64)
     words = phrase.split()
     for row in range(0, len(words), 4):
-        line_words = words[row:row + 4]
-        numbered = [f"{i+row+1:>2}. {w:<10}" for i, w in enumerate(line_words)]
+        line_words = words[row : row + 4]
+        numbered = [f"{i + row + 1:>2}. {w:<10}" for i, w in enumerate(line_words)]
         click.echo("  ".join(numbered))
     click.echo("=" * 64)
     click.echo("Anyone with these 24 words can take over your identity.")
@@ -499,7 +530,8 @@ def backup_show():
 
 @backup.command("init")
 @click.option(
-    "--force", is_flag=True,
+    "--force",
+    is_flag=True,
     help="Rotate identity even if existing keys are in use.",
 )
 def backup_init(force):
@@ -515,52 +547,69 @@ def backup_init(force):
     auto-creates a seed on first launch. This command is for
     EXISTING installs that want to opt into recovery.
     """
-    from one_link import master_seed
+    import secrets
+
+    from one_link import master_seed, recovery_api
+    from one_link.key_material import KeyMaterialError
     from one_link.paths import data_dir, key_path
+
     if master_seed.has_seed(data_dir()):
         click.echo(
             "A master seed already exists. Run `one-link backup show`\n"
-            "to view its 24-word phrase. To rotate the seed (and thus\n"
-            "the identity), delete the seed file at\n"
-            f"  {data_dir() / master_seed.SEED_FILENAME}\n"
-            "and re-run this command.",
+            "to view its 24-word phrase. Never delete authority files\n"
+            "by hand; use an explicit recovery transaction if this\n"
+            "identity must be replaced.",
             err=True,
         )
         raise click.exceptions.Exit(1)
-    if key_path().is_file() and not force:
+    root = data_dir()
+    identity_path = key_path()
+    try:
+        evidence = recovery_api.restore_artifact_evidence(
+            root,
+            identity_path=identity_path,
+        )
+    except Exception as exc:
+        raise click.ClickException(
+            f"could not prove this install is safe to initialize: {exc}"
+        ) from exc
+    if any(evidence.values()) and not force:
         click.echo(
-            "An existing identity key is in use. Initializing a master\n"
-            "seed at this point will REPLACE that identity (peers will\n"
-            "see you as a different device after the swap).\n"
+            "Existing authority or state is in use. Initializing a master\n"
+            "seed will replace that identity after a controlled restart\n"
+            "(peers will see a different device).\n"
             "Re-run with --force to confirm rotation.",
             err=True,
         )
         raise click.exceptions.Exit(1)
-    # If --force was passed and an identity exists: delete the old
-    # identity so the daemon will derive a fresh one from the seed.
-    if key_path().is_file() and force:
-        try:
-            key_path().unlink()
-        except OSError as e:
-            click.echo(f"Could not remove old identity: {e}", err=True)
-            raise click.exceptions.Exit(1)
-        # Also drop the DRK so it gets re-derived from the seed.
-        from one_link.lockbox import DRK_FILENAME
-        drk_path = data_dir() / DRK_FILENAME
-        with __import__("contextlib").suppress(OSError):
-            drk_path.unlink()
-    seed, _ = master_seed.load_or_create_seed(data_dir())
-    click.echo(
-        "Master seed created. Run `one-link backup show` and write\n"
-        "down the 24 words on paper. Then start the daemon — it will\n"
-        "derive a fresh identity + at-rest key from the seed."
-    )
+    seed = secrets.token_bytes(master_seed.SEED_LEN_BYTES)
+    try:
+        result = recovery_api.stage_seed_authority_replacement(
+            data_dir=root,
+            identity_path=identity_path,
+            seed=seed,
+            allow_replace=force,
+        )
+    except (ValueError, KeyMaterialError, recovery_api.RecoveryTransactionError) as exc:
+        raise click.ClickException(f"could not initialize recovery: {exc}") from exc
+    if result["pending_restart"]:
+        click.echo(
+            "Recovery initialization staged durably. Existing keys were not\n"
+            "deleted or changed. Stop every One Link process, start the daemon\n"
+            "once to commit the transaction, then run `one-link backup show`."
+        )
+    else:
+        click.echo(
+            "Master seed, identity, and at-rest authority created and verified.\n"
+            "Run `one-link backup show` and write the 24 words on paper."
+        )
 
 
 @backup.command("restore")
 @click.argument("phrase_words", nargs=-1)
 @click.option(
-    "--force", is_flag=True,
+    "--force",
+    is_flag=True,
     help="Overwrite existing identity even if one is present.",
 )
 def backup_restore(phrase_words, force):
@@ -577,19 +626,26 @@ def backup_restore(phrase_words, force):
     The seed file is created from the phrase; on next daemon
     launch the identity + DRK derive from it.
     """
-    from one_link import master_seed, mnemonic
+    from one_link import recovery_api
+    from one_link.key_material import KeyMaterialError
     from one_link.paths import data_dir, key_path
-    if master_seed.has_seed(data_dir()) and not force:
-        click.echo(
-            "A master seed already exists on this install. To replace\n"
-            "it with a restored seed, re-run with --force.",
-            err=True,
+
+    root = data_dir()
+    identity_path = key_path()
+    try:
+        evidence = recovery_api.restore_artifact_evidence(
+            root,
+            identity_path=identity_path,
         )
-        raise click.exceptions.Exit(1)
-    if key_path().is_file() and not force:
+    except Exception as exc:
+        raise click.ClickException(
+            f"could not prove this install is safe to restore: {exc}"
+        ) from exc
+    if any(evidence.values()) and not force:
         click.echo(
-            "An existing identity key is in use. Restoring will\n"
-            "REPLACE that identity. Re-run with --force to confirm.",
+            "Existing authority or state is in use. Restoring will replace\n"
+            "that identity after a controlled restart. Re-run with --force\n"
+            "to confirm.",
             err=True,
         )
         raise click.exceptions.Exit(1)
@@ -599,29 +655,32 @@ def backup_restore(phrase_words, force):
             "(Hidden input; the phrase will not be echoed.)"
         )
         raw = click.prompt(
-            "phrase", hide_input=True, prompt_suffix="> ",
+            "phrase",
+            hide_input=True,
+            prompt_suffix="> ",
         )
     else:
         raw = " ".join(phrase_words)
     try:
-        seed = mnemonic.decode(raw)
-    except ValueError as e:
-        click.echo(f"Invalid phrase: {e}", err=True)
-        raise click.exceptions.Exit(1)
-    # Force-mode: clear out the old identity + DRK so they
-    # re-derive from the restored seed on next launch.
-    if force:
-        with __import__("contextlib").suppress(OSError):
-            key_path().unlink()
-        from one_link.lockbox import DRK_FILENAME
-        with __import__("contextlib").suppress(OSError):
-            (data_dir() / DRK_FILENAME).unlink()
-    master_seed.store_seed(data_dir(), seed)
-    click.echo(
-        "Master seed restored. Start the daemon — it will derive\n"
-        "your identity + at-rest key from the restored seed.\n"
-        "Peers paired with the original device will recognize you."
-    )
+        recovery_api.restore_seed_from_phrase(
+            data_dir=root,
+            phrase=raw,
+            delete_identity_files=force,
+        )
+    except ValueError as exc:
+        raise click.ClickException(f"invalid phrase: {exc}") from exc
+    except (KeyMaterialError, recovery_api.RecoveryTransactionError) as exc:
+        raise click.ClickException(f"restore could not be staged: {exc}") from exc
+    if recovery_api.has_pending_recovery(root):
+        click.echo(
+            "Recovery staged durably; existing authority is unchanged. Stop\n"
+            "every One Link process and start the daemon once to commit it."
+        )
+    else:
+        click.echo(
+            "Master seed, identity, and at-rest authority restored and verified.\n"
+            "Peers paired with the original device will recognize you."
+        )
 
 
 @backup.command("test")
@@ -644,6 +703,7 @@ def backup_test(phrase_words):
     """
     from one_link import recovery_api
     from one_link.paths import data_dir
+
     if not phrase_words:
         click.echo(
             "Type the 24 words separated by spaces, then press Enter.\n"
@@ -653,16 +713,14 @@ def backup_test(phrase_words):
     else:
         raw = " ".join(phrase_words)
     res = recovery_api.test_phrase_against_current_seed(
-        data_dir=data_dir(), phrase=raw,
+        data_dir=data_dir(),
+        phrase=raw,
     )
     if not res["valid_checksum"]:
         click.echo(f"INVALID PHRASE: {res['error']}", err=True)
         raise click.exceptions.Exit(1)
     if not res["has_current_identity"]:
-        click.echo(
-            "Valid 24-word phrase, but this device has no master seed "
-            "to compare against."
-        )
+        click.echo("Valid 24-word phrase, but this device has no master seed to compare against.")
         raise click.exceptions.Exit(2)
     if res["matches_current_identity"]:
         click.echo("VERIFIED: this phrase matches your current identity.")
@@ -696,8 +754,12 @@ def backup_test_bundle(bundle_path, phrase_words):
       0 = bundle decrypted + plaintext archive readable
       1 = phrase invalid OR bundle failed to decrypt
     """
-    from one_link import recovery_api
-    bundle_bytes = Path(bundle_path).read_bytes()
+    from one_link import backup_bundle, recovery_api
+
+    try:
+        bundle_bytes = backup_bundle.read_bundle_file_bounded(Path(bundle_path))
+    except ValueError as exc:
+        raise click.ClickException(f"bundle read failed: {exc}") from exc
     if not phrase_words:
         click.echo(
             "Type the 24 words separated by spaces, then press Enter.\n"
@@ -707,7 +769,8 @@ def backup_test_bundle(bundle_path, phrase_words):
     else:
         raw = " ".join(phrase_words)
     res = recovery_api.test_bundle_against_phrase(
-        phrase=raw, bundle_bytes=bundle_bytes,
+        phrase=raw,
+        bundle_bytes=bundle_bytes,
     )
     if not res["valid_phrase"]:
         click.echo(f"INVALID PHRASE: {res['error']}", err=True)
@@ -727,12 +790,14 @@ def backup_test_bundle(bundle_path, phrase_words):
 @backup.command("export")
 @click.argument("out_path", type=click.Path(dir_okay=False, path_type=Path))
 @click.option(
-    "--include-files", is_flag=True,
+    "--include-files",
+    is_flag=True,
     help=(
-        "Also include everything under inbox/. Inboxes can be GB-sized; "
-        "default is to bundle only the load-bearing state (sqlite + keys + "
-        "settings). Identity, chat history, groups, and folder configs are "
-        "ALWAYS included regardless of this flag."
+        "Also include everything under inbox/. The encoded .olbak payload is "
+        "capped at 256 MiB for bounded restore; use ordinary file backup for "
+        "larger or poorly-compressing inboxes. By default only load-bearing "
+        "state is bundled. Identity, chat history, groups, and folder configs "
+        "are ALWAYS included regardless of this flag."
     ),
 )
 def backup_export(out_path, include_files):
@@ -752,7 +817,9 @@ def backup_export(out_path, include_files):
     `one-link backup init` first to create one).
     """
     from one_link import backup_bundle, master_seed
+    from one_link.key_material import KeyMaterialError
     from one_link.paths import data_dir
+
     seed = master_seed.load_seed(data_dir())
     if seed is None:
         click.echo(
@@ -776,24 +843,27 @@ def backup_export(out_path, include_files):
             out_path=out_path,
             include_files=include_files,
         )
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, KeyMaterialError) as e:
         raise click.ClickException(f"export failed: {e}")
     click.echo(f"wrote {n} bytes -> {out_path}")
     click.echo(
         "This file is encrypted under your master seed. To restore it on a\n"
-        "new device, copy it there + run `one-link backup import <path>`\n"
-        "AFTER you've restored the 24-word phrase on that device."
+        "new device, restore the 24-word phrase first. If that command stages\n"
+        "a restart, complete it; then run `one-link backup import <path>\n"
+        "--overwrite` through the same safe recovery transaction."
     )
 
 
 @backup.command("import")
 @click.argument("bundle_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
-    "--overwrite", is_flag=True,
-    help="Replace files at the target if they already exist.",
+    "--overwrite",
+    is_flag=True,
+    help="Validate and stage replacement of the active install at restart.",
 )
 @click.option(
-    "--target-dir", type=click.Path(file_okay=False, path_type=Path),
+    "--target-dir",
+    type=click.Path(file_okay=False, path_type=Path),
     default=None,
     help="Override the install's data dir (advanced; default is correct).",
 )
@@ -804,13 +874,31 @@ def backup_import(bundle_path, overwrite, target_dir):
     `one-link backup restore <24 words>`). The seed must match the
     one that sealed the bundle, or decryption fails.
 
-    Default behavior refuses to clobber existing files in the
-    target dir. Pass --overwrite to allow replacement (this is
-    destructive: existing chat history etc. will be overwritten).
+    The active install is never modified while a daemon may still hold its
+    keys/database open. ``--overwrite`` validates and durably stages the bundle;
+    singleton-locked daemon startup commits it. A custom ``--target-dir`` is an
+    offline operation and must be a proven-empty directory; overwrite is never
+    permitted there.
     """
-    from one_link import backup_bundle, master_seed
-    from one_link.paths import data_dir
-    seed = master_seed.load_seed(data_dir())
+    import stat
+
+    from one_link import backup_bundle, master_seed, mnemonic, recovery_api
+    from one_link.key_material import KeyMaterialError
+    from one_link.paths import data_dir, key_path
+
+    active_root = data_dir().resolve()
+    try:
+        pending_recovery = recovery_api.has_pending_recovery(active_root)
+        seed = master_seed.load_seed(active_root)
+    except (OSError, KeyMaterialError, recovery_api.RecoveryTransactionError) as exc:
+        raise click.ClickException(
+            f"cannot inspect active recovery authority: {exc}"
+        ) from exc
+    if pending_recovery:
+        raise click.ClickException(
+            "another recovery is already pending; restart One Link to commit "
+            "it before importing a backup"
+        )
     if seed is None:
         click.echo(
             "No master seed on this install. Run\n"
@@ -819,13 +907,55 @@ def backup_import(bundle_path, overwrite, target_dir):
             err=True,
         )
         raise click.exceptions.Exit(1)
-    target = Path(target_dir).expanduser().resolve() if target_dir else data_dir()
+    target = Path(target_dir).expanduser().resolve() if target_dir else active_root
+    live_target = target == active_root
+    if not live_target:
+        if overwrite:
+            raise click.ClickException(
+                "--overwrite is not allowed with --target-dir; choose a new, "
+                "empty offline directory"
+            )
+        if target.exists():
+            try:
+                observed = target.lstat()
+                attrs = int(getattr(observed, "st_file_attributes", 0) or 0)
+                reparse = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+                if (
+                    stat.S_ISLNK(observed.st_mode)
+                    or bool(attrs & reparse)
+                    or not stat.S_ISDIR(observed.st_mode)
+                ):
+                    raise click.ClickException(
+                        "custom restore target must be a real local directory, "
+                        "not a file, link, or reparse point"
+                    )
+                if next(target.iterdir(), None) is not None:
+                    raise click.ClickException(
+                        "custom restore target is not empty; choose a new directory"
+                    )
+            except click.ClickException:
+                raise
+            except OSError as exc:
+                raise click.ClickException(
+                    f"could not prove custom restore target is clean: {exc}"
+                ) from exc
+    elif not overwrite:
+        raise click.ClickException(
+            "the active install contains authority/state; re-run with --overwrite "
+            "to validate and stage replacement at the next controlled restart"
+        )
+
     try:
-        header, written = backup_bundle.restore_bundle_from_file(
-            seed=seed,
-            bundle_path=Path(bundle_path).expanduser().resolve(),
-            target_dir=target,
-            overwrite=overwrite,
+        bundle_bytes = backup_bundle.read_bundle_file_bounded(
+            Path(bundle_path).expanduser().resolve()
+        )
+        result = recovery_api.restore_from_bundle(
+            data_dir=target,
+            identity_path=key_path() if live_target else target / "identity.key",
+            phrase=mnemonic.encode(seed),
+            bundle_bytes=bundle_bytes,
+            delete_identity_files=live_target,
+            overwrite=live_target,
         )
     except FileExistsError as e:
         click.echo(
@@ -834,21 +964,28 @@ def backup_import(bundle_path, overwrite, target_dir):
             err=True,
         )
         raise click.exceptions.Exit(1)
-    except ValueError as e:
+    except (ValueError, recovery_api.RecoveryTransactionError) as e:
         # Wrong seed, tampered file, bad magic, traversal attempt, etc.
         raise click.ClickException(f"import failed: {e}")
-    except OSError as e:
+    except (OSError, KeyMaterialError) as e:
         raise click.ClickException(f"import failed: {e}")
-    click.echo(f"restored {len(written)} file(s) into {target}")
+    written = list(result.get("written") or [])
+    if result.get("pending_restart"):
+        click.echo(
+            f"validated {result.get('file_count', 0)} backup file(s) and staged "
+            f"the encrypted bundle for {target}"
+        )
+        click.echo(
+            "Existing live files and keys are unchanged. Stop every One Link "
+            "process and start the daemon once to commit the transaction."
+        )
+        return
+    click.echo(f"restored and verified {len(written)} file(s) into {target}")
     if written:
         for name in written[:20]:
             click.echo(f"  - {name}")
         if len(written) > 20:
             click.echo(f"  ... and {len(written) - 20} more")
-    click.echo(
-        "Restart the daemon (or `one-link daemon`) so the new state is\n"
-        "loaded into memory."
-    )
 
 
 @cli.group()
@@ -886,19 +1023,24 @@ def recovery():
       one-link recovery restore <share_blob_1> ... <share_blob_K>
         On a fresh device: reconstruct the master seed from K
         decrypted shares (each is the base64 the unwrap step
-        emitted) and persist it. On next daemon start, identity +
-        DRK + everything else derives from the recovered seed.
+        emitted) and stage it. On next daemon start, identity and
+        seed-derived authority converge. Retained chats/settings require the
+        matching encrypted backup and its wrapped application-key artifacts.
     """
 
 
 @recovery.command("setup")
 @click.argument("guardians", nargs=-1)
 @click.option(
-    "--threshold", "threshold_k", default=3, type=int,
+    "--threshold",
+    "threshold_k",
+    default=3,
+    type=int,
     help="K in K-of-N (default 3)",
 )
 @click.option(
-    "--out-dir", type=click.Path(file_okay=False, path_type=Path),
+    "--out-dir",
+    type=click.Path(file_okay=False, path_type=Path),
     default=None,
     help="Where to write the wrapped shares (default ./shares/).",
 )
@@ -920,6 +1062,7 @@ def recovery_setup(
     """
     from one_link import master_seed, social_recovery
     from one_link.paths import data_dir
+
     if len(guardians) % 2 != 0 or len(guardians) < 4:
         raise click.ClickException(
             "GUARDIANS must be (name pub_hex) pairs; need at least 2 guardians.\n"
@@ -931,13 +1074,10 @@ def recovery_setup(
         try:
             pub = bytes.fromhex(guardians[i + 1])
         except ValueError:
-            raise click.ClickException(
-                f"guardian {name!r}: pub_hex is not valid hex"
-            )
+            raise click.ClickException(f"guardian {name!r}: pub_hex is not valid hex")
         if len(pub) != 32:
             raise click.ClickException(
-                f"guardian {name!r}: pub_hex must be 32 bytes (64 hex chars), "
-                f"got {len(pub)} bytes"
+                f"guardian {name!r}: pub_hex must be 32 bytes (64 hex chars), got {len(pub)} bytes"
             )
         parsed.append((name, pub))
     total_n = len(parsed)
@@ -953,11 +1093,12 @@ def recovery_setup(
             "to recover an existing identity)."
         )
     shares = social_recovery.setup_social_recovery(
-        seed=seed, guardians=parsed, threshold_k=threshold_k,
+        seed=seed,
+        guardians=parsed,
+        threshold_k=threshold_k,
     )
     target_dir = (
-        Path(out_dir).expanduser().resolve() if out_dir
-        else Path("./shares").expanduser().resolve()
+        Path(out_dir).expanduser().resolve() if out_dir else Path("./shares").expanduser().resolve()
     )
     target_dir.mkdir(parents=True, exist_ok=True)
     for name, share in shares:
@@ -973,7 +1114,8 @@ def recovery_setup(
 
 @recovery.command("unwrap")
 @click.argument(
-    "share_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    "share_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
 def recovery_unwrap(share_path):
     """Decrypt a share addressed to this device.
@@ -987,6 +1129,7 @@ def recovery_unwrap(share_path):
 
     from one_link import master_seed, social_recovery
     from one_link.paths import data_dir, key_path
+
     seed = master_seed.load_seed(data_dir())
     if seed is None:
         # Fall back to the raw identity key — older daemons without a
@@ -1002,11 +1145,13 @@ def recovery_unwrap(share_path):
         # decrypt for recovery without supplying it twice.
         from cryptography.hazmat.primitives import serialization
         from one_link.identity import PASSPHRASE_ENV
+
         pw_env = os.environ.get(PASSPHRASE_ENV)
         pw = pw_env.encode("utf-8") if pw_env else None
         try:
             priv_obj = serialization.load_pem_private_key(
-                key_path().read_bytes(), password=pw,
+                key_path().read_bytes(),
+                password=pw,
             )
         except Exception as e:
             raise click.ClickException(f"identity key load failed: {e}")
@@ -1015,10 +1160,9 @@ def recovery_unwrap(share_path):
         from cryptography.hazmat.primitives.asymmetric.ed25519 import (
             Ed25519PrivateKey,
         )
+
         if not isinstance(priv_obj, Ed25519PrivateKey):
-            raise click.ClickException(
-                "identity key on disk is not Ed25519 — cannot recover."
-            )
+            raise click.ClickException("identity key on disk is not Ed25519 — cannot recover.")
         ed_seed = priv_obj.private_bytes_raw()
     else:
         ed_seed = master_seed.derive_identity_priv(seed).private_bytes_raw()
@@ -1026,7 +1170,8 @@ def recovery_unwrap(share_path):
     blob = Path(share_path).read_bytes()
     try:
         idx, share_bytes = social_recovery.unwrap_share(
-            wrapped=blob, my_ed_priv_seed=ed_seed,
+            wrapped=blob,
+            my_ed_priv_seed=ed_seed,
         )
     except ValueError as e:
         raise click.ClickException(f"unwrap failed: {e}")
@@ -1051,7 +1196,8 @@ def recovery_unwrap(share_path):
 @recovery.command("restore")
 @click.argument("portable_shares", nargs=-1)
 @click.option(
-    "--force", is_flag=True,
+    "--force",
+    is_flag=True,
     help="Overwrite an existing master seed on this device.",
 )
 def recovery_restore(portable_shares: tuple[str, ...], force: bool) -> None:
@@ -1062,17 +1208,29 @@ def recovery_restore(portable_shares: tuple[str, ...], force: bool) -> None:
     """
     import base64
 
-    from one_link import master_seed, social_recovery
+    from one_link import recovery_api
+    from one_link.key_material import KeyMaterialError
     from one_link.paths import data_dir, key_path
+
     if len(portable_shares) < 2:
         raise click.ClickException(
-            "need at least 2 portable shares (from `recovery unwrap` on "
-            "each guardian device)"
+            "need at least 2 portable shares (from `recovery unwrap` on each guardian device)"
         )
-    if master_seed.has_seed(data_dir()) and not force:
+    root = data_dir()
+    identity_path = key_path()
+    try:
+        evidence = recovery_api.restore_artifact_evidence(
+            root,
+            identity_path=identity_path,
+        )
+    except Exception as exc:
+        raise click.ClickException(
+            f"could not prove this install is safe to restore: {exc}"
+        ) from exc
+    if any(evidence.values()) and not force:
         click.echo(
-            "A master seed already exists on this install. Re-run with\n"
-            "--force to replace it. The existing identity will be REPLACED.",
+            "Existing authority or state is in use. Re-run with --force to\n"
+            "stage its replacement after a controlled daemon restart.",
             err=True,
         )
         raise click.exceptions.Exit(1)
@@ -1089,21 +1247,25 @@ def recovery_restore(portable_shares: tuple[str, ...], force: bool) -> None:
         share_bytes = payload[1:]
         decrypted.append((idx, share_bytes))
     try:
-        seed = social_recovery.reconstruct_from_decrypted_shares(decrypted)
-    except ValueError as e:
-        raise click.ClickException(f"reconstruct failed: {e}")
-    if force:
-        with __import__("contextlib").suppress(OSError):
-            key_path().unlink()
-        from one_link.lockbox import DRK_FILENAME
-        with __import__("contextlib").suppress(OSError):
-            (data_dir() / DRK_FILENAME).unlink()
-    master_seed.store_seed(data_dir(), seed)
-    click.echo(
-        "master seed reconstructed + persisted. Start the daemon — it\n"
-        "will derive your identity + at-rest key from the recovered seed.\n"
-        "Peers paired with the original device will recognize you."
-    )
+        recovery_api.restore_from_shares(
+            data_dir=root,
+            shares=decrypted,
+            delete_identity_files=force,
+        )
+    except ValueError as exc:
+        raise click.ClickException(f"reconstruct failed: {exc}") from exc
+    except (KeyMaterialError, recovery_api.RecoveryTransactionError) as exc:
+        raise click.ClickException(f"restore could not be staged: {exc}") from exc
+    if recovery_api.has_pending_recovery(root):
+        click.echo(
+            "Social recovery staged durably; existing authority is unchanged.\n"
+            "Stop every One Link process and start the daemon once to commit it."
+        )
+    else:
+        click.echo(
+            "Master seed, identity, and at-rest authority reconstructed and\n"
+            "verified. Peers paired with the original device will recognize you."
+        )
 
 
 @recovery.command("test-shares")
@@ -1134,10 +1296,10 @@ def recovery_test_shares(portable_shares: tuple[str, ...]) -> None:
 
     from one_link import recovery_api
     from one_link.paths import data_dir
+
     if len(portable_shares) < 2:
         raise click.ClickException(
-            "need at least 2 portable shares (from `recovery unwrap` on "
-            "each guardian device)"
+            "need at least 2 portable shares (from `recovery unwrap` on each guardian device)"
         )
     decrypted: list[tuple[int, bytes]] = []
     for s in portable_shares:
@@ -1152,7 +1314,8 @@ def recovery_test_shares(portable_shares: tuple[str, ...]) -> None:
         share_bytes = payload[1:]
         decrypted.append((idx, share_bytes))
     res = recovery_api.test_shares_against_current_seed(
-        data_dir=data_dir(), shares=decrypted,
+        data_dir=data_dir(),
+        shares=decrypted,
     )
     if not res["valid_recovery"]:
         click.echo(f"COMBINE FAILED: {res['error']}", err=True)
@@ -1160,14 +1323,11 @@ def recovery_test_shares(portable_shares: tuple[str, ...]) -> None:
     n = res["share_count"]
     if not res["has_current_identity"]:
         click.echo(
-            f"Valid quorum ({n} shares), but this device has no master "
-            "seed to compare against."
+            f"Valid quorum ({n} shares), but this device has no master seed to compare against."
         )
         raise click.exceptions.Exit(2)
     if res["matches_current_identity"]:
-        click.echo(
-            f"VERIFIED: these {n} shares reconstruct your current identity."
-        )
+        click.echo(f"VERIFIED: these {n} shares reconstruct your current identity.")
         return
     click.echo(
         f"Valid quorum ({n} shares), but it reconstructs a DIFFERENT "
@@ -1191,90 +1351,1179 @@ def native_status():
         click.echo(f"reason:     {st.reason}")
 
 
-@cli.command("verify-this-install")
-@click.option(
-    "--json", "as_json", is_flag=True,
-    help="Emit machine-readable JSON instead of human text.",
-)
-def verify_this_install(as_json):
-    """Show + verify the load-bearing identity of this install.
+@cli.command("runtime-import-smoke", hidden=True)
+@click.option("--json", "as_json", is_flag=True)
+def runtime_import_smoke(as_json):
+    """Import and attest every Python/native surface in a frozen release."""
+    import importlib
+    import importlib.machinery
+    import json as _json
+    import sys as _sys
+    import types as _types
 
-    Prints the version, package root, a BLAKE3 content hash of every
-    load-bearing source file, and a hash-of-hashes that matches the
-    figure published in the release notes. Lets a user (or auditor)
-    confirm that the binary + source files have not been tampered
-    with since the signed release.
+    from one_link import __version__
+    from one_link.build_identity import (
+        EXPECTED_NATIVE_RUNTIME_SUBMODULES,
+        EXPECTED_NATIVE_RUNTIME_SUBMODULES_SHA256,
+        EXPECTED_STABLE_RUNTIME_MODULES,
+        EXPECTED_STABLE_RUNTIME_MODULES_SHA256,
+        STABLE_RUNTIME_FORBIDDEN_MODULES,
+        STABLE_RUNTIME_FORBIDDEN_MODULES_SHA256,
+        normalized_code_sha256,
+        stable_forbidden_runtime_module_statuses,
+        stable_runtime_module_statuses,
+    )
 
-    The hash-of-hashes is also visible via `/api/me` so a Web-UI
-    user can compare against the value here without leaving the
-    browser. A mismatch means either (a) you patched the install
-    locally (fine, just remember you did) or (b) someone else
-    modified the files on disk (investigate).
+    if not bool(
+        getattr(_sys, "frozen", False) and hasattr(_sys, "executable") and hasattr(_sys, "_MEIPASS")
+    ):
+        raise click.ClickException("runtime-import-smoke is a frozen-release gate")
+    expected_root = Path(os.path.abspath(str(getattr(_sys, "_MEIPASS"))))
 
-    For Sigstore verification of the released artifact:
+    def _inside_runtime_root(path: object) -> bool:
+        if not isinstance(path, (str, os.PathLike)):
+            return False
+        try:
+            candidate = Path(path).resolve(strict=True)
+            root = expected_root.resolve(strict=True)
+        except OSError:
+            return False
+        return candidate == root or root in candidate.parents
 
-        cosign verify-blob \\
-          --certificate-identity-regexp '.*' \\
-          --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\
-          --bundle one-link.exe.sigstore \\
-          one-link.exe
+    source_manifest_path = expected_root / "one_link" / "_build" / "runtime-source-manifest.json"
+    source_manifest_status = "PRESENT"
+    source_manifest_sha256: str | None = None
+    source_manifest_modules: dict[str, object] = {}
+    try:
+        source_manifest_bytes = source_manifest_path.read_bytes()
+        source_manifest_sha256 = __import__("hashlib").sha256(source_manifest_bytes).hexdigest()
+        source_manifest = _json.loads(source_manifest_bytes)
+        if not isinstance(source_manifest, dict):
+            raise ValueError("manifest root is not an object")
+        if source_manifest.get("schema") != "one-link-runtime-source-manifest-v1":
+            raise ValueError("manifest schema mismatch")
+        if (
+            source_manifest.get("runtime_module_manifest_sha256")
+            != EXPECTED_STABLE_RUNTIME_MODULES_SHA256
+        ):
+            raise ValueError("runtime-module manifest digest mismatch")
+        candidate_modules = source_manifest.get("modules")
+        if not isinstance(candidate_modules, dict) or set(candidate_modules) != set(
+            EXPECTED_STABLE_RUNTIME_MODULES
+        ):
+            raise ValueError("manifest module keys mismatch")
+        source_manifest_modules = candidate_modules
+    except (OSError, UnicodeError, ValueError, _json.JSONDecodeError) as exc:
+        source_manifest_status = f"INVALID_{type(exc).__name__.upper()}"
 
-    The verify-blob command + the publisher identity REGEX are
-    documented in docs/RELEASE_CHECKLIST.md.
-    """
-    import hashlib
+    preflight = stable_runtime_module_statuses(expected_root)
+    imports: dict[str, str] = {}
+    errors: dict[str, str] = {}
+    code_digests: dict[str, str] = {}
+    for module in EXPECTED_STABLE_RUNTIME_MODULES:
+        status = preflight.get(module, "MISSING")
+        if status != "PRESENT":
+            imports[module] = status
+            continue
+        try:
+            loaded = importlib.import_module(module)
+        except Exception as exc:
+            imports[module] = "IMPORT_ERROR"
+            errors[module] = type(exc).__name__
+            continue
+        if getattr(loaded, "__name__", None) != module:
+            imports[module] = "IMPORT_NAME_MISMATCH"
+            continue
+        spec = getattr(loaded, "__spec__", None)
+        loader = getattr(spec, "loader", None)
+        get_code = getattr(loader, "get_code", None)
+        if not callable(get_code):
+            imports[module] = "CODE_LOADER_MISSING"
+            continue
+        try:
+            code = get_code(module)
+        except Exception as exc:
+            imports[module] = "CODE_LOAD_ERROR"
+            errors[module] = type(exc).__name__
+            continue
+        if not isinstance(code, _types.CodeType):
+            imports[module] = "CODE_OBJECT_MISSING"
+            continue
+        code_digest = normalized_code_sha256(code)
+        code_digests[module] = code_digest
+        manifest_entry = source_manifest_modules.get(module)
+        if (
+            not isinstance(manifest_entry, dict)
+            or manifest_entry.get("normalized_code_sha256") != code_digest
+        ):
+            imports[module] = "CODE_MISMATCH"
+            continue
+        imports[module] = "IMPORTED"
+
+    forbidden = stable_forbidden_runtime_module_statuses(expected_root)
+    for module in STABLE_RUNTIME_FORBIDDEN_MODULES:
+        if module in _sys.modules:
+            forbidden[module] = "LOADED"
+    invalid_imports = sorted(module for module, status in imports.items() if status != "IMPORTED")
+    present_forbidden = sorted(module for module, status in forbidden.items() if status != "ABSENT")
+
+    native_modules: dict[str, str] = {}
+    native_errors: dict[str, str] = {}
+    native_package_status = "IMPORTED"
+    native_package_origin: str | None = None
+    native_extension_origin: str | None = None
+    native_version: str | None = None
+    native_package: object | None = None
+    try:
+        native_package = importlib.import_module("one_link_native")
+        native_package_origin = getattr(native_package, "__file__", None)
+        if getattr(native_package, "__name__", None) != "one_link_native":
+            native_package_status = "IMPORT_NAME_MISMATCH"
+        elif not _inside_runtime_root(native_package_origin):
+            native_package_status = "OUTSIDE_RUNTIME_ROOT"
+        native_extension = getattr(native_package, "one_link_native", None)
+        native_extension_origin = getattr(native_extension, "__file__", None)
+        if not _inside_runtime_root(native_extension_origin):
+            native_package_status = "EXTENSION_OUTSIDE_RUNTIME_ROOT"
+        elif not any(
+            str(native_extension_origin).endswith(suffix)
+            for suffix in importlib.machinery.EXTENSION_SUFFIXES
+        ):
+            native_package_status = "EXTENSION_SUFFIX_INVALID"
+        native_version = getattr(native_package, "__version__", None)
+        if native_version not in {__version__, f"{__version__}.0"}:
+            native_package_status = "VERSION_MISMATCH"
+        if not isinstance(getattr(native_package, "chunk_version", None), str):
+            native_package_status = "REQUIRED_API_MISSING"
+    except Exception as exc:
+        native_package_status = "IMPORT_ERROR"
+        native_errors["one_link_native"] = type(exc).__name__
+
+    for module in EXPECTED_NATIVE_RUNTIME_SUBMODULES:
+        if native_package is None or native_package_status != "IMPORTED":
+            native_modules[module] = "PACKAGE_INVALID"
+            continue
+        try:
+            loaded = importlib.import_module(module)
+        except Exception as exc:
+            native_modules[module] = "IMPORT_ERROR"
+            native_errors[module] = type(exc).__name__
+            continue
+        short_name = module.rsplit(".", 1)[1]
+        if not isinstance(loaded, _types.ModuleType):
+            native_modules[module] = "NOT_MODULE"
+        elif getattr(loaded, "__name__", None) not in {module, short_name}:
+            native_modules[module] = "IMPORT_NAME_MISMATCH"
+        elif getattr(native_package, short_name, None) is not loaded:
+            native_modules[module] = "PACKAGE_EXPORT_MISMATCH"
+        else:
+            native_modules[module] = "IMPORTED"
+    invalid_native_modules = sorted(
+        module for module, status in native_modules.items() if status != "IMPORTED"
+    )
+
+    runtime_failed = bool(
+        invalid_imports
+        or present_forbidden
+        or source_manifest_status != "PRESENT"
+        or native_package_status != "IMPORTED"
+        or invalid_native_modules
+    )
+    payload = {
+        "runtime_modules": imports,
+        "runtime_module_count": len(imports),
+        "runtime_module_manifest_sha256": EXPECTED_STABLE_RUNTIME_MODULES_SHA256,
+        "runtime_code_sha256": code_digests,
+        "runtime_import_errors": errors,
+        "invalid_runtime_modules": invalid_imports,
+        "runtime_source_manifest_path": str(source_manifest_path),
+        "runtime_source_manifest_sha256": source_manifest_sha256,
+        "runtime_source_manifest_status": source_manifest_status,
+        "forbidden_runtime_modules": forbidden,
+        "forbidden_runtime_module_count": len(forbidden),
+        "forbidden_runtime_module_manifest_sha256": (STABLE_RUNTIME_FORBIDDEN_MODULES_SHA256),
+        "present_forbidden_runtime_modules": present_forbidden,
+        "native_package_status": native_package_status,
+        "native_package_origin": native_package_origin,
+        "native_extension_origin": native_extension_origin,
+        "native_version": native_version,
+        "native_runtime_modules": native_modules,
+        "native_runtime_module_count": len(native_modules),
+        "native_runtime_module_manifest_sha256": (EXPECTED_NATIVE_RUNTIME_SUBMODULES_SHA256),
+        "native_runtime_import_errors": native_errors,
+        "invalid_native_runtime_modules": invalid_native_modules,
+        "verification_status": (
+            "runtime_imports_ok" if not runtime_failed else "runtime_imports_failed"
+        ),
+    }
+    if as_json:
+        click.echo(_json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        click.echo(
+            f"Stable runtime imports: {len(imports) - len(invalid_imports)}/"
+            f"{len(imports)}; forbidden modules absent: "
+            f"{len(forbidden) - len(present_forbidden)}/{len(forbidden)}; "
+            f"native ABI modules: {len(native_modules) - len(invalid_native_modules)}/"
+            f"{len(native_modules)}"
+        )
+    if runtime_failed:
+        raise click.exceptions.Exit(1)
+
+
+@cli.command("runtime-feature-smoke", hidden=True)
+@click.option("--json", "as_json", is_flag=True)
+def runtime_feature_smoke(as_json):
+    """Run side-effect-free dependency operations inside a frozen release."""
+    import importlib
+    import importlib.util
+    import io
     import json as _json
     import sys as _sys
 
-    from one_link import __version__
-    from one_link.build_identity import _FINGERPRINT_FILES, package_root
+    if not bool(
+        getattr(_sys, "frozen", False) and hasattr(_sys, "executable") and hasattr(_sys, "_MEIPASS")
+    ):
+        raise click.ClickException("runtime-feature-smoke is a frozen-release gate")
 
-    root = package_root()
+    expected_statuses = {
+        "aiortc_datachannel": "OK",
+        "keyring_backend": "OK",
+        "native_cdc_scan": "OK",
+        "packaging_updater": "OK",
+        "pillow_tray_icon": "OK",
+        "psutil_process": "OK",
+        "pyav_primitives": "OK",
+        "pystray_backend": "OK",
+        "qrcode_svg_stdlib": "OK",
+        "sigstore_frozen_update_boundary": (
+            "NOT_APPLICABLE_FROZEN_UPDATES_DISABLED"
+        ),
+        "sqlcipher_roundtrip": "OK",
+        "watchdog_observer": "OK",
+    }
+    features = {name: "NOT_RUN" for name in expected_statuses}
+    errors: dict[str, str] = {}
+
+    def _probe(name: str, operation) -> None:
+        try:
+            operation()
+        except Exception as exc:
+            features[name] = "FAILED"
+            errors[name] = type(exc).__name__
+        else:
+            features[name] = "OK"
+
+    def _numpy_status() -> str:
+        if "numpy" in _sys.modules or any(name.startswith("numpy.") for name in _sys.modules):
+            return "LOADED"
+        try:
+            return "PRESENT" if importlib.util.find_spec("numpy") is not None else "ABSENT"
+        except (ImportError, ModuleNotFoundError, ValueError):
+            return "ABSENT"
+
+    initial_numpy_status = _numpy_status()
+
+    def _qrcode_svg() -> None:
+        import qrcode
+        from qrcode.compat.etree import ET
+        from qrcode.image.svg import SvgPathImage
+
+        # lxml is an optional QR accelerator and forbidden in stable bundles;
+        # exercise the supported stdlib fallback, not merely the import edge.
+        if getattr(ET, "__name__", "") != "xml.etree.ElementTree":
+            raise RuntimeError("qrcode did not select the stdlib XML backend")
+        image = qrcode.make("one-link-runtime-feature-smoke", image_factory=SvgPathImage)
+        output = io.BytesIO()
+        image.save(output)
+        rendered = output.getvalue()
+        if b"<svg" not in rendered or len(rendered) < 100:
+            raise RuntimeError("qrcode SVG renderer returned an invalid document")
+
+    def _pillow_tray_icon() -> None:
+        from PIL import Image
+        from one_link.tray import TrayIcon, _icon_image
+
+        image = _icon_image()
+        tinted = TrayIcon._tinted_icon("online")
+        if not isinstance(image, Image.Image) or image.size != (64, 64) or image.mode != "RGBA":
+            raise RuntimeError("tray base icon has an invalid Pillow representation")
+        if not isinstance(tinted, Image.Image) or tinted.size != (64, 64):
+            raise RuntimeError("tray status icon has an invalid Pillow representation")
+
+    def _pystray_backend() -> None:
+        backend_name = (
+            "pystray._win32"
+            if _sys.platform == "win32"
+            else "pystray._darwin"
+            if _sys.platform == "darwin"
+            else "pystray._xorg"
+        )
+        backend = importlib.import_module(backend_name)
+        module = importlib.import_module("pystray")
+        if not isinstance(getattr(backend, "Icon", None), type):
+            raise RuntimeError(f"platform pystray backend has no Icon class: {backend_name}")
+        if not callable(getattr(module, "Menu", None)):
+            raise RuntimeError("pystray platform backend has no Menu primitive")
+
+    def _keyring_backend() -> None:
+        import keyring.backend
+
+        if not isinstance(keyring.backend.KeyringBackend, type):
+            raise RuntimeError("keyring backend contract is unavailable")
+        if _sys.platform == "win32":
+            windows = importlib.import_module("keyring.backends.Windows")
+            win32cred = importlib.import_module("win32ctypes.pywin32.win32cred")
+            importlib.import_module("win32ctypes.pywin32.pywintypes")
+            if not isinstance(getattr(windows, "WinVaultKeyring", None), type):
+                raise RuntimeError("Windows Credential Manager backend is unavailable")
+            if not callable(getattr(win32cred, "CredRead", None)):
+                raise RuntimeError("Windows credential bindings are unavailable")
+        elif _sys.platform == "darwin":
+            macos = importlib.import_module("keyring.backends.macOS")
+            if not isinstance(getattr(macos, "Keyring", None), type):
+                raise RuntimeError("macOS Keychain backend is unavailable")
+        else:
+            fallback = importlib.import_module("keyring.backends.fail")
+            if not isinstance(getattr(fallback, "Keyring", None), type):
+                raise RuntimeError("keyring fallback backend is unavailable")
+
+    def _sqlcipher_roundtrip() -> None:
+        import tempfile
+
+        module = importlib.import_module("sqlcipher3")
+        if not callable(getattr(module, "connect", None)):
+            raise RuntimeError("SQLCipher connect primitive is unavailable")
+
+        with tempfile.TemporaryDirectory(prefix="one-link-sqlcipher-smoke-") as raw:
+            database = Path(raw) / "probe.db"
+            connection = module.connect(str(database))
+            try:
+                connection.execute("PRAGMA key = 'one-link-frozen-smoke-key'")
+                cipher_row = connection.execute("PRAGMA cipher_version").fetchone()
+                if not cipher_row or not str(cipher_row[0]).strip():
+                    raise RuntimeError("SQLCipher engine did not report cipher_version")
+                connection.execute(
+                    "CREATE TABLE smoke (id INTEGER PRIMARY KEY, value BLOB NOT NULL)"
+                )
+                expected = b"one-link-sqlcipher-roundtrip"
+                connection.execute("INSERT INTO smoke(value) VALUES (?)", (expected,))
+                connection.commit()
+                row = connection.execute("SELECT value FROM smoke WHERE id = 1").fetchone()
+                if row is None or bytes(row[0]) != expected:
+                    raise RuntimeError("SQLCipher encrypted database round-trip failed")
+            finally:
+                connection.close()
+            if not database.is_file() or database.stat().st_size <= 0:
+                raise RuntimeError("SQLCipher did not materialize the temporary database")
+
+    def _watchdog_observer() -> None:
+        import tempfile
+        import threading
+
+        from watchdog.events import FileSystemEventHandler
+        from watchdog.observers import Observer
+
+        observed = threading.Event()
+
+        class Handler(FileSystemEventHandler):
+            def on_created(self, event):
+                if not event.is_directory and Path(event.src_path).name == "created.bin":
+                    observed.set()
+
+        with tempfile.TemporaryDirectory(prefix="one-link-watchdog-smoke-") as raw:
+            observer = Observer()
+            observer.schedule(Handler(), raw, recursive=False)
+            observer.start()
+            try:
+                (Path(raw) / "created.bin").write_bytes(b"one-link-watchdog")
+                if not observed.wait(8.0):
+                    raise RuntimeError("watchdog observer did not deliver a file event")
+            finally:
+                observer.stop()
+                observer.join(timeout=8.0)
+            if observer.is_alive():
+                raise RuntimeError("watchdog observer did not shut down")
+
+    def _psutil_process() -> None:
+        import psutil
+
+        process = psutil.Process(os.getpid())
+        if process.pid != os.getpid():
+            raise RuntimeError("psutil resolved the wrong current process")
+
+    def _aiortc_datachannel() -> None:
+        import asyncio
+
+        from aiortc import RTCConfiguration, RTCPeerConnection
+
+        async def _roundtrip() -> None:
+            # Empty ICE-server lists categorically prevent STUN/TURN traffic;
+            # two peers in this process exercise DTLS/SCTP over host candidates.
+            configuration = RTCConfiguration(iceServers=[])
+            sender = RTCPeerConnection(configuration)
+            receiver = RTCPeerConnection(configuration)
+            received = asyncio.Event()
+            expected = "one-link-aiortc-local-roundtrip"
+
+            @receiver.on("datachannel")
+            def on_datachannel(channel):
+                @channel.on("message")
+                def on_message(message):
+                    if message == expected:
+                        received.set()
+
+            channel = sender.createDataChannel("one-link-runtime-feature-smoke")
+            opened = asyncio.Event()
+
+            @channel.on("open")
+            def on_open():
+                opened.set()
+                channel.send(expected)
+
+            try:
+                await sender.setLocalDescription(await sender.createOffer())
+                await receiver.setRemoteDescription(sender.localDescription)
+                await receiver.setLocalDescription(await receiver.createAnswer())
+                await sender.setRemoteDescription(receiver.localDescription)
+                await asyncio.wait_for(opened.wait(), timeout=15.0)
+                await asyncio.wait_for(received.wait(), timeout=15.0)
+            finally:
+                await sender.close()
+                await receiver.close()
+
+        asyncio.run(_roundtrip())
+
+    def _native_cdc_scan() -> None:
+        from one_link.native_cdc import get_native_cdc_scanner, validate_native_cdc_library
+
+        scanner = get_native_cdc_scanner()
+        if scanner is None:
+            raise RuntimeError("mandatory frozen native CDC scanner is unavailable")
+        validate_native_cdc_library(scanner.library)
+
+    def _pyav_primitives() -> None:
+        import av
+
+        packet = av.Packet(b"one-link")
+        frame = av.VideoFrame(2, 2, "rgb24")
+        if bytes(packet) != b"one-link" or packet.size != 8:
+            raise RuntimeError("PyAV packet primitive did not round-trip")
+        if frame.width != 2 or frame.height != 2 or frame.format.name != "rgb24":
+            raise RuntimeError("PyAV frame primitive is unavailable")
+
+    def _packaging_updater() -> None:
+        from packaging.tags import sys_tags
+        from packaging.utils import parse_wheel_filename
+        from packaging.version import Version
+        from one_link import updater
+
+        distribution, version, _build, tags = parse_wheel_filename(
+            "one_link_native-0.21.0a0-cp311-abi3-win_amd64.whl"
+        )
+        if str(distribution) != "one-link-native" or version != Version("0.21.0a0") or not tags:
+            raise RuntimeError("packaging wheel parser returned an invalid result")
+        if next(iter(sys_tags()), None) is None:
+            raise RuntimeError("packaging exposed no compatible platform tags")
+        try:
+            updater.write_updater_script(Path(os.devnull), parent_pid=os.getpid())
+        except RuntimeError as exc:
+            if "disabled" not in str(exc):
+                raise
+        else:
+            raise RuntimeError("frozen in-place updater unexpectedly became executable")
+
+    _probe("qrcode_svg_stdlib", _qrcode_svg)
+    _probe("pillow_tray_icon", _pillow_tray_icon)
+    _probe("pystray_backend", _pystray_backend)
+    _probe("keyring_backend", _keyring_backend)
+    _probe("sqlcipher_roundtrip", _sqlcipher_roundtrip)
+    _probe("watchdog_observer", _watchdog_observer)
+    _probe("psutil_process", _psutil_process)
+    _probe("aiortc_datachannel", _aiortc_datachannel)
+    _probe("native_cdc_scan", _native_cdc_scan)
+    _probe("pyav_primitives", _pyav_primitives)
+    _probe("packaging_updater", _packaging_updater)
+    # Stable frozen applications deliberately refuse in-place installation;
+    # Sigstore verification remains active for source installs and release CI,
+    # while its CLI/dependency graph must not expand the frozen attack surface.
+    try:
+        sigstore_present = (
+            "sigstore" in _sys.modules
+            or importlib.util.find_spec("sigstore") is not None
+        )
+    except (ImportError, ModuleNotFoundError, ValueError):
+        sigstore_present = False
+    if sigstore_present:
+        features["sigstore_frozen_update_boundary"] = "UNEXPECTEDLY_PRESENT"
+        errors["sigstore_frozen_update_boundary"] = "ForbiddenModulePresent"
+    else:
+        features["sigstore_frozen_update_boundary"] = (
+            "NOT_APPLICABLE_FROZEN_UPDATES_DISABLED"
+        )
+
+    final_numpy_status = _numpy_status()
+    numpy_status = (
+        "ABSENT"
+        if initial_numpy_status == "ABSENT" and final_numpy_status == "ABSENT"
+        else final_numpy_status
+    )
+    failed = (
+        features != expected_statuses
+        or bool(errors)
+        or numpy_status != "ABSENT"
+    )
+    payload = {
+        "features": features,
+        "feature_count": len(features),
+        "feature_errors": errors,
+        "numpy_status": numpy_status,
+        "side_effect_policy": (
+            "no_external_network_no_ui_no_keychain_access_isolated_temporary_io_only"
+        ),
+        "verification_status": (
+            "runtime_features_failed" if failed else "runtime_features_ok"
+        ),
+    }
+    if as_json:
+        click.echo(_json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        passed = sum(
+            status == expected_statuses[name]
+            for name, status in features.items()
+        )
+        click.echo(
+            f"Runtime dependency features: {passed}/{len(features)}; "
+            f"NumPy: {numpy_status}"
+        )
+    if failed:
+        raise click.exceptions.Exit(1)
+
+
+@cli.command("verify-this-install")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit machine-readable JSON instead of human text.",
+)
+@click.option(
+    "--expected-rollup",
+    metavar="SHA256",
+    help=(
+        "Compare with an exact 64-hex SHA-256 rollup obtained from an "
+        "independently authenticated release record."
+    ),
+)
+@click.option(
+    "--inventory-only",
+    is_flag=True,
+    help=(
+        "Print a local inventory without a baseline and exit 0. This does not "
+        "verify authenticity or release provenance."
+    ),
+)
+def verify_this_install(as_json, expected_rollup, inventory_only):
+    """Inventory this install and optionally compare an authenticated baseline.
+
+    Local hashes alone cannot prove authenticity, so the default fails closed.
+    Supply --expected-rollup only after authenticating that value independently,
+    or use --inventory-only for an explicitly non-verifying diagnostic. Every
+    stable file in the managed Python package and separately installed native
+    extension package is included. A frozen executable is bound into the same
+    rollup when present.
+
+    The launcher source fingerprint exposed by the Web UI is a compatibility
+    signal, not this complete content inventory and not a signed-release proof.
+
+    For Sigstore verification of a released artifact, replace the placeholder
+    with the exact tag and keep the workflow identity exact:
+
+        python -m sigstore verify identity \\
+          --cert-identity 'https://github.com/IamOneYouAreOneWeAreOne/one-link/.github/workflows/release.yml@refs/tags/v<exact-version>' \\
+          --cert-oidc-issuer 'https://token.actions.githubusercontent.com' \\
+          --bundle one-link.exe.sigstore \\
+          one-link.exe
+
+    Never substitute a wildcard certificate identity.
+    """
+    import hashlib
+    import json as _json
+    import stat as _stat
+    import struct
+    import sys as _sys
+
+    from one_link import __version__
+    from one_link.build_identity import (
+        EXPECTED_STABLE_RUNTIME_MODULES,
+        EXPECTED_STABLE_RUNTIME_MODULES_SHA256,
+        STABLE_RUNTIME_FORBIDDEN_MODULES,
+        STABLE_RUNTIME_FORBIDDEN_MODULES_SHA256,
+        _FINGERPRINT_FILES,
+        installation_inventory_files,
+        native_package_root,
+        package_root,
+        stable_forbidden_runtime_module_statuses,
+        stable_runtime_module_statuses,
+    )
+
+    if expected_rollup is not None:
+        expected_rollup = expected_rollup.strip().lower()
+        if len(expected_rollup) != 64 or any(
+            character not in "0123456789abcdef" for character in expected_rollup
+        ):
+            raise click.BadParameter(
+                "must be exactly 64 hexadecimal characters",
+                param_hint="--expected-rollup",
+            )
+    if expected_rollup is not None and inventory_only:
+        raise click.UsageError("--expected-rollup and --inventory-only are mutually exclusive")
+
+    is_frozen = bool(getattr(_sys, "frozen", False) and hasattr(_sys, "executable"))
+    frozen_executable: Path | None = None
+    frozen_executable_label: str | None = None
+    macos_bundle = False
+    internal_root: Path | None = None
+    data_root: Path | None = None
+    if is_frozen:
+        # PyInstaller stores Python bytecode in the executable's PYZ archive,
+        # so nonexistent source-module paths are not meaningful verification
+        # targets.  An onedir release is one managed artifact: hash every
+        # physical file beneath the launcher's directory exactly once.
+        frozen_executable = Path(os.path.abspath(_sys.executable))
+        macos_bundle = (
+            frozen_executable.parent.name == "MacOS"
+            and frozen_executable.parent.parent.name == "Contents"
+            and frozen_executable.parent.parent.parent.suffix.lower() == ".app"
+        )
+        if macos_bundle:
+            inventory_root = frozen_executable.parent.parent.parent
+            internal_root = inventory_root / "Contents" / "Frameworks"
+            data_root = inventory_root / "Contents" / "Resources"
+            inventory_mode = "frozen_macos_app_bundle"
+        else:
+            inventory_root = frozen_executable.parent
+            internal_root = inventory_root / "_internal"
+            data_root = internal_root
+            inventory_mode = "frozen_onedir_bundle"
+        root = internal_root / "one_link"
+        native_root: Path | None = internal_root / "one_link_native"
+        frozen_executable_label = (
+            "bundle/" + frozen_executable.relative_to(inventory_root).as_posix()
+        )
+    else:
+        root = package_root().resolve()
+        native_root = native_package_root()
+        inventory_root = root
+        inventory_mode = "source_or_installed_packages"
     file_hashes: dict[str, str] = {}
     missing: list[str] = []
-    rollup = hashlib.blake2s(digest_size=16)
-    for rel in _FINGERPRINT_FILES:
-        path = root / rel
-        if not path.is_file():
+    unsafe_entries: list[str] = []
+    rollup = hashlib.sha256()
+    rollup.update(b"ONE-LINK-INSTALL-ROLLUP-SHA256-V1\x00")
+
+    def _rollup_entry(relative: str, status: bytes, digest: bytes = b"") -> None:
+        name = relative.encode("utf-8", "surrogatepass")
+        rollup.update(struct.pack(">Q", len(name)))
+        rollup.update(name)
+        rollup.update(struct.pack(">B", len(status)))
+        rollup.update(status)
+        rollup.update(struct.pack(">Q", len(digest)))
+        rollup.update(digest)
+
+    inventory_paths: list[tuple[str, Path]] = []
+    frozen_inventory_before: tuple[str, ...] | None = None
+    layout_statuses: dict[str, str] = {}
+
+    def _bundle_label(path: Path) -> str:
+        return "bundle/" + path.relative_to(inventory_root).as_posix()
+
+    def _safe_bundle_link_digest(path: Path) -> bytes:
+        try:
+            target = os.readlink(path)
+        except OSError as exc:
+            raise RuntimeError("bundle link target is unreadable") from exc
+        target_path = Path(target)
+        if target_path.is_absolute():
+            raise RuntimeError("bundle link target is absolute")
+        try:
+            resolved_root = inventory_root.resolve(strict=True)
+            resolved_target = (path.parent / target_path).resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeError("bundle link target is broken or cyclic") from exc
+        if resolved_target != resolved_root and resolved_root not in resolved_target.parents:
+            raise RuntimeError("bundle link target escapes inventory root")
+        encoded = target.encode("utf-8", "surrogatepass")
+        digest = hashlib.sha256(b"ONE-LINK-BUNDLE-SYMLINK-V1\x00")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        return digest.digest()
+
+    def _frozen_inventory_files() -> tuple[str, ...]:
+        entries: list[str] = []
+
+        def _walk_error(error: OSError) -> None:
+            raise error
+
+        for directory, directory_names, file_names in os.walk(
+            inventory_root,
+            followlinks=False,
+            onerror=_walk_error,
+        ):
+            directory_names.sort()
+            file_names.sort()
+            parent = Path(directory)
+            for name in list(directory_names):
+                child = parent / name
+                metadata = child.lstat()
+                attributes = int(getattr(metadata, "st_file_attributes", 0))
+                reparse_flag = int(getattr(_stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+                if _stat.S_ISLNK(metadata.st_mode) or attributes & reparse_flag:
+                    if not macos_bundle:
+                        raise OSError(f"unsafe link in frozen inventory: {child}")
+                    try:
+                        _safe_bundle_link_digest(child)
+                    except RuntimeError as exc:
+                        raise OSError(f"unsafe link in frozen inventory: {child}") from exc
+                    entries.append(child.relative_to(inventory_root).as_posix())
+                    directory_names.remove(name)
+                elif not _stat.S_ISDIR(metadata.st_mode):
+                    raise OSError(f"non-directory in frozen inventory: {child}")
+            entries.extend(
+                (parent / name).relative_to(inventory_root).as_posix() for name in file_names
+            )
+        return tuple(sorted(entries))
+
+    def _layout_status(path: Path, expected_kind: str) -> str | None:
+        try:
+            metadata = path.lstat()
+        except OSError:
+            return "MISSING"
+        attributes = int(getattr(metadata, "st_file_attributes", 0))
+        reparse_flag = int(getattr(_stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+        if _stat.S_ISLNK(metadata.st_mode) or attributes & reparse_flag:
+            if not macos_bundle:
+                return "UNSAFE_LINK"
+            try:
+                _safe_bundle_link_digest(path)
+                resolved = path.resolve(strict=True)
+            except (OSError, RuntimeError):
+                return "UNSAFE_LINK"
+            if expected_kind == "directory" and not resolved.is_dir():
+                return "UNSAFE_NON_DIRECTORY"
+            if expected_kind == "file" and not resolved.is_file():
+                return "UNSAFE_NON_REGULAR"
+            return None
+        if expected_kind == "directory" and not _stat.S_ISDIR(metadata.st_mode):
+            return "UNSAFE_NON_DIRECTORY"
+        if expected_kind == "file" and not _stat.S_ISREG(metadata.st_mode):
+            return "UNSAFE_NON_REGULAR"
+        return None
+
+    try:
+        if is_frozen:
+            assert frozen_executable is not None
+            assert frozen_executable_label is not None
+            from one_link.native_cdc import native_library_name, native_platform_tag
+
+            assert internal_root is not None
+            assert data_root is not None
+            runtime_package_root = internal_root / "one_link"
+            package_root_in_bundle = data_root / "one_link"
+            native_root_in_bundle = internal_root / "one_link_native"
+            cdc_root = runtime_package_root / "native" / native_platform_tag()
+            cdc_library = cdc_root / native_library_name()
+            cdc_library_label = _bundle_label(cdc_library)
+            cdc_sidecar = (
+                package_root_in_bundle
+                / "native"
+                / native_platform_tag()
+                / f"{cdc_library.name}.sha256"
+            )
+            cdc_sidecar_label = _bundle_label(cdc_sidecar)
+            runtime_root_label = _bundle_label(internal_root)
+            data_root_label = _bundle_label(data_root)
+            package_root_label = _bundle_label(package_root_in_bundle)
+            native_root_label = _bundle_label(native_root_in_bundle)
+            expectations: list[tuple[str, Path, str, str | None]] = [
+                ("bundle/<root>", inventory_root, "directory", None),
+                (
+                    frozen_executable_label,
+                    frozen_executable,
+                    "file",
+                    "bundle/<root>",
+                ),
+                (
+                    runtime_root_label,
+                    internal_root,
+                    "directory",
+                    "bundle/<root>",
+                ),
+                (
+                    _bundle_label(internal_root / "base_library.zip"),
+                    internal_root / "base_library.zip",
+                    "file",
+                    runtime_root_label,
+                ),
+                (
+                    package_root_label,
+                    package_root_in_bundle,
+                    "directory",
+                    data_root_label,
+                ),
+                (
+                    _bundle_label(package_root_in_bundle / "web" / "index.html"),
+                    package_root_in_bundle / "web" / "index.html",
+                    "file",
+                    package_root_label,
+                ),
+                (
+                    _bundle_label(package_root_in_bundle / "data" / "bip39-english.txt"),
+                    package_root_in_bundle / "data" / "bip39-english.txt",
+                    "file",
+                    package_root_label,
+                ),
+                (
+                    _bundle_label(package_root_in_bundle / "data" / "oui_prefixes.txt.gz"),
+                    package_root_in_bundle / "data" / "oui_prefixes.txt.gz",
+                    "file",
+                    package_root_label,
+                ),
+                (
+                    _bundle_label(
+                        package_root_in_bundle / "_build" / "runtime-source-manifest.json"
+                    ),
+                    package_root_in_bundle / "_build" / "runtime-source-manifest.json",
+                    "file",
+                    package_root_label,
+                ),
+                (
+                    cdc_library_label,
+                    cdc_library,
+                    "file",
+                    runtime_root_label,
+                ),
+                (
+                    cdc_sidecar_label,
+                    cdc_sidecar,
+                    "file",
+                    package_root_label,
+                ),
+                (
+                    native_root_label,
+                    native_root_in_bundle,
+                    "directory",
+                    runtime_root_label,
+                ),
+                (
+                    _bundle_label(native_root_in_bundle / "__init__.py"),
+                    native_root_in_bundle / "__init__.py",
+                    "file",
+                    native_root_label,
+                ),
+            ]
+            if data_root != internal_root:
+                expectations.insert(
+                    3,
+                    (
+                        data_root_label,
+                        data_root,
+                        "directory",
+                        "bundle/<root>",
+                    ),
+                )
+                expectations.insert(
+                    1,
+                    (
+                        "bundle/Contents/Info.plist",
+                        inventory_root / "Contents" / "Info.plist",
+                        "file",
+                        "bundle/<root>",
+                    ),
+                )
+            for label, path, expected_kind, parent_label in expectations:
+                if parent_label is not None and parent_label in layout_statuses:
+                    parent_status = layout_statuses[parent_label]
+                    layout_statuses[label] = (
+                        "MISSING" if parent_status == "MISSING" else "UNSAFE_LAYOUT_PARENT"
+                    )
+                    continue
+                status = _layout_status(path, expected_kind)
+                if status is not None:
+                    layout_statuses[label] = status
+
+            if (
+                cdc_library_label not in layout_statuses
+                and cdc_sidecar_label not in layout_statuses
+            ):
+                try:
+                    cdc_digest = hashlib.sha256(cdc_library.read_bytes()).hexdigest()
+                    cdc_sidecar_text = cdc_sidecar.read_text(encoding="ascii")
+                except (OSError, UnicodeError):
+                    layout_statuses["bundle/<native-cdc-integrity>"] = "UNSTABLE_OR_UNREADABLE"
+                else:
+                    if cdc_sidecar_text != f"{cdc_digest}  {cdc_library.name}\n":
+                        layout_statuses["bundle/<native-cdc-integrity>"] = "HASH_MISMATCH"
+
+            runtime_root = getattr(_sys, "_MEIPASS", None)
+            runtime_label = "bundle/<pyinstaller-runtime-root>"
+            if runtime_root is None:
+                layout_statuses[runtime_label] = "MISSING"
+            elif os.path.normcase(os.path.abspath(str(runtime_root))) != os.path.normcase(
+                os.path.abspath(str(internal_root))
+            ):
+                layout_statuses[runtime_label] = "UNSAFE_LAYOUT_ROOT"
+
+            native_extension_present = False
+            if native_root_label not in layout_statuses:
+                for candidate in native_root_in_bundle.iterdir():
+                    if candidate.suffix.lower() not in {".pyd", ".so", ".dylib"}:
+                        continue
+                    if _layout_status(candidate, "file") is None:
+                        native_extension_present = True
+                        break
+            if not native_extension_present:
+                layout_statuses[f"{native_root_label}/<native-extension>"] = "MISSING"
+
+            if "bundle/<root>" not in layout_statuses:
+                frozen_inventory_before = _frozen_inventory_files()
+                inventory_paths.extend(
+                    (f"bundle/{relative}", inventory_root / relative)
+                    for relative in frozen_inventory_before
+                )
+        else:
+            primary_inventory = sorted(
+                set(installation_inventory_files(root)) | set(_FINGERPRINT_FILES)
+            )
+            inventory_paths.extend((relative, root / relative) for relative in primary_inventory)
+            if native_root is None:
+                native_marker = "one_link_native/<package>"
+                file_hashes[native_marker] = "MISSING"
+                missing.append(native_marker)
+                _rollup_entry(native_marker, b"MISSING")
+            else:
+                inventory_paths.extend(
+                    (f"one_link_native/{relative}", native_root / relative)
+                    for relative in installation_inventory_files(native_root)
+                )
+    except OSError as exc:
+        raise click.ClickException(
+            f"could not enumerate the complete installed package tree: {type(exc).__name__}"
+        ) from exc
+
+    for rel, status in sorted(layout_statuses.items()):
+        file_hashes[rel] = status
+        if status == "MISSING":
+            missing.append(rel)
+        else:
+            unsafe_entries.append(rel)
+        _rollup_entry(rel, status.encode("ascii"))
+
+    for rel, path in sorted(inventory_paths):
+        if rel in layout_statuses:
+            continue
+        try:
+            before = path.lstat()
+        except OSError:
             file_hashes[rel] = "MISSING"
             missing.append(rel)
-            rollup.update(rel.encode("utf-8") + b":MISSING\n")
+            _rollup_entry(rel, b"MISSING")
             continue
-        h = hashlib.blake2s(digest_size=16)
-        with path.open("rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                h.update(chunk)
-        digest = h.hexdigest()
-        file_hashes[rel] = digest
-        rollup.update(rel.encode("utf-8") + b":" + digest.encode("ascii") + b"\n")
+
+        attributes = int(getattr(before, "st_file_attributes", 0))
+        reparse_flag = int(getattr(_stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+        if _stat.S_ISLNK(before.st_mode) or attributes & reparse_flag:
+            if macos_bundle:
+                try:
+                    digest_bytes = _safe_bundle_link_digest(path)
+                except RuntimeError:
+                    file_hashes[rel] = "UNSAFE_LINK"
+                    unsafe_entries.append(rel)
+                    _rollup_entry(rel, b"UNSAFE_LINK")
+                    continue
+                file_hashes[rel] = digest_bytes.hex()
+                _rollup_entry(rel, b"SYMLINK", digest_bytes)
+                continue
+            file_hashes[rel] = "UNSAFE_LINK"
+            unsafe_entries.append(rel)
+            _rollup_entry(rel, b"UNSAFE_LINK")
+            continue
+        if not _stat.S_ISREG(before.st_mode):
+            file_hashes[rel] = "UNSAFE_NON_REGULAR"
+            unsafe_entries.append(rel)
+            _rollup_entry(rel, b"UNSAFE_NON_REGULAR")
+            continue
+
+        h = hashlib.sha256()
+        try:
+            with path.open("rb") as file_handle:
+                opened = os.fstat(file_handle.fileno())
+                identity_before = (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                )
+                identity_opened = (
+                    opened.st_dev,
+                    opened.st_ino,
+                    opened.st_size,
+                    opened.st_mtime_ns,
+                )
+                if identity_before != identity_opened:
+                    raise RuntimeError("entry changed before hashing")
+                for chunk in iter(lambda: file_handle.read(1024 * 1024), b""):
+                    h.update(chunk)
+                after_open = os.fstat(file_handle.fileno())
+            after_path = path.lstat()
+            identity_after_open = (
+                after_open.st_dev,
+                after_open.st_ino,
+                after_open.st_size,
+                after_open.st_mtime_ns,
+            )
+            identity_after_path = (
+                after_path.st_dev,
+                after_path.st_ino,
+                after_path.st_size,
+                after_path.st_mtime_ns,
+            )
+            if identity_opened != identity_after_open or identity_opened != identity_after_path:
+                raise RuntimeError("entry changed while hashing")
+        except (OSError, RuntimeError):
+            file_hashes[rel] = "UNSTABLE_OR_UNREADABLE"
+            unsafe_entries.append(rel)
+            _rollup_entry(rel, b"UNSTABLE_OR_UNREADABLE")
+            continue
+        digest_bytes = h.digest()
+        file_hashes[rel] = digest_bytes.hex()
+        _rollup_entry(rel, b"FILE", digest_bytes)
+
+    # A complete file walk is necessary but insufficient for a PyInstaller
+    # onedir: Python modules live inside the PYZ archive and are not individual
+    # files below ``_internal``.  Resolve the explicit stable-module contract
+    # through the active importer and require every origin to remain inside
+    # this install.  This catches omitted lazy modules and external shadowing.
+    runtime_expected_root = internal_root if is_frozen else root
+    assert runtime_expected_root is not None
+    runtime_modules = stable_runtime_module_statuses(runtime_expected_root)
+    missing_runtime_modules: list[str] = []
+    for module in EXPECTED_STABLE_RUNTIME_MODULES:
+        status = runtime_modules.get(module, "MISSING")
+        label = f"runtime-module/{module}"
+        _rollup_entry(label, f"MODULE_{status}".encode("ascii"))
+        if status == "PRESENT":
+            continue
+        missing_runtime_modules.append(module)
+        if status == "MISSING":
+            missing.append(label)
+        else:
+            unsafe_entries.append(label)
+
+    runtime_module_count = len(EXPECTED_STABLE_RUNTIME_MODULES)
+    _rollup_entry(
+        "runtime-module-manifest/<count>",
+        b"COUNT",
+        runtime_module_count.to_bytes(8, "big"),
+    )
+    _rollup_entry(
+        "runtime-module-manifest/<sha256>",
+        b"MANIFEST",
+        bytes.fromhex(EXPECTED_STABLE_RUNTIME_MODULES_SHA256),
+    )
+
+    forbidden_runtime_modules: dict[str, str] = {}
+    present_forbidden_runtime_modules: list[str] = []
+    if is_frozen:
+        forbidden_runtime_modules = stable_forbidden_runtime_module_statuses(runtime_expected_root)
+        for module in STABLE_RUNTIME_FORBIDDEN_MODULES:
+            status = forbidden_runtime_modules.get(module, "SPEC_ERROR")
+            label = f"forbidden-runtime-module/{module}"
+            _rollup_entry(label, f"MODULE_{status}".encode("ascii"))
+            if status == "ABSENT":
+                continue
+            present_forbidden_runtime_modules.append(module)
+            unsafe_entries.append(label)
+    forbidden_runtime_module_count = len(forbidden_runtime_modules)
+    _rollup_entry(
+        "forbidden-runtime-module-manifest/<sha256>",
+        b"MANIFEST",
+        bytes.fromhex(STABLE_RUNTIME_FORBIDDEN_MODULES_SHA256),
+    )
 
     frozen_binary: Optional[str] = None
-    if getattr(_sys, "frozen", False) and hasattr(_sys, "executable"):
-        bin_path = Path(_sys.executable)
-        if bin_path.is_file():
-            bh = hashlib.blake2s(digest_size=32)
-            with bin_path.open("rb") as f:
-                for chunk in iter(lambda: f.read(65536), b""):
-                    bh.update(chunk)
-            frozen_binary = bh.hexdigest()
+    if is_frozen:
+        assert frozen_executable_label is not None
+        candidate_digest = file_hashes.get(frozen_executable_label)
+        if candidate_digest is not None and len(candidate_digest) == 64:
+            frozen_binary = candidate_digest
+        if frozen_inventory_before is not None:
+            try:
+                frozen_inventory_after = _frozen_inventory_files()
+            except OSError:
+                frozen_inventory_after = ()
+            if frozen_inventory_after != frozen_inventory_before:
+                stability_marker = "bundle/<inventory-stability>"
+                file_hashes[stability_marker] = "UNSTABLE_OR_UNREADABLE"
+                unsafe_entries.append(stability_marker)
+                _rollup_entry(stability_marker, b"UNSTABLE_OR_UNREADABLE")
+
+    rollup_hex = rollup.hexdigest()
+    baseline_match = None if expected_rollup is None else rollup_hex == expected_rollup
+    if missing or unsafe_entries:
+        verification_status = "incomplete_install"
+        exit_code = 1
+    elif baseline_match is False:
+        verification_status = "baseline_mismatch"
+        exit_code = 1
+    elif baseline_match is True:
+        verification_status = "matches_supplied_baseline"
+        exit_code = 0
+    elif inventory_only:
+        verification_status = "inventory_only"
+        exit_code = 0
+    else:
+        verification_status = "baseline_required"
+        exit_code = 2
 
     out = {
         "version": __version__,
+        "inventory_mode": inventory_mode,
+        "inventory_root": str(inventory_root),
         "package_root": str(root),
+        "native_package_root": None if native_root is None else str(native_root),
         "files": file_hashes,
+        "file_count": len(file_hashes),
         "missing": missing,
-        "rollup_blake2s_128": rollup.hexdigest(),
-        "frozen_binary_blake2s_256": frozen_binary,
+        "rollup_sha256": rollup_hex,
+        "frozen_binary_sha256": frozen_binary,
+        "expected_rollup_sha256": expected_rollup,
+        "baseline_match": baseline_match,
+        "verification_status": verification_status,
+        "unsafe_entries": unsafe_entries,
+        "runtime_modules": runtime_modules,
+        "runtime_module_count": runtime_module_count,
+        "runtime_module_manifest_sha256": EXPECTED_STABLE_RUNTIME_MODULES_SHA256,
+        "missing_runtime_modules": missing_runtime_modules,
+        "forbidden_runtime_modules": forbidden_runtime_modules,
+        "forbidden_runtime_module_count": forbidden_runtime_module_count,
+        "forbidden_runtime_module_manifest_sha256": (STABLE_RUNTIME_FORBIDDEN_MODULES_SHA256),
+        "present_forbidden_runtime_modules": present_forbidden_runtime_modules,
+        # Matching a caller-supplied value does not authenticate its source.
+        "authenticity_verified": False,
     }
 
     if as_json:
         click.echo(_json.dumps(out, indent=2, sort_keys=True))
+        if exit_code:
+            raise click.exceptions.Exit(exit_code)
         return
 
     click.echo(f"One Link version:   {__version__}")
-    click.echo(f"Package root:       {root}")
+    click.echo(f"Inventory mode:     {inventory_mode}")
+    click.echo(f"Inventory root:     {inventory_root}")
+    click.echo(f"Package payload:    {root}")
     click.echo("")
-    click.echo("Load-bearing source files (BLAKE2s-128 content hash):")
+    click.echo("Managed install files (SHA-256 content hash):")
     name_w = max(len(n) for n in file_hashes)
     for name, hx in sorted(file_hashes.items()):
         click.echo(f"  {name:<{name_w}}  {hx}")
@@ -1292,23 +2541,56 @@ def verify_this_install(as_json):
             err=True,
         )
     click.echo("")
-    click.echo(f"Rollup (compare with release notes): {rollup.hexdigest()}")
+    click.echo(f"Rollup (local inventory): {rollup_hex}")
+    if verification_status == "baseline_required":
+        click.echo(
+            "NOT VERIFIED: no independently authenticated expected rollup was supplied.",
+            err=True,
+        )
+    if unsafe_entries:
+        click.echo("")
+        click.echo(
+            "WARNING: links, special files, or unstable entries are not "
+            "accepted in a verified install.",
+            err=True,
+        )
+        for entry in unsafe_entries:
+            if entry.startswith("runtime-module/"):
+                detail = runtime_modules.get(entry.removeprefix("runtime-module/"))
+            else:
+                detail = file_hashes.get(entry)
+            click.echo(f"  - {entry}: {detail or 'INVALID'}", err=True)
+        click.echo(
+            "Use --expected-rollup <64-hex> after authenticating that value, or "
+            "--inventory-only for a non-verifying diagnostic.",
+            err=True,
+        )
+    elif verification_status == "baseline_mismatch":
+        click.echo("FAILED: installed files do not match the supplied rollup.", err=True)
+    elif verification_status == "matches_supplied_baseline":
+        click.echo(
+            "MATCH: installed files match the supplied rollup. This command did "
+            "not authenticate the source of that rollup."
+        )
+    else:
+        click.echo("INVENTORY ONLY: authenticity and release provenance were not verified.")
     if frozen_binary:
-        click.echo(f"Frozen binary BLAKE2s-256:           {frozen_binary}")
+        click.echo(f"Frozen binary SHA-256:               {frozen_binary}")
         click.echo("")
         click.echo("To verify this binary against the published Sigstore bundle:")
-        click.echo("  cosign verify-blob \\")
-        click.echo("    --certificate-identity-regexp '.*' \\")
+        click.echo("  python -m sigstore verify identity \\")
         click.echo(
-            "    --certificate-oidc-issuer "
-            "'https://token.actions.githubusercontent.com' \\"
+            "    --cert-identity "
+            f"'https://github.com/IamOneYouAreOneWeAreOne/one-link/"
+            f".github/workflows/release.yml@refs/tags/v{__version__}' \\"
         )
-        click.echo(
-            f"    --bundle {Path(_sys.executable).name}.sigstore \\"
-        )
+        click.echo("    --cert-oidc-issuer 'https://token.actions.githubusercontent.com' \\")
+        click.echo(f"    --bundle {Path(_sys.executable).name}.sigstore \\")
         click.echo(f"    {Path(_sys.executable).name}")
     else:
         click.echo("(running from source; no frozen-binary hash to report)")
+    if exit_code:
+        raise click.exceptions.Exit(exit_code)
 
 
 @cli.command()
@@ -1327,9 +2609,7 @@ def peers():
     click.echo(f"{'short_id':10} {'hostname':24} {'address':18} port")
     click.echo("-" * 60)
     for p in plist:
-        click.echo(
-            f"{p['short_id']:10} {p['hostname']:24} {p['address']:18} {p['port']}"
-        )
+        click.echo(f"{p['short_id']:10} {p['hostname']:24} {p['address']:18} {p['port']}")
 
 
 @cli.command()
@@ -1348,7 +2628,11 @@ def send(peer, body):
 @click.argument("peer")
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 def send_file(peer, path):
-    """Send a file to PEER. Any size."""
+    """Send a file to PEER.
+
+    One Link imposes no user-configured quota here, but disk, filesystem,
+    memory, transport, route, and peer-policy limits still apply.
+    """
     size = path.stat().st_size
     click.echo(f"sending {path.name} ({size} bytes)...")
     timeout = max(300.0, min(3600.0, size / (512 * 1024)))
@@ -1361,9 +2645,7 @@ def send_file(peer, path):
     if not res.get("ok"):
         raise click.ClickException(res.get("error", "send-file failed"))
     r = res["result"]
-    click.echo(
-        f"sent  blob={r['blob'][:12]}  chunks={r['chunks']}  size={r['size']}"
-    )
+    click.echo(f"sent  blob={r['blob'][:12]}  chunks={r['chunks']}  size={r['size']}")
 
 
 @cli.command()
@@ -1380,11 +2662,11 @@ def send_file(peer, path):
 )
 @click.option(
     "--lan/--loopback-only",
-    default=True,
+    default=False,
     help=(
-        "Bind to 0.0.0.0 so devices on your local Wi-Fi (your phone, "
-        "another laptop) can reach the UI. Use --loopback-only for "
-        "local-computer-only mode."
+        "Explicitly bind the pairing surface to 0.0.0.0 so devices on your "
+        "local Wi-Fi can reach it. Default is loopback-only; remote plain "
+        "HTTP never accepts owner UI credentials."
     ),
 )
 @click.option(
@@ -1409,21 +2691,21 @@ def app(no_browser, browser_tab, lan, supervise):
     ``--no-browser`` to start the daemon headless. ``--supervise``
     wraps the daemon in an auto-restart watchdog."""
     from one_link.app import run_app
-    raise SystemExit(run_app(
-        no_browser=no_browser,
-        standalone=not browser_tab,
-        lan=lan,
-        supervise=supervise,
-    ))
+
+    raise SystemExit(
+        run_app(
+            no_browser=no_browser,
+            standalone=not browser_tab,
+            lan=lan,
+            supervise=supervise,
+        )
+    )
 
 
 @cli.command("open-url")
 @click.argument("url")
 def open_url(url: str):
     """Open a one-link:// URL in the local desktop app."""
-    import webbrowser
-
-    from one_link import server as server_mod
     from one_link.app import run_app
     from one_link.protocol_handler import local_ui_url_for_deep_link
 
@@ -1431,21 +2713,23 @@ def open_url(url: str):
     if code != 0:
         raise SystemExit(code)
     try:
+        ui_port, ui_token = _ui_launch_info()
         local = local_ui_url_for_deep_link(
             url,
-            port=server_mod.read_server_port(),
-            token=server_mod.read_ui_token(),
+            port=ui_port,
+            token=ui_token,
         )
     except Exception as exc:
         raise click.ClickException(str(exc))
-    click.echo(f"open: {local}")
-    webbrowser.open(local)
+    click.echo("open: authenticated One Link UI on loopback")
+    launch_loopback_url(local)
 
 
 @cli.command()
 def chat():
     """Open the interactive terminal REPL. Auto-starts a daemon if none running."""
     from one_link.chat import run_chat
+
     raise SystemExit(run_chat())
 
 
@@ -1453,21 +2737,21 @@ def chat():
 def audit():
     """Print a self-audit of this binary's network surface.
 
-    Reports every kind of network call this build can make, sourced from
-    the registered HTTP routes and the peer protocol's declared message
-    types. Useful for verifying 'no telemetry, no calls home' claims.
+    Reports declared destination classes, registered local HTTP routes, and
+    the peer protocol vocabulary. Optional services are included even when
+    disabled. This inventory is not a packet-capture attestation; use the
+    sovereignty status and outbound log for current policy and recent calls.
     """
     res = _request("audit")
     if res.get("error") or res.get("ok") is False:
         # The control socket doesn't have audit; we go via the UI port.
-        from one_link import server as server_mod
         try:
-            ui_port = server_mod.read_server_port()
-            token = server_mod.read_ui_token()
-        except RuntimeError as e:
+            ui_port, token = _ui_launch_info()
+        except (RuntimeError, click.ClickException) as e:
             raise click.ClickException(f"daemon not running ({e})")
         import urllib.request
         import json as _json
+
         req = urllib.request.Request(
             f"http://127.0.0.1:{ui_port}/api/audit",
             headers={"Authorization": f"Bearer {token}"},
@@ -1505,9 +2789,13 @@ def audit():
         for s in pp.get("sessions", []):
             click.echo(f"      - {s.get('name')}")
     click.echo("  Outbound destinations:")
+    if res.get("outbound_inventory_scope"):
+        click.echo(f"    scope: {res['outbound_inventory_scope']}")
     for o in res.get("outbound_destinations", []):
         click.echo(f"    - {o['kind']}: {o['destination']}")
         click.echo(f"        protocol: {o['protocol']}")
+        if o.get("activation"):
+            click.echo(f"        activation: {o['activation']}")
     click.echo("  Local UI routes:")
     for r in res.get("local_ui_routes", []):
         click.echo(f"    {r['method']:6} {r['path']}")
@@ -1517,9 +2805,7 @@ def audit():
         for p in primitives:
             status = p.get("status", "?")
             ref = p.get("audit_ref", "")
-            click.echo(
-                f"    {p['name']:42} [{status}]  {ref}"
-            )
+            click.echo(f"    {p['name']:42} [{status}]  {ref}")
             click.echo(f"      {p['summary']}")
 
 
@@ -1529,16 +2815,15 @@ def audit():
 @click.option("--limit", default=50, type=int, help="Max results.")
 def search(query, peer, limit):
     """Full-text search across message history."""
-    from one_link import server as server_mod
     try:
-        ui_port = server_mod.read_server_port()
-        token = server_mod.read_ui_token()
-    except RuntimeError as e:
+        ui_port, token = _ui_launch_info()
+    except (RuntimeError, click.ClickException) as e:
         raise click.ClickException(f"daemon not running ({e})")
 
     import urllib.parse
     import urllib.request
     import json as _json
+
     qs = {"q": query, "limit": str(limit)}
     if peer:
         qs["peer"] = peer
@@ -1565,28 +2850,40 @@ def search(query, peer, limit):
 def tail():
     """Stream incoming and outgoing message events. Ctrl-C to stop."""
     s, _ = _connect_control()
-    s.settimeout(None)
+    stream = None
     try:
-        s.sendall((json.dumps({"cmd": "tail"}) + "\n").encode("utf-8"))
-        buf = b""
+        secret = control_ipc.read_control_secret()
+        credential, exchange = control_ipc.begin_authenticated_request(
+            s,
+            {"cmd": "tail"},
+            secret=secret,
+        )
+        s.settimeout(None)
+        stream = s.makefile("rb")
+        first = stream.readline(control_ipc.CONTROL_RESPONSE_MAX_BYTES + 2)
+        if len(first) > control_ipc.CONTROL_RESPONSE_MAX_BYTES or not first.endswith(b"\n"):
+            raise click.ClickException("daemon returned an oversized tail response")
+        envelope = json.loads(first.decode("utf-8"))
+        ack = control_ipc.verify_server_response(envelope, credential, exchange)
+        if ack.get("ok") is not True or not ack.get("tailing"):
+            raise click.ClickException(ack.get("error") or "daemon refused tail stream")
+        click.echo("(tailing — Ctrl-C to stop)")
         while True:
-            chunk = s.recv(65536)
-            if not chunk:
+            line = stream.readline(control_ipc.CONTROL_RESPONSE_MAX_BYTES + 2)
+            if not line:
                 break
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                if not line.strip():
-                    continue
-                obj = json.loads(line.decode("utf-8"))
-                if obj.get("ok") is True and obj.get("tailing"):
-                    click.echo("(tailing — Ctrl-C to stop)")
-                    continue
-                msg = obj.get("msg") or obj
-                _print_event(msg)
+            if len(line) > control_ipc.CONTROL_RESPONSE_MAX_BYTES or not line.endswith(b"\n"):
+                raise click.ClickException("daemon tail event exceeds byte limit")
+            if not line.strip():
+                continue
+            obj = json.loads(line.decode("utf-8"))
+            msg = obj.get("msg") or obj
+            _print_event(msg)
     except KeyboardInterrupt:
         pass
     finally:
+        if stream is not None:
+            stream.close()
         s.close()
 
 
@@ -1596,34 +2893,33 @@ def _print_event(m: dict) -> None:
     peer = m.get("peer", "?")
     t = m.get("t", "?")
     if t == "TEXT":
-        click.echo(f"[{m.get('ts','')}] {arrow} {peer}: {m.get('body','')}")
+        click.echo(f"[{m.get('ts', '')}] {arrow} {peer}: {m.get('body', '')}")
     elif t == "FILE_OFFER":
         click.echo(
-            f"[{m.get('ts','')}] {arrow} {peer} OFFER {m.get('name','')} "
-            f"({m.get('size','?')} bytes, blob={m.get('blob','')[:8]})"
+            f"[{m.get('ts', '')}] {arrow} {peer} OFFER {m.get('name', '')} "
+            f"({m.get('size', '?')} bytes, blob={m.get('blob', '')[:8]})"
         )
     elif t == "FILE_DONE":
         ok = "OK" if m.get("ok") else "BAD"
         click.echo(
-            f"[{m.get('ts','')}] {arrow} {peer} FILE_DONE [{ok}] "
-            f"{m.get('name','')} -> {m.get('path','')}"
+            f"[{m.get('ts', '')}] {arrow} {peer} FILE_DONE [{ok}] "
+            f"{m.get('name', '')} -> {m.get('path', '')}"
         )
     else:
-        click.echo(f"[{m.get('ts','')}] {arrow} {peer} {t}")
+        click.echo(f"[{m.get('ts', '')}] {arrow} {peer} {t}")
 
 
 def _ui_request(method: str, path: str, *, payload=None) -> dict:
     """Helper for hitting the daemon's UI API from CLI commands."""
-    from one_link import server as server_mod
     try:
-        ui_port = server_mod.read_server_port()
-        token = server_mod.read_ui_token()
-    except RuntimeError as e:
+        ui_port, token = _ui_launch_info()
+    except (RuntimeError, click.ClickException) as e:
         raise click.ClickException(f"daemon not running ({e})")
 
     import urllib.error
     import urllib.request
     import json as _json
+
     body = None
     headers = {"Authorization": f"Bearer {token}"}
     if payload is not None:
@@ -1631,7 +2927,9 @@ def _ui_request(method: str, path: str, *, payload=None) -> dict:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(
         f"http://127.0.0.1:{ui_port}{path}",
-        data=body, headers=headers, method=method,
+        data=body,
+        headers=headers,
+        method=method,
     )
     try:
         with validated_urlopen(req, timeout=30, allow_loopback_http=True) as r:
@@ -1653,15 +2951,20 @@ def folder():
 @folder.command("add")
 @click.argument("name")
 @click.argument("local_path", type=click.Path(file_okay=False, path_type=Path))
-@click.option("--share", "share", multiple=True,
-              help="Peer fingerprint to share with (repeatable).")
+@click.option(
+    "--share", "share", multiple=True, help="Peer fingerprint to share with (repeatable)."
+)
 def folder_add(name, local_path, share):
     """Designate a folder to sync. NAME is a label, LOCAL_PATH is the directory."""
-    res = _ui_request("POST", "/api/folders", payload={
-        "name": name,
-        "local_path": str(local_path.expanduser().resolve()),
-        "shared_with": list(share),
-    })
+    res = _ui_request(
+        "POST",
+        "/api/folders",
+        payload={
+            "name": name,
+            "local_path": str(local_path.expanduser().resolve()),
+            "shared_with": list(share),
+        },
+    )
     if res.get("error"):
         raise click.ClickException(res["error"])
     f = res.get("folder", {})
@@ -1684,13 +2987,12 @@ def folder_list():
     click.echo("-" * 60)
     for f in folders:
         click.echo(
-            f"{f['name']:16} {f.get('files', 0):>6} {f.get('in_store', 0):>9}  "
-            f"{f['local_path']}"
+            f"{f['name']:16} {f.get('files', 0):>6} {f.get('in_store', 0):>9}  {f['local_path']}"
         )
         if f.get("shared_with"):
-            click.echo(f"{'':16} shared with: " + ", ".join(
-                fp[:8] + "…" for fp in f["shared_with"]
-            ))
+            click.echo(
+                f"{'':16} shared with: " + ", ".join(fp[:8] + "…" for fp in f["shared_with"])
+            )
 
 
 @folder.command("share")
@@ -1698,8 +3000,7 @@ def folder_list():
 @click.argument("fingerprint")
 def folder_share(name, fingerprint):
     """Add a peer FINGERPRINT to the sharing list of folder NAME."""
-    res = _ui_request("POST", f"/api/folders/{name}/share",
-                      payload={"peer_fp": fingerprint})
+    res = _ui_request("POST", f"/api/folders/{name}/share", payload={"peer_fp": fingerprint})
     if res.get("error"):
         raise click.ClickException(res["error"])
     click.echo(f"shared {name!r} with {fingerprint[:16]}…")
@@ -1726,8 +3027,7 @@ def folder_sync(name):
         peer = r.get("peer_fp", "?")[:8] + "…"
         if r["status"] == "pushed":
             click.echo(
-                f"  {peer}  pushed  wants={r.get('wants', 0)}  "
-                f"blobs_sent={r.get('blobs_sent', 0)}"
+                f"  {peer}  pushed  wants={r.get('wants', 0)}  blobs_sent={r.get('blobs_sent', 0)}"
             )
         else:
             click.echo(f"  {peer}  {r['status']}")
@@ -1744,38 +3044,51 @@ def daemon_stop():
     re-launch it.
     """
     try:
-        port = daemon_mod.read_control_port()
+        daemon_mod.read_control_port()
     except RuntimeError:
         click.echo("daemon is not running.")
         return
-    # Tell the daemon to shut down cleanly via the control port.
+    # Tell the daemon to shut down cleanly via authenticated control IPC.
+    authenticated_pid: int | None = None
     try:
-        sock, _ = _connect_control(timeout=3.0)
-        sock.sendall(json.dumps({"cmd": "shutdown"}).encode() + b"\n")
-        try:
-            sock.recv(256)
-        except Exception:
-            pass
-        sock.close()
+        status = _request("status", timeout=3.0)
+        reported_pid = status.get("pid")
+        if status.get("ok") is True and isinstance(reported_pid, int) and reported_pid > 0:
+            authenticated_pid = reported_pid
+        result = _request("shutdown", timeout=3.0)
+        if result.get("ok") is not True:
+            raise RuntimeError(result.get("error") or "shutdown refused")
         click.echo("daemon shutdown requested.")
     except Exception as e:
-        # Fall back to PID-file termination.
-        try:
-            from one_link.paths import data_dir as _dd
-            pid_path = _dd() / "daemon.pid"
-            if pid_path.is_file():
-                pid = int(pid_path.read_text().strip())
+        # A PID file alone is untrusted: stale PIDs can be recycled into an
+        # unrelated process.  Only fall back after this very connection
+        # authenticated the daemon's PID and OS process inspection still
+        # confirms it is One Link for the current home.
+        if authenticated_pid is not None and daemon_mod._pid_matches_one_link_daemon(
+            authenticated_pid
+        ):
+            try:
                 if os.name == "nt":
-                    _force_kill_windows_pid(pid)
+                    _force_kill_windows_pid(authenticated_pid)
                 else:
                     try:
-                        os.kill(pid, signal.SIGTERM)
+                        os.kill(authenticated_pid, signal.SIGTERM)
                     except ProcessLookupError:
-                        pass
-                click.echo(f"daemon terminated (pid {pid}).")
+                        click.echo(f"daemon already exited (pid {authenticated_pid}).")
+                        return
+                click.echo(f"daemon terminated (pid {authenticated_pid}).")
                 return
-        except Exception:
-            pass
+            except (
+                OSError,
+                RuntimeError,
+                ValueError,
+                subprocess.SubprocessError,
+            ) as fallback_exc:
+                raise click.ClickException(
+                    "could not stop daemon: authenticated process fallback "
+                    f"failed ({type(fallback_exc).__name__}); clean shutdown "
+                    f"also failed ({type(e).__name__})"
+                ) from fallback_exc
         raise click.ClickException(f"could not stop daemon: {e}")
 
 

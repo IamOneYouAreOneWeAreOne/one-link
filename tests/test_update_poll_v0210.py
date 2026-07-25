@@ -20,18 +20,40 @@ Tests:
 from __future__ import annotations
 
 import asyncio
-import logging
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+
+def _poll_stub(daemon_cls, ui_server, *, state=None):
+    """Build the smallest faithful stand-in for the live poll daemon.
+
+    The sovereignty hardening added a shared network lock so an update request
+    cannot race a transition into Quiet/Off-grid mode.  Bind the production
+    lazy-lock method here instead of bypassing that security boundary with an
+    unrelated test-only context manager.
+    """
+    stub = SimpleNamespace(
+        state=state,
+        ui_server=ui_server,
+        UPDATE_CHECK_INTERVAL_S=6 * 60 * 60,
+        # The historical background installer must remain unreachable even
+        # when the poll observes a newer release.
+        _maybe_auto_install=AsyncMock(),
+    )
+    stub.get_update_check_network_lock = (
+        daemon_cls.get_update_check_network_lock.__get__(stub)
+    )
+    return stub
 
 
 @pytest.mark.asyncio
 async def test_update_poll_broadcasts_on_status_change(monkeypatch):
     """Same -> newer: the loop broadcasts an update_status event with
     the new latest_version. UI listens and refreshes the banner."""
+    monkeypatch.setenv("ONE_LINK_UPDATE_CHECK", "1")
     from one_link import update_check as uc_mod
 
     # Sequence the fetch results: first call same, second call newer.
@@ -59,10 +81,7 @@ async def test_update_poll_broadcasts_on_status_change(monkeypatch):
     # We don't actually instantiate Daemon (it has heavy init); we
     # bind the coroutine to a lightweight stand-in that satisfies
     # _update_check_loop's only attribute reads.
-    stub = SimpleNamespace(
-        ui_server=fake_ui_server,
-        UPDATE_CHECK_INTERVAL_S=6 * 60 * 60,
-    )
+    stub = _poll_stub(Daemon, fake_ui_server)
     coro = Daemon._update_check_loop.__get__(stub)
 
     # Make sleep instantaneous + bounded.
@@ -88,6 +107,7 @@ async def test_update_poll_broadcasts_on_status_change(monkeypatch):
     events = [c.get("status") for c in broadcast_calls]
     assert events == ["same", "newer"]
     assert broadcast_calls[1]["latest_version"] == "v0.22.0"
+    stub._maybe_auto_install.assert_not_awaited()
     # Loop slept for at least one warmup + one inter-tick interval.
     assert sleep_calls[0] == 60.0      # 1-minute warmup
     assert sleep_calls[1] >= 60 * 60   # at least 1h between ticks
@@ -98,6 +118,7 @@ async def test_update_poll_does_not_broadcast_when_unchanged(monkeypatch):
     """If two consecutive ticks return the same status + version, the
     second tick is silent. A daemon running for a week shouldn't
     broadcast 28 'still up to date' events."""
+    monkeypatch.setenv("ONE_LINK_UPDATE_CHECK", "1")
     from one_link import update_check as uc_mod
 
     def fake_fetch_latest(local_version, **kw):
@@ -112,10 +133,7 @@ async def test_update_poll_does_not_broadcast_when_unchanged(monkeypatch):
     fake_ui_server.broadcast.side_effect = lambda ev: broadcast_calls.append(ev)
 
     from one_link.daemon import Daemon
-    stub = SimpleNamespace(
-        ui_server=fake_ui_server,
-        UPDATE_CHECK_INTERVAL_S=6 * 60 * 60,
-    )
+    stub = _poll_stub(Daemon, fake_ui_server)
     coro = Daemon._update_check_loop.__get__(stub)
 
     real_sleep = asyncio.sleep
@@ -142,6 +160,7 @@ async def test_update_poll_tolerates_fetch_exceptions(monkeypatch):
     """fetch_latest is supposed to never raise, but if it ever does
     (bug, surprise import error), the loop must not die. The next
     tick should resume."""
+    monkeypatch.setenv("ONE_LINK_UPDATE_CHECK", "1")
     from one_link import update_check as uc_mod
 
     calls = [0]
@@ -163,10 +182,7 @@ async def test_update_poll_tolerates_fetch_exceptions(monkeypatch):
     fake_ui_server.broadcast.side_effect = lambda ev: broadcast_calls.append(ev)
 
     from one_link.daemon import Daemon
-    stub = SimpleNamespace(
-        ui_server=fake_ui_server,
-        UPDATE_CHECK_INTERVAL_S=6 * 60 * 60,
-    )
+    stub = _poll_stub(Daemon, fake_ui_server)
     coro = Daemon._update_check_loop.__get__(stub)
 
     real_sleep = asyncio.sleep
@@ -185,6 +201,60 @@ async def test_update_poll_tolerates_fetch_exceptions(monkeypatch):
     # Loop survived the first error and produced the second tick's
     # 'newer' broadcast.
     assert any(c.get("status") == "newer" for c in broadcast_calls)
+
+
+@pytest.mark.asyncio
+async def test_update_poll_policy_read_failure_is_fail_closed(monkeypatch):
+    """A broken privacy store cannot become permission to contact GitHub.
+
+    This remains closed even with the legacy environment opt-in set: a
+    trustworthy active preset is the ceiling for outbound update traffic.
+    """
+    monkeypatch.setenv("ONE_LINK_UPDATE_CHECK", "1")
+    from one_link import update_check as uc_mod
+    from one_link.daemon import Daemon
+
+    fetch_calls = 0
+
+    def fake_fetch_latest(local_version, **kw):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return uc_mod.CheckResult(
+            status="same",
+            local_version=local_version,
+            latest_version=local_version,
+        )
+
+    monkeypatch.setattr(uc_mod, "fetch_latest", fake_fetch_latest)
+
+    class BrokenPrivacyState:
+        def get_setting(self, key):
+            raise RuntimeError(f"unreadable setting: {key}")
+
+    fake_ui_server = MagicMock()
+    stub = _poll_stub(Daemon, fake_ui_server, state=BrokenPrivacyState())
+    # This would loosen policy if the loop trusted it after the state read
+    # failed. The implementation must instead apply the Quiet ceiling.
+    stub.runtime_sovereignty_preset_name = lambda: "just_works"
+    coro = Daemon._update_check_loop.__get__(stub)
+
+    real_sleep = asyncio.sleep
+    sleep_count = 0
+
+    async def fake_sleep(n):
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count >= 2:  # warmup, then one disabled-policy cycle
+            raise asyncio.CancelledError
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await coro()
+
+    assert fetch_calls == 0
+    fake_ui_server.broadcast.assert_not_called()
+    stub._maybe_auto_install.assert_not_awaited()
 
 
 def test_update_check_interval_is_in_hours_not_seconds():

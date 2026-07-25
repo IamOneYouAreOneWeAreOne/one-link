@@ -65,7 +65,10 @@ detection, role-overstepping rejection, replay-after-removal).
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -101,6 +104,23 @@ EV_KINDS_VALID = frozenset({
 # Sane caps so a malicious member can't blow up state.
 MAX_GROUP_NAME_LEN = 200
 MAX_GROUP_MEMBERS = 1024
+MAX_EVENT_TIMESTAMP_MS = 2**63 - 1
+
+_EVENT_WIRE_FIELDS = frozenset({
+    "v",
+    "group_id_b64",
+    "kind",
+    "timestamp_ms",
+    "author_pubkey_b64",
+    "target_pubkey_b64",
+    "role",
+    "name",
+    "nonce_b64",
+    "signature",
+    "event_id",
+})
+_B64URL_RE = re.compile(r"^[A-Za-z0-9_-]*$")
+_EVENT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 # ─── helpers ────────────────────────────────────────────────────────
@@ -131,14 +151,41 @@ def _event_id(payload: dict) -> str:
 
 
 def _b64(b: bytes) -> str:
-    import base64
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
 
 
-def _b64d(s: str) -> bytes:
-    import base64
+def _b64d(s: str, *, name: str, max_decoded_bytes: int) -> bytes:
+    """Decode the protocol's canonical, unpadded base64url form.
+
+    Python's convenience decoder accepts multiple textual aliases for the
+    same bytes and can allocate before the caller checks a decoded length.
+    Wire identities are content-addressed, so both properties are unsafe at
+    this boundary: reject padding/foreign alphabets and bound before decode.
+    """
+    if not isinstance(s, str):
+        raise ValueError(f"{name} must be a string")
+    max_encoded = (max_decoded_bytes * 4 + 2) // 3
+    if len(s) > max_encoded:
+        raise ValueError(f"{name} is too large")
+    if len(s) % 4 == 1 or _B64URL_RE.fullmatch(s) is None:
+        raise ValueError(f"{name} must be canonical base64url")
     pad = "=" * ((4 - len(s) % 4) % 4)
-    return base64.urlsafe_b64decode((s + pad).encode("ascii"))
+    try:
+        decoded = base64.b64decode(
+            (s + pad).encode("ascii"), altchars=b"-_", validate=True
+        )
+    except (binascii.Error, ValueError, UnicodeEncodeError):
+        raise ValueError(f"{name} must be canonical base64url") from None
+    if len(decoded) > max_decoded_bytes or _b64(decoded) != s:
+        raise ValueError(f"{name} must be canonical base64url")
+    return decoded
+
+
+def _decode_exact_b64(s: object, *, name: str, size: int) -> bytes:
+    value = _b64d(_require_str(s, name), name=name, max_decoded_bytes=size)
+    if len(value) != size:
+        raise ValueError(f"{name} must decode to {size} bytes")
+    return value
 
 
 # ─── GroupEvent — the only mutating primitive ──────────────────────
@@ -190,37 +237,48 @@ class GroupEvent:
     def from_wire(cls, d: dict) -> "GroupEvent":
         if not isinstance(d, dict):
             raise ValueError("event must be an object")
+        keys = frozenset(d)
+        missing = _EVENT_WIRE_FIELDS - keys
+        extra = keys - _EVENT_WIRE_FIELDS
+        if missing:
+            raise ValueError(f"event missing fields: {', '.join(sorted(missing))}")
+        if extra:
+            raise ValueError(f"event has unknown fields: {', '.join(sorted(extra))}")
         if d.get("v") != PROTOCOL_VERSION:
             raise ValueError(f"unsupported version: {d.get('v')!r}")
         kind = _require_str(d.get("kind"), "kind")
         if kind not in EV_KINDS_VALID:
             raise ValueError(f"unknown event kind: {kind!r}")
-        gid = _b64d(_require_str(d.get("group_id_b64"), "group_id_b64"))
-        if len(gid) != GROUP_ID_BYTES:
-            raise ValueError(f"group_id wrong length: {len(gid)}")
-        author = _b64d(_require_str(d.get("author_pubkey_b64"), "author_pubkey_b64"))
-        if len(author) != 32:
-            raise ValueError("author_pubkey must be 32 bytes")
-        target_b64 = d.get("target_pubkey_b64") or ""
-        target = _b64d(target_b64) if target_b64 else b""
-        if target and len(target) != 32:
-            raise ValueError("target_pubkey must be 32 bytes when present")
-        role = str(d.get("role") or "")
+        gid = _decode_exact_b64(
+            d.get("group_id_b64"), name="group_id_b64", size=GROUP_ID_BYTES
+        )
+        author = _decode_exact_b64(
+            d.get("author_pubkey_b64"), name="author_pubkey_b64", size=32
+        )
+        target_b64 = _require_str(d.get("target_pubkey_b64"), "target_pubkey_b64")
+        target = (
+            _decode_exact_b64(target_b64, name="target_pubkey_b64", size=32)
+            if target_b64
+            else b""
+        )
+        role = _require_str(d.get("role"), "role")
         if role and role not in ROLES_VALID:
             raise ValueError(f"invalid role: {role!r}")
-        name = str(d.get("name") or "")
+        name = _require_str(d.get("name"), "name")
         if len(name) > MAX_GROUP_NAME_LEN:
             raise ValueError(f"name too long: {len(name)}")
-        nonce = _b64d(_require_str(d.get("nonce_b64"), "nonce_b64"))
-        if len(nonce) != 8:
-            raise ValueError("nonce must be 8 bytes")
-        sig = _b64d(_require_str(d.get("signature"), "signature"))
-        if len(sig) != 64:
-            raise ValueError("signature must be 64 bytes")
-        return cls(
+        nonce = _decode_exact_b64(d.get("nonce_b64"), name="nonce_b64", size=8)
+        sig = _decode_exact_b64(d.get("signature"), name="signature", size=64)
+        timestamp_ms = _require_int(d.get("timestamp_ms"), "timestamp_ms")
+        if not 0 <= timestamp_ms <= MAX_EVENT_TIMESTAMP_MS:
+            raise ValueError("timestamp_ms is out of range")
+        claimed_event_id = _require_str(d.get("event_id"), "event_id")
+        if _EVENT_ID_RE.fullmatch(claimed_event_id) is None:
+            raise ValueError("event_id must be 64 lowercase hexadecimal characters")
+        event = cls(
             group_id=gid,
             kind=kind,
-            timestamp_ms=_require_int(d.get("timestamp_ms"), "timestamp_ms"),
+            timestamp_ms=timestamp_ms,
             author_pubkey=author,
             target_pubkey=target,
             role=role,
@@ -228,8 +286,55 @@ class GroupEvent:
             nonce=nonce,
             signature=sig,
         )
+        event._validate_semantics()
+        if not secrets.compare_digest(event.event_id, claimed_event_id):
+            raise ValueError("event_id does not match event body")
+        return event
+
+    def _validate_semantics(self) -> None:
+        if len(self.group_id) != GROUP_ID_BYTES:
+            raise ValueError("group_id must be 16 bytes")
+        if len(self.author_pubkey) != 32:
+            raise ValueError("author_pubkey must be 32 bytes")
+        if len(self.nonce) != 8:
+            raise ValueError("nonce must be 8 bytes")
+        if self.kind not in EV_KINDS_VALID:
+            raise ValueError(f"unknown event kind: {self.kind!r}")
+        if not 0 <= self.timestamp_ms <= MAX_EVENT_TIMESTAMP_MS:
+            raise ValueError("timestamp_ms is out of range")
+        if self.kind == EV_CREATE:
+            valid = (
+                not self.target_pubkey
+                and self.role == ROLE_OWNER
+                and 0 < len(self.name) <= MAX_GROUP_NAME_LEN
+            )
+        elif self.kind == EV_ADD_MEMBER:
+            valid = (
+                len(self.target_pubkey) == 32
+                and self.role in ROLES_VALID
+                and not self.name
+            )
+        elif self.kind == EV_REMOVE_MEMBER:
+            valid = len(self.target_pubkey) == 32 and not self.role and not self.name
+        elif self.kind == EV_CHANGE_ROLE:
+            valid = (
+                len(self.target_pubkey) == 32
+                and self.role in ROLES_VALID
+                and not self.name
+            )
+        else:  # EV_RENAME
+            valid = (
+                not self.target_pubkey
+                and not self.role
+                and 0 < len(self.name) <= MAX_GROUP_NAME_LEN
+            )
+        if not valid:
+            raise ValueError(f"invalid fields for group event kind {self.kind!r}")
 
     def verify(self) -> None:
+        self._validate_semantics()
+        if len(self.signature) != 64:
+            raise ValueError("signature must be 64 bytes")
         try:
             Ed25519PublicKey.from_public_bytes(self.author_pubkey).verify(
                 self.signature,
@@ -250,16 +355,30 @@ def _sign(
     role: str = "",
     name: str = "",
 ) -> GroupEvent:
+    if len(pubkey) != 32:
+        raise ValueError("pubkey must be 32 bytes")
+    if private_key.public_key().public_bytes_raw() != pubkey:
+        raise ValueError("private_key does not match pubkey")
+    if len(group_id) != GROUP_ID_BYTES:
+        raise ValueError("group_id must be 16 bytes")
+    event_timestamp = timestamp_ms if timestamp_ms is not None else now_ms()
+    if (
+        not isinstance(event_timestamp, int)
+        or isinstance(event_timestamp, bool)
+        or not 0 <= event_timestamp <= MAX_EVENT_TIMESTAMP_MS
+    ):
+        raise ValueError("timestamp_ms is out of range")
     ev = GroupEvent(
         group_id=group_id,
         kind=kind,
-        timestamp_ms=timestamp_ms if timestamp_ms is not None else now_ms(),
+        timestamp_ms=event_timestamp,
         author_pubkey=pubkey,
         target_pubkey=target_pubkey,
         role=role,
         name=name,
         nonce=secrets.token_bytes(8),
     )
+    ev._validate_semantics()
     ev.signature = private_key.sign(_canonical_bytes(ev.to_signing_dict()))
     return ev
 
@@ -281,7 +400,7 @@ def sign_create_group(
     return _sign(
         private_key=private_key,
         pubkey=pubkey,
-        group_id=group_id or new_group_id(),
+        group_id=new_group_id() if group_id is None else group_id,
         kind=EV_CREATE,
         timestamp_ms=timestamp_ms,
         name=name,

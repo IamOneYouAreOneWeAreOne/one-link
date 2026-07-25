@@ -5,7 +5,9 @@ use std::collections::VecDeque;
 use crate::error::BatcherError;
 use crate::priority::Priority;
 use crate::state::RadioState;
-use crate::{DEFAULT_DRX_WINDOW_MS, DEFAULT_MAX_AGE_MS, DEFAULT_MAX_QUEUE_SIZE};
+use crate::{
+    DEFAULT_DRX_WINDOW_MS, DEFAULT_MAX_AGE_MS, DEFAULT_MAX_QUEUE_SIZE, MAX_QUEUE_SIZE_LIMIT,
+};
 
 /// One queued entry awaiting drain.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +40,7 @@ pub struct BatcherStats {
     pub enqueued_total: u64,
     /// Total entries ever drained.
     pub drained_total: u64,
-    /// Total enqueues rejected due to QueueFull.
+    /// Total enqueues rejected due to `QueueFull`.
     pub rejected_full: u64,
     /// Total entries force-drained due to age.
     pub aged_out: u64,
@@ -100,6 +102,12 @@ impl<T> Batcher<T> {
         if max_queue_size == 0 {
             return Err(BatcherError::InvalidMaxQueueSize {
                 got: max_queue_size,
+            });
+        }
+        if max_queue_size > MAX_QUEUE_SIZE_LIMIT {
+            return Err(BatcherError::MaxQueueSizeTooLarge {
+                got: max_queue_size,
+                max: MAX_QUEUE_SIZE_LIMIT,
             });
         }
         Ok(Self {
@@ -281,6 +289,17 @@ mod tests {
         assert!(matches!(
             Batcher::<u32>::with_config(50, 0, 1000),
             Err(BatcherError::InvalidMaxQueueSize { .. })
+        ));
+    }
+
+    #[test]
+    fn enormous_max_size_rejected() {
+        assert!(matches!(
+            Batcher::<u32>::with_config(50, usize::MAX, 1000),
+            Err(BatcherError::MaxQueueSizeTooLarge {
+                max: MAX_QUEUE_SIZE_LIMIT,
+                ..
+            })
         ));
     }
 

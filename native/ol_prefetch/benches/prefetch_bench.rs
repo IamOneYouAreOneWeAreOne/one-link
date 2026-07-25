@@ -1,4 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+//! Criterion benchmarks for the prefetch predictor.
+
+use criterion::{black_box, criterion_main, Criterion};
 use ol_prefetch::PrefetchPredictor;
 
 fn bench_observe(c: &mut Criterion) {
@@ -17,5 +19,9 @@ fn bench_observe(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_observe);
-criterion_main!(benches);
+fn benchmarks() {
+    let mut criterion = Criterion::default().configure_from_args();
+    bench_observe(&mut criterion);
+}
+
+criterion_main!(benchmarks);

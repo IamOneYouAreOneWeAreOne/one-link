@@ -17,7 +17,8 @@ Read order for the passphrase, in priority:
      CI / containers without depending on a desktop keychain).
   2. OS keychain entry under the service name `ONE_LINK_KEYCHAIN_SERVICE`,
      account `ONE_LINK_KEYCHAIN_USER`.
-  3. None.  (Caller decides whether to auto-mint + store one.)
+  3. Private local ``state.key`` fallback.
+  4. None, only after every configured store proves absence.
 
 Auto-mint policy: on first daemon start when (1) and (2) are both empty,
 `ensure_passphrase()` generates a fresh 32-byte url-safe-base64
@@ -25,12 +26,11 @@ passphrase, writes it to the keychain, and returns it. Subsequent
 restarts pick it up via (2) and stay in paranoid mode automatically —
 the user never has to remember anything.
 
-Recovery: if the keychain entry is deleted / inaccessible (e.g. user
-restored from a backup to a new machine), the daemon falls back to
-generating a NEW passphrase. That new passphrase CANNOT decrypt the
-existing state.db — the user needs the env-var override path to recover.
-This is the right tradeoff: a keychain that auto-syncs across machines
-defeats the whole point.
+Recovery: an inaccessible backend, unreadable/empty local key file, or
+ambiguous write outcome is a typed startup failure, never permission to mint
+a replacement.  Only proven absence may create.  First publication is
+serialized across processes, read back, and either committed to the OS
+credential store or atomically linked into a durable private local file.
 
 This module never logs the passphrase, never echoes it to stderr, never
 includes it in exception messages, and exposes no method to retrieve it
@@ -39,10 +39,23 @@ return to a caller.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import secrets
 import stat
+import threading
+from collections.abc import Iterator
+
+from one_link.key_material import (
+    KeyMaterialAccessError,
+    KeyMaterialIntegrityError,
+    KeyMaterialPersistenceError,
+    KeyMaterialProtectionError,
+    atomic_create_bytes,
+    read_bytes_if_exists,
+    sync_existing_authority,
+)
 
 log = logging.getLogger("one_link.keychain")
 
@@ -51,6 +64,17 @@ ONE_LINK_KEYCHAIN_USER = "state_db_key"
 ENV_VAR = "ONE_LINK_PASSPHRASE"
 # Filename of the local key-file fallback (see _local_key_path).
 LOCAL_KEY_FILENAME = "state.key"
+RECOVERY_KEY_FILENAME = "state.key.recovery-v1"
+RECOVERY_KEY_MAGIC = b"OLDBKEY\x01\x00\x00\x00\x00"
+RECOVERY_KEY_NONCE_LEN = 12
+RECOVERY_KEY_MAX_BYTES = len(RECOVERY_KEY_MAGIC) + RECOVERY_KEY_NONCE_LEN + 4096 + 16
+_RECOVERY_KEY_INFO = b"OL/master/state-db-key-recovery|v1"
+_PROVISION_LOCK_FILENAME = ".state-key.provision.lock"
+_provision_thread_lock = threading.RLock()
+
+
+class KeychainBackendError(KeyMaterialAccessError):
+    """The credential backend could not prove presence or absence."""
 
 
 def _load_keyring():
@@ -61,8 +85,10 @@ def _load_keyring():
     try:
         import keyring  # type: ignore[import-not-found]
         return keyring
-    except Exception:  # pragma: no cover - depends on install env
+    except ImportError:  # pragma: no cover - depends on install env
         return None
+    except Exception as exc:  # pragma: no cover - broken install edge
+        raise KeychainBackendError("keyring import failed") from exc
 
 
 # ── Local key-file fallback ───────────────────────────────────────────
@@ -89,40 +115,105 @@ def _local_key_path():
     return data_dir() / LOCAL_KEY_FILENAME
 
 
-def _read_local_key() -> str | None:
+def _harden_local_key(path) -> None:
+    if os.name == "nt":
+        from one_link.identity import _restrict_windows_acl
+
+        _restrict_windows_acl(path)
+        return
+    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    current = os.stat(path, follow_symlinks=False)
+    if stat.S_IMODE(current.st_mode) != 0o600:
+        raise KeyMaterialIntegrityError(
+            "local state encryption key is not owner-only"
+        )
+    get_euid = getattr(os, "geteuid", None)
+    if get_euid is not None and int(current.st_uid) != int(get_euid()):
+        raise KeyMaterialIntegrityError(
+            "local state encryption key is not owned by the current user"
+        )
+
+
+def _decode_local_key(blob: bytes) -> str:
+    if not blob:
+        raise KeyMaterialIntegrityError("existing local state key is empty")
+    if len(blob) > 4096:
+        raise KeyMaterialIntegrityError("existing local state key is oversized")
     try:
-        p = _local_key_path()
-        if not p.exists():
-            return None
-        v = p.read_text(encoding="utf-8").strip()
-        return v or None
-    except Exception as e:  # pragma: no cover - fs edge
-        log.warning("local key-file read failed: %s", type(e).__name__)
+        value = blob.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise KeyMaterialIntegrityError(
+            "existing local state key is not valid UTF-8"
+        ) from exc
+    if not value or value != value.strip() or any(ord(ch) < 0x20 for ch in value):
+        raise KeyMaterialIntegrityError(
+            "existing local state key has an invalid encoding"
+        )
+    return value
+
+
+def _read_local_key() -> str | None:
+    return _read_local_key_at(_local_key_path())
+
+
+def _read_local_key_at(path) -> str | None:
+    blob = read_bytes_if_exists(
+        path,
+        label="local state encryption key",
+        max_bytes=4096,
+        harden_path=_harden_local_key,
+    )
+    if blob is None:
         return None
+    return _decode_local_key(blob)
 
 
 def _write_local_key(pw: str) -> bool:
-    """Persist the key to a 0600 file in the data dir. Returns True on
-    success. Best-effort restrictive perms (POSIX chmod; on Windows the
-    file lives under the per-user profile dir whose ACLs already deny
-    other standard users)."""
+    """Exclusively and durably publish the local fallback key.
+
+    Existing bytes are never truncated or replaced.  A concurrent winner is
+    accepted only when it contains the exact same authority.
+    """
+    return _write_local_key_at(_local_key_path(), pw)
+
+
+def _write_local_key_at(path, pw: str) -> bool:
+    if not isinstance(pw, str) or not pw or pw != pw.strip():
+        raise ValueError("local state encryption key must be non-empty text")
+    payload = pw.encode("utf-8")
+    if len(payload) > 4096:
+        raise ValueError("local state encryption key is too large")
+
+    def _validate(blob: bytes) -> None:
+        if not secrets.compare_digest(_decode_local_key(blob), pw):
+            raise KeyMaterialIntegrityError(
+                "local state encryption key does not match requested authority"
+            )
+
     try:
-        p = _local_key_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        # Create with 0600 from the start where supported, so there's
-        # no window where the key is world-readable.
-        fd = os.open(
-            str(p),
-            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-            stat.S_IRUSR | stat.S_IWUSR,
+        p = path
+        created = atomic_create_bytes(
+            p,
+            payload,
+            label="local state encryption key",
+            validate=_validate,
+            harden_path=_harden_local_key,
         )
-        try:
-            os.write(fd, pw.encode("utf-8"))
-        finally:
-            os.close(fd)
-        with contextlib_suppress():
-            os.chmod(str(p), stat.S_IRUSR | stat.S_IWUSR)
+        if created:
+            return True
+        sync_existing_authority(p, label="local state encryption key")
+        existing = _read_local_key_at(p)
+        if existing is None:
+            raise KeyMaterialPersistenceError(
+                "concurrent local-key publication reported a winner but none exists"
+            )
+        if not secrets.compare_digest(existing, pw):
+            raise KeyMaterialIntegrityError(
+                "refusing to overwrite a different existing local state key"
+            )
         return True
+    except KeyMaterialIntegrityError:
+        raise
     except Exception as e:
         log.warning("local key-file write failed: %s", type(e).__name__)
         return False
@@ -147,9 +238,64 @@ def _disabled() -> bool:
     return os.environ.get(DISABLE_ENV) == "1"
 
 
+@contextlib.contextmanager
+def _exclusive_provision(lock_path=None) -> Iterator[None]:
+    """Serialize first-key publication across threads and processes."""
+
+    with _provision_thread_lock:
+        if lock_path is None:
+            lock_path = _local_key_path().with_name(_PROVISION_LOCK_FILENAME)
+        else:
+            lock_path = os.fspath(lock_path)
+            from pathlib import Path
+
+            lock_path = Path(lock_path)
+        try:
+            lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(
+                str(lock_path),
+                os.O_RDWR | os.O_CREAT | int(getattr(os, "O_BINARY", 0)),
+                0o600,
+            )
+        except OSError as exc:
+            raise KeyMaterialPersistenceError(
+                "cannot open state-key provisioning lock"
+            ) from exc
+        try:
+            if os.fstat(fd).st_size < 1:
+                os.write(fd, b"\x00")
+                os.fsync(fd)
+            os.lseek(fd, 0, os.SEEK_SET)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                flock = getattr(fcntl, "flock")
+                lock_ex = int(getattr(fcntl, "LOCK_EX"))
+                lock_un = int(getattr(fcntl, "LOCK_UN"))
+                flock(fd, lock_ex)
+                try:
+                    yield
+                finally:
+                    flock(fd, lock_un)
+        except OSError as exc:
+            raise KeyMaterialPersistenceError(
+                "state-key provisioning lock failed"
+            ) from exc
+        finally:
+            os.close(fd)
+
+
 def get_passphrase() -> str | None:
-    """Returns the active passphrase, or None if neither env var nor
-    keychain entry exists. Caller decides whether to auto-mint."""
+    """Return authority, or ``None`` only when every store proves absence."""
     env = os.environ.get(ENV_VAR, "").strip()
     if env:
         return env
@@ -161,66 +307,422 @@ def get_passphrase() -> str | None:
     if kr is not None:
         try:
             v = kr.get_password(ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER)
-            if v:
+            if v is not None:
+                if not isinstance(v, str) or not v:
+                    raise KeyMaterialIntegrityError(
+                        "existing OS keychain state key is empty or invalid"
+                    )
+                local = _read_local_key()
+                if local is not None and not secrets.compare_digest(local, v):
+                    raise KeyMaterialIntegrityError(
+                        "OS keychain and local state-key authorities conflict"
+                    )
                 return v
         except Exception as e:
-            # Common on Linux without an active D-Bus session, or Windows
-            # in unusual security contexts. Fall through to the local
-            # key file rather than to plaintext.
-            log.warning("keychain read failed: %s", type(e).__name__)
+            if isinstance(e, KeyMaterialIntegrityError):
+                raise
+            raise KeychainBackendError(
+                "OS keychain lookup failed; authority absence is unproven"
+            ) from e
     # Local key-file fallback (minted by ensure_passphrase when the OS
     # keychain is unavailable). Keeps at-rest encryption on across
     # restarts even where no OS keychain exists.
     return _read_local_key()
 
 
+def _recovery_artifact_path(data_root):
+    from pathlib import Path
+
+    return Path(data_root) / RECOVERY_KEY_FILENAME
+
+
+def _harden_recovery_artifact(path) -> None:
+    """Apply the same private-file contract to the sealed recovery key."""
+
+    _harden_local_key(path)
+
+
+def _derive_recovery_wrapping_key(seed: bytes) -> bytes:
+    if not isinstance(seed, (bytes, bytearray)) or len(seed) != 32:
+        raise ValueError("seed must be 32 bytes")
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=_RECOVERY_KEY_INFO,
+    ).derive(bytes(seed))
+
+
+def seal_state_passphrase_for_recovery(*, seed: bytes, passphrase: str) -> bytes:
+    """Return a versioned, seed-wrapped SQLCipher authority artifact.
+
+    The returned bytes are safe to place in an authenticated backup archive;
+    the database passphrase never appears in plaintext in that archive.  A
+    separate HKDF domain keeps this wrapping key independent from the outer
+    ``.olbak`` key, identity key, DRK, and runtime SQLCipher authority.
+    """
+
+    if not isinstance(passphrase, str):
+        raise TypeError("state database passphrase must be text")
+    payload = passphrase.encode("utf-8")
+    _decode_local_key(payload)
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    nonce = secrets.token_bytes(RECOVERY_KEY_NONCE_LEN)
+    ciphertext = AESGCM(_derive_recovery_wrapping_key(seed)).encrypt(
+        nonce,
+        payload,
+        RECOVERY_KEY_MAGIC,
+    )
+    artifact = RECOVERY_KEY_MAGIC + nonce + ciphertext
+    if len(artifact) > RECOVERY_KEY_MAX_BYTES:
+        raise ValueError("sealed state database recovery key exceeds its size limit")
+    return artifact
+
+
+def unseal_state_passphrase_for_recovery(*, seed: bytes, artifact: bytes) -> str:
+    """Authenticate, decrypt, and strictly validate a recovery artifact."""
+
+    if not isinstance(artifact, bytes):
+        raise KeyMaterialIntegrityError(
+            "state database recovery key artifact must be bytes"
+        )
+    minimum = len(RECOVERY_KEY_MAGIC) + RECOVERY_KEY_NONCE_LEN + 17
+    if len(artifact) < minimum or len(artifact) > RECOVERY_KEY_MAX_BYTES:
+        raise KeyMaterialIntegrityError(
+            "state database recovery key artifact has an invalid length"
+        )
+    if not secrets.compare_digest(
+        artifact[:len(RECOVERY_KEY_MAGIC)], RECOVERY_KEY_MAGIC
+    ):
+        raise KeyMaterialIntegrityError(
+            "state database recovery key artifact has an unsupported format"
+        )
+    offset = len(RECOVERY_KEY_MAGIC)
+    nonce = artifact[offset:offset + RECOVERY_KEY_NONCE_LEN]
+    ciphertext = artifact[offset + RECOVERY_KEY_NONCE_LEN:]
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    try:
+        payload = AESGCM(_derive_recovery_wrapping_key(seed)).decrypt(
+            nonce,
+            ciphertext,
+            RECOVERY_KEY_MAGIC,
+        )
+    except Exception as exc:
+        raise KeyMaterialIntegrityError(
+            "state database recovery key authentication failed"
+        ) from exc
+    try:
+        return _decode_local_key(payload)
+    finally:
+        # Python bytes cannot be reliably zeroized, but keep their lifetime
+        # bounded and never include them in logs or exception messages.
+        payload = b"\x00" * len(payload)
+
+
+def _configured_passphrase_at(data_root) -> str | None:
+    """Read env/keyring/local authority for one recovery target."""
+
+    from pathlib import Path
+
+    env = os.environ.get(ENV_VAR, "").strip()
+    if env:
+        return env
+    if _disabled():
+        return None
+    local_path = Path(data_root) / LOCAL_KEY_FILENAME
+    kr = _load_keyring()
+    if kr is not None:
+        try:
+            value = kr.get_password(
+                ONE_LINK_KEYCHAIN_SERVICE,
+                ONE_LINK_KEYCHAIN_USER,
+            )
+        except Exception as exc:
+            raise KeychainBackendError(
+                "OS keychain lookup failed during database recovery"
+            ) from exc
+        if value is not None:
+            if not isinstance(value, str) or not value:
+                raise KeyMaterialIntegrityError(
+                    "existing OS keychain state key is empty or invalid"
+                )
+            local = _read_local_key_at(local_path)
+            if local is not None and not secrets.compare_digest(local, value):
+                raise KeyMaterialIntegrityError(
+                    "OS keychain and local state-key authorities conflict"
+                )
+            return value
+    return _read_local_key_at(local_path)
+
+
+def _publish_recovered_passphrase(data_root, passphrase: str) -> str:
+    """Publish an exact recovered authority, never a replacement random key."""
+
+    from pathlib import Path
+
+    root = Path(data_root)
+    local_path = root / LOCAL_KEY_FILENAME
+    lock_path = root / _PROVISION_LOCK_FILENAME
+    with _exclusive_provision(lock_path):
+        winner = _configured_passphrase_at(root)
+        if winner is not None:
+            return winner
+        kr = _load_keyring()
+        if kr is not None:
+            try:
+                kr.set_password(
+                    ONE_LINK_KEYCHAIN_SERVICE,
+                    ONE_LINK_KEYCHAIN_USER,
+                    passphrase,
+                )
+            except Exception as write_exc:
+                try:
+                    after = kr.get_password(
+                        ONE_LINK_KEYCHAIN_SERVICE,
+                        ONE_LINK_KEYCHAIN_USER,
+                    )
+                except Exception as read_exc:
+                    raise KeychainBackendError(
+                        "OS keychain recovery-key write outcome is unknown"
+                    ) from read_exc
+                if after is not None:
+                    if not isinstance(after, str) or not after:
+                        raise KeyMaterialIntegrityError(
+                            "OS keychain returned invalid recovery authority"
+                        )
+                    return after
+                log.warning(
+                    "keychain recovery write failed (%s) and absence was "
+                    "re-confirmed; using the private local fallback",
+                    type(write_exc).__name__,
+                )
+            else:
+                try:
+                    after = kr.get_password(
+                        ONE_LINK_KEYCHAIN_SERVICE,
+                        ONE_LINK_KEYCHAIN_USER,
+                    )
+                except Exception as exc:
+                    raise KeychainBackendError(
+                        "OS keychain recovery-key write could not be read back"
+                    ) from exc
+                if not isinstance(after, str) or not secrets.compare_digest(
+                    after,
+                    passphrase,
+                ):
+                    raise KeyMaterialIntegrityError(
+                        "OS keychain recovery-key read-back did not match"
+                    )
+                return after
+        if not _write_local_key_at(local_path, passphrase):
+            raise KeyMaterialPersistenceError(
+                "could not persist the recovered state database authority"
+            )
+        winner = _read_local_key_at(local_path)
+        if winner is None or not secrets.compare_digest(winner, passphrase):
+            raise KeyMaterialPersistenceError(
+                "recovered local state database authority failed read-back"
+            )
+        return winner
+
+
+def _retire_recovery_artifact(data_root, expected: bytes) -> None:
+    from pathlib import Path
+
+    path = _recovery_artifact_path(data_root)
+    current = read_bytes_if_exists(
+        path,
+        label="sealed state database recovery key",
+        max_bytes=RECOVERY_KEY_MAX_BYTES,
+        harden_path=_harden_recovery_artifact,
+    )
+    if current is None or not secrets.compare_digest(current, expected):
+        raise KeyMaterialAccessError(
+            "sealed state database recovery key changed before retirement"
+        )
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise KeyMaterialPersistenceError(
+            "could not retire the consumed state database recovery key"
+        ) from exc
+    if os.name != "nt":
+        flags = os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0))
+        fd = os.open(str(Path(data_root)), flags)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def adopt_recovery_passphrase_for_database(db_path) -> bool:
+    """Converge a restored DB on this machine's runtime key authority.
+
+    No artifact means a fast ``False`` return.  When present, the master seed
+    authenticates and unwraps the source SQLCipher key.  A fresh target stores
+    that exact key in its OS keyring/private local fallback.  A target with an
+    explicit ``ONE_LINK_PASSPHRASE`` or an existing keyring/local authority is
+    honored by atomically re-encrypting the restored database to that key.
+
+    The artifact is retired only after the final database is independently
+    readable.  If power fails after the atomic rekey but before retirement,
+    the next call detects that the target key already opens the database and
+    completes idempotently.
+    """
+
+    from pathlib import Path
+
+    path = Path(db_path).resolve()
+    root = path.parent
+    artifact = read_bytes_if_exists(
+        _recovery_artifact_path(root),
+        label="sealed state database recovery key",
+        max_bytes=RECOVERY_KEY_MAX_BYTES,
+        harden_path=_harden_recovery_artifact,
+    )
+    if artifact is None:
+        return False
+    if not path.is_file():
+        raise KeyMaterialIntegrityError(
+            "sealed state database recovery key exists without state.db"
+        )
+    from one_link import master_seed, state_encryption
+
+    seed = master_seed.load_seed(root)
+    if seed is None:
+        raise KeyMaterialIntegrityError(
+            "sealed state database recovery key exists without a master seed"
+        )
+    recovered = unseal_state_passphrase_for_recovery(
+        seed=seed,
+        artifact=artifact,
+    )
+    configured = _configured_passphrase_at(root)
+    if configured is None:
+        if _disabled():
+            raise KeyMaterialProtectionError(
+                "encrypted database recovery is incompatible with explicitly "
+                "disabled at-rest encryption"
+            )
+        configured = _publish_recovered_passphrase(root, recovered)
+
+    if secrets.compare_digest(configured, recovered):
+        if not state_encryption.database_accepts_passphrase(path, recovered):
+            raise KeyMaterialIntegrityError(
+                "restored state database does not match its sealed recovery key"
+            )
+    elif state_encryption.database_accepts_passphrase(path, recovered):
+        state_encryption.replace_encrypted_database_key_atomic(
+            db_path=path,
+            source_passphrase=recovered,
+            destination_passphrase=configured,
+        )
+    elif not state_encryption.database_accepts_passphrase(path, configured):
+        raise KeyMaterialIntegrityError(
+            "restored state database matches neither recovery nor configured authority"
+        )
+    _retire_recovery_artifact(root, artifact)
+    return True
+
+
 def ensure_passphrase() -> str | None:
-    """Get the passphrase OR auto-mint + store one. Returns None ONLY
-    if no keychain is available AND no env var is set — in which case
-    the caller MUST fall back to plaintext state.db (legacy mode).
+    """Get the passphrase or auto-mint and durably store one.
+
+    Returns ``None`` only when key management is explicitly disabled or no
+    secure key destination is usable.  The state layer treats that result as
+    a fail-closed condition unless legacy plaintext mode was explicitly
+    authorized by the operator.
 
     A fresh passphrase is 32 random bytes encoded as url-safe-base64.
     256 bits of entropy comfortably exceeds AES-256's key strength."""
     existing = get_passphrase()
-    if existing:
+    if existing is not None:
         return existing
     if _disabled():
-        # Explicitly disabled (tests / opt-out): stay plaintext, never
-        # mint a keychain entry.
+        # Explicitly disabled (isolated tests / recovery tooling): never mint
+        # or touch a real credential. The state layer decides whether an
+        # explicit plaintext opt-in permits continuing.
         return None
-    new_pw = secrets.token_urlsafe(32)
-    kr = _load_keyring()
-    if kr is not None:
-        try:
-            kr.set_password(
-                ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER, new_pw,
+    with _exclusive_provision():
+        # Re-check under the process-wide lock.  This closes the ordinary
+        # check-then-create race for both the OS backend and local fallback.
+        existing = get_passphrase()
+        if existing is not None:
+            return existing
+        new_pw = secrets.token_urlsafe(32)
+        kr = _load_keyring()
+        if kr is not None:
+            try:
+                kr.set_password(
+                    ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER, new_pw,
+                )
+            except Exception as write_exc:
+                # Some backends can commit and then report an error.  Prove
+                # the postcondition before deciding whether local creation is
+                # safe; a failed lookup is not absence.
+                try:
+                    after = kr.get_password(
+                        ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER
+                    )
+                except Exception as read_exc:
+                    raise KeychainBackendError(
+                        "OS keychain write outcome is unknown; refusing fallback creation"
+                    ) from read_exc
+                if after is not None:
+                    if not isinstance(after, str) or not after:
+                        raise KeyMaterialIntegrityError(
+                            "OS keychain returned invalid authority after a write failure"
+                        )
+                    if secrets.compare_digest(after, new_pw):
+                        return new_pw
+                    # Another authority appeared; never overwrite it and use
+                    # the proven backend winner.
+                    return after
+                log.warning(
+                    "keychain write failed (%s) and absence was re-confirmed; "
+                    "using the private local fallback",
+                    type(write_exc).__name__,
+                )
+            else:
+                try:
+                    after = kr.get_password(
+                        ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER
+                    )
+                except Exception as exc:
+                    raise KeychainBackendError(
+                        "OS keychain write could not be read back"
+                    ) from exc
+                if not isinstance(after, str) or not secrets.compare_digest(
+                    after, new_pw
+                ):
+                    raise KeyMaterialIntegrityError(
+                        "OS keychain read-back did not match generated authority"
+                    )
+                log.info(
+                    "keychain: minted fresh state.db encryption key; stored "
+                    "in the OS credential store and read back successfully."
+                )
+                return new_pw
+        else:
+            log.warning(
+                "keyring library/back end unavailable; using the local 0600 "
+                "key file so at-rest encryption stays ON"
             )
+        # OS keychain absent or confirmed not to have committed the failed
+        # write.  Local publication is fsynced, no-replace, ACL-verified, and
+        # read back before the key is returned.
+        if _write_local_key(new_pw):
             log.info(
-                "keychain: minted fresh state.db encryption key; stored "
-                "in the OS credential store. Future restarts pick it up "
-                "automatically."
+                "keychain: minted fresh state.db encryption key; stored in a "
+                "0600 local key file (%s). at-rest encryption ACTIVE.",
+                LOCAL_KEY_FILENAME,
             )
             return new_pw
-        except Exception as e:
-            log.warning(
-                "keychain write failed (%s); falling back to the local "
-                "0600 key file so at-rest encryption stays ON",
-                type(e).__name__,
-            )
-    else:
-        log.warning(
-            "keyring library/back end unavailable; using the local 0600 "
-            "key file so at-rest encryption stays ON (the OS keychain is "
-            "preferred — install/enable it for stronger key isolation)"
-        )
-    # OS keychain unavailable → local key-file fallback (still encrypted).
-    if _write_local_key(new_pw):
-        log.info(
-            "keychain: minted fresh state.db encryption key; stored in a "
-            "0600 local key file (%s). at-rest encryption ACTIVE.",
-            LOCAL_KEY_FILENAME,
-        )
-        return new_pw
     # Could not obtain or persist a key anywhere. Returning None signals
     # the caller; state.py refuses to silently run plaintext unless the
     # operator explicitly sets ONE_LINK_ALLOW_PLAINTEXT=1.
@@ -239,18 +741,63 @@ def rotate_passphrase() -> str | None:
 
     Returns the new passphrase, or None if the keychain refused
     the write."""
-    kr = _load_keyring()
-    if kr is None:
-        return None
-    new_pw = secrets.token_urlsafe(32)
-    try:
-        kr.set_password(
-            ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER, new_pw,
+    if os.environ.get(ENV_VAR, "").strip():
+        raise KeyMaterialIntegrityError(
+            "cannot rotate OS keychain authority while an environment override is active"
         )
-    except Exception as e:
-        log.warning("keychain rotate failed: %s", type(e).__name__)
-        return None
-    return new_pw
+    with _exclusive_provision():
+        kr = _load_keyring()
+        if kr is None:
+            return None
+        try:
+            prior = kr.get_password(
+                ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER
+            )
+        except Exception as exc:
+            raise KeychainBackendError(
+                "cannot read OS keychain authority before rotation"
+            ) from exc
+        if prior is None:
+            return None
+        if not isinstance(prior, str) or not prior:
+            raise KeyMaterialIntegrityError(
+                "cannot rotate an invalid OS keychain authority"
+            )
+        new_pw = secrets.token_urlsafe(32)
+        try:
+            kr.set_password(
+                ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER, new_pw,
+            )
+        except Exception as write_exc:
+            try:
+                after = kr.get_password(
+                    ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER
+                )
+            except Exception as read_exc:
+                raise KeychainBackendError(
+                    "OS keychain rotation outcome is unknown"
+                ) from read_exc
+            if isinstance(after, str) and secrets.compare_digest(after, new_pw):
+                return new_pw
+            if isinstance(after, str) and secrets.compare_digest(after, prior):
+                log.warning("keychain rotate failed: %s", type(write_exc).__name__)
+                return None
+            raise KeyMaterialIntegrityError(
+                "OS keychain rotation produced unknown authority"
+            ) from write_exc
+        try:
+            after = kr.get_password(
+                ONE_LINK_KEYCHAIN_SERVICE, ONE_LINK_KEYCHAIN_USER
+            )
+        except Exception as exc:
+            raise KeychainBackendError(
+                "OS keychain rotation could not be read back"
+            ) from exc
+        if not isinstance(after, str) or not secrets.compare_digest(after, new_pw):
+            raise KeyMaterialIntegrityError(
+                "OS keychain rotation read-back did not match"
+            )
+        return new_pw
 
 
 def forget_passphrase() -> bool:
@@ -270,8 +817,14 @@ def forget_passphrase() -> bool:
                     fh.write(secrets.token_bytes(max(32, size)))
                     fh.flush()
                     os.fsync(fh.fileno())
-            except Exception:
-                pass
+            except Exception as e:
+                # Secure overwrite is best-effort on journaling filesystems
+                # and SSDs, but a failure is still security-relevant. Keep
+                # the requested unlink while making weaker erasure visible.
+                log.warning(
+                    "local key-file secure overwrite failed before unlink: %s",
+                    type(e).__name__,
+                )
             p.unlink()
             removed = True
     except Exception as e:

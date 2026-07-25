@@ -11,9 +11,9 @@ name = "ol_quic"
 crate-type = ["lib"]
 
 [dependencies]
+bytes          = "1"
 quinn          = { workspace = true }
 rustls         = { workspace = true }
-rustls-pemfile = { workspace = true }
 rcgen          = { workspace = true }
 ring           = { workspace = true }
 tokio          = { workspace = true }

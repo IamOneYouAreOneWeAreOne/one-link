@@ -5,7 +5,9 @@
 //! Ed25519 grant scheme is migrated against this in Phase C.
 
 use ol_capability::{CapError, Capability, Caveat, Context};
-use ol_capability::{CAP_ID_LEN, ROOT_KEY_LEN, SIGNATURE_LEN};
+use ol_capability::{
+    CAP_ID_LEN, MAX_CAVEATS, MAX_OPERATION_NAMES, MAX_WIRE_BYTES, ROOT_KEY_LEN, SIGNATURE_LEN,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -13,7 +15,11 @@ use zeroize::Zeroizing;
 
 /// Python-visible cap. Wraps `ol_capability::Capability` and carries a
 /// `Vec<u8>` representation of each caveat for round-trip diagnostics.
-#[pyclass(name = "Capability", module = "one_link_native.capability")]
+#[pyclass(
+    from_py_object,
+    name = "Capability",
+    module = "one_link_native.capability"
+)]
 #[derive(Debug, Clone)]
 pub struct PyCapability {
     inner: Capability,
@@ -44,17 +50,17 @@ impl PyCapability {
 
     /// Encode to wire bytes.
     fn encode<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.encode())
+        PyBytes::new(py, &self.inner.encode())
     }
 
     /// 32-byte capability identifier.
     fn cap_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, self.inner.id())
+        PyBytes::new(py, self.inner.id())
     }
 
     /// 32-byte current HMAC chain signature.
     fn signature<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, self.inner.signature())
+        PyBytes::new(py, self.inner.signature())
     }
 
     /// Number of caveats.
@@ -63,39 +69,44 @@ impl PyCapability {
     }
 
     /// Attenuate with an `expires_at` (Unix-ms) caveat.
-    fn attenuate_expires_at(&self, ms: u64) -> Self {
-        Self {
-            inner: self.inner.attenuate(Caveat::ExpiresAt(ms)),
-        }
+    fn attenuate_expires_at(&self, ms: u64) -> PyResult<Self> {
+        self.inner
+            .attenuate(Caveat::ExpiresAt(ms))
+            .map(|inner| Self { inner })
+            .map_err(cap_err_to_py)
     }
 
     /// Attenuate with a peer-fingerprint caveat.
     fn attenuate_peer(&self, fp: &[u8]) -> PyResult<Self> {
         let arr = bytes_to_array::<32>(fp, "peer fingerprint")?;
-        Ok(Self {
-            inner: self.inner.attenuate(Caveat::PeerFingerprint(arr)),
-        })
+        self.inner
+            .attenuate(Caveat::PeerFingerprint(arr))
+            .map(|inner| Self { inner })
+            .map_err(cap_err_to_py)
     }
 
     /// Attenuate with a path-prefix caveat.
-    fn attenuate_path_prefix(&self, prefix: &str) -> Self {
-        Self {
-            inner: self.inner.attenuate(Caveat::PathPrefix(prefix.to_string())),
-        }
+    fn attenuate_path_prefix(&self, prefix: &str) -> PyResult<Self> {
+        self.inner
+            .attenuate(Caveat::PathPrefix(prefix.to_string()))
+            .map(|inner| Self { inner })
+            .map_err(cap_err_to_py)
     }
 
     /// Attenuate with an operation-allowlist caveat.
-    fn attenuate_operation_in(&self, ops: Vec<String>) -> Self {
-        Self {
-            inner: self.inner.attenuate(Caveat::OperationIn(ops)),
-        }
+    fn attenuate_operation_in(&self, ops: Vec<String>) -> PyResult<Self> {
+        self.inner
+            .attenuate(Caveat::OperationIn(ops))
+            .map(|inner| Self { inner })
+            .map_err(cap_err_to_py)
     }
 
     /// Attenuate with an audit-tag caveat (never rejects, logs only).
-    fn attenuate_audit_tag(&self, tag: &str) -> Self {
-        Self {
-            inner: self.inner.attenuate(Caveat::AuditTag(tag.to_string())),
-        }
+    fn attenuate_audit_tag(&self, tag: &str) -> PyResult<Self> {
+        self.inner
+            .attenuate(Caveat::AuditTag(tag.to_string()))
+            .map(|inner| Self { inner })
+            .map_err(cap_err_to_py)
     }
 
     /// Verify against a root key + optional context fields.
@@ -183,7 +194,7 @@ fn bytes_to_array<const N: usize>(bytes: &[u8], field: &str) -> PyResult<[u8; N]
 }
 
 fn cap_err_to_py(err: CapError) -> PyErr {
-    crate::errors::OlCapabilityError::new_err(err.to_string())
+    crate::errors::OlCapabilityError::new_err(crate::errors::owned_error_message(err))
 }
 
 /// Sanity-check: signature length matches the expectation.
@@ -196,6 +207,9 @@ pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()>
     m.add("CAP_ID_LEN", CAP_ID_LEN)?;
     m.add("ROOT_KEY_LEN", ROOT_KEY_LEN)?;
     m.add("SIGNATURE_LEN", SIGNATURE_LEN)?;
+    m.add("MAX_CAVEATS", MAX_CAVEATS)?;
+    m.add("MAX_OPERATION_NAMES", MAX_OPERATION_NAMES)?;
+    m.add("MAX_WIRE_BYTES", MAX_WIRE_BYTES)?;
     m.add_class::<PyCapability>()?;
     Ok(())
 }

@@ -1,11 +1,11 @@
-//! Empirical hop-blindness tests.
+//! Empirical nested-packet structure and byte-frequency tests.
 //!
-//! TLA+ proves logical hop-blindness (see `docs/formal/onion.tla`).
-//! These tests check the empirical byte-level property: at every
-//! position along a 3-hop circuit, the packet "looks the same" in
-//! its structural features (version byte, hops_remaining field
-//! takes the expected value, ephemeral pubkey + nonce + ciphertext
-//! all appear uniformly random to an observer).
+//! The TLA+ model in `docs/formal/Onion.tla` checks its stated abstract
+//! invariants; it is not a cryptographic proof. These tests check exact
+//! structural features and use a coarse byte-frequency smoke over sample
+//! ciphertext. They do not show that packets "look the same" to a network
+//! observer: `hops_remaining`, length, timing, and adjacent endpoints can
+//! be observable depending on framing and padding.
 //!
 //! What we DON'T claim: that a global passive adversary cannot
 //! correlate timing or packet size. Packet size shrinks
@@ -38,7 +38,7 @@ fn chi_squared_uniform(bytes: &[u8]) -> f64 {
     for &b in bytes {
         counts[b as usize] += 1;
     }
-    let n = bytes.len() as f64;
+    let n = f64::from(u32::try_from(bytes.len()).unwrap());
     let expected = n / 256.0;
     if expected < 1.0 {
         return 0.0; // sample too small to be meaningful
@@ -46,18 +46,16 @@ fn chi_squared_uniform(bytes: &[u8]) -> f64 {
     counts
         .iter()
         .map(|&c| {
-            let d = c as f64 - expected;
+            let d = f64::from(c) - expected;
             d * d / expected
         })
         .sum()
 }
 
 #[test]
-fn ciphertext_at_each_hop_looks_uniformly_random() {
+fn ciphertext_sample_passes_coarse_byte_frequency_smoke() {
     // Build a 3-hop circuit, peel at each hop, accumulate the
-    // ciphertext bytes from every layer. Aggregate chi-squared
-    // should be in the "looks uniform" range (chi-sq < 350 for
-    // df=255 at p=0.001).
+    // ciphertext bytes from every layer and check for gross bias.
     let (r1_sk, r1) = make_hop(1);
     let (r2_sk, r2) = make_hop(2);
     let (dest_sk, dest) = make_hop(3);
@@ -84,8 +82,8 @@ fn ciphertext_at_each_hop_looks_uniformly_random() {
     }
 
     let chi = chi_squared_uniform(&all_ciphertext);
-    // 350 is the chi-sq critical value for df=255 at p=0.001 (very
-    // loose). ChaCha20 ciphertext should sit well under this.
+    // Loose regression threshold only; not a randomness or
+    // indistinguishability proof.
     eprintln!(
         "hop_blindness: {} bytes, chi-sq = {chi:.1}",
         all_ciphertext.len()
@@ -154,7 +152,7 @@ fn ephemeral_pubkey_distinct_at_each_hop() {
                 packet = OnionPacket::decode(&inner_packet_bytes).unwrap();
                 seen.push(packet.ephem_pubkey);
             }
-            _ => panic!(),
+            PeelOutcome::Deliver { .. } => panic!(),
         }
     }
     // All three pubkeys distinct.

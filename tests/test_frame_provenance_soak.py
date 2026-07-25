@@ -111,8 +111,10 @@ def test_provenance_round_trip_soak(iters: int) -> None:
             attacker = _make_identity(i + 10**9)
 
             blob = _random_blob(rng)
-            import hashlib
-            blob_hex = hashlib.sha256(blob).hexdigest()
+            # FILE_OFFER and provenance share the canonical whole-file
+            # BLAKE3-256 identifier; SHA-256 here would exercise only the
+            # intentional cross-blob rejection path.
+            blob_hex = blake3.blake3(blob).hexdigest()
 
             # Pick a random combination of frame kind / path / recording
             # so we sweep the state space, not just one combination.

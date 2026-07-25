@@ -20,12 +20,10 @@ Coverage:
 """
 from __future__ import annotations
 
-import asyncio
 import base64
 import inspect
 import zlib
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -33,7 +31,7 @@ import pytest_asyncio
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.blobstore import BlobStore
-from one_link.daemon import Daemon
+from one_link.daemon import CHUNK_SIZE, Daemon
 from one_link.identity import Identity, fingerprint_of
 from one_link.state import State
 
@@ -125,17 +123,38 @@ async def receiver_ctx(tmp_path: Path, monkeypatch):
     blob_hash = blake3.blake3(blob_hash_data).hexdigest()
     cm = blob_store.writer()
     writer, tmp = cm.__enter__()
+    channel_binding = "11" * 32
+    reservation_id = f"test-folder-blob:{blob_hash}"
+    expected_chunks = max(1, (len(plain) + CHUNK_SIZE - 1) // CHUNK_SIZE)
     daemon._incoming_blobs = {
-        blob_hash: {
+        (peer_fp, channel_binding, "", blob_hash): {
             "size": len(plain), "received": 0, "next_seq": 0,
-            "writer": writer, "cm": cm, "tmp_path": tmp,
+            "expected_chunks": expected_chunks,
+            "writer": writer, "cm": cm, "tmp_path": tmp, "folder": None,
+            "sync_id": "", "modern": False,
+            "reservation_id": reservation_id,
         },
     }
     daemon._expected_blob_pulls = {peer_fp: {blob_hash}}
+    daemon._expected_blob_pull_scopes = {(peer_fp, blob_hash): None}
     daemon._dedupe_sites = MagicMock()
+    reservation_ledger = MagicMock()
+    monkeypatch.setattr(
+        daemon,
+        "_cache_reservation_ledger",
+        MagicMock(return_value=reservation_ledger),
+    )
+    channel = MagicMock()
+    channel.transcript_hex = channel_binding
+    channel.send = AsyncMock()
     yield {
         "daemon": daemon, "state": state, "blob_store": blob_store,
         "peer_fp": peer_fp, "blob_hash": blob_hash, "plain": plain,
+        "incoming_key": (peer_fp, channel_binding, "", blob_hash),
+        "reservation_id": reservation_id,
+        "reservation_ledger": reservation_ledger,
+        "tmp_path": tmp,
+        "channel": channel,
     }
     state.close()
 
@@ -157,11 +176,19 @@ async def test_handle_blob_chunk_decodes_zlib(receiver_ctx):
         "enc": "zlib",
         "eof": True,
     }
-    chan = MagicMock()
-    chan.send = AsyncMock()
+    chan = receiver_ctx["channel"]
     await daemon._handle_blob_chunk(chan, msg, peer_fp)
     # The blob landed in the store with the right hash.
     assert daemon.blob_store.has(blob_hash)
+    assert receiver_ctx["incoming_key"] not in daemon._incoming_blobs
+    assert blob_hash not in daemon._expected_blob_pulls[peer_fp]
+    assert not receiver_ctx["tmp_path"].exists()
+    receiver_ctx["reservation_ledger"].consume.assert_called_once_with(
+        receiver_ctx["reservation_id"], len(plain),
+    )
+    receiver_ctx["reservation_ledger"].release.assert_called_once_with(
+        receiver_ctx["reservation_id"], peer_fp=peer_fp,
+    )
 
 
 @pytest.mark.asyncio
@@ -172,7 +199,6 @@ async def test_handle_blob_chunk_rejects_zlib_bomb(receiver_ctx):
     peer_fp = receiver_ctx["peer_fp"]
     blob_hash = receiver_ctx["blob_hash"]
     # Build a bomb: tiny zlib → huge output.
-    from one_link.daemon import CHUNK_SIZE
     bomb_plain = b"x" * (CHUNK_SIZE * 4)
     bomb = zlib.compress(bomb_plain, level=9)
     msg = {
@@ -180,11 +206,18 @@ async def test_handle_blob_chunk_rejects_zlib_bomb(receiver_ctx):
         "data": base64.b64encode(bomb).decode("ascii"),
         "enc": "zlib", "eof": False,
     }
-    chan = MagicMock()
-    chan.send = AsyncMock()
+    chan = receiver_ctx["channel"]
     await daemon._handle_blob_chunk(chan, msg, peer_fp)
-    # Aborted: incoming entry cleared.
-    assert blob_hash not in daemon._incoming_blobs
+    # Aborted: the channel/sync-bound incoming entry, temporary file, and
+    # disk reservation are all cleared. No decoded bytes were charged.
+    assert receiver_ctx["incoming_key"] not in daemon._incoming_blobs
+    assert not receiver_ctx["tmp_path"].exists()
+    assert not daemon.blob_store.has(blob_hash)
+    assert blob_hash not in daemon._expected_blob_pulls[peer_fp]
+    receiver_ctx["reservation_ledger"].consume.assert_not_called()
+    receiver_ctx["reservation_ledger"].release.assert_called_once_with(
+        receiver_ctx["reservation_id"], peer_fp=peer_fp,
+    )
 
 
 # ── source guards ────────────────────────────────────────────────
@@ -244,8 +277,7 @@ async def test_handle_blob_chunk_broadcasts_per_blob_progress(receiver_ctx):
         "data": base64.b64encode(plain).decode("ascii"),
         "enc": "raw", "eof": True,
     }
-    chan = MagicMock()
-    chan.send = AsyncMock()
+    chan = receiver_ctx["channel"]
     await daemon._handle_blob_chunk(chan, msg, peer_fp)
     # Find the folder_recv_blob_done broadcast.
     calls = daemon.ui_server.broadcast.call_args_list
@@ -257,3 +289,10 @@ async def test_handle_blob_chunk_broadcasts_per_blob_progress(receiver_ctx):
     assert progress_events[0]["blob"] == blob_hash
     assert progress_events[0]["peer_fp"] == peer_fp
     assert progress_events[0]["size"] == len(plain)
+    assert receiver_ctx["incoming_key"] not in daemon._incoming_blobs
+    receiver_ctx["reservation_ledger"].consume.assert_called_once_with(
+        receiver_ctx["reservation_id"], len(plain),
+    )
+    receiver_ctx["reservation_ledger"].release.assert_called_once_with(
+        receiver_ctx["reservation_id"], peer_fp=peer_fp,
+    )

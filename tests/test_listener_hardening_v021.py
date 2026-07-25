@@ -22,7 +22,10 @@ silently revert either fix.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -108,6 +111,84 @@ def test_acquire_instance_lock_defence_in_depth_pid_check(daemon_src):
         "missing _pid_is_alive call — without it the defence-in-depth "
         "check can't distinguish a stale PID file from a live rival"
     )
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["python", "-m", "one_link.cli", "daemon", "-v"], True),
+        (["python", "-P", "-m", "one_link.cli", "daemon", "-v"], True),
+        ([r"C:\\Program Files\\One Link\\one-link.exe", "daemon"], True),
+        (["python", "-c", "from multiprocessing.spawn import spawn_main"], False),
+        (["one-link.exe", "supervisor"], False),
+    ],
+)
+def test_daemon_process_command_line_classification(argv, expected):
+    """PID-reuse protection recognizes only the daemon command itself."""
+    from one_link.daemon import _argv_is_one_link_daemon
+
+    assert _argv_is_one_link_daemon(argv) is expected
+
+
+def test_acquire_instance_lock_ignores_reused_pid(tmp_path, monkeypatch):
+    """A stale lock PID reused by an unrelated live process cannot brick startup."""
+    from one_link import daemon as daemon_mod
+
+    home = tmp_path / "home"
+    data = home / "data"
+    data.mkdir(parents=True)
+    monkeypatch.setenv("ONE_LINK_HOME", str(home))
+    sleeper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    daemon = object.__new__(daemon_mod.Daemon)
+    daemon._lock_file = None
+    try:
+        (data / daemon_mod.DAEMON_LOCK_FILE).write_text(
+            str(sleeper.pid), encoding="ascii"
+        )
+        daemon._acquire_instance_lock()
+
+        assert sleeper.poll() is None
+        daemon._lock_file.seek(0)
+        assert daemon._lock_file.read().decode("ascii").strip() == str(os.getpid())
+    finally:
+        daemon._release_instance_lock()
+        sleeper.terminate()
+        sleeper.wait(timeout=5)
+
+
+def test_handshake_source_buckets_are_globally_bounded(monkeypatch):
+    from collections import OrderedDict
+    from one_link import daemon as daemon_mod
+
+    daemon = object.__new__(daemon_mod.Daemon)
+    daemon._handshake_history = OrderedDict()
+    daemon._handshake_inflight = {}
+    monkeypatch.setattr(daemon_mod, "HANDSHAKE_SOURCE_BUCKETS_MAX", 3)
+
+    assert daemon._handshake_admit("198.51.100.1") is True
+    assert daemon._handshake_admit("198.51.100.2") is True
+    assert daemon._handshake_admit("198.51.100.3") is True
+    assert daemon._handshake_admit("198.51.100.4") is False
+    assert len(daemon._handshake_history) == 3
+
+
+def test_handshake_source_bucket_expires_and_releases_capacity(monkeypatch):
+    from collections import OrderedDict
+    from one_link import daemon as daemon_mod
+
+    daemon = object.__new__(daemon_mod.Daemon)
+    daemon._handshake_history = OrderedDict({"198.51.100.1": [1.0]})
+    daemon._handshake_inflight = {}
+    monkeypatch.setattr(daemon_mod, "HANDSHAKE_SOURCE_BUCKETS_MAX", 1)
+    monkeypatch.setattr(daemon_mod.time, "monotonic", lambda: 1000.0)
+
+    assert daemon._handshake_admit("198.51.100.2") is True
+    assert list(daemon._handshake_history) == ["198.51.100.2"]
 
 
 # ── SO_EXCLUSIVEADDRUSE hardening ────────────────────────────────────

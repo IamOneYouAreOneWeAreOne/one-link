@@ -3,8 +3,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use ol_device_mesh::active_routing::{
-    pick_device_for_context, CohortPrior, DeviceActionRecord, RoutingContext,
-    RoutingHistory,
+    pick_device_for_context, CohortPrior, DeviceActionRecord, RoutingContext, RoutingHistory,
 };
 use ol_device_mesh::{DeviceClass, DEVICE_ID_LEN};
 use rand::SeedableRng;
@@ -59,11 +58,5 @@ fuzz_target!(|data: &[u8]| {
         .map(|b| ([*b; DEVICE_ID_LEN], DeviceClass::Phone))
         .collect();
     let mut rng = ChaCha20Rng::from_seed([0xAFu8; 32]);
-    let _ = pick_device_for_context(
-        &ctx,
-        &candidates,
-        &h,
-        &CohortPrior::uniform(),
-        &mut rng,
-    );
+    let _ = pick_device_for_context(&ctx, &candidates, &h, &CohortPrior::uniform(), &mut rng);
 });

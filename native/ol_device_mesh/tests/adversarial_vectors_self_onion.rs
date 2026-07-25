@@ -21,7 +21,8 @@ fn registry_for(
     let mut ids = Vec::new();
     let mut identities = Vec::new();
     let mut reg = OnionKeyRegistry::empty();
-    for i in 1u8..=(n as u8) {
+    let count = u8::try_from(n).expect("test circuit sizes fit in u8");
+    for i in 1u8..=count {
         let id = [i; DEVICE_ID_LEN];
         let identity = derive_onion_identity(&master, &id);
         let att = sign_onion_attestation(&master, id, identity.public_bytes(), 0, 365).unwrap();

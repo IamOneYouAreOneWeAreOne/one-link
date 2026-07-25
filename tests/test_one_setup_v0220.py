@@ -52,6 +52,8 @@ def test_setup_api_routes_exist() -> None:
         ("POST", "/api/setup"),
         ("POST", "/api/setup/device-invite"),
         ("POST", "/api/setup/device-invite/claim"),
+        ("POST", "/api/setup/device-invite/relogin/challenge"),
+        ("POST", "/api/setup/device-invite/relogin"),
         ("POST", "/api/setup/device-invite/confirm"),
         ("POST", "/api/setup/device-invite/reject"),
         ("GET",  "/api/setup/device-invite/qr.svg"),
@@ -149,7 +151,9 @@ def test_setup_device_invite_claim_requires_host_confirmation() -> None:
     src = _server_src()
     idx = src.find("async def api_setup_device_invite_claim(")
     assert idx > 0
-    snippet = src[idx:idx + 5000]
+    end = src.find("async def api_setup_device_invite_status(", idx)
+    assert end > idx
+    snippet = src[idx:end]
     assert "device_pub_b64" in snippet
     assert "pending_claim" in snippet
     assert "compute_sas" in snippet
@@ -237,12 +241,13 @@ def test_setup_device_invite_relogin_endpoint_pinned() -> None:
     experiences daemon restarts as 'the phone broke'.
 
     Endpoint MUST:
-      * be public (cert + sig-on-nonce is the auth, not a UI bearer
-        token);
-      * accept POST with {cert_b64, nonce_b64, sig_b64};
+      * be public (cert + a daemon-issued proof is the auth, not a UI
+        bearer token);
+      * issue a bounded, one-time challenge before accepting a signature;
+      * accept POST with {cert_b64, challenge_id, sig_b64};
       * validate the cert chain against this daemon's root via
         verify_device_cert;
-      * verify the sig over the nonce with the cert's device_pub
+      * verify the sig over the bound proof with the cert's device_pub
         (proves the phone holds the private key);
       * confirm the device is in the trusted roster (not revoked);
       * return the same handoff shape /status confirmed returns so
@@ -260,29 +265,49 @@ def test_setup_device_invite_relogin_endpoint_pinned() -> None:
     assert "self._guarded(" not in route_line, (
         "relogin must be PUBLIC — auth is the cert, not a UI token"
     )
+    challenge_line_idx = src.find(
+        '"/api/setup/device-invite/relogin/challenge",'
+    )
+    assert challenge_line_idx > 0
+    challenge_route = src[challenge_line_idx - 100:challenge_line_idx + 180]
+    assert "self._guarded(" not in challenge_route
 
-    # Handler exists + implements the contract.
+    # Handlers + shared verifier implement the contract.
     handler_idx = src.find("async def api_setup_device_invite_relogin(")
     assert handler_idx > 0
     handler = src[handler_idx:handler_idx + 8000]
+    challenge_idx = src.find(
+        "async def api_setup_device_invite_relogin_challenge("
+    )
+    assert challenge_idx > 0
+    challenge = src[challenge_idx:challenge_idx + 3500]
+    verifier_idx = src.find("def _verified_rostered_device_cert(")
+    assert verifier_idx > 0
+    verifier = src[verifier_idx:verifier_idx + 3500]
     # Validates inputs.
     assert "cert_b64" in handler
-    assert "nonce_b64" in handler
+    assert "challenge_id" in handler
     assert "sig_b64" in handler
+    assert "nonce_b64" not in handler
+    assert "DeviceReloginChallengeStore" in src
+    assert "_device_relogin_challenges.issue(" in challenge
+    assert "_device_relogin_challenges.consume(" in handler
     # Rate-limits (per IP, same bucket pattern as /claim + /status).
     assert "_rate_limited(" in handler
     assert "device_invite_relogin" in handler
     # Calls verify_device_cert against this daemon's root.
-    assert "verify_device_cert" in handler
-    assert "list_self_mesh_roots" in handler
-    # Verifies sig on the nonce.
+    assert "verify_device_cert" in verifier
+    assert "list_self_mesh_roots" in verifier
+    # Verifies sig on the daemon-issued proof.
     assert "Ed25519PublicKey" in handler
     assert "InvalidSignature" in handler
     # Checks device is in the trusted roster + not revoked.
-    assert "list_self_mesh_devices" in handler
-    assert "revoked" in handler
+    assert "list_self_mesh_devices" in verifier
+    assert "revoked" in verifier
+    assert "trusted" in verifier
     # Returns the same handoff bundle /status confirmed returns.
-    assert "_setup_device_invite_pair_handoff()" in handler
+    assert "_setup_device_invite_pair_handoff(" in handler
+    assert "device_pub=parsed.device_pub" in handler
 
 
 def test_smart_device_label_from_ua_basics() -> None:
@@ -543,7 +568,7 @@ def test_setup_device_invite_pair_handoff_shape() -> None:
     src = _server_src()
     helper_idx = src.find("def _setup_device_invite_pair_handoff(")
     assert helper_idx > 0
-    helper = src[helper_idx:helper_idx + 2500]
+    helper = src[helper_idx:helper_idx + 3500]
     for field in (
         '"pair_token"',
         '"daemon_fingerprint"',
@@ -554,6 +579,7 @@ def test_setup_device_invite_pair_handoff_shape() -> None:
     # Must reuse mint_pairing_token (single-use signaling auth)
     # rather than rolling its own token format.
     assert "mint_pairing_token" in helper
+    assert "fp_hint=device_fingerprint" in helper
 
 
 def test_setup_device_invite_confirm_mints_cert_and_reject_blocks() -> None:
@@ -687,3 +713,15 @@ def test_one_setup_walkthrough_can_reach_all_six_steps() -> None:
         'id="onboarding-finish"',
     ):
         assert marker in html
+
+
+def test_one_setup_file_proof_is_mutexed_and_retry_idempotent() -> None:
+    html = _index_html()
+    idx = html.find("async function oneSetupSendFile()")
+    assert idx > 0
+    snippet = html[idx - 250:idx + 2600]
+    assert "_oneSetupFileSendInFlight" in snippet
+    assert "if (_oneSetupFileSendInFlight) return" in snippet
+    assert "clientDeliveryId: _newClientMsgId()" in snippet
+    assert "clientDeliveryId: intent.clientDeliveryId" in snippet
+    assert "_oneSetupFileIntent = null" in snippet

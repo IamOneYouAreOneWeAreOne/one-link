@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Optional
 
+from one_link.async_capsule import AsyncCapsule
 from one_link.call_manager import (
     CallManager,
     CallManagerRegistry,
@@ -53,6 +54,7 @@ from one_link.call_manager import (
     ManagerEventKind,
     ManagerOutput,
     TailEvent,
+    normalize_call_kind,
 )
 from one_link.call_signaling import CallPhase
 
@@ -77,6 +79,7 @@ class CallAction(IntEnum):
     APPROVE_RECORDING = 11
     DECLINE_RECORDING = 12
     STOP_RECORDING    = 13
+    CONVERT_TO_ASYNC  = 20
 
 
 # String-form for the HTTP layer.
@@ -90,6 +93,7 @@ _ACTION_BY_NAME: dict[str, CallAction] = {
     "approve_recording":  CallAction.APPROVE_RECORDING,
     "decline_recording":  CallAction.DECLINE_RECORDING,
     "stop_recording":     CallAction.STOP_RECORDING,
+    "convert_to_async":   CallAction.CONVERT_TO_ASYNC,
 }
 
 _ACTION_TO_EVENT: dict[CallAction, ManagerEventKind] = {
@@ -102,6 +106,7 @@ _ACTION_TO_EVENT: dict[CallAction, ManagerEventKind] = {
     CallAction.APPROVE_RECORDING: ManagerEventKind.USER_APPROVE_RECORDING,
     CallAction.DECLINE_RECORDING: ManagerEventKind.USER_DECLINE_RECORDING,
     CallAction.STOP_RECORDING:    ManagerEventKind.USER_STOP_RECORDING,
+    CallAction.CONVERT_TO_ASYNC:  ManagerEventKind.IMMUNE_CONVERT_TO_ASYNC,
 }
 
 
@@ -117,6 +122,7 @@ class ApiRequest:
     call_id: Optional[str] = None
     # For INITIATE only:
     peer_master_vk_hex: Optional[str] = None
+    call_kind: Optional[str] = None
     # Optional negotiated caps for the new call. The HTTP layer
     # gets these from the daemon's capability negotiation state.
     negotiated_capabilities: frozenset[str] = field(default_factory=frozenset)
@@ -138,6 +144,7 @@ class ApiResponse:
 
     ok: bool
     call_id: Optional[str] = None
+    call_kind: Optional[str] = None
     phase: Optional[str] = None
     consent_phase: Optional[str] = None
     user_message: str = ""
@@ -147,6 +154,10 @@ class ApiResponse:
     # When the call has been fully terminated and the daemon may
     # reap the manager.
     call_complete: bool = False
+    # A finalized capsule is an I/O side effect, just like outbound signaling.
+    # Preserve it across the pure CallManager -> HTTP adapter boundary so the
+    # daemon can durably seal it before the UI is told capture completed.
+    finalized_capsule: Optional[AsyncCapsule] = None
 
 
 # ---------------------------------------------------------------------------
@@ -217,13 +228,36 @@ class CallAPI:
                 user_message="That action is not available.",
                 server_log=f"unknown action {action_name!r}",
             )
+        raw_caps = body.get("negotiated_capabilities") or []
+        if (
+            not isinstance(raw_caps, (list, tuple, set, frozenset))
+            or len(raw_caps) > 256
+            or any(
+                not isinstance(cap, str) or not cap or len(cap) > 128
+                for cap in raw_caps
+            )
+        ):
+            return ApiResponse(
+                ok=False,
+                user_message="Request shape was unexpected.",
+                server_log="invalid negotiated_capabilities",
+            )
+        call_kind = body.get("kind")
+        if action == CallAction.INITIATE:
+            try:
+                call_kind = normalize_call_kind(call_kind)
+            except ValueError:
+                return ApiResponse(
+                    ok=False,
+                    user_message="Choose a voice or video call.",
+                    server_log=f"invalid call kind {call_kind!r}",
+                )
         return self.handle(ApiRequest(
             action=action,
             call_id=body.get("call_id"),
             peer_master_vk_hex=body.get("peer_master_vk_hex"),
-            negotiated_capabilities=frozenset(
-                body.get("negotiated_capabilities") or []
-            ),
+            call_kind=call_kind,
+            negotiated_capabilities=frozenset(raw_caps),
         ))
 
     # ── Targeted methods (the HTTP layer may use these directly) ──
@@ -233,10 +267,12 @@ class CallAPI:
         *,
         peer_master_vk_hex: str,
         negotiated_capabilities: frozenset[str] = frozenset(),
+        call_kind: str = "voice",
     ) -> ApiResponse:
         return self.handle(ApiRequest(
             action=CallAction.INITIATE,
             peer_master_vk_hex=peer_master_vk_hex,
+            call_kind=call_kind,
             negotiated_capabilities=negotiated_capabilities,
         ))
 
@@ -249,6 +285,7 @@ class CallAPI:
             )
         return ApiResponse(
             ok=True, call_id=call_id,
+            call_kind=mgr.state.call_kind,
             phase=mgr.phase.name.lower(),
             consent_phase=mgr.consent_phase.name.lower(),
         )
@@ -291,12 +328,21 @@ class CallAPI:
                 user_message="Pick someone to call.",
                 server_log="initiate: missing peer_master_vk_hex",
             )
+        try:
+            call_kind = normalize_call_kind(request.call_kind)
+        except ValueError:
+            return ApiResponse(
+                ok=False,
+                user_message="Choose a voice or video call.",
+                server_log=f"initiate: invalid call kind {request.call_kind!r}",
+            )
         # Idempotent: if there's already an active call with this
         # peer, return its id.
-        existing = self._find_active_call_with_peer(peer)
+        existing = self._find_active_call_with_peer(peer, call_kind)
         if existing is not None:
             return ApiResponse(
                 ok=True, call_id=existing.call_id,
+                call_kind=existing.state.call_kind,
                 phase=existing.phase.name.lower(),
                 consent_phase=existing.consent_phase.name.lower(),
                 user_message="",
@@ -310,14 +356,24 @@ class CallAPI:
             local_master_vk_hex=self._local_vk,
             started_at_ms=started_at_ms,
             negotiated_capabilities=request.negotiated_capabilities,
+            call_kind=call_kind,
         )
         out = mgr.handle(ManagerEvent(
             kind=ManagerEventKind.USER_INITIATE_CALL,
             occurred_at_ms=started_at_ms,
         ))
-        return self._make_response(mgr, out, call_id=call_id)
+        return self._make_response(
+            mgr,
+            out,
+            call_id=call_id,
+            call_kind=call_kind,
+        )
 
-    def _find_active_call_with_peer(self, peer_vk_hex: str) -> Optional[CallManager]:
+    def _find_active_call_with_peer(
+        self,
+        peer_vk_hex: str,
+        call_kind: str,
+    ) -> Optional[CallManager]:
         """Return an existing in-progress call to this peer, if any.
 
         An "in-progress" call is one in INVITING / RINGING / ACTIVE
@@ -340,7 +396,10 @@ class CallAPI:
                 continue
             # Peer match comes from the CallManager state.
             with mgr._lock:  # noqa: SLF001 — adapter has friend access
-                if mgr.state.peer_master_vk_hex == peer_vk_hex:
+                if (
+                    mgr.state.peer_master_vk_hex == peer_vk_hex
+                    and mgr.state.call_kind == call_kind
+                ):
                     return mgr
         return None
 
@@ -350,12 +409,20 @@ class CallAPI:
         out: ManagerOutput,
         *,
         call_id: str,
+        call_kind: Optional[str] = None,
     ) -> ApiResponse:
         outbound = tuple(
             ApiOutboundMessage(
                 type=m.type,
                 peer_master_vk_hex=m.target_peer_fp,
-                payload=m.payload,
+                payload={
+                    **m.payload,
+                    **(
+                        {"call_kind": call_kind or mgr.state.call_kind}
+                        if m.type == "CALL_INVITE"
+                        else {}
+                    ),
+                },
             )
             for m in out.outbound_msgs
         ) + tuple(
@@ -370,11 +437,13 @@ class CallAPI:
         return ApiResponse(
             ok=True,
             call_id=call_id,
+            call_kind=mgr.state.call_kind,
             phase=mgr.phase.name.lower(),
             consent_phase=mgr.consent_phase.name.lower(),
             outbound=outbound,
             tail_events=out.tail_events,
             call_complete=out.call_complete,
+            finalized_capsule=out.finalized_capsule,
         )
 
 

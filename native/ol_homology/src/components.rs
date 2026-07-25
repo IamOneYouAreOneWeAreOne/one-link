@@ -2,6 +2,50 @@
 
 use std::collections::HashMap;
 
+fn find(parent: &mut HashMap<String, String>, x: &str) -> String {
+    let mut node = x.to_string();
+    loop {
+        let parent_node = parent.get(&node).cloned().unwrap_or(node.clone());
+        if parent_node == node {
+            return node;
+        }
+        // Path compression.
+        let grandparent = parent
+            .get(&parent_node)
+            .cloned()
+            .unwrap_or(parent_node.clone());
+        parent.insert(node.clone(), grandparent);
+        node = parent_node;
+    }
+}
+
+fn union(
+    parent: &mut HashMap<String, String>,
+    rank: &mut HashMap<String, usize>,
+    a: &str,
+    b: &str,
+) {
+    let root_a = find(parent, a);
+    let root_b = find(parent, b);
+    if root_a == root_b {
+        return;
+    }
+    let rank_a = *rank.get(&root_a).unwrap_or(&0);
+    let rank_b = *rank.get(&root_b).unwrap_or(&0);
+    match rank_a.cmp(&rank_b) {
+        std::cmp::Ordering::Less => {
+            parent.insert(root_a, root_b);
+        }
+        std::cmp::Ordering::Greater => {
+            parent.insert(root_b, root_a);
+        }
+        std::cmp::Ordering::Equal => {
+            parent.insert(root_b, root_a.clone());
+            *rank.entry(root_a).or_insert(0) += 1;
+        }
+    }
+}
+
 /// Per-component summary.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComponentReport {
@@ -16,7 +60,7 @@ pub struct ComponentReport {
 /// Compute connected components of a chunk-co-hold graph.
 ///
 /// `nodes` is the set of chunk ids (string for convenience). `edges`
-/// are (chunk_a, chunk_b) pairs meaning "some peer holds BOTH".
+/// are (`chunk_a`, `chunk_b`) pairs meaning "some peer holds BOTH".
 /// Symmetric edges are derived automatically — provide each
 /// undirected edge once.
 pub fn components_of(nodes: &[String], edges: &[(String, String)]) -> ComponentReport {
@@ -24,43 +68,6 @@ pub fn components_of(nodes: &[String], edges: &[(String, String)]) -> ComponentR
     let mut parent: HashMap<String, String> =
         nodes.iter().map(|n| (n.clone(), n.clone())).collect();
     let mut rank: HashMap<String, usize> = nodes.iter().map(|n| (n.clone(), 0)).collect();
-
-    fn find(parent: &mut HashMap<String, String>, x: &str) -> String {
-        let mut node = x.to_string();
-        loop {
-            let p = parent.get(&node).cloned().unwrap_or(node.clone());
-            if p == node {
-                return node;
-            }
-            // Path compression.
-            let gp = parent.get(&p).cloned().unwrap_or(p.clone());
-            parent.insert(node.clone(), gp.clone());
-            node = p;
-        }
-    }
-
-    fn union(
-        parent: &mut HashMap<String, String>,
-        rank: &mut HashMap<String, usize>,
-        a: &str,
-        b: &str,
-    ) {
-        let root_a = find(parent, a);
-        let root_b = find(parent, b);
-        if root_a == root_b {
-            return;
-        }
-        let r_a = *rank.get(&root_a).unwrap_or(&0);
-        let r_b = *rank.get(&root_b).unwrap_or(&0);
-        if r_a < r_b {
-            parent.insert(root_a, root_b);
-        } else if r_a > r_b {
-            parent.insert(root_b, root_a);
-        } else {
-            parent.insert(root_b.clone(), root_a.clone());
-            *rank.entry(root_a).or_insert(0) += 1;
-        }
-    }
 
     for (a, b) in edges {
         if !parent.contains_key(a) {
@@ -81,7 +88,7 @@ pub fn components_of(nodes: &[String], edges: &[(String, String)]) -> ComponentR
         comp_sizes.entry(root).or_default().push(n.clone());
     }
 
-    let mut sizes: Vec<usize> = comp_sizes.values().map(|v| v.len()).collect();
+    let mut sizes: Vec<usize> = comp_sizes.values().map(std::vec::Vec::len).collect();
     sizes.sort_unstable_by(|a, b| b.cmp(a));
     let singletons: Vec<String> = comp_sizes
         .values()

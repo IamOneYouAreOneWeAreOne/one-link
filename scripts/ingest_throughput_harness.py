@@ -3,7 +3,7 @@
 
 Per ``docs/FILE_ENGINE_V2_PLAN.md``:
 
-    End-to-end ingest throughput: ≥ 1 GiB/s on Linux NVMe
+    End-to-end ingest throughput: >= 1 GiB/s on Linux NVMe
 
 The plan gate is on Linux NVMe; this script runs on any platform but
 the gate-passing threshold is **only meaningful on Linux NVMe**. On
@@ -16,15 +16,15 @@ reports GiB/s through the CDC + BLAKE3 + WAL + index path.
 Usage:
     python scripts/ingest_throughput_harness.py [--bytes 1G] [--out report.json]
 
-Exit code 0 if achieved throughput ≥ plan threshold, 1 otherwise.
+Exit code 0 if achieved throughput >= plan threshold, 1 otherwise.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import platform
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -42,7 +42,7 @@ def _require_native():
     except ImportError as e:
         raise RuntimeError(
             "one_link_native.chunk + .store not installed; build via "
-            "`cd native && maturin develop --release`"
+            "`cd native && maturin develop --release --locked`"
         ) from e
 
 
@@ -56,20 +56,16 @@ def parse_size(s: str) -> int:
 
 
 def gen_data(n_bytes: int, *, seed: int = 0) -> bytes:
-    """Pseudo-random data that's NOT all-zeros (zeros would dedup to
-    one chunk and tank the measurement). Uses xorshift for speed; the
-    point is throughput, not cryptographic randomness."""
-    out = bytearray(n_bytes)
-    state = seed if seed else 0xCAFEBABE
-    # Fill 8 bytes at a time via xorshift64.
-    i = 0
-    while i + 8 <= n_bytes:
-        state ^= (state << 13) & 0xFFFFFFFFFFFFFFFF
-        state ^= state >> 7
-        state ^= (state << 17) & 0xFFFFFFFFFFFFFFFF
-        out[i : i + 8] = state.to_bytes(8, "little")
-        i += 8
-    return bytes(out)
+    """Generate deterministic, incompressible bytes outside the timed path.
+
+    BLAKE3's XOF is implemented in native code and avoids a Python loop that
+    used to make a 1 GiB benchmark spend minutes preparing its input. The
+    XOF output is suitable benchmark material; it is not used as a secret.
+    """
+    from blake3 import blake3
+
+    seed_bytes = int(seed or 0xCAFEBABE).to_bytes(16, "little", signed=False)
+    return blake3(seed_bytes).digest(length=n_bytes)
 
 
 def run_ingest(target_bytes: int, store_dir: Path, quiet: bool = False) -> dict[str, Any]:
@@ -78,17 +74,44 @@ def run_ingest(target_bytes: int, store_dir: Path, quiet: bool = False) -> dict[
     data = gen_data(target_bytes)
     actual_bytes = len(data)
 
-    # Create a fresh chunk store. The exact pyo3 surface varies; we
-    # exercise the smallest API that touches CDC + BLAKE3 + WAL.
+    # Create a fresh chunk store and exercise CDC + BLAKE3 addressing + WAL
+    # append + in-memory index + a durable flush. Older versions stopped the
+    # timer immediately after CDC yet labeled that number "end-to-end ingest";
+    # that was a misleading performance gate and missed storage regressions.
     store_dir.mkdir(parents=True, exist_ok=True)
-    # cdc_iter returns chunk boundaries through the native scanner.
-    t0 = time.perf_counter_ns()
+    store = store_mod.open_store(str(store_dir))
+    ingest_t0 = time.perf_counter_ns()
+    cdc_t0 = time.perf_counter_ns()
     boundaries = list(chunk_mod.cdc_iter(data))
-    cdc_ns = time.perf_counter_ns() - t0
-    total_ns = cdc_ns
+    cdc_ns = time.perf_counter_ns() - cdc_t0
+
+    ratchet_key_id = b"\x00" * 16
+    try:
+        for boundary in boundaries:
+            plaintext = data[boundary.start : boundary.end]
+            # Model the frame-tag overhead written by the transfer AEAD. The
+            # cryptographic primitive has its own benchmark; this harness is
+            # specifically the durable ingest/storage gate.
+            tag_bytes = chunk_mod.frame_count(len(plaintext)) * 16
+            ciphertext = plaintext + (b"\x00" * tag_bytes)
+            store.append_chunk(
+                "blob",
+                "raw",
+                "aes",
+                boundary.raw_address,
+                ratchet_key_id,
+                len(plaintext),
+                ciphertext,
+            )
+        store.flush()
+        store_stats = dict(store.stats())
+    finally:
+        store.close()
+    total_ns = time.perf_counter_ns() - ingest_t0
 
     cdc_throughput = actual_bytes / (cdc_ns / 1e9) if cdc_ns > 0 else float("inf")
 
+    total_throughput = actual_bytes / (total_ns / 1e9) if total_ns > 0 else float("inf")
     report = {
         "platform": platform.platform(),
         "actual_bytes": actual_bytes,
@@ -97,14 +120,15 @@ def run_ingest(target_bytes: int, store_dir: Path, quiet: bool = False) -> dict[
         "cdc_throughput_bytes_per_sec": cdc_throughput,
         "cdc_throughput_gib_per_sec": cdc_throughput / (1 << 30),
         "total_ns": total_ns,
-        "total_throughput_bytes_per_sec": cdc_throughput,
-        "total_throughput_gib_per_sec": cdc_throughput / (1 << 30),
+        "store_stats": store_stats,
+        "total_throughput_bytes_per_sec": total_throughput,
+        "total_throughput_gib_per_sec": total_throughput / (1 << 30),
         "plan_threshold_gib_per_sec": PLAN_THRESHOLD_BYTES_PER_SEC / (1 << 30),
-        "gate_passed": cdc_throughput >= PLAN_THRESHOLD_BYTES_PER_SEC,
+        "gate_passed": total_throughput >= PLAN_THRESHOLD_BYTES_PER_SEC,
         "gate_meaningful": "linux" in platform.system().lower(),
     }
     if not quiet:
-        print(f"=== Phase A1 ingest harness ===")
+        print("=== Phase A1 ingest harness ===")
         print(f"Platform: {report['platform']}")
         print(f"Bytes ingested: {actual_bytes:,}")
         print(f"Chunks produced: {report['chunk_count']:,}")
@@ -113,13 +137,17 @@ def run_ingest(target_bytes: int, store_dir: Path, quiet: bool = False) -> dict[
             f"CDC throughput: {cdc_throughput / 1e9:.2f} GB/s "
             f"= {report['cdc_throughput_gib_per_sec']:.2f} GiB/s"
         )
+        print(
+            f"Durable ingest: {total_throughput / 1e9:.2f} GB/s "
+            f"= {report['total_throughput_gib_per_sec']:.2f} GiB/s"
+        )
         if not report["gate_meaningful"]:
             print(
-                f"NOTE: Plan gate (≥ 1 GiB/s) is calibrated for Linux NVMe. "
+                f"NOTE: Plan gate (>= 1 GiB/s) is calibrated for Linux NVMe. "
                 f"On {platform.system()}, achievable ceiling is much lower; "
                 "the gate-passed bit is informational only off-Linux."
             )
-        print(f"Gate (≥ 1 GiB/s): {'PASS' if report['gate_passed'] else 'FAIL'}")
+        print(f"Gate (>= 1 GiB/s): {'PASS' if report['gate_passed'] else 'FAIL'}")
     return report
 
 
@@ -134,7 +162,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     n_bytes = parse_size(args.bytes)
-    if args.store_dir is None:
+    cleanup_store = args.store_dir is None
+    if cleanup_store:
         import tempfile
 
         args.store_dir = Path(tempfile.mkdtemp(prefix="ol_ingest_"))
@@ -144,6 +173,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
+    finally:
+        if cleanup_store:
+            shutil.rmtree(args.store_dir, ignore_errors=True)
     if args.out is not None:
         args.out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     # On Linux, exit non-zero if gate fails. Off-Linux, exit 0

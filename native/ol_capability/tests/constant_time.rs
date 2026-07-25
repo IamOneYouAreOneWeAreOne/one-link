@@ -1,5 +1,5 @@
 //! Phase C constant-time audit for `ol_capability::Capability::verify`
-//! per [FILE_ENGINE_V2_PLAN.md:292] item #9:
+//! per [`FILE_ENGINE_V2_PLAN.md:292`] item #9:
 //!
 //!     "Constant-time check: timing variance across cap-validity /
 //!      crypto-input-validity < 1% of mean."
@@ -36,8 +36,11 @@ fn signature_compare_timing_uniform() {
     let id: [u8; CAP_ID_LEN] = [0xCDu8; CAP_ID_LEN];
     let cap = Capability::root(id, &root)
         .attenuate(Caveat::ExpiresAt(1_000_000))
+        .unwrap()
         .attenuate(Caveat::PathPrefix("/safe/folder".to_string()))
-        .attenuate(Caveat::OperationIn(vec!["read".to_string()]));
+        .unwrap()
+        .attenuate(Caveat::OperationIn(vec!["read".to_string()]))
+        .unwrap();
 
     // Tamper the carried signature (last 32 bytes of the wire). The
     // recomputed HMAC chain stays valid (caveats untouched) but
@@ -85,13 +88,13 @@ fn signature_compare_timing_uniform() {
         t_b += s.elapsed().as_nanos();
     }
 
-    let avg_a = t_a as f64 / (iters_per_burst * bursts) as f64;
-    let avg_b = t_b as f64 / (iters_per_burst * bursts) as f64;
+    let avg_a = u128_as_f64(t_a) / f64::from(iters_per_burst * bursts);
+    let avg_b = u128_as_f64(t_b) / f64::from(iters_per_burst * bursts);
     let ratio = avg_a.max(avg_b) / avg_a.min(avg_b);
 
-    eprintln!("verify sig-tamper@0:  {:.1} ns/call", avg_a);
-    eprintln!("verify sig-tamper@31: {:.1} ns/call", avg_b);
-    eprintln!("ratio: {:.4}", ratio);
+    eprintln!("verify sig-tamper@0:  {avg_a:.1} ns/call");
+    eprintln!("verify sig-tamper@31: {avg_b:.1} ns/call");
+    eprintln!("ratio: {ratio:.4}");
 
     // The straight-line XOR-accumulator in `subtle::ConstantTimeEq` is
     // CPU-constant-time. Allow up to 1.20× wall-clock variance for OS
@@ -104,6 +107,18 @@ fn signature_compare_timing_uniform() {
     );
 }
 
+fn u128_as_f64(value: u128) -> f64 {
+    let words = [
+        u32::try_from(value >> 96).expect("top u128 word fits in u32"),
+        u32::try_from((value >> 64) & u128::from(u32::MAX)).expect("masked u128 word fits in u32"),
+        u32::try_from((value >> 32) & u128::from(u32::MAX)).expect("masked u128 word fits in u32"),
+        u32::try_from(value & u128::from(u32::MAX)).expect("masked u128 word fits in u32"),
+    ];
+    words.into_iter().fold(0.0, |accumulator, word| {
+        accumulator.mul_add(4_294_967_296.0, f64::from(word))
+    })
+}
+
 /// Semantic guard: verify rejects every tampered cap, regardless of
 /// which byte was touched. The CT timing test above relies on this
 /// invariant — both calls are returning Err, not Ok-vs-Err.
@@ -112,7 +127,9 @@ fn tampered_caps_reject_uniformly() {
     let root_arr: [u8; ROOT_KEY_LEN] = [0x42u8; ROOT_KEY_LEN];
     let root = Zeroizing::new(root_arr);
     let id: [u8; CAP_ID_LEN] = [0xCDu8; CAP_ID_LEN];
-    let cap = Capability::root(id, &root).attenuate(Caveat::ExpiresAt(1_000_000));
+    let cap = Capability::root(id, &root)
+        .attenuate(Caveat::ExpiresAt(1_000_000))
+        .unwrap();
     let original_wire = cap.encode();
     // Flip every byte in the caveat region (between cap-id and signature).
     let caveat_start = CAP_ID_LEN + 4;
@@ -122,17 +139,14 @@ fn tampered_caps_reject_uniformly() {
         wire[idx] ^= 0xFF;
         // After a byte flip, decode may fail entirely (variant tag, length
         // field); whether decoded or not, we treat it as rejection.
-        match Capability::decode(&wire) {
-            Ok(tampered) => {
-                let ctx = Context::new().with_now(500_000);
-                assert!(
-                    !tampered.accepts(&root, &ctx),
-                    "tampered cap (byte {idx}) accepted — auth broken"
-                );
-            }
-            Err(_) => {
-                // Decode rejection counts as the right outcome.
-            }
+        if let Ok(tampered) = Capability::decode(&wire) {
+            let ctx = Context::new().with_now(500_000);
+            assert!(
+                !tampered.accepts(&root, &ctx),
+                "tampered cap (byte {idx}) accepted — auth broken"
+            );
+        } else {
+            // Decode rejection counts as the right outcome.
         }
     }
 }

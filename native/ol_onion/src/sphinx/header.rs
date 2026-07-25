@@ -6,7 +6,7 @@
 //! changing total size, and which the destination's MAC verifies
 //! against the cumulative output of all upstream relays.
 //!
-//! ## Header layout (HEADER_LEN bytes per hop)
+//! ## Header layout (`HEADER_LEN` bytes per hop)
 //!
 //! Each relay's view after decrypt:
 //! ```text
@@ -51,8 +51,9 @@ use crate::sphinx::primitives::{
     build_filler, chacha20_keystream_into, chacha20_xor_in_place, header_mac, verify_header_mac,
     HopKeys, HEADER_KEYSTREAM_LEN, HEADER_LEN, SLOT_ID_LEN, SLOT_LEN, SLOT_MAC_LEN,
 };
+use crate::{OnionError, OnionResult};
 
-/// Special destination marker: a slot whose hop_id is all zero
+/// Special destination marker: a slot whose `hop_id` is all zero
 /// signals "this hop is the destination, deliver the payload."
 pub const DESTINATION_MARKER: [u8; SLOT_ID_LEN] = [0u8; SLOT_ID_LEN];
 
@@ -90,22 +91,31 @@ pub fn build_header(
     hop_keys: &[HopKeys],
     next_hop_ids: &[[u8; SLOT_ID_LEN]],
     random_pad: &[u8],
-) -> BuiltHeader {
-    assert!(!hop_keys.is_empty(), "circuit must have at least one hop");
-    assert_eq!(
-        hop_keys.len(),
-        next_hop_ids.len(),
-        "hop_keys + next_hop_ids must have equal length"
-    );
+) -> OnionResult<BuiltHeader> {
+    if hop_keys.is_empty() {
+        return Err(OnionError::EmptyCircuit);
+    }
+    if hop_keys.len() > crate::sphinx::primitives::MAX_HOPS {
+        return Err(OnionError::TooManyHops {
+            got: hop_keys.len(),
+            max: crate::sphinx::primitives::MAX_HOPS,
+        });
+    }
+    if hop_keys.len() != next_hop_ids.len() {
+        return Err(OnionError::InvalidParameter(
+            "hop_keys and next_hop_ids lengths differ",
+        ));
+    }
     let n = hop_keys.len();
     let n_relays = n - 1;
     let filler_len = n_relays * SLOT_LEN;
     let pad_len = HEADER_LEN - SLOT_LEN - filler_len;
-    assert_eq!(
-        random_pad.len(),
-        pad_len,
-        "random_pad must be exactly {pad_len} bytes for n={n} hops"
-    );
+    if random_pad.len() != pad_len {
+        return Err(OnionError::BadFrameSize {
+            got: random_pad.len(),
+            expected: pad_len,
+        });
+    }
 
     // ── Step 1: build cumulative filler from upstream-relay streams.
     let relay_streams: Vec<[u8; 32]> = hop_keys
@@ -117,7 +127,7 @@ pub fn build_header(
     debug_assert_eq!(filler.len(), filler_len);
 
     // ── Step 2: destination's encrypted header.
-    let dest_keys = hop_keys.last().expect("non-empty");
+    let dest_keys = hop_keys.last().ok_or(OnionError::EmptyCircuit)?;
     // Stack-array header buffer (HEADER_LEN = 240 bytes).
     let mut header = [0u8; HEADER_LEN];
     // Marker slot (first SLOT_LEN bytes: all zero hop_id || zero mac).
@@ -151,10 +161,10 @@ pub fn build_header(
         prev_mac = header_mac(&keys.mac_key, &header);
     }
 
-    BuiltHeader {
+    Ok(BuiltHeader {
         header: header.to_vec(),
         mac: prev_mac,
-    }
+    })
 }
 
 /// Outcome of a single peel.
@@ -239,7 +249,9 @@ mod tests {
 
     fn random_pad_for(n_hops: usize) -> Vec<u8> {
         let pad_len = HEADER_LEN - SLOT_LEN - (n_hops - 1) * SLOT_LEN;
-        (0..pad_len).map(|i| (i as u8).wrapping_mul(31)).collect()
+        (0..pad_len)
+            .map(|i| i.to_le_bytes()[0].wrapping_mul(31))
+            .collect()
     }
 
     // ── 1-hop ─────────────────────────────────────────────────────
@@ -252,7 +264,8 @@ mod tests {
             std::slice::from_ref(&dest_keys),
             &next_hop_ids,
             &random_pad_for(1),
-        );
+        )
+        .unwrap();
         let outcome = peel_header(&dest_keys, &built.header, &built.mac).unwrap();
         assert_eq!(outcome, HeaderPeelOutcome::Deliver);
     }
@@ -268,7 +281,8 @@ mod tests {
             &[r0.clone(), dest.clone()],
             &next_hop_ids,
             &random_pad_for(2),
-        );
+        )
+        .unwrap();
 
         // r0 peels first.
         let outcome = peel_header(&r0, &built.header, &built.mac).unwrap();
@@ -299,29 +313,30 @@ mod tests {
             &[r0.clone(), r1.clone(), dest.clone()],
             &next_hop_ids,
             &random_pad_for(3),
-        );
+        )
+        .unwrap();
 
         // r0 → r1
         let outcome = peel_header(&r0, &built.header, &built.mac).unwrap();
-        let (next_id, next_header, next_mac) = match outcome {
-            HeaderPeelOutcome::Forward {
-                next_hop_id,
-                next_header,
-                next_mac,
-            } => (next_hop_id, next_header, next_mac),
-            _ => panic!(),
+        let HeaderPeelOutcome::Forward {
+            next_hop_id: next_id,
+            next_header,
+            next_mac,
+        } = outcome
+        else {
+            panic!();
         };
         assert_eq!(next_id, [0x32; SLOT_ID_LEN]);
 
         // r1 → dest
         let outcome = peel_header(&r1, &next_header, &next_mac).unwrap();
-        let (next_id, next_header, next_mac) = match outcome {
-            HeaderPeelOutcome::Forward {
-                next_hop_id,
-                next_header,
-                next_mac,
-            } => (next_hop_id, next_header, next_mac),
-            _ => panic!(),
+        let HeaderPeelOutcome::Forward {
+            next_hop_id: next_id,
+            next_header,
+            next_mac,
+        } = outcome
+        else {
+            panic!();
         };
         assert_eq!(next_id, [0x33; SLOT_ID_LEN]);
 
@@ -335,12 +350,14 @@ mod tests {
     #[test]
     fn max_hops_round_trip() {
         use crate::sphinx::primitives::MAX_HOPS;
-        let keys: Vec<HopKeys> = (0..MAX_HOPS).map(|i| make_hop_keys(i as u8 + 1)).collect();
+        let keys: Vec<HopKeys> = (0..MAX_HOPS)
+            .map(|i| make_hop_keys(u8::try_from(i).unwrap() + 1))
+            .collect();
         let mut next_hop_ids: Vec<[u8; SLOT_ID_LEN]> = (0..MAX_HOPS - 1)
-            .map(|i| [i as u8 + 2; SLOT_ID_LEN])
+            .map(|i| [u8::try_from(i).unwrap() + 2; SLOT_ID_LEN])
             .collect();
         next_hop_ids.push(DESTINATION_MARKER);
-        let built = build_header(&keys, &next_hop_ids, &random_pad_for(MAX_HOPS));
+        let built = build_header(&keys, &next_hop_ids, &random_pad_for(MAX_HOPS)).unwrap();
 
         let mut current_header = built.header.clone();
         let mut current_mac = built.mac;
@@ -352,7 +369,7 @@ mod tests {
                     next_header,
                     next_mac,
                 } => {
-                    assert_eq!(next_hop_id, [i as u8 + 2; SLOT_ID_LEN]);
+                    assert_eq!(next_hop_id, [u8::try_from(i).unwrap() + 2; SLOT_ID_LEN]);
                     current_header = next_header;
                     current_mac = next_mac;
                     assert!(i < MAX_HOPS - 1);
@@ -374,7 +391,8 @@ mod tests {
             std::slice::from_ref(&dest),
             &[DESTINATION_MARKER],
             &random_pad_for(1),
-        );
+        )
+        .unwrap();
         let mut bad_mac = built.mac;
         bad_mac[0] ^= 0x01;
         let err = peel_header(&dest, &built.header, &bad_mac);
@@ -388,7 +406,8 @@ mod tests {
             std::slice::from_ref(&dest),
             &[DESTINATION_MARKER],
             &random_pad_for(1),
-        );
+        )
+        .unwrap();
         let mut bad_header = built.header.clone();
         bad_header[0] ^= 0x01;
         let err = peel_header(&dest, &bad_header, &built.mac);
@@ -399,7 +418,7 @@ mod tests {
     fn wrong_key_rejected() {
         let dest = make_hop_keys(0x43);
         let other = make_hop_keys(0x44);
-        let built = build_header(&[dest], &[DESTINATION_MARKER], &random_pad_for(1));
+        let built = build_header(&[dest], &[DESTINATION_MARKER], &random_pad_for(1)).unwrap();
         let err = peel_header(&other, &built.header, &built.mac);
         assert!(err.is_err());
     }

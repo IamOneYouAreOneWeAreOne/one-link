@@ -90,6 +90,16 @@ pub enum QuicError {
     /// listening or for dialing.
     #[error("endpoint role: {0}")]
     EndpointRole(&'static str),
+
+    /// Endpoint configuration cannot be represented by QUIC's bounded
+    /// transport parameters.
+    #[error("invalid endpoint config `{field}`: {reason}")]
+    InvalidConfig {
+        /// Configuration field name.
+        field: &'static str,
+        /// Stable reason suitable for logs and FFI error mapping.
+        reason: &'static str,
+    },
 }
 
 impl From<x509_parser::error::X509Error> for QuicError {

@@ -9,7 +9,11 @@ use ol_homology::{components_of, fragility_score, ComponentReport, FragilityScor
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
-#[pyclass(name = "ComponentReport", module = "one_link_native.homology")]
+#[pyclass(
+    from_py_object,
+    name = "ComponentReport",
+    module = "one_link_native.homology"
+)]
 #[derive(Debug, Clone)]
 pub struct PyComponentReport {
     #[pyo3(get)]
@@ -41,7 +45,11 @@ impl PyComponentReport {
     }
 }
 
-#[pyclass(name = "FragilityScore", module = "one_link_native.homology")]
+#[pyclass(
+    from_py_object,
+    name = "FragilityScore",
+    module = "one_link_native.homology"
+)]
 #[derive(Debug, Clone)]
 pub struct PyFragilityScore {
     #[pyo3(get)]
@@ -79,21 +87,26 @@ impl PyFragilityScore {
 #[pyfunction]
 #[pyo3(name = "components_of")]
 fn py_components_of(nodes: Vec<String>, edges: Vec<(String, String)>) -> PyComponentReport {
-    components_of(&nodes, &edges).into()
+    let report = components_of(&nodes, &edges);
+    // PyO3 accepts Python sequences as owned Vecs, not borrowed Rust slices.
+    // Release potentially large extracted inputs before building the result.
+    drop((nodes, edges));
+    report.into()
 }
 
 /// Compute per-chunk fragility scores. Returns
 /// ``(scores: list[FragilityScore], replication_priority: list[str])``.
 #[pyfunction]
 #[pyo3(name = "fragility_score")]
-fn py_fragility_score<'py>(
-    py: Python<'py>,
+fn py_fragility_score(
+    py: Python<'_>,
     nodes: Vec<String>,
     edges: Vec<(String, String)>,
     holders: HashMap<String, usize>,
-) -> PyResult<(Bound<'py, PyList>, Vec<String>)> {
+) -> PyResult<(Bound<'_, PyList>, Vec<String>)> {
     let report = fragility_score(&nodes, &edges, &holders);
-    let scores_py = PyList::empty_bound(py);
+    drop((nodes, edges, holders));
+    let scores_py = PyList::empty(py);
     for s in report.scores {
         let py_s: PyFragilityScore = s.into();
         scores_py.append(Py::new(py, py_s)?)?;

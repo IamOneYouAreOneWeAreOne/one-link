@@ -10,7 +10,7 @@ Browsing returns a live registry of known peers keyed by short_id.
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import concurrent.futures
 import ipaddress
 import logging
 import os
@@ -18,6 +18,7 @@ import socket
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
+from one_link.fault_observability import report_best_effort_failure
 from one_link.platform_guard import install_windows_platform_fastpath
 
 if TYPE_CHECKING:
@@ -168,8 +169,18 @@ class Registry:
                         peer.short_id,
                     )
                     return
-            except Exception:
-                pass
+            except Exception as exc:
+                # This predicate is the security boundary that prevents an
+                # mDNS advertiser from replacing a paired identity. If the
+                # trust lookup is unavailable, retain the known entry and
+                # retry on the next advertisement.
+                log.error(
+                    "discovery: pinned-key lookup failed for short_id=%s; "
+                    "refusing pub-hex swap (fail-closed): %s",
+                    peer.short_id,
+                    exc,
+                )
+                return
         # mDNS can briefly surface multiple service names for the same device
         # after restarts. The public key is the durable identity; keep the
         # newest advertisement and remove older aliases so the UI does not
@@ -302,21 +313,99 @@ class _AsyncListener:
         self.zc = zc
         self.loop = loop
         self.service_to_short_id: dict[str, str] = {}
+        self._resolve_futures: set[concurrent.futures.Future[None]] = set()
+        # ``run_coroutine_threadsafe`` exposes a concurrent Future whose
+        # cancellation can complete before the loop-owned Task has actually
+        # observed ``CancelledError``. Track the real Tasks as well so shutdown
+        # can drain resolver cleanup rather than only draining the proxy.
+        self._resolve_tasks: set[asyncio.Task[None]] = set()
+        self._closing = False
 
     def _schedule_resolve(self, type_: str, name: str) -> None:
-        asyncio.run_coroutine_threadsafe(self._resolve(type_, name), self.loop)
+        async def _tracked_resolve() -> None:
+            task = asyncio.current_task()
+            if task is None:
+                raise RuntimeError("mDNS resolver is not running in an asyncio task")
+            self._resolve_tasks.add(task)
+            try:
+                if not self._closing:
+                    await self._resolve(type_, name)
+            finally:
+                self._resolve_tasks.discard(task)
+
+        resolve_coro = _tracked_resolve()
+        if self._closing:
+            resolve_coro.close()
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                resolve_coro,
+                self.loop,
+            )
+        except RuntimeError as exc:
+            # Zeroconf invokes this listener from its callback thread. During
+            # shutdown the event loop can close between notification and
+            # scheduling; surface that race instead of leaking an un-awaited
+            # coroutine and silently retaining a stale registry entry.
+            resolve_coro.close()
+            log.debug("mDNS: could not schedule resolve for %s: %s", name, exc)
+            return
+
+        def _resolve_done(done) -> None:
+            try:
+                done.result()
+            except concurrent.futures.CancelledError:
+                return
+            except Exception as exc:
+                # Exceptions raised by a coroutine submitted with
+                # run_coroutine_threadsafe otherwise remain trapped in the
+                # Future forever. That made broken resolution look exactly
+                # like a peer that had disappeared from the LAN.
+                log.warning("mDNS: resolve failed for %s: %s", name, exc)
+
+        self._resolve_futures.add(future)
+
+        def _tracked_resolve_done(
+            done: concurrent.futures.Future[None],
+        ) -> None:
+            self._resolve_futures.discard(done)
+            _resolve_done(done)
+
+        future.add_done_callback(_tracked_resolve_done)
 
     async def _resolve(self, type_: str, name: str) -> None:
         from zeroconf.asyncio import AsyncServiceInfo
 
         info = AsyncServiceInfo(type_, name)
         ok = await info.async_request(self.zc.zeroconf, timeout=2000)
-        if not ok:
+        if not ok or self._closing:
             return
         peer = _info_to_peer(info, self.self_short_id)
         if peer:
             self.service_to_short_id[name] = peer.short_id
             self.registry.upsert(peer)
+
+    async def stop(self) -> None:
+        """Cancel and drain every resolver submitted from callback threads."""
+        self._closing = True
+        # Admit callbacks queued by ``run_coroutine_threadsafe`` before the
+        # closing flag became visible. Their wrapper observes ``_closing`` and
+        # registers the loop-owned Task, allowing an exact drain below.
+        await asyncio.sleep(0)
+        tasks = tuple(self._resolve_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        pending = tuple(self._resolve_futures)
+        for future in pending:
+            future.cancel()
+        if pending:
+            await asyncio.gather(
+                *(asyncio.wrap_future(future) for future in pending),
+                return_exceptions=True,
+            )
+        self._resolve_futures.clear()
 
     def add_service(self, _zc, type_: str, name: str) -> None:
         self._schedule_resolve(type_, name)
@@ -353,6 +442,12 @@ class Discovery:
         self._zc: AsyncZeroconf | None = None
         self._info: AsyncServiceInfo | None = None
         self._browser: AsyncServiceBrowser | None = None
+        self._listener: _AsyncListener | None = None
+
+    @property
+    def is_running(self) -> bool:
+        """Whether zeroconf advertisement/browsing owns live resources."""
+        return self._zc is not None
 
     async def start(self) -> None:
         if self._zc is not None:
@@ -407,10 +502,13 @@ class Discovery:
             server=f"{self.short_id}.local.",
         )
         await self._zc.async_register_service(self._info, allow_name_change=True)
+        self._listener = _AsyncListener(
+            self.registry, self.short_id, self._zc, loop
+        )
         self._browser = AsyncServiceBrowser(
             self._zc.zeroconf,
             SERVICE_TYPE,
-            listener=_AsyncListener(self.registry, self.short_id, self._zc, loop),
+            listener=self._listener,
         )
 
     async def update_rendezvous_urls(self, urls: list[str]) -> None:
@@ -447,8 +545,16 @@ class Discovery:
             properties=new_props,
             server=f"{self.short_id}.local.",
         )
-        with contextlib.suppress(Exception):
+        try:
             await self._zc.async_update_service(self._info)
+        except Exception as exc:
+            # Keep the desired URLs in memory so a subsequent update can
+            # retry, but do not make a stale TXT advertisement invisible to
+            # operators troubleshooting a missing route.
+            log.warning(
+                "mDNS: rendezvous TXT update failed; peers may retain stale routes: %s",
+                exc,
+            )
 
     async def prune_unreachable(self, *, timeout: float = 0.6) -> int:
         """TCP-probe every peer in the registry; remove any that don't accept
@@ -480,8 +586,13 @@ class Discovery:
                 try:
                     writer.close()
                     await writer.wait_closed()
-                except Exception:
-                    pass
+                except (OSError, RuntimeError) as exc:
+                    report_best_effort_failure(
+                        log,
+                        "peer_probe_writer_close",
+                        exc,
+                        level=logging.DEBUG,
+                    )
                 return p, True
             except (asyncio.TimeoutError, OSError):
                 return p, False
@@ -497,21 +608,30 @@ class Discovery:
         try:
             if self._browser:
                 await self._browser.async_cancel()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("mDNS: browser cancellation failed during shutdown: %s", exc)
+        if self._listener is not None:
+            await self._listener.stop()
         try:
             if self._info and self._zc:
                 await self._zc.async_unregister_service(self._info)
-        except Exception:
-            pass
+        except Exception as exc:
+            # A failed goodbye can leave resolvers displaying the endpoint
+            # until its TTL expires. Shutdown remains best-effort, but the
+            # stale-route source must be diagnosable.
+            log.warning(
+                "mDNS: service unregister failed; advertisement may remain until TTL: %s",
+                exc,
+            )
         try:
             if self._zc:
                 await self._zc.async_close()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("mDNS: zeroconf close failed during shutdown: %s", exc)
         self._zc = None
         self._info = None
         self._browser = None
+        self._listener = None
 
 
 def _best_local_ipv4() -> str:

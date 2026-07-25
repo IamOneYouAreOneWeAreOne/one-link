@@ -164,6 +164,24 @@ def test_recipient_invite_shows_ring() -> None:
     out = fsm.handle(s, _event(EventKind.WIRE_INVITE, ts=1))
     assert out.state.phase == CallPhase.RINGING
     assert LocalAction.SHOW_RING in out.local_actions
+    assert LocalAction.START_INVITE_TIMER in out.local_actions
+
+
+def test_recipient_ring_expires_and_hides_without_peer_followup() -> None:
+    fsm = CallLifecycle()
+    state = fsm.handle(
+        _new_recipient(),
+        _event(EventKind.WIRE_INVITE, ts=1),
+    ).state
+    out = fsm.handle(
+        state,
+        _event(EventKind.INVITE_TIMER_EXPIRED, ts=31_000),
+    )
+    assert out.state.phase == CallPhase.ENDED
+    assert out.state.end_cause == EndCause.INVITE_TIMEOUT
+    assert LocalAction.STOP_INVITE_TIMER in out.local_actions
+    assert LocalAction.HIDE_RING in out.local_actions
+    assert out.outbound == ()
 
 
 def test_recipient_accept_emits_accept_and_starts_media() -> None:

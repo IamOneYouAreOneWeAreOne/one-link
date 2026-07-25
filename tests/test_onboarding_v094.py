@@ -134,10 +134,11 @@ def test_init_pops_after_state_loaded(index_html: str):
     """The wizard call must come AFTER refreshPeers + /api/me so we
     know whether to pop."""
     idx = index_html.find("async function init()")
-    snippet = index_html[idx:idx + 2500]
-    refresh_idx = snippet.find("await refreshPeers()")
-    show_idx = snippet.find("maybeShowOnboarding()")
-    assert refresh_idx > 0 and show_idx > refresh_idx
+    assert idx > 0
+    peers_idx = index_html.find('["peers", refreshPeers()]', idx)
+    settle_idx = index_html.find("await Promise.allSettled(bootTasks", idx)
+    show_idx = index_html.find("await maybeShowOnboarding()", idx)
+    assert idx < peers_idx < settle_idx < show_idx
 
 
 def test_enter_key_advances_name_step(index_html: str):

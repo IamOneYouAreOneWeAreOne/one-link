@@ -13,7 +13,7 @@
 //! bits over the public channel.
 //!
 //! Receiver computes XOR of their-parity vs peer's-parity. This
-//! equals the syndrome of (my_data XOR peer_data) — the error
+//! equals the syndrome of (`my_data` XOR `peer_data`) — the error
 //! pattern between the two sides. The standard Hamming syndrome
 //! decoding then locates the error.
 //!
@@ -21,7 +21,7 @@
 //!   - 120 data bits + 7 parity bits = 127-bit codeword
 //!   - Parity bit at codeword position 2^i (1, 2, 4, 8, 16, 32, 64)
 //!     covers all codeword positions where bit i of the position is 1
-//!   - Syndrome[i] = XOR of received bits at positions covered by p_i
+//!   - Syndrome[i] = XOR of received bits at positions covered by `p_i`
 //!   - Syndrome (as 7-bit integer) IS the codeword position of the
 //!     single bit error (or 0 for no error)
 //!
@@ -51,18 +51,20 @@ const PARITY_POSITIONS: [usize; HAMMING_PARITY_BITS] = [1, 2, 4, 8, 16, 32, 64];
 
 /// Map data-index `0..120` to its codeword position `1..=127`.
 /// Skips the 7 parity positions (powers of 2 in 1..=64).
-fn data_index_to_codeword_pos(di: usize) -> usize {
-    debug_assert!(di < HAMMING_DATA_BITS);
+fn data_index_to_codeword_pos(di: usize) -> Option<usize> {
+    if di >= HAMMING_DATA_BITS {
+        return None;
+    }
     let mut count = 0usize;
     for pos in 1..=HAMMING_CODEWORD_BITS {
         if !pos.is_power_of_two() {
             if count == di {
-                return pos;
+                return Some(pos);
             }
             count += 1;
         }
     }
-    unreachable!()
+    None
 }
 
 /// Map codeword position `1..=127` to data-index `0..120`, or None
@@ -86,13 +88,17 @@ fn codeword_pos_to_data_index(pos: usize) -> Option<usize> {
 /// byte, values 0 or 1).
 #[must_use]
 pub fn parity_bits_for_block(data: &[u8]) -> [u8; HAMMING_PARITY_BITS] {
-    debug_assert_eq!(data.len(), HAMMING_DATA_BITS);
     let mut parity = [0u8; HAMMING_PARITY_BITS];
-    for (di, &bit) in data.iter().enumerate() {
+    // The compatibility API is total for arbitrary slices: missing data is
+    // treated as zero padding and excess data is ignored. Callers that need
+    // strict framing should enforce the documented 120-byte block length.
+    for (di, &bit) in data.iter().take(HAMMING_DATA_BITS).enumerate() {
         if bit & 1 == 0 {
             continue;
         }
-        let cw_pos = data_index_to_codeword_pos(di);
+        let Some(cw_pos) = data_index_to_codeword_pos(di) else {
+            continue;
+        };
         // For each parity bit p_i at position 2^i: if cw_pos has
         // bit i set, this data bit affects p_i.
         for (pi, &pp) in PARITY_POSITIONS.iter().enumerate() {
@@ -134,11 +140,14 @@ pub fn parity_bits_for_string(data: &[u8]) -> Vec<u8> {
 ///     outside the valid range (could indicate >1 errors).
 #[must_use]
 pub fn decode_syndrome_to_data_index(my_parity: &[u8], peer_parity: &[u8]) -> Option<usize> {
-    debug_assert_eq!(my_parity.len(), HAMMING_PARITY_BITS);
-    debug_assert_eq!(peer_parity.len(), HAMMING_PARITY_BITS);
     // Syndrome interpreted as 7-bit integer; bit i is parity[i].
     let mut s: usize = 0;
-    for (i, (&mine, &peer)) in my_parity.iter().zip(peer_parity.iter()).enumerate() {
+    for (i, (&mine, &peer)) in my_parity
+        .iter()
+        .zip(peer_parity.iter())
+        .take(HAMMING_PARITY_BITS)
+        .enumerate()
+    {
         if (mine ^ peer) & 1 != 0 {
             s |= 1 << i;
         }
@@ -205,10 +214,26 @@ mod tests {
     #[test]
     fn data_index_roundtrip() {
         for di in 0..HAMMING_DATA_BITS {
-            let cw = data_index_to_codeword_pos(di);
+            let cw = data_index_to_codeword_pos(di).unwrap();
             assert!(!cw.is_power_of_two());
             assert_eq!(codeword_pos_to_data_index(cw), Some(di));
         }
+    }
+
+    #[test]
+    fn block_and_syndrome_helpers_are_total_for_adversarial_lengths() {
+        let prefix = vec![1u8; HAMMING_DATA_BITS];
+        let mut oversized = prefix.clone();
+        oversized.extend(std::iter::repeat_n(1u8, 10_000));
+        assert_eq!(
+            parity_bits_for_block(&oversized),
+            parity_bits_for_block(&prefix)
+        );
+        assert_eq!(
+            decode_syndrome_to_data_index(&vec![1u8; 10_000], &vec![0u8; 10_000]),
+            decode_syndrome_to_data_index(&[1u8; HAMMING_PARITY_BITS], &[0u8; HAMMING_PARITY_BITS])
+        );
+        assert_eq!(data_index_to_codeword_pos(HAMMING_DATA_BITS), None);
     }
 
     #[test]

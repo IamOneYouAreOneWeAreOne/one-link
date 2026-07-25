@@ -20,6 +20,7 @@ import random
 from pathlib import Path
 
 import pytest
+from blake3 import blake3
 
 from one_link.blobstore import BlobStore
 from one_link.crdt import ManifestEntry, VectorClock
@@ -83,7 +84,7 @@ def test_foldersync_native_pipeline_soak(tmp_path: Path):
             vc = VectorClock.from_dict({peer: peer_clocks[peer]})
 
             if op == "add":
-                blob = f"blob_{i:06x}"
+                blob = blake3(f"blob_{i:06x}".encode()).hexdigest()
                 entry = ManifestEntry(
                     file_path=path,
                     blob_hash=blob,
@@ -104,7 +105,7 @@ def test_foldersync_native_pipeline_soak(tmp_path: Path):
                 # height — exercises the conflict / OR-set add-wins paths.
                 entry = ManifestEntry(
                     file_path=path,
-                    blob_hash=f"blob_alt_{i:06x}",
+                    blob_hash=blake3(f"blob_alt_{i:06x}".encode()).hexdigest(),
                     size=rng.randint(1, 1_000_000),
                     mtime_ms=1_700_000_000_000 + i,
                     vclock=vc,

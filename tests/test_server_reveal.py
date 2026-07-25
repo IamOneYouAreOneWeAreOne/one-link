@@ -11,7 +11,6 @@ those launch points so they work without opening a real window.
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -146,12 +145,18 @@ async def test_file_reveal_invokes_correct_platform_command(tmp_path: Path, monk
 
     popen.assert_called_once()
     args = popen.call_args.args[0]
+    assert Path(args[0]).is_absolute()
+    assert popen.call_args.kwargs["shell"] is False
+    assert popen.call_args.kwargs["close_fds"] is True
     if sys.platform == "win32":
-        assert args == ["explorer.exe", f"/select,{target.resolve()}"]
+        assert Path(args[0]).name.lower() == "explorer.exe"
+        assert args[1:] == [f"/select,{target.resolve()}"]
     elif sys.platform == "darwin":
-        assert args == ["open", "-R", str(target.resolve())]
+        assert Path(args[0]).name == "open"
+        assert args[1:] == ["-R", str(target.resolve())]
     else:
-        assert args == ["xdg-open", str(target.resolve().parent)]
+        assert Path(args[0]).name == "xdg-open"
+        assert args[1:] == [str(target.resolve().parent)]
 
 
 @pytest.mark.asyncio
@@ -205,25 +210,22 @@ async def test_inbox_reveal_invokes_correct_platform_command(tmp_path: Path, mon
 
     popen = MagicMock()
     monkeypatch.setattr("subprocess.Popen", popen)
-    startfile = MagicMock()
-    if sys.platform == "win32":
-        monkeypatch.setattr("os.startfile", startfile, raising=False)
-
     resp = await server.api_inbox_reveal(SimpleNamespace())
     assert resp.status == 200, resp.text
 
     resolved = str(inbox.resolve())
+    popen.assert_called_once()
+    args = popen.call_args.args[0]
+    assert Path(args[0]).is_absolute()
     if sys.platform == "win32":
-        popen.assert_not_called()
-        startfile.assert_called_once_with(resolved)
+        assert Path(args[0]).name.lower() == "explorer.exe"
+        assert args[1:] == [resolved]
     elif sys.platform == "darwin":
-        popen.assert_called_once()
-        args = popen.call_args.args[0]
-        assert args == ["open", resolved]
+        assert Path(args[0]).name == "open"
+        assert args[1:] == [resolved]
     else:
-        popen.assert_called_once()
-        args = popen.call_args.args[0]
-        assert args == ["xdg-open", resolved]
+        assert Path(args[0]).name == "xdg-open"
+        assert args[1:] == [resolved]
 
 
 # ─── End-to-end auth tests against a real daemon ───────────────────────

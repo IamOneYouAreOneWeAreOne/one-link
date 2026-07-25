@@ -69,6 +69,6 @@ fn real_passphrase_reaches_real_path() {
     );
     match gate.open(pw, &real_check, &duress_check).unwrap() {
         DuressOutcome::Real(_) => {}
-        other => panic!("expected real path, got {:?}", other),
+        other @ DuressOutcome::Duress { .. } => panic!("expected real path, got {other:?}"),
     }
 }

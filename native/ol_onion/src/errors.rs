@@ -76,6 +76,11 @@ pub enum OnionError {
     /// rejected the input.
     #[error("schnorr signature did not verify")]
     SignatureInvalid,
+
+    /// A caller supplied a non-finite, out-of-range, or inconsistent
+    /// configuration value.
+    #[error("invalid parameter: {0}")]
+    InvalidParameter(&'static str),
 }
 
 /// Result alias for crate operations.

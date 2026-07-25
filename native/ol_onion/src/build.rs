@@ -94,8 +94,8 @@ pub fn build_onion<R: RngCore + CryptoRng>(
         // relay (i == 0) in an n-hop circuit, it's n-1.
         // n ≤ MAX_HOPS = 5, so (n - 1 - i) fits in u8 trivially.
         debug_assert!(n <= crate::packet::MAX_HOPS);
-        #[allow(clippy::cast_possible_truncation)]
-        let hops_remaining = (n - 1 - i) as u8;
+        let hops_remaining = u8::try_from(n - 1 - i)
+            .map_err(|_| OnionError::Internal("validated hop count exceeds u8"))?;
 
         // Layer key.
         let layer_key = derive_layer_key_sender(&esk, &hop.pubkey);
@@ -115,9 +115,9 @@ pub fn build_onion<R: RngCore + CryptoRng>(
         aad.write_fixed(&aead_nonce);
         // ciphertext_len ≤ TRANSPORT_PAD_HINT = 1280, bounded by the
         // payload-size check at function entry; fits in u16 trivially.
-        debug_assert!(ciphertext_len <= u16::MAX as usize);
-        #[allow(clippy::cast_possible_truncation)]
-        let ciphertext_len_u16 = ciphertext_len as u16;
+        debug_assert!(u16::try_from(ciphertext_len).is_ok());
+        let ciphertext_len_u16 = u16::try_from(ciphertext_len)
+            .map_err(|_| OnionError::Internal("onion ciphertext length exceeds u16"))?;
         aad.write_u16(ciphertext_len_u16);
         let aad_bytes = aad.into_bytes();
 

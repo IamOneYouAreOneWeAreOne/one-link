@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import socket
 import time
-from pathlib import Path
 
 import pytest
 
@@ -26,7 +25,7 @@ pytestmark = pytest.mark.timeout(120)
 # ─────────────────────────── Happy path ────────────────────────────
 
 def test_text_round_trip():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         res = request(p.a.control_port, cmd="send", peer=p.b.short_id, body="hello")
         assert res["ok"], res
         time.sleep(0.5)
@@ -37,7 +36,7 @@ def test_text_round_trip():
 
 def test_text_with_unicode():
     body = "résumé 日本 🌍 مرحبا"
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         res = request(p.a.control_port, cmd="send", peer=p.b.short_id, body=body)
         assert res["ok"]
         time.sleep(0.5)
@@ -46,7 +45,7 @@ def test_text_with_unicode():
 
 
 def test_send_by_hostname():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         peers = request(p.a.control_port, cmd="peers")
         assert peers["ok"], peers
         peer_label = next(
@@ -59,13 +58,13 @@ def test_send_by_hostname():
 
 
 def test_send_by_short_id_prefix():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         res = request(p.a.control_port, cmd="send", peer=p.b.short_id[:4], body="hi")
         assert res["ok"], res
 
 
 def test_peer_capabilities_persist_after_contact():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         res = request(p.a.control_port, cmd="send", peer=p.b.short_id, body="caps")
         assert res["ok"], res
         time.sleep(0.5)
@@ -85,14 +84,15 @@ def test_peer_capabilities_persist_after_contact():
 
 
 def test_chat_reuses_long_lived_session_and_capability_policy():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         from one_link.state import State
         import urllib.request
         import json as _json
 
         port = int((p.a.home / "data" / "server.port").read_text())
         token = (p.a.home / "data" / "ui.token").read_text().strip()
-        # v0.4: peers are unpaired here, so use the modal feed.
+        # The live transport fixture pins peers, and include_unpaired remains
+        # useful here because this assertion targets the complete peer feed.
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}/api/peers?include_unpaired=1",
             headers={"Authorization": f"Bearer {token}"},
@@ -154,7 +154,7 @@ def test_chat_reuses_long_lived_session_and_capability_policy():
     ],
 )
 def test_file_send_various_sizes(size: int):
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         src = p.tmp / f"src_{size}.bin"
         if size > 0:
             # use a deterministic-but-non-trivial pattern so byte mismatch is easy to spot
@@ -178,7 +178,7 @@ def test_file_send_various_sizes(size: int):
 
 
 def test_file_send_cdc_skips_chunks_receiver_already_has():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         base = p.tmp / "base.bin"
         derived = p.tmp / "derived.bin"
         payload = bytes((i * 17 + 3) & 0xFF for i in range(900_000))
@@ -213,7 +213,7 @@ def test_file_send_cdc_skips_chunks_receiver_already_has():
 
 
 def test_file_send_compresses_easy_payloads():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         src = p.tmp / "compressible.bin"
         src.write_bytes((b"one-link-compress-me\n" * 50_000))
 
@@ -236,7 +236,7 @@ def test_file_send_compresses_easy_payloads():
 # ─────────────────────── Filename safety ───────────────────────────
 
 def test_unicode_filename():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         src = p.tmp / "résumé_日本.txt"
         src.write_text("hello", encoding="utf-8")
         res = request(p.a.control_port, cmd="send_file", peer=p.b.short_id, path=str(src))
@@ -250,7 +250,7 @@ def test_unicode_filename():
 
 def test_filename_with_unusual_chars_lands_in_inbox():
     """Files with unusual but legal names round-trip and stay in inbox/."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         src = p.tmp / "weird name with spaces.bin"
         src.write_bytes(b"data")
         res = request(p.a.control_port, cmd="send_file", peer=p.b.short_id, path=str(src))
@@ -268,14 +268,14 @@ def test_filename_with_unusual_chars_lands_in_inbox():
 # ───────────────────── Failure / error paths ──────────────────────
 
 def test_send_to_unknown_peer_returns_error():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         res = request(p.a.control_port, cmd="send", peer="zzzzzzzz", body="x")
         assert not res["ok"]
         assert "no peer" in res.get("error", "").lower()
 
 
 def test_send_file_for_missing_path_returns_error():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         res = request(
             p.a.control_port,
             cmd="send_file",
@@ -287,13 +287,13 @@ def test_send_file_for_missing_path_returns_error():
 
 
 def test_unknown_command_returns_error():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         res = request(p.a.control_port, cmd="frobnicate")
         assert not res["ok"]
 
 
 def test_malformed_control_request_returns_error():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(5)
         s.connect(("127.0.0.1", p.a.control_port))
@@ -307,7 +307,7 @@ def test_malformed_control_request_returns_error():
                 buf += chunk
             obj = json.loads(buf.decode("utf-8").strip())
             assert not obj["ok"]
-            assert "bad request" in obj["error"].lower()
+            assert obj["error"].lower() == "unauthorized"
         finally:
             s.close()
 
@@ -315,7 +315,7 @@ def test_malformed_control_request_returns_error():
 # ───────────────────── Logging / tail ──────────────────────────────
 
 def test_message_log_records_both_directions():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         request(p.a.control_port, cmd="send", peer=p.b.short_id, body="from-A")
         request(p.b.control_port, cmd="send", peer=p.a.short_id, body="from-B")
         time.sleep(0.5)
@@ -334,7 +334,7 @@ def test_message_log_records_both_directions():
 def test_serial_text_sends_all_received():
     """Five sends in a row, all should land. Same as 'concurrent' but without
     the threading complications — exercises the message log too."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         for i in range(5):
             res = request(
                 p.a.control_port, cmd="send", peer=p.b.short_id, body=f"msg-{i}"
@@ -356,7 +356,7 @@ def test_concurrent_sends_via_threads():
     connections must serialize correctly."""
     import threading
 
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         N = 10
         results = [None] * N
 

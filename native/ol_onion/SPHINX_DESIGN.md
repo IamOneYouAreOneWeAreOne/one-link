@@ -1,7 +1,9 @@
 # Sphinx onion routing design (F3-polish v3, deferred)
 
-This document captures the **correct** Sphinx algorithm for the next
-F3 polish ship. The first F3 polish attempt got the high-level
+This historical design note captures the intended Sphinx packet
+construction for an F3 research iteration. It is not product-route,
+interoperability, anonymity, or release evidence. The first F3 polish
+attempt got the high-level
 architecture right but got the *filler-byte* construction wrong:
 each relay's trailing-slot padding must be derived from the
 *cumulative* PRG outputs of upstream relays' stream-cipher
@@ -15,11 +17,13 @@ Current `packet.rs` design carries one ephemeral X25519 pubkey
 every relay can correlate the same circuit's packets by their
 shrinking sizes + per-layer ephemeral-pubkey changes.
 
-Sphinx achieves:
+The target Sphinx packet format provides these narrow construction
+properties when implemented correctly:
 
 1. **Single packet-level ephemeral pubkey**, BLINDED at each hop.
-   The same circuit's `alpha` at relay R_i looks pairwise
-   indistinguishable from independent random group elements.
+   The same circuit's `alpha` changes at relay R_i. Security of that
+   transformation is a cryptographic assumption; byte-frequency tests do
+   not prove observer unlinkability.
 2. **Fixed-size packets** at every hop. Header is shifted-and-XOR'd
    rather than removed.
 3. **Per-hop MAC** binds the header so no relay can mutate routing
@@ -171,16 +175,17 @@ for i in (0..n-1).rev():
    PACKET_LEN bytes.
 4. Adversarial: tampered MAC, swapped alpha, replay across circuits,
    small-order pubkey.
-5. Linkability test: a global passive adversary that records every
-   relay's (alpha, header, payload) cannot match same-circuit
-   packets above random chance.
+5. Alpha-evolution and byte-distribution smoke tests. A global passive
+   observer also sees timing, direction, volume, endpoints, and topology;
+   this test plan cannot establish random-chance circuit linkage or
+   anonymity.
 6. TLA+ model extension with the alpha-blinding step explicit.
 
 ## References
 
 - Danezis & Goldberg, "Sphinx: A Compact and Provably Secure Mix
   Format" (2009), the canonical paper.
-- Nymtech `sphinx-packet` Rust crate (production-audited
-  implementation, useful as a cross-reference for the filler-byte
-  algorithm).
+- Nymtech `sphinx-packet` Rust crate, useful as a cross-reference for the
+  filler-byte algorithm. One Link's implementation and wire format still
+  require their own interoperability and security review.
 - Tor's variable-length cell spec (different but related design).

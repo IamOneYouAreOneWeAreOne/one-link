@@ -115,9 +115,8 @@ async fn rejects_when_client_not_in_server_registry() {
     )
     .await;
 
-    let conn = match connect_result {
-        Ok(Ok(conn)) => conn,
-        Ok(Err(_)) | Err(_) => return, // rejected at handshake — pass
+    let Ok(Ok(conn)) = connect_result else {
+        return; // rejected at handshake — pass
     };
 
     // QUIC may resolve `connect()` after the initial CRYPTO exchange
@@ -168,8 +167,12 @@ async fn rejects_on_fingerprint_mismatch() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bulk_throughput_100_mib() {
+    const CHUNKS: usize = 100;
+    const CHUNK_SIZE: usize = 1024 * 1024;
+    const BYTES_PER_MIB: usize = 1024 * 1024;
+
     let alice = Arc::new(Identity::generate().unwrap());
     let bob = Arc::new(Identity::generate().unwrap());
 
@@ -185,9 +188,6 @@ async fn bulk_throughput_100_mib() {
     let bob_client = Endpoint::client_for_identity(bob.clone(), ipv4_loopback_config()).unwrap();
 
     // 100 chunks × 1 MiB (the bulk frame cap).
-    const CHUNKS: usize = 100;
-    const CHUNK_SIZE: usize = 1024 * 1024;
-
     let payload = vec![0xCDu8; CHUNK_SIZE];
     let payload_for_server = payload.clone();
     let server_handle = tokio::spawn(async move {
@@ -198,7 +198,7 @@ async fn bulk_throughput_100_mib() {
             // ignore the payload, reply with ChunkResponse of 1 MiB.
             let _req = ol_quic::transport::read_frame(&mut recv).await.unwrap();
             let frame = Frame::new(FrameKind::ChunkResponse, payload_for_server.clone()).unwrap();
-            ol_quic::transport::write_frame(&mut send, &frame)
+            ol_quic::transport::write_owned_frame(&mut send, frame)
                 .await
                 .unwrap();
             send.finish().unwrap();
@@ -217,13 +217,11 @@ async fn bulk_throughput_100_mib() {
     let elapsed = start.elapsed();
     conn.close(0, b"ok");
 
-    let mib = total as f64 / (1024.0 * 1024.0);
-    let mibps = mib / elapsed.as_secs_f64();
+    let total_mib = u32::try_from(total / BYTES_PER_MIB).unwrap();
+    let mibps = f64::from(total_mib) / elapsed.as_secs_f64();
     println!(
-        "ol_quic loopback throughput: {} MiB in {:.3}s = {:.1} MiB/s",
-        mib as u64,
-        elapsed.as_secs_f64(),
-        mibps,
+        "ol_quic loopback throughput: {total_mib} MiB in {:.3}s = {mibps:.1} MiB/s",
+        elapsed.as_secs_f64()
     );
     assert_eq!(total, CHUNKS * CHUNK_SIZE);
     assert!(

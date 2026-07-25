@@ -1,9 +1,10 @@
 //! Cover-traffic helpers — D05 from the integration map.
 //!
-//! Generates onion packets that are byte-indistinguishable from real
-//! traffic on the wire (same `ONION_PACKET_SIZE`, same per-hop layer
-//! structure, same AEAD tag layout) but whose innermost plaintext
-//! starts with a magic marker the destination uses to drop them.
+//! Generates onion cover packets with the same encoded layout and length
+//! as an equally shaped real packet. Their innermost plaintext starts
+//! with a magic marker the destination uses to drop them. Layout/length
+//! equality is not a claim of traffic indistinguishability: timing,
+//! volume, route, and caller behavior are outside this module.
 //!
 //! ## Why a marker (vs purely-random payload)
 //!
@@ -25,13 +26,13 @@
 //! high bits zero for valid frames < 256 MiB, never the 0xC0 0xCC
 //! 0xE3 0xAF cover prefix).
 //!
-//! ## Wire-indistinguishability
+//! ## Encoded-layout equality
 //!
 //! After AEAD wrapping the cover marker + random body is exactly the
 //! same length as wrapping a real payload of the same body length.
-//! A global passive observer sees identical fixed-size packets
-//! regardless of cover-vs-real. Only the destination — which holds
-//! the innermost layer's secret key — learns the difference.
+//! The marker is not visible without the innermost layer's secret key.
+//! This does not establish that a global observer sees identical traffic
+//! distributions or cannot classify cover using other metadata.
 //!
 //! ## Determinism for testing
 //!
@@ -61,9 +62,10 @@ pub const DEFAULT_COVER_BODY_LEN: usize = 256;
 /// Construct a cover-traffic onion packet for `circuit`.
 ///
 /// The innermost plaintext is `COVER_MAGIC || random_bytes(body_len)`.
-/// The packet's outer layout is byte-indistinguishable from a real
-/// packet of the same shape — same circuit length, same fixed
-/// transport size after padding, same AEAD tag/header sequence.
+/// The packet's outer layout and encoded length match a real packet of
+/// the same shape: same circuit length, fixed transport size after
+/// padding, and AEAD tag/header sequence. No timing/volume/route
+/// indistinguishability claim is made.
 ///
 /// # Errors
 /// Returns [`OnionError::PayloadOversize`] if `body_len + 4` exceeds
@@ -135,7 +137,7 @@ mod tests {
         let mut hops = Vec::with_capacity(n);
         let mut secrets = Vec::with_capacity(n);
         for i in 0..n {
-            let (h, s) = hop_n((i as u8) + 1);
+            let (h, s) = hop_n(u8::try_from(i + 1).unwrap());
             hops.push(h);
             secrets.push(s);
         }
@@ -174,7 +176,7 @@ mod tests {
     fn cover_packet_decrypts_through_all_hops_and_marker_visible() {
         // Construct a 3-hop circuit + 1-hop destination = 4 entries.
         let (circuit, secrets) = make_circuit(4);
-        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xABCDEF12);
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xABCD_EF12);
         let packet = build_cover_packet(&circuit, 200, &mut rng).unwrap();
         // Peel each layer in order — the final result should be the
         // cover marker followed by random body.
@@ -216,8 +218,8 @@ mod tests {
     }
 
     #[test]
-    fn cover_packet_is_wire_indistinguishable_from_real() {
-        // After encoding, the two packets are the same size.
+    fn cover_packet_has_same_encoded_length_as_real() {
+        // This assertion is intentionally limited to encoded length.
         let (circuit, _) = make_circuit(3);
         let mut rng_c = rand_chacha::ChaCha20Rng::seed_from_u64(11);
         let mut rng_r = rand_chacha::ChaCha20Rng::seed_from_u64(12);

@@ -42,7 +42,7 @@ pub enum DuressOutcome {
 }
 
 /// Stateless gate that classifies a presented passphrase. Holds the
-/// per-account roots: real_root + duress_root + a paired-secret used
+/// per-account roots: `real_root` + `duress_root` + a paired-secret used
 /// to derive covert signals that only paired peers can decode.
 #[derive(Debug, Clone)]
 pub struct DuressGate {
@@ -86,7 +86,7 @@ impl DuressGate {
     /// for the real candidate, derive_key("ol-duress-decoy-v1", root||
     /// passphrase) for the duress candidate. The gate's input is a
     /// 32-byte "expected real" and "expected duress" hash that the
-    /// account setup precomputed; this open() compares against both
+    /// account setup precomputed; this `open()` compares against both
     /// in constant time.
     pub fn open(
         &self,

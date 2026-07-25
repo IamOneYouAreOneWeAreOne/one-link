@@ -35,6 +35,7 @@ def _bare_daemon():
     d.me.short_id = "selfid"
     d._is_pinned = MagicMock(return_value=True)
     d._expected_blob_pulls = {}
+    d._expected_blob_pull_scopes = {}
     # Defaults — overridden by individual tests.
     d.blob_store.has.return_value = True
     d.blob_store.size.return_value = 5
@@ -178,10 +179,8 @@ async def test_handle_blob_request_happy_path_without_folder_with_files_cap() ->
 
 
 @pytest.mark.asyncio
-async def test_handle_blob_request_preregisters_expected_pull() -> None:
-    """The replied-BLOB_OFFER lands on the peer's side via their normal
-    _handle_blob_offer path, which gates on the expected-pull set —
-    so we must preregister our reply or the peer drops it."""
+async def test_handle_blob_request_does_not_self_grant_reverse_pull() -> None:
+    """Serving a peer's request must not authorize that peer to write back."""
     d = _bare_daemon()
     d._capability_allowed = MagicMock(return_value=True)
     channel = MagicMock()
@@ -190,7 +189,7 @@ async def test_handle_blob_request_preregisters_expected_pull() -> None:
         channel, {"blob": "a" * 64}, "peer_fp_abc",
     )
     expected = d._expected_blob_pulls.get("peer_fp_abc", set())
-    assert "a" * 64 in expected
+    assert "a" * 64 not in expected
 
 
 # ---------- find_alternate_sources_for_blob ----------
@@ -303,6 +302,8 @@ async def test_request_blob_returns_requested_on_happy_path() -> None:
     assert frame["t"] == "BLOB_REQUEST"
     assert frame["blob"] == "h" * 64
     assert frame["folder"] == "myfolder"
+    assert "h" * 64 in d._expected_blob_pulls["peerX"]
+    assert d._expected_blob_pull_scopes[("peerX", "h" * 64)] == "myfolder"
 
 
 @pytest.mark.asyncio
@@ -319,3 +320,5 @@ async def test_request_blob_returns_send_failed_on_exception() -> None:
     out = await d.request_blob_from_peer("peerX", "h" * 64)
     assert out["status"] == "send_failed"
     assert "simulated" in out["detail"]
+    assert "h" * 64 not in d._expected_blob_pulls.get("peerX", set())
+    assert ("peerX", "h" * 64) not in d._expected_blob_pull_scopes

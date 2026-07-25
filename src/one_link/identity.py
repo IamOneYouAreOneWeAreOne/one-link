@@ -19,12 +19,11 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import sys
 import secrets
 import socket
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import NoReturn, Optional
 
 # External audit 2026-05-18 ES-39 + ES-40: previously silent
 # best-effort failures (os.chmod, directory fsync, Windows ACL apply)
@@ -105,136 +104,311 @@ def _resolve_passphrase(passphrase: Optional[bytes | str]) -> Optional[bytes]:
 
 
 def _restrict_windows_acl(p: Path) -> None:
-    """v0.20.7 (security audit H3): tighten the file's Windows ACL to
-    grant the current user full control and deny inheritance.
+    """Install and verify a protected, current-user-only Windows DACL.
 
-    `os.chmod` on Windows only flips the read-only attribute; it does
-    nothing about access-control. The README's "user-only ACL on
-    Windows" claim depended on `%APPDATA%` directory ACLs, which on a
-    multi-admin / domain-joined box typically grant Administrators +
-    SYSTEM read access. This routine uses the Win32 SetFileSecurity
-    API via ctypes (no new dependency) to install an explicit
-    discretionary ACL on the identity-key file: PROTECTED + a single
-    ACE granting STANDARD_RIGHTS_ALL + GENERIC_ALL to the current
-    user's SID. SYSTEM is intentionally omitted; if the OS needs
-    SYSTEM access for backup it has to inherit from the parent dir
-    (which we set DACL_PROTECTED on, breaking inheritance).
-
-    Best-effort: any failure logs a debug message and falls back to
-    the inherited parent-dir ACL. No raise, because the rest of the
-    daemon must continue to function on stripped-down Windows
-    (containers, embedded, bypassed system policies)."""
+    Key authority may not be returned after a best-effort ACL attempt.  Every
+    Win32 function has an explicit pointer-width-safe signature, and the DACL
+    is read back to prove that it is protected and contains exactly one allow
+    ACE for the current user.  Any failure raises
+    :class:`KeyMaterialProtectionError`; callers creating non-secret staging
+    files already clean up and surface that failure, while secret publishers
+    refuse to expose the newly generated authority.
+    """
     if os.name != "nt":
         return
-    # External audit 2026-05-18 ES-40: every failure path in this
-    # function was `return` with no log. On a Windows box where the
-    # ACL apply fails, the user thought the file was user-only but
-    # was actually on the inherited %APPDATA% ACL (which typically
-    # grants Administrators + SYSTEM read). Promote each early
-    # return to log.warning with the failure point named so ops can
-    # grep for "ACL apply failed at step N".
+    import ctypes
+    from ctypes import wintypes
+
+    from one_link.key_material import KeyMaterialProtectionError
+
+    token_query = 0x0008
+    token_user_class = 1
+    dacl_security_information = 0x00000004
+    protected_dacl_security_information = 0x80000000
+    security_descriptor_revision = 1
+    acl_revision = 2
+    file_all_access = 0x001F01FF
+    se_dacl_protected = 0x1000
+    acl_size_information_class = 2
+    access_allowed_ace_type = 0
+    se_file_object = 1
+
+    class _SidAndAttributes(ctypes.Structure):
+        _fields_ = [("sid", wintypes.LPVOID), ("attributes", wintypes.DWORD)]
+
+    class _TokenUser(ctypes.Structure):
+        _fields_ = [("user", _SidAndAttributes)]
+
+    class _AclSizeInformation(ctypes.Structure):
+        _fields_ = [
+            ("ace_count", wintypes.DWORD),
+            ("acl_bytes_in_use", wintypes.DWORD),
+            ("acl_bytes_free", wintypes.DWORD),
+        ]
+
+    class _AceHeader(ctypes.Structure):
+        _fields_ = [
+            ("ace_type", wintypes.BYTE),
+            ("ace_flags", wintypes.BYTE),
+            ("ace_size", wintypes.WORD),
+        ]
+
+    class _AccessAllowedAce(ctypes.Structure):
+        _fields_ = [
+            ("header", _AceHeader),
+            ("mask", wintypes.DWORD),
+            ("sid_start", wintypes.DWORD),
+        ]
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [wintypes.LPVOID]
+    kernel32.LocalFree.restype = wintypes.LPVOID
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.GetLengthSid.argtypes = [wintypes.LPVOID]
+    advapi32.GetLengthSid.restype = wintypes.DWORD
+    advapi32.InitializeSecurityDescriptor.argtypes = [wintypes.LPVOID, wintypes.DWORD]
+    advapi32.InitializeSecurityDescriptor.restype = wintypes.BOOL
+    advapi32.InitializeAcl.argtypes = [
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    advapi32.InitializeAcl.restype = wintypes.BOOL
+    advapi32.AddAccessAllowedAce.argtypes = [
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+    ]
+    advapi32.AddAccessAllowedAce.restype = wintypes.BOOL
+    advapi32.SetSecurityDescriptorDacl.argtypes = [
+        wintypes.LPVOID,
+        wintypes.BOOL,
+        wintypes.LPVOID,
+        wintypes.BOOL,
+    ]
+    advapi32.SetSecurityDescriptorDacl.restype = wintypes.BOOL
+    advapi32.SetFileSecurityW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+    ]
+    advapi32.SetFileSecurityW.restype = wintypes.BOOL
+    advapi32.GetFileSecurityW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetFileSecurityW.restype = wintypes.BOOL
+    advapi32.GetNamedSecurityInfoW.argtypes = [
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+    ]
+    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.SetNamedSecurityInfoW.argtypes = [
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+    ]
+    advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.GetSecurityDescriptorControl.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetSecurityDescriptorControl.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorDacl.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    advapi32.GetAclInformation.argtypes = [
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    advapi32.GetAclInformation.restype = wintypes.BOOL
+    advapi32.GetAce.argtypes = [
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPVOID),
+    ]
+    advapi32.GetAce.restype = wintypes.BOOL
+    advapi32.EqualSid.argtypes = [wintypes.LPVOID, wintypes.LPVOID]
+    advapi32.EqualSid.restype = wintypes.BOOL
+
+    def _fail(operation: str) -> NoReturn:
+        code = int(ctypes.get_last_error())
+        detail = ctypes.FormatError(code).strip() if code else "verification failed"
+        raise KeyMaterialProtectionError(
+            f"Windows private-ACL {operation} failed ({code}: {detail})"
+        )
+
+    def _fail_code(operation: str, code: int) -> NoReturn:
+        detail = ctypes.FormatError(code).strip() if code else "verification failed"
+        raise KeyMaterialProtectionError(
+            f"Windows private-ACL {operation} failed ({code}: {detail})"
+        )
+
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(), token_query, ctypes.byref(token)
+    ):
+        _fail("OpenProcessToken")
     try:
-        import ctypes
-        from ctypes import wintypes
-    except Exception as e:
-        log.warning("identity._restrict_windows_acl: ctypes unavailable: %s", e)
-        return
-    try:
-        # Constants
-        TOKEN_QUERY = 0x0008
-        TokenUser = 1
-        DACL_SECURITY_INFORMATION = 0x00000004
-        PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
-        SECURITY_DESCRIPTOR_REVISION = 1
-        ACL_REVISION = 2
-        STANDARD_RIGHTS_ALL = 0x001F0000
-        GENERIC_ALL = 0x10000000
-        FILE_ALL_ACCESS = 0x001F01FF
-
-        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-        # 1. Get current process token + the user SID.
-        token = wintypes.HANDLE()
-        if not advapi32.OpenProcessToken(
-            kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)
+        size = wintypes.DWORD()
+        advapi32.GetTokenInformation(
+            token, token_user_class, None, 0, ctypes.byref(size)
+        )
+        if size.value <= 0:
+            _fail("GetTokenInformation(size)")
+        token_info = ctypes.create_string_buffer(size.value)
+        if not advapi32.GetTokenInformation(
+            token, token_user_class, token_info, size, ctypes.byref(size)
         ):
-            log.warning(
-                "identity._restrict_windows_acl: OpenProcessToken failed "
-                "(error %d); identity key on inherited %%APPDATA%% ACL.",
-                ctypes.get_last_error(),
-            )
-            return
-        try:
-            size = wintypes.DWORD(0)
-            advapi32.GetTokenInformation(
-                token, TokenUser, None, 0, ctypes.byref(size)
-            )
-            buf = (ctypes.c_byte * size.value)()
-            if not advapi32.GetTokenInformation(
-                token, TokenUser, buf, size, ctypes.byref(size)
-            ):
-                log.warning(
-                    "identity._restrict_windows_acl: GetTokenInformation failed "
-                    "(error %d); identity key on inherited ACL.",
-                    ctypes.get_last_error(),
-                )
-                return
-            # TOKEN_USER struct: SID_AND_ATTRIBUTES { PSID Sid; DWORD Attributes }
-            user_sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
-            sid_len = advapi32.GetLengthSid(user_sid_ptr)
-            if not sid_len:
-                log.warning("identity._restrict_windows_acl: GetLengthSid returned 0")
-                return
-        finally:
-            kernel32.CloseHandle(token)
+            _fail("GetTokenInformation")
+        user_sid_ptr = ctypes.cast(
+            token_info, ctypes.POINTER(_TokenUser)
+        ).contents.user.sid
+        sid_len = int(advapi32.GetLengthSid(user_sid_ptr))
+        if sid_len <= 0:
+            _fail("GetLengthSid")
 
-        # 2. Build a security descriptor + DACL containing one ACE.
-        sd = (ctypes.c_byte * 1024)()
-        if not advapi32.InitializeSecurityDescriptor(
-            sd, SECURITY_DESCRIPTOR_REVISION
-        ):
-            log.warning("identity._restrict_windows_acl: InitializeSecurityDescriptor failed")
-            return
-        # Allocate ACL: enough for the SD header (8) + one ACE
-        # (8 + sid_len). Round up.
+        sd = ctypes.create_string_buffer(64)
+        if not advapi32.InitializeSecurityDescriptor(sd, security_descriptor_revision):
+            _fail("InitializeSecurityDescriptor")
         acl_size = 8 + 8 + sid_len + 16
-        acl = (ctypes.c_byte * acl_size)()
-        if not advapi32.InitializeAcl(acl, acl_size, ACL_REVISION):
-            log.warning("identity._restrict_windows_acl: InitializeAcl failed")
-            return
+        acl = ctypes.create_string_buffer(acl_size)
+        if not advapi32.InitializeAcl(acl, acl_size, acl_revision):
+            _fail("InitializeAcl")
         if not advapi32.AddAccessAllowedAce(
-            acl, ACL_REVISION,
-            FILE_ALL_ACCESS,
-            user_sid_ptr,
+            acl, acl_revision, file_all_access, user_sid_ptr
         ):
-            log.warning("identity._restrict_windows_acl: AddAccessAllowedAce failed")
-            return
+            _fail("AddAccessAllowedAce")
         if not advapi32.SetSecurityDescriptorDacl(sd, True, acl, False):
-            log.warning("identity._restrict_windows_acl: SetSecurityDescriptorDacl failed")
-            return
-        # 3. Apply to the file with PROTECTED so inheritance is broken.
-        path_w = ctypes.c_wchar_p(str(p))
+            _fail("SetSecurityDescriptorDacl")
         if not advapi32.SetFileSecurityW(
-            path_w,
-            DACL_SECURITY_INFORMATION
-            | PROTECTED_DACL_SECURITY_INFORMATION,
+            str(p),
+            dacl_security_information | protected_dacl_security_information,
             sd,
         ):
-            log.warning(
-                "identity._restrict_windows_acl: SetFileSecurityW on %s failed "
-                "(error %d); identity key on inherited ACL.",
-                p, ctypes.get_last_error(),
+            _fail("SetFileSecurityW")
+        # SetNamedSecurityInfo is the authoritative inheritance-control API.
+        # SetFileSecurity can canonicalize away SE_DACL_PROTECTED for a child
+        # created inside an already non-inheriting private directory even
+        # though the ACE list is safe; applying the explicit protection flag
+        # here makes the persisted control bit itself unambiguous.
+        named_status = int(
+            advapi32.SetNamedSecurityInfoW(
+                str(p),
+                se_file_object,
+                dacl_security_information | protected_dacl_security_information,
+                None,
+                None,
+                acl,
+                None,
             )
-            return
-        log.debug("identity._restrict_windows_acl: applied user-only DACL to %s", p)
-    except Exception as e:
-        log.warning(
-            "identity._restrict_windows_acl: unexpected exception (%s); "
-            "identity key on inherited %%APPDATA%% ACL.",
-            e,
         )
-        return
+        if named_status:
+            _fail_code("SetNamedSecurityInfoW", named_status)
+
+        readback_acl = wintypes.LPVOID()
+        readback_sd = wintypes.LPVOID()
+        status = int(
+            advapi32.GetNamedSecurityInfoW(
+                str(p),
+                se_file_object,
+                dacl_security_information,
+                None,
+                None,
+                ctypes.byref(readback_acl),
+                None,
+                ctypes.byref(readback_sd),
+            )
+        )
+        if status:
+            _fail_code("GetNamedSecurityInfoW", status)
+        try:
+            control = wintypes.WORD()
+            revision = wintypes.DWORD()
+            if not advapi32.GetSecurityDescriptorControl(
+                readback_sd, ctypes.byref(control), ctypes.byref(revision)
+            ):
+                _fail("GetSecurityDescriptorControl")
+            if not (int(control.value) & se_dacl_protected):
+                raise KeyMaterialProtectionError(
+                    "Windows private-ACL DACL protection verification failed "
+                    f"(control=0x{int(control.value):04x})"
+                )
+            if not readback_acl:
+                _fail("DACL presence verification")
+            acl_info = _AclSizeInformation()
+            if not advapi32.GetAclInformation(
+                readback_acl,
+                ctypes.byref(acl_info),
+                ctypes.sizeof(acl_info),
+                acl_size_information_class,
+            ):
+                _fail("GetAclInformation")
+            if int(acl_info.ace_count) != 1:
+                _fail("DACL trustee-count verification")
+            ace_ptr = wintypes.LPVOID()
+            if not advapi32.GetAce(readback_acl, 0, ctypes.byref(ace_ptr)):
+                _fail("GetAce")
+            ace = ctypes.cast(ace_ptr, ctypes.POINTER(_AccessAllowedAce)).contents
+            if (
+                int(ace.header.ace_type) != access_allowed_ace_type
+                or int(ace.header.ace_size) < ctypes.sizeof(_AccessAllowedAce)
+                or int(ace.mask) != file_all_access
+            ):
+                _fail("DACL ACE verification")
+            ace_address = ace_ptr.value
+            if ace_address is None:
+                _fail("DACL ACE address verification")
+            ace_sid = ctypes.c_void_p(
+                int(ace_address) + _AccessAllowedAce.sid_start.offset
+            )
+            if not advapi32.EqualSid(ace_sid, user_sid_ptr):
+                _fail("DACL trustee verification")
+        finally:
+            if readback_sd:
+                kernel32.LocalFree(readback_sd)
+        log.debug("identity._restrict_windows_acl: verified user-only DACL on %s", p)
+    finally:
+        kernel32.CloseHandle(token)
 
 
 def _zero_overwrite_file(p: Path) -> None:
@@ -288,7 +462,13 @@ def _zero_overwrite_file(p: Path) -> None:
         )
 
 
-def _save_key(p: Path, priv: Ed25519PrivateKey, passphrase: Optional[bytes]) -> None:
+def _save_key(
+    p: Path,
+    priv: Ed25519PrivateKey,
+    passphrase: Optional[bytes],
+    *,
+    replace: bool = True,
+) -> None:
     """Atomically persist the Ed25519 identity key.
 
     v0.20.7 (security audit H19): the previous implementation was a
@@ -314,6 +494,12 @@ def _save_key(p: Path, priv: Ed25519PrivateKey, passphrase: Optional[bytes]) -> 
       5. chmod 0o600 (POSIX file-mode bits).
       6. Apply explicit user-only DACL on Windows (no-op on POSIX).
     """
+    from one_link.key_material import (
+        KeyMaterialIntegrityError,
+        atomic_create_bytes,
+        atomic_replace_bytes,
+    )
+
     enc = (
         serialization.BestAvailableEncryption(passphrase)
         if passphrase
@@ -324,54 +510,204 @@ def _save_key(p: Path, priv: Ed25519PrivateKey, passphrase: Optional[bytes]) -> 
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=enc,
     )
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp." + secrets.token_hex(8))
-    # Windows: O_BINARY suppresses CRLF translation on write so PEM
-    # files round-trip byte-equal across save/load (PEM tolerates
-    # mixed line endings, but `git diff` and reproducible-build
-    # hashing don't). On POSIX O_BINARY isn't defined; the OR is
-    # a no-op via getattr.
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    flags |= getattr(os, "O_BINARY", 0)
-    fd = os.open(str(tmp), flags, 0o600)
-    try:
-        os.write(fd, pem)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(tmp, p)
-    if sys.platform != "win32":
+    expected = priv.private_bytes_raw()
+
+    def _validate(blob: bytes) -> None:
         try:
-            # POSIX-only flag — guarded by sys.platform narrow so
-            # mypy resolves os.O_DIRECTORY from the POSIX stub set
-            # and the constant is reachable on the runtime platform.
-            dfd = os.open(str(p.parent), os.O_DIRECTORY)
-            try:
-                os.fsync(dfd)
-            finally:
-                os.close(dfd)
-        except (OSError, AttributeError) as e:
-            # External audit 2026-05-18 ES-39: was silent. A
-            # directory-fsync failure could mean the FS is read-only,
-            # or O_DIRECTORY isn't supported on this platform (Windows
-            # is one case where AttributeError fires). Log so ops can
-            # grep for misbehaving filesystems instead of guessing.
-            log.warning("identity._save_key: directory fsync failed: %s", e)
-    try:
-        os.chmod(p, 0o600)
-    except (OSError, NotImplementedError) as e:
-        # ES-39: silent before. A chmod failure means the file is
-        # readable by other users on this box. Loud so a misconfigured
-        # umask / Windows quirk doesn't quietly weaken at-rest perms.
-        log.warning(
-            "identity._save_key: chmod 0o600 on %s failed: %s. "
-            "Identity-key file may be readable by other local users.",
-            p, e,
+            loaded = serialization.load_pem_private_key(blob, password=passphrase)
+        except (TypeError, ValueError) as exc:
+            raise KeyMaterialIntegrityError(
+                "persisted identity key cannot be decoded with its requested protection"
+            ) from exc
+        if not isinstance(loaded, Ed25519PrivateKey):
+            raise KeyMaterialIntegrityError(
+                "persisted identity key has an unexpected key type"
+            )
+        if not secrets.compare_digest(loaded.private_bytes_raw(), expected):
+            raise KeyMaterialIntegrityError(
+                "persisted identity key does not match requested authority"
+            )
+
+    hardener = _restrict_windows_acl if os.name == "nt" else None
+    if replace:
+        atomic_replace_bytes(
+            p,
+            pem,
+            label="identity key",
+            validate=_validate,
+            harden_path=hardener,
         )
-    # v0.20.7 (security audit H3): Windows-only explicit DACL.
-    # Best-effort; a failure here leaves the file under the
-    # inherited %APPDATA% ACL — same defense as before this fix.
-    _restrict_windows_acl(p)
+        return
+    if not atomic_create_bytes(
+        p,
+        pem,
+        label="identity key",
+        validate=_validate,
+        harden_path=hardener,
+    ):
+        raise FileExistsError(f"identity key was concurrently created at {p}")
+
+
+def _migrate_key_encryption(
+    p: Path,
+    priv: Ed25519PrivateKey,
+    passphrase: bytes,
+) -> None:
+    """Atomically encrypt an existing PEM without pre-destroying authority.
+
+    On POSIX an open descriptor retains the old inode across ``os.replace``;
+    only after the encrypted replacement has passed read-back validation do
+    we best-effort overwrite that unlinked inode.  On Windows an open handle
+    can prevent the atomic replacement, so publication remains the priority
+    and filesystem-level residue is left to BitLocker/secure storage.
+    """
+
+    retained_fd: int | None = None
+    if os.name != "nt":
+        flags = os.O_RDWR | int(getattr(os, "O_CLOEXEC", 0))
+        flags |= int(getattr(os, "O_NOFOLLOW", 0))
+        try:
+            retained_fd = os.open(str(p), flags)
+        except OSError:
+            retained_fd = None
+    try:
+        _save_key(p, priv, passphrase)
+        if retained_fd is None:
+            return
+        try:
+            size = int(os.fstat(retained_fd).st_size)
+            for fill in (None, b"\x00"):
+                os.lseek(retained_fd, 0, os.SEEK_SET)
+                remaining = size
+                while remaining:
+                    count = min(remaining, 65536)
+                    payload = os.urandom(count) if fill is None else fill * count
+                    offset = 0
+                    while offset < len(payload):
+                        wrote = os.write(retained_fd, payload[offset:])
+                        if wrote <= 0:
+                            raise OSError("short write erasing retired identity inode")
+                        offset += wrote
+                    remaining -= count
+                os.fsync(retained_fd)
+        except OSError as exc:
+            log.warning(
+                "identity migration published safely, but best-effort erasure "
+                "of the retired cleartext inode failed: %s",
+                exc,
+            )
+    finally:
+        if retained_fd is not None:
+            os.close(retained_fd)
+
+
+def _load_existing_private_key(
+    path: Path,
+    *,
+    passphrase: Optional[bytes | str] = None,
+) -> Optional[Ed25519PrivateKey]:
+    """Load an existing identity without creating or migrating it.
+
+    Recovery and boot authority checks must be observational: a validation
+    failure cannot be allowed to mint a replacement key or transparently
+    rewrite the artifact being examined.  ``None`` therefore means only a
+    proven-absent path; malformed, inaccessible, or wrongly protected keys
+    raise.
+    """
+    from one_link.key_material import KeyMaterialIntegrityError, read_bytes_if_exists
+
+    p = Path(path)
+    blob = read_bytes_if_exists(
+        p,
+        label="identity key",
+        max_bytes=1 << 20,
+        harden_path=_restrict_windows_acl if os.name == "nt" else None,
+    )
+    if blob is None:
+        return None
+    pw = _resolve_passphrase(passphrase)
+    errors: list[Exception] = []
+    candidates: tuple[Optional[bytes], ...] = (pw, None) if pw else (None,)
+    for candidate in candidates:
+        try:
+            loaded = serialization.load_pem_private_key(blob, password=candidate)
+        except (TypeError, ValueError) as exc:
+            errors.append(exc)
+            continue
+        if not isinstance(loaded, Ed25519PrivateKey):
+            raise KeyMaterialIntegrityError(
+                f"identity key at {p} is not an Ed25519 private key"
+            )
+        return loaded
+    detail = errors[0] if errors else "unknown decode failure"
+    raise KeyMaterialIntegrityError(
+        f"identity key at {p} could not be decoded with the configured protection: "
+        f"{detail}"
+    )
+
+
+def identity_file_matches_seed(
+    path: Path,
+    seed: bytes,
+    *,
+    passphrase: Optional[bytes | str] = None,
+) -> Optional[bool]:
+    """Return whether an on-disk identity is the one derived from ``seed``.
+
+    ``None`` denotes a proven-absent identity.  This helper never creates or
+    migrates key material, making it safe for phrase verification and daemon
+    preflight checks.
+    """
+    from one_link import master_seed
+
+    current = _load_existing_private_key(path, passphrase=passphrase)
+    if current is None:
+        return None
+    expected = master_seed.derive_identity_priv(bytes(seed))
+    return secrets.compare_digest(
+        current.private_bytes_raw(),
+        expected.private_bytes_raw(),
+    )
+
+
+def store_seed_derived_identity(
+    path: Path,
+    seed: bytes,
+    *,
+    passphrase: Optional[bytes | str] = None,
+) -> Identity:
+    """Atomically replace ``path`` with the identity derived from ``seed``.
+
+    The caller owns the surrounding multi-artifact recovery journal.  This
+    function provides the single-file atomic publication and exact read-back
+    proof needed by that transaction.
+    """
+    from one_link import master_seed
+    from one_link.key_material import KeyMaterialIntegrityError
+
+    p = Path(path)
+    pw = _resolve_passphrase(passphrase)
+    private = master_seed.derive_identity_priv(bytes(seed))
+    _save_key(p, private, pw, replace=True)
+    matches = identity_file_matches_seed(p, bytes(seed), passphrase=pw)
+    if matches is not True:
+        raise KeyMaterialIntegrityError(
+            "published identity does not match the recovered master seed"
+        )
+    public = private.public_key()
+    public_bytes = public.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    fp = _fingerprint(public_bytes)
+    return Identity(
+        private=private,
+        public=public,
+        public_bytes=public_bytes,
+        fingerprint=fp,
+        short_id=fp[:8],
+        hostname=socket.gethostname(),
+    )
 
 
 def load_or_create(
@@ -379,11 +715,19 @@ def load_or_create(
     *,
     passphrase: Optional[bytes | str] = None,
 ) -> Identity:
+    from one_link.key_material import read_bytes_if_exists, sync_existing_authority
+
     p = path or key_path()
     pw = _resolve_passphrase(passphrase)
+    existing_bytes = read_bytes_if_exists(
+        p,
+        label="identity key",
+        max_bytes=1 << 20,
+        harden_path=_restrict_windows_acl if os.name == "nt" else None,
+    )
 
-    if p.exists():
-        data = p.read_bytes()
+    if existing_bytes is not None:
+        data = existing_bytes
         # Try the passphrase we have first; fall back to no-password to
         # support transparent migration unencrypted → encrypted.
         priv = None
@@ -428,14 +772,11 @@ def load_or_create(
                             # outside this fix's scope.
                             pass
                         else:
-                            # External audit 2026-05-18 ES-3: before
-                            # _save_key atomic-renames the new
-                            # encrypted PEM into place, overwrite
-                            # the existing cleartext PEM file with
-                            # random bytes + fsync. Closes the
-                            # cleartext-bytes-in-old-inode hole.
-                            _zero_overwrite_file(p)
-                            _save_key(p, priv, pw)
+                            # Build, fsync, decode, and key-compare the
+                            # encrypted replacement before the atomic
+                            # publish.  The old cleartext authority is never
+                            # modified on a save/fsync/ACL/rename failure.
+                            _migrate_key_encryption(p, priv, pw)
                     finally:
                         if lock_fd is not None:
                             with contextlib.suppress(Exception):
@@ -465,17 +806,22 @@ def load_or_create(
         # Ed25519PrivateKey.generate() path; those identities are
         # not BIP-39-recoverable, but they continue to work.
         priv = None
-        try:
-            from one_link import master_seed
-            from one_link.paths import data_dir as _data_dir_fn
-            seed = master_seed.load_seed(_data_dir_fn())
-            if seed is not None:
-                priv = master_seed.derive_identity_priv(seed)
-        except Exception:
-            priv = None
+        from one_link import master_seed
+        from one_link.paths import data_dir as _data_dir_fn
+
+        seed = master_seed.load_seed(_data_dir_fn())
+        if seed is not None:
+            priv = master_seed.derive_identity_priv(seed)
         if priv is None:
             priv = Ed25519PrivateKey.generate()
-        _save_key(p, priv, pw)
+        try:
+            _save_key(p, priv, pw, replace=False)
+        except FileExistsError:
+            # A concurrent first boot won atomic no-replace publication.
+            # Discard our candidate and load the durable winner; never return
+            # ephemeral authority that differs from the on-disk identity.
+            sync_existing_authority(p, label="identity key")
+            return load_or_create(path=p, passphrase=passphrase)
     pub = priv.public_key()
     pub_bytes = pub.public_bytes(
         encoding=serialization.Encoding.Raw,

@@ -1,10 +1,11 @@
 """Cryptographic Reality Engine — frame-level provenance attestation.
 
-Every media segment One Link emits carries a verifiable provenance
+Supported transfer and call media segments can carry a verifiable provenance
 tag that attests:
 
     - Which device produced it (device_id, 8 hex chars of sender fingerprint)
-    - Whether it is real / repaired / predicted / reconstructed / blank
+    - The sender-declared representation: original / repaired / predicted /
+      reconstructed / blank
     - Path class the engines chose (Local / LAN / Direct / Relay / Onion / Mesh)
     - Recording state (none / local / remote / mutual)
     - Timestamp + producer confidence
@@ -13,6 +14,8 @@ tag that attests:
 The receiver verifies the signature against the sender's master public
 key (the same long-lived Ed25519 identity key the rest of One Link uses
 for SDP signing, capability minting, and pairing transcripts).
+That verifies who signed the exact bytes and declared fields.  It is not
+hardware attestation and cannot establish that a physical scene was truthful.
 
 This module is intentionally pure: no I/O, no daemon imports, no UI
 concerns. The daemon ([daemon.py]) attaches a FrameProvenance to each
@@ -33,6 +36,7 @@ Companion: docs/LIVING_PRESENCE_ARCHITECTURE.md §4.5
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
@@ -50,6 +54,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 # recognise a schema version refuse the signature and treat the frame
 # as unverified.
 SCHEMA_V1 = 1
+# Schema 2 preserves the exact 54-byte layout but changes the segment hash
+# interpretation to SHA-256 for live RTC windows.  The live module performs
+# its own semantic verification; this module still owns the shared encoding.
+LIVE_SCHEMA_V2 = 2
+SUPPORTED_SCHEMA_VERSIONS = frozenset({SCHEMA_V1, LIVE_SCHEMA_V2})
 
 # Canonical sizes (bytes) — used by both Python here and any future
 # Rust crate that codegens against this schema.
@@ -62,7 +71,10 @@ class FrameKind(IntEnum):
     """What kind of media this frame contains. The user sees this in
     plain language on the Reality dot."""
 
-    REAL          = 0   # captured live from the physical sensor
+    # Wire value 0 is retained for compatibility.  It means the sender
+    # declared these bytes to be the original input, not that cryptography
+    # proved a physical sensor or the truth of a scene.
+    REAL          = 0
     REPAIRED      = 1   # missing samples filled by codec PLC
     PREDICTED     = 2   # rendered ahead by Predictive Continuity
     RECONSTRUCTED = 3   # rendered from semantic delta + shared model
@@ -142,15 +154,23 @@ def _canonical_bytes(p: FrameProvenance) -> bytes:
     encoding (signing it would require the signature before it's
     produced; that's how schemes fail).
     """
-    if not (0 <= p.schema_version <= 255):
+    if (
+        isinstance(p.schema_version, bool)
+        or not isinstance(p.schema_version, int)
+        or p.schema_version not in SUPPORTED_SCHEMA_VERSIONS
+    ):
         raise ValueError(
-            f"schema_version out of range: {p.schema_version}"
+            f"unsupported schema_version: {p.schema_version!r}"
         )
+    if not isinstance(p.segment_hash, bytes):
+        raise ValueError("segment_hash must be bytes")
     if len(p.segment_hash) != SEGMENT_HASH_LEN:
         raise ValueError(
             f"segment_hash must be {SEGMENT_HASH_LEN} bytes, "
             f"got {len(p.segment_hash)}"
         )
+    if not isinstance(p.device_id, str):
+        raise ValueError("device_id must be text")
     if len(p.device_id) != DEVICE_ID_LEN:
         raise ValueError(
             f"device_id must be {DEVICE_ID_LEN} hex chars, "
@@ -160,11 +180,26 @@ def _canonical_bytes(p: FrameProvenance) -> bytes:
         raise ValueError(
             f"device_id must be lowercase hex, got {p.device_id!r}"
         )
-    if not (0 <= p.timestamp_us < 2**64):
+    if not isinstance(p.frame_kind, FrameKind):
+        raise ValueError("frame_kind must be a FrameKind")
+    if not isinstance(p.path_class, PathClass):
+        raise ValueError("path_class must be a PathClass")
+    if not isinstance(p.recording_state, RecordingState):
+        raise ValueError("recording_state must be a RecordingState")
+    if (
+        isinstance(p.timestamp_us, bool)
+        or not isinstance(p.timestamp_us, int)
+        or not (0 <= p.timestamp_us < 2**64)
+    ):
         raise ValueError(
             f"timestamp_us out of range: {p.timestamp_us}"
         )
-    if not (0.0 <= p.produce_confidence <= 1.0):
+    if (
+        isinstance(p.produce_confidence, bool)
+        or not isinstance(p.produce_confidence, (int, float))
+        or not math.isfinite(float(p.produce_confidence))
+        or not (0.0 <= p.produce_confidence <= 1.0)
+    ):
         raise ValueError(
             f"produce_confidence must be in [0.0, 1.0], "
             f"got {p.produce_confidence}"
@@ -257,7 +292,7 @@ def verify_provenance(
         pub = Ed25519PublicKey.from_public_bytes(sender_public_bytes)
         pub.verify(p.signature, canonical)
         return True
-    except (InvalidSignature, ValueError, Exception):
+    except (InvalidSignature, TypeError, ValueError, OverflowError):
         return False
 
 
@@ -294,6 +329,9 @@ _WIRE_FIELDS = ("v", "seg", "did", "fk", "pc", "rs", "ts", "pcf", "sig")
 
 def to_wire_dict(p: FrameProvenance) -> dict[str, Any]:
     """Encode for the One Link wire envelope (JSON-in-AEAD-in-frame)."""
+    _canonical_bytes(p)
+    if not isinstance(p.signature, bytes) or len(p.signature) != ED25519_SIG_LEN:
+        raise ValueError("signature must be 64 bytes")
     return {
         "v":   p.schema_version,
         "seg": p.segment_hash.hex(),
@@ -314,23 +352,79 @@ def from_wire_dict(d: dict[str, Any]) -> FrameProvenance:
     responsible for verifying the signature afterwards with
     :func:`verify_provenance`.
     """
-    for field in _WIRE_FIELDS:
-        if field not in d:
-            raise ValueError(f"missing field in provenance wire dict: {field}")
-    try:
-        return FrameProvenance(
-            schema_version=int(d["v"]),
-            segment_hash=bytes.fromhex(d["seg"]),
-            device_id=str(d["did"]),
-            frame_kind=FrameKind(int(d["fk"])),
-            path_class=PathClass(int(d["pc"])),
-            recording_state=RecordingState(int(d["rs"])),
-            timestamp_us=int(d["ts"]),
-            produce_confidence=float(d["pcf"]),
-            signature=bytes.fromhex(d["sig"]),
+    if not isinstance(d, dict):
+        raise ValueError("provenance wire value must be an object")
+    keys = frozenset(d)
+    expected = frozenset(_WIRE_FIELDS)
+    missing = expected - keys
+    extra = keys - expected
+    if missing:
+        raise ValueError(
+            f"missing field in provenance wire dict: {', '.join(sorted(missing))}"
         )
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"malformed provenance wire dict: {exc}") from exc
+    if extra:
+        raise ValueError(
+            f"unknown field in provenance wire dict: {', '.join(sorted(extra))}"
+        )
+    try:
+        schema_version = _strict_wire_int(d["v"], "v")
+        if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+            raise ValueError("unsupported provenance schema")
+        segment_hash = _strict_lower_hex(
+            d["seg"], "seg", encoded_chars=SEGMENT_HASH_LEN * 2
+        )
+        signature = _strict_lower_hex(
+            d["sig"], "sig", encoded_chars=ED25519_SIG_LEN * 2
+        )
+        device_id = d["did"]
+        if (
+            not isinstance(device_id, str)
+            or len(device_id) != DEVICE_ID_LEN
+            or any(ch not in "0123456789abcdef" for ch in device_id)
+        ):
+            raise ValueError("invalid device id")
+        confidence = d["pcf"]
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence))
+            or not 0.0 <= confidence <= 1.0
+        ):
+            raise ValueError("invalid produce confidence")
+        timestamp_us = _strict_wire_int(d["ts"], "ts")
+        if not 0 <= timestamp_us < 2**64:
+            raise ValueError("invalid timestamp")
+        parsed = FrameProvenance(
+            schema_version=schema_version,
+            segment_hash=segment_hash,
+            device_id=device_id,
+            frame_kind=FrameKind(_strict_wire_int(d["fk"], "fk")),
+            path_class=PathClass(_strict_wire_int(d["pc"], "pc")),
+            recording_state=RecordingState(_strict_wire_int(d["rs"], "rs")),
+            timestamp_us=timestamp_us,
+            produce_confidence=float(confidence),
+            signature=signature,
+        )
+        _canonical_bytes(parsed)
+        return parsed
+    except (TypeError, ValueError):
+        raise ValueError("malformed provenance wire dict") from None
+
+
+def _strict_wire_int(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} must be an integer")
+    return value
+
+
+def _strict_lower_hex(value: object, field_name: str, *, encoded_chars: int) -> bytes:
+    if (
+        not isinstance(value, str)
+        or len(value) != encoded_chars
+        or any(ch not in "0123456789abcdef" for ch in value)
+    ):
+        raise ValueError(f"{field_name} must be canonical lowercase hex")
+    return bytes.fromhex(value)
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +439,7 @@ def from_wire_dict(d: dict[str, Any]) -> FrameProvenance:
 
 def frame_kind_label(k: FrameKind) -> str:
     return {
-        FrameKind.REAL:          "Real",
+        FrameKind.REAL:          "Original",
         FrameKind.REPAIRED:      "Repaired",
         FrameKind.PREDICTED:     "Predicted",
         FrameKind.RECONSTRUCTED: "Reconstructed",
@@ -387,5 +481,11 @@ def to_ui_dict(p: FrameProvenance, *, verified: bool) -> dict[str, Any]:
         "path":           path_class_label(p.path_class),
         "recording":      recording_state_label(p.recording_state),
         "verified":       verified,
+        "verification":   "Sender signature confirmed" if verified else "Sender not confirmed",
+        "scope": (
+            "Confirms the sender and exact bytes, not the truth of a physical scene"
+            if verified
+            else "No confirmed sender signature for these bytes"
+        ),
         "produced_at_us": p.timestamp_us,
     }

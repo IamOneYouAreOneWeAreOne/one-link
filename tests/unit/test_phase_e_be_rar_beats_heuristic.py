@@ -19,7 +19,6 @@ a runaway loss term.
 from __future__ import annotations
 
 import random
-from collections import Counter
 
 import pytest
 

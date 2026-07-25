@@ -127,13 +127,13 @@ chunk_log/000002.clog (sealed, 256 MiB, immutable)
 chunk_log/000003.clog (active, currently appending, ≤256 MiB)
 ```
 
-Rotation policy: when active file exceeds 256 MiB, allocate next file:
+Rotation policy: before an append would exceed 256 MiB, allocate the next file:
 
 1. Allocate next file: `open("000004.clog", O_CREAT | O_WRONLY | O_APPEND)`, write file header, fsync.
 2. Direct subsequent appends to new file.
-3. Close old file's fd (no fsync needed; old file's data was already fsync'd record-by-record).
+3. Flush and fsync the old file's pending group, then switch the single writer to the new fd.
 
-This is a hot operation — we don't block writers during rotation. The writer holds two fds during transition: it appends the last record (or batch) to old, fdatasyncs, then atomically swaps to new.
+`Wal::append` performs this transition transparently. The single writer may block on the one durability barrier that seals the old group; callers never receive a routine "cap exceeded" error and therefore cannot accidentally turn the per-file limit into a lifetime write limit. The returned append position includes both file id and byte offset.
 
 ### Replay determinism:
 

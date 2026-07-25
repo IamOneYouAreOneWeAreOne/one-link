@@ -6,8 +6,6 @@ property — the user-visible reason these matter.
 
 from __future__ import annotations
 
-import asyncio
-import json
 import os
 import socket
 import subprocess
@@ -15,6 +13,8 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -62,21 +62,22 @@ def _assert_well_known_or_saturated_fallback(port: int) -> None:
     assert port > 0, "daemon failed to bind any port"
 
 
-def _control_request(port: int, cmd: str, timeout: float = 5.0) -> dict:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        s.connect(("127.0.0.1", port))
-        s.sendall((json.dumps({"cmd": cmd}) + "\n").encode("utf-8"))
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf.decode("utf-8").strip() or "{}")
-    finally:
-        s.close()
+def _control_request(
+    port: int,
+    cmd: str,
+    *,
+    home: Path,
+    timeout: float = 5.0,
+) -> dict:
+    from one_link import control_ipc
+
+    secret = control_ipc.read_control_secret(home / "data")
+    return control_ipc.request_control(
+        port,
+        {"cmd": cmd},
+        timeout=timeout,
+        secret=secret,
+    )
 
 
 def _read_port(home: Path, name: str, timeout: float = 12.0) -> int:
@@ -92,19 +93,39 @@ def _read_port(home: Path, name: str, timeout: float = 12.0) -> int:
     raise RuntimeError(f"port file did not appear: {p}")
 
 
-def _read_text(home: Path, name: str, timeout: float = 12.0) -> str:
+def _read_text(
+    home: Path,
+    name: str,
+    timeout: float = 12.0,
+    *,
+    different_from: str | None = None,
+) -> str:
     p = home / "data" / name
     end = time.time() + timeout
     while time.time() < end:
         if p.exists():
             try:
                 t = p.read_text(encoding="utf-8").strip()
-                if t:
+                if t and t != different_from:
                     return t
             except OSError:
                 pass
         time.sleep(0.1)
     raise RuntimeError(f"file did not appear: {p}")
+
+
+def _owner_api_status(port: int, token: str) -> int:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            response.read()
+            return int(response.status)
+    except urllib.error.HTTPError as exc:
+        exc.read()
+        return int(exc.code)
 
 
 def _spawn_daemon(home: Path, log: Path) -> subprocess.Popen:
@@ -121,25 +142,40 @@ def _spawn_daemon(home: Path, log: Path) -> subprocess.Popen:
     return subprocess.Popen(
         [sys.executable, "-m", "one_link.cli", "daemon"],
         env=env,
+        stdin=subprocess.DEVNULL,
         stdout=open(log, "wb"),
         stderr=subprocess.STDOUT,
     )
 
 
-def _stop(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
-    try:
-        proc.terminate()
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=5)
+def _stop(proc: subprocess.Popen, *, home: Path) -> None:
+    # Reuse the authenticated exact-home process-tree cleanup used by every
+    # other live-daemon test. A Windows venv launcher PID is not necessarily
+    # the interpreter PID that owns One Link's sockets.
+    from tests.harness import _stop as stop_harness_daemon
+
+    stop_harness_daemon(proc, home=home)
+
+
+def test_stale_runtime_publication_is_removed_without_following_paths(
+    tmp_path: Path,
+) -> None:
+    from one_link.server import _remove_stale_runtime_publication
+
+    publication = tmp_path / "ui.token"
+    publication.write_text("stale", encoding="ascii")
+    _remove_stale_runtime_publication(publication, label="test token")
+    assert not publication.exists()
+
+    publication.mkdir()
+    with pytest.raises(RuntimeError, match="is a directory"):
+        _remove_stale_runtime_publication(publication, label="test token")
+    assert publication.is_dir()
 
 
 @pytest.mark.timeout(60)
-def test_token_persists_across_daemon_restart():
-    """Restart the daemon — the same UI token should still be in place."""
+def test_owner_bootstrap_token_rotates_across_daemon_restart():
+    """A bearer leaked by an old plaintext cookie dies on restart."""
     tmp = Path(tempfile.mkdtemp(prefix="ol_lifecycle_"))
     try:
         home = tmp / "H"
@@ -154,18 +190,21 @@ def test_token_persists_across_daemon_restart():
             assert len(token1) >= 32
             _assert_well_known_or_saturated_fallback(port1)
         finally:
-            _stop(proc)
+            _stop(proc, home=home)
 
         # Restart cleanly
         time.sleep(0.4)
         proc2 = _spawn_daemon(home, log2)
         try:
-            token2 = _read_text(home, "ui.token")
-            assert token2 == token1, (
-                f"token rotated across restart: {token1!r} -> {token2!r}"
+            token2 = _read_text(home, "ui.token", different_from=token1)
+            port2 = _read_port(home, "server.port")
+            assert token2 != token1, (
+                f"owner bootstrap token survived restart: {token1!r}"
             )
+            assert _owner_api_status(port2, token1) == 401
+            assert _owner_api_status(port2, token2) == 200
         finally:
-            _stop(proc2)
+            _stop(proc2, home=home)
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
@@ -187,14 +226,14 @@ def test_ui_port_is_in_well_known_range():
             port = _read_port(home, "server.port")
             _assert_well_known_or_saturated_fallback(port)
         finally:
-            _stop(proc)
+            _stop(proc, home=home)
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 @pytest.mark.timeout(60)
-def test_control_status_and_shutdown_contract():
+def test_control_status_and_shutdown_contract(monkeypatch):
     """The launcher depends on status/shutdown to self-heal stale daemons."""
     from one_link import __version__
 
@@ -202,27 +241,79 @@ def test_control_status_and_shutdown_contract():
     try:
         home = tmp / "H"
         home.mkdir()
+        monkeypatch.setenv("ONE_LINK_HOME", str(home))
         proc = _spawn_daemon(home, tmp / "out.log")
         try:
             ctrl = _read_port(home, "control.port")
             ui_port = _read_port(home, "server.port")
-            status = _control_request(ctrl, "status")
+            status = _control_request(ctrl, "status", home=home)
             assert status["ok"] is True
             assert status["app_version"] == __version__
-            assert status["pid"] == proc.pid
+            # On Windows a virtual-environment ``python.exe`` launcher can be
+            # the Popen process while the interpreter that owns the sockets is
+            # its child.  The HMAC-authenticated control status, exact data
+            # home, and OS process inspection are the security contract; PID
+            # equality with the launcher stub is not.
+            daemon_pid = status["pid"]
+            assert type(daemon_pid) is int and daemon_pid > 0
+            assert Path(status["home"]).resolve() == (home / "data").resolve()
+            from one_link import daemon as daemon_module
+            assert daemon_module._pid_matches_one_link_daemon(daemon_pid)
             assert status["schema_version"] >= 1
             assert status["protocol_version"]
             assert isinstance(status["ui_server_port"], int)
             assert status["ui_server_port"] == ui_port
 
-            shutdown = _control_request(ctrl, "shutdown")
+            from one_link.app import _resolve_running_daemon
+
+            resolved = _resolve_running_daemon()
+            assert resolved is not None
+            assert resolved.control_port == ctrl
+            assert resolved.server_port == ui_port
+            assert resolved.status["daemon_instance_id"] == status["daemon_instance_id"]
+
+            shutdown = _control_request(ctrl, "shutdown", home=home)
             assert shutdown == {"ok": True, "stopping": True}
             proc.wait(timeout=10)
             assert proc.poll() is not None
         finally:
-            _stop(proc)
+            _stop(proc, home=home)
     finally:
         import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.timeout(60)
+def test_harness_stop_reaps_serving_interpreter_and_launcher():
+    """Teardown must not leak the socket-owning child behind a venv launcher."""
+    import psutil
+
+    tmp = Path(tempfile.mkdtemp(prefix="ol_harness_stop_"))
+    home = tmp / "H"
+    home.mkdir()
+    proc = _spawn_daemon(home, tmp / "out.log")
+    stopped = False
+    try:
+        ctrl = _read_port(home, "control.port")
+        _read_port(home, "server.port")
+        status = _control_request(ctrl, "status", home=home)
+        daemon_pid = status["pid"]
+        assert type(daemon_pid) is int and daemon_pid > 0
+        assert psutil.pid_exists(daemon_pid)
+
+        _stop(proc, home=home)
+        stopped = True
+
+        assert proc.poll() is not None
+        assert not psutil.pid_exists(daemon_pid)
+        assert not (home / "data" / "control.port").exists()
+        assert not (home / "data" / "server.port").exists()
+        assert not (home / "data" / "ui.token").exists()
+    finally:
+        if not stopped:
+            _stop(proc, home=home)
+        import shutil
+
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -303,22 +394,17 @@ def test_launcher_rejects_ui_that_does_not_match_control_identity():
     assert _runtime_matches_control(control, {"ok": False}) is False
 
 
-def test_launcher_uses_native_windows_url_open(monkeypatch):
-    """Fallback path: when no Chromium browser is available AND/OR the
-    caller opts out of standalone mode, the launcher uses
-    os.startfile on Windows (the native shell-open) rather than
-    webbrowser.open."""
+def test_launcher_uses_hardened_loopback_url_open(monkeypatch):
+    """Fallback never delegates executable selection to ``$BROWSER``."""
     from one_link import app as app_mod
 
     opened = []
 
-    monkeypatch.setattr(app_mod.os, "name", "nt")
-    monkeypatch.setattr(app_mod.os, "startfile", lambda url: opened.append(url), raising=False)
-    monkeypatch.setattr(app_mod.webbrowser, "open", lambda *_args, **_kw: (_ for _ in ()).throw(AssertionError("webbrowser fallback used")))
-    # Force the Chromium-detector to return None so the launcher
-    # takes the os.startfile fallback (the legacy path this test was
-    # written for). The standalone-window path is exercised separately
-    # in tests/unit/test_standalone_window.py.
+    monkeypatch.setattr(
+        app_mod,
+        "launch_loopback_url",
+        lambda url, **_kwargs: opened.append(url),
+    )
     monkeypatch.setattr(app_mod, "_find_chromium_browser_exe", lambda: None)
 
     app_mod._open_browser_url("http://127.0.0.1:7117/?t=test")
@@ -339,33 +425,61 @@ def test_launcher_prefers_control_reported_ui_port(monkeypatch):
         app_mod.daemon_mod, "read_control_port",
         lambda clear_stale=True: 43210,
     )
-    monkeypatch.setattr(app_mod, "_alive", lambda port: port == 43210)
-    monkeypatch.setattr(app_mod.server_mod, "read_ui_token", lambda: "token")
     monkeypatch.setattr(
-        app_mod.server_mod,
-        "read_server_port",
-        lambda: (_ for _ in ()).throw(AssertionError("stale file read")),
+        app_mod,
+        "_alive",
+        lambda port, **_kwargs: port == 43210,
+    )
+    monkeypatch.setattr(
+        app_mod.control_ipc,
+        "read_control_secret",
+        lambda: "authenticated-control-secret",
+    )
+    verified_connection = type(
+        "VerifiedConnection",
+        (),
+        {"close": lambda self: None},
+    )()
+    monkeypatch.setattr(
+        app_mod,
+        "_open_verified_ui_instance",
+        lambda *a, **kw: verified_connection,
     )
     monkeypatch.setattr(
         app_mod,
         "_control_request",
-        lambda _port, _cmd: {
-            "ok": True,
-            "app_version": __version__,
-            "source_fingerprint": _sf,
-            "protocol_version": "OL1.2",
-            "schema_version": 16,
-            "ui_server_port": 7999,
-            "me": {"fingerprint": "cc" * 32},
-        },
+        lambda _port, cmd, **_kwargs: (
+            {
+                "ok": True,
+                "ui_server_port": 7999,
+                "token": "t" * 32,
+                "daemon_instance_id": "instance-1",
+                "pid": 99,
+                "source_fingerprint": _sf,
+            }
+            if cmd == "ui_launch_info"
+            else {
+                "ok": True,
+                "app_version": __version__,
+                "source_fingerprint": _sf,
+                "protocol_version": "OL1.2",
+                "schema_version": 16,
+                "ui_server_port": 7999,
+                "daemon_instance_id": "instance-1",
+                "pid": 99,
+                "me": {"fingerprint": "cc" * 32},
+            }
+        ),
     )
     monkeypatch.setattr(
         app_mod,
-        "_ui_status",
-        lambda port, token: {
-            "ok": port == 7999 and token == "token",
+        "_ui_status_on_verified_connection",
+        lambda connection, token: {
+            "ok": connection is verified_connection and token == "t" * 32,
             "app_version": __version__,
             "source_fingerprint": _sf,
+            "daemon_instance_id": "instance-1",
+            "pid": 99,
             "me": {"fingerprint": "cc" * 32},
         },
     )
@@ -397,7 +511,7 @@ def test_corrupt_token_file_is_replaced_safely():
             token = (home / "data" / "ui.token").read_text(encoding="utf-8").strip()
             assert len(token) >= 32, f"daemon kept unsafe short token: {token!r}"
         finally:
-            _stop(proc)
+            _stop(proc, home=home)
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
@@ -414,9 +528,7 @@ def test_load_or_create_token_unit(monkeypatch, tmp_path):
     from one_link.server import UIServer
 
     monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
-    # Force a re-import via direct module access; UIServer._load_or_create_token
-    # uses one_link.server._token_path() which honours ONE_LINK_HOME via paths.py.
-    # First call: no file → generates fresh
+    # First call: no file → generates fresh.
     from one_link.paths import data_dir
     token_path = data_dir() / "ui.token"
     if token_path.exists():
@@ -429,10 +541,13 @@ def test_load_or_create_token_unit(monkeypatch, tmp_path):
     t2 = UIServer._load_or_create_token()
     assert len(t2) >= 32
 
-    # Now WRITE a valid token; load_or_create_token should return it.
+    # Even a syntactically valid prior-process token is not authority for this
+    # process. This invalidates host-wide cookies planted by old releases.
     token_path.write_text("a" * 50)
     t3 = UIServer._load_or_create_token()
-    assert t3 == "a" * 50
+    assert t3 != "a" * 50
+    assert len(t3) >= 32
+    assert len({t1, t2, t3}) == 3
 
     # Corrupt token: too short → fresh one generated
     token_path.write_text("nope")

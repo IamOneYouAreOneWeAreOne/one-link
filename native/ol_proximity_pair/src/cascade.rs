@@ -1,4 +1,4 @@
-//! Multi-pass CASCADE reconciliation.
+//! Experimental multi-pass parity alignment (not CASCADE).
 //!
 //! Single-pass parity-block reconciliation (see [`crate::reconcile`])
 //! converges only when every disagreement happens to be the FIRST bit
@@ -8,28 +8,24 @@
 //! the "wrong position" of one block lands in the "right position" of
 //! a different block on the next pass.
 //!
-//! After 4-8 passes with a deterministic permutation both sides agree
-//! on, the bit strings are byte-identical with very high probability.
-//!
-//! Reference: Brassard & Salvail 1994 ("Secret-Key Reconciliation by
-//! Public Discussion"). OneField's bootstrap.cl implements the same
-//! protocol; this port adapts to Rust idioms.
+//! Permuting across passes can reduce some parity disagreements, but the
+//! fixed-position flip cannot identify an arbitrary error and has no
+//! byte-identical convergence guarantee. Real CASCADE (Brassard & Salvail,
+//! 1994) requires interactive bisection and backtracking; it is not
+//! implemented here.
 //!
 //! ## Public-channel cost
 //!
 //! Each pass leaks `n_bits / block_bits` syndrome bits. With 4 passes
-//! at block_bits=8: leakage = 4 * n_bits / 8 = n_bits / 2 — half the
-//! input. Privacy amplification (BLAKE3 down to 256 bits) is what
-//! makes this safe: the input bit string is ~2-4x larger than the
-//! output key size, so even with half-the-input leaked the residual
-//! entropy supports a 256-bit key.
+//! at `block_bits=8`: leakage = 4 * `n_bits` / 8 = `n_bits` / 2 — half the
+//! input. This accounting covers only these parity bytes and is not an
+//! entropy proof. BLAKE3 compression cannot manufacture missing entropy.
 
 use crate::prng::PrngState;
 use crate::reconcile::{block_syndrome, reconcile_with_syndrome};
 
-/// Default number of CASCADE passes. 4 is sufficient for byte-
-/// identical keys at typical (~2-3%) bit-error rates. More passes
-/// trade leakage for residual error.
+/// Default number of experimental permutation passes. More passes disclose
+/// more parity bits and do not guarantee convergence.
 pub const CASCADE_PASSES_DEFAULT: usize = 4;
 
 /// Deterministically permute the bit positions using a seeded PRNG.
@@ -52,7 +48,7 @@ pub fn permutation_for_pass(seed: u64, pass_idx: usize, n: usize) -> Vec<usize> 
     perm
 }
 
-/// Run multi-pass CASCADE reconciliation.
+/// Run multi-pass parity alignment.
 ///
 /// Each pass:
 ///   1. Permute bit positions using `permutation_for_pass(seed, i, n)`.
@@ -63,7 +59,7 @@ pub fn permutation_for_pass(seed: u64, pass_idx: usize, n: usize) -> Vec<usize> 
 ///
 /// `peer_syndromes` must have length `passes` and each entry must
 /// have length `ceil(my_bits.len() / block_bits)`. Caller (peer) ran
-/// [`multi_pass_syndromes`] with the same seed + same block_bits to
+/// [`multi_pass_syndromes`] with the same seed + same `block_bits` to
 /// produce them.
 #[must_use]
 pub fn multi_pass_reconcile(

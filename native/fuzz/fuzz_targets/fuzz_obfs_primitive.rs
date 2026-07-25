@@ -9,7 +9,11 @@ use ol_onion::transport_obfs::primitive::{deobfuscate, obfuscate, OBFS_KEY_LEN, 
 fuzz_target!(|data: &[u8]| {
     // Use first OBFS_KEY_LEN bytes as key (zero-padded if short),
     // next OBFS_NONCE_LEN bytes as nonce, rest as plaintext.
-    let key_src = if data.len() >= OBFS_KEY_LEN { &data[..OBFS_KEY_LEN] } else { data };
+    let key_src = if data.len() >= OBFS_KEY_LEN {
+        &data[..OBFS_KEY_LEN]
+    } else {
+        data
+    };
     let mut key = [0u8; OBFS_KEY_LEN];
     key[..key_src.len()].copy_from_slice(key_src);
 

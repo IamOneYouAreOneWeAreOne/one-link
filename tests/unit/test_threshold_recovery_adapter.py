@@ -191,10 +191,11 @@ def test_field_seed_size_validated():
 def test_field_score_out_of_range_caught():
     from one_link import threshold_recovery_native as tr
 
-    w = tr.field_witness(
-        b"\x00" * 32,
-        [0.1, 0.5, 1.5, 0.4, 0.8],  # 1.5 is out of [0, 1]
-        epoch_ns=0,
-    )
-    with pytest.raises(ValueError):
-        tr.field_bound_split(b"x", k=3, n=5, seed=0, witness=w)
+    # Reject malformed scores when the witness crosses the native boundary,
+    # before invalid state can survive until a later split operation.
+    with pytest.raises(ValueError, match="holder score"):
+        tr.field_witness(
+            b"\x00" * 32,
+            [0.1, 0.5, 1.5, 0.4, 0.8],  # 1.5 is out of [0, 1]
+            epoch_ns=0,
+        )

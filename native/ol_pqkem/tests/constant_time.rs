@@ -30,12 +30,12 @@ use std::time::Instant;
 #[path = "../../test_support/timing_gate.rs"]
 mod timing_gate;
 
-fn measure_iters(sk: &HybridSecretKey, ct: &HybridCiphertext, iters: u32) -> u64 {
+fn measure_iters(sk: &HybridSecretKey, ct: &HybridCiphertext, iters: u32) -> f64 {
     let start = Instant::now();
     for _ in 0..iters {
         let _ = decapsulate(sk, ct).expect("decap");
     }
-    start.elapsed().as_nanos() as u64
+    start.elapsed().as_secs_f64() * 1_000_000_000.0
 }
 
 /// Build a "malformed" hybrid ciphertext: a valid hybrid ciphertext
@@ -55,6 +55,9 @@ fn flip_random_ct_byte(ct: &HybridCiphertext, rng: &mut StdRng) -> HybridCiphert
 
 #[test]
 fn adr0017_constant_time_decap_valid_vs_malformed() {
+    const ITER_PER_BURST: u32 = 1_000;
+    const BURSTS: u32 = 20;
+
     let mut rng = StdRng::seed_from_u64(0xCAFE_BABE);
     let (pk, sk) = keypair(&mut rng);
     let (ct_valid, _) = encapsulate(&pk, &mut rng).expect("encap");
@@ -65,17 +68,16 @@ fn adr0017_constant_time_decap_valid_vs_malformed() {
     let _ = measure_iters(&sk, &ct_malformed, 1_000);
 
     // Measure each in alternating bursts to amortize OS scheduler noise.
-    const ITER_PER_BURST: u32 = 1_000;
-    const BURSTS: usize = 20;
-    let mut valid_ns = 0u64;
-    let mut malformed_ns = 0u64;
+    let mut valid_ns = 0.0;
+    let mut malformed_ns = 0.0;
     for _ in 0..BURSTS {
         valid_ns += measure_iters(&sk, &ct_valid, ITER_PER_BURST);
         malformed_ns += measure_iters(&sk, &ct_malformed, ITER_PER_BURST);
     }
 
-    let valid_per_iter = valid_ns as f64 / (ITER_PER_BURST * BURSTS as u32) as f64;
-    let malformed_per_iter = malformed_ns as f64 / (ITER_PER_BURST * BURSTS as u32) as f64;
+    let total_iterations = f64::from(ITER_PER_BURST) * f64::from(BURSTS);
+    let valid_per_iter = valid_ns / total_iterations;
+    let malformed_per_iter = malformed_ns / total_iterations;
     let ratio = (valid_per_iter.max(malformed_per_iter)) / (valid_per_iter.min(malformed_per_iter));
 
     eprintln!("decap valid:     {valid_per_iter:.1} ns/iter");

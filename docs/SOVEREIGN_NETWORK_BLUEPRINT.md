@@ -1,16 +1,31 @@
 # One Link Sovereign Network Blueprint
 
-Status: in_progress — v0.3.0 shipped (audit hardening); v0.4 → v1.0
-roadmap below.
+Status: historical design blueprint and roadmap; not a current capability
+inventory. Last truth review: 2026-07-24.
+
+> **Current source boundary:** native daemon payload channels are mutually
+> authenticated and end-to-end encrypted. Capable current daemons require the
+> signed X25519 + FIPS-203 ML-KEM-768 v3 handshake, while Ed25519 identity and
+> browser/WebRTC remain outside that PQ claim. The optional native v2 relay uses
+> rotating pairwise route tags and seals both identity-bearing first flights;
+> it does not provide sender anonymity or traffic-analysis resistance. A relay
+> still observes endpoints, timing, sizes, counts, and tag linkage. No live
+> onion/mix-net message route, ZK provenance system, model-as-key protocol,
+> multimodal environment authentication, or information-theoretic security
+> product path exists. The milestones below are targets unless a current
+> boundary explicitly says otherwise.
 
 One Link should feel simple enough for a non-technical person to use,
 while becoming a real people-owned network layer. The product promise
-is direct: no accounts, no mandatory company server, no telemetry, no
-rent to keep talking to people you care about — anywhere on Earth.
+is direct: no required hosted account, no mandatory company relay, no
+application analytics or advertising telemetry, and no subscription rent to
+keep talking. Optional discovery/relay operators and network providers still
+process ordinary endpoint/timing/size metadata and are never described as
+nonexistent.
 
 ---
 
-## North Star
+## Target North Star
 
 A free, sovereign, encrypted communication and file-sharing layer for
 **people**, not platforms:
@@ -22,9 +37,10 @@ A free, sovereign, encrypted communication and file-sharing layer for
   it still talks to your home devices because the keys travel with it.
 - Groups (family, friends, teams) work across continents with the same
   primitive that powers two-device LAN chat.
-- Every byte on the wire is end-to-end encrypted. No relay anywhere in
-  the path can read it. Operators of relays cannot be compelled to
-  surrender what they don't have.
+- Every private message, file, and call payload is end-to-end encrypted. A
+  relay must not receive the payload keys. Discovery, handshake, routing, and
+  traffic metadata have separate schemas and threat limits; “payload E2E” is
+  never expanded into an “all bytes or metadata are hidden” claim.
 - The architecture survives losing every centralized service — DNS,
   certificate authorities, ISPs — by having never required them.
 
@@ -39,10 +55,11 @@ design in this space.
 |---|---|---|
 | **Identity** | Who is this device, cryptographically? | Permanent Ed25519 keypair per device |
 | **Trust** | Who am I willing to talk to? | A signed graph of pubkey ↔ pubkey edges |
-| **Reachability** | How do I find this peer right now? | mDNS (LAN) → rendezvous (internet) → onion (high-sensitivity) |
+| **Reachability** | How do I find this peer right now? | Current: mDNS (LAN) → configured rendezvous/direct-or-single-relay. Target: onion/mix routing for high-sensitivity use. |
 
-**Identity is portable.** A device's key never changes. Take it
-anywhere — its identity goes with it.
+**Identity continuity is portable.** Keys may rotate or be revoked through a
+signed continuity path; taking a device elsewhere does not by itself change
+the identity authority.
 
 **Trust is portable.** Once paired, two devices stay paired across
 continents until explicitly revoked. There is no concept of "you must
@@ -71,13 +88,19 @@ feature it enables.
 
 ### From OneField crypto + ZK
 
+These are design inputs. A row is not a One Link product capability unless it
+explicitly names a current integration and executable evidence.
+
 | OneField primitive | One Link use |
 |---|---|
-| ZK provenance (Plonky3) | Sealed sender — relays see who's online, never who's talking to whom. Per-message origin proof without revealing the sending member's key |
-| Constant-time crypto rails | Compile-time-checked invariant: every AEAD primitive runs in constant time, no timing side-channels |
-| Information-theoretic model-as-key (capability #2) | Household-shared trained model becomes a quantum-resistant primitive: without the model, captured packets are unrecoverable noise. No PKI to migrate when quantum computers arrive |
+| ZK provenance (Plonky3) | Target research input for anonymous origin proofs. It is not part of the current sealed native relay, and the current relay can correlate endpoints/timing. |
+| Constant-time crypto rails | Target global compile-time invariant. Selected native primitives have bounded timing tests, but the repository does not prove every AEAD call or eliminate all microarchitectural leakage. |
+| Information-theoretic model-as-key (capability #2) | Research hypothesis only. A trained model is not treated as a cryptographic credential or a quantum-security mechanism without a formal construction, independent cryptanalysis, key lifecycle, and implementation proof. |
 
 ### From OneField perception layer
+
+The following rows are proposed research mappings, not deployed authentication,
+routing, or RF capabilities.
 
 | OneField primitive | One Link use |
 |---|---|
@@ -128,7 +151,7 @@ Solves the "12 ghost devices in the sidebar" problem.
 - `/api/peers` filters to paired-only by default; modal uses
   `?include_unpaired=1`
 
-### v0.5 — Reachability beyond the LAN *(≈2 weeks)*
+### v0.5 — Reachability beyond the LAN *(historical target; partial now)*
 
 The unlock. Without this, One Link is a LAN toy regardless of how
 good the crypto is. With it, your laptop at work talks to your home
@@ -145,10 +168,11 @@ devices.
      can't decrypt (E2E AEAD)
   3. Path quality reported to UI as *regime* (DIRECT / HOLEPUNCH /
      RELAYED) using the OneField auto-regime pattern
-- **Sealed-sender envelope** — relays see *who is online*, never *who
-  is talking to whom*. Destination pubkey encrypted to the relay's
-  session key only as routing info; source pubkey encrypted to the
-  destination only
+- **Current narrower relay privacy boundary:** rotating pairwise route tags and
+  recipient-sealed HELLO/REPLY first flights keep identity public keys off the
+  default v2 relay wire. This does not hide sockets, IPs, timing, sizes, counts,
+  rotating-tag linkage, or presence correlation, and it is not sender
+  anonymity. The explicit legacy migration route exposes identities.
 - **Anti-abuse on relays**: per-pubkey rate limits + bytes-per-day
   cap + signed eviction events. No identity beyond the pubkey
 - **Self-host story**: a $5/month box handles thousands of devices.
@@ -191,21 +215,25 @@ Forward secrecy + post-compromise security + safety numbers.
   extends the existing per-peer capability system into time-scoped
   delegations
 
-### v0.8 — Hybrid post-quantum *(≈3 days)*
+### v0.8 — Hybrid post-quantum *(partial current implementation)*
 
 Today's traffic stays safe even if a quantum computer is built in
 15 years.
 
-- Hybrid X25519 + Kyber768 (NIST PQC, standardized 2024)
-- libsodium and rustls both ship reference implementations
-- Hybrid form means: classical attacks must break X25519 *and* PQ
-  attacks must break Kyber768 — strictly stronger than either alone
+- Current capable native daemon channels use X25519 + standardized FIPS-203
+  ML-KEM-768 with signed suite negotiation, transcript binding, and mutual key
+  confirmation. Classical downgrade is refused by default.
+- The handshake authentication signature is Ed25519; browser/WebRTC, identity
+  rotation, recovery signatures, and every packaged platform are not thereby
+  post-quantum qualified.
 
 ### v0.9 — Multimodal environment-fingerprint pairing *(≈1 week)*
 
-The zero-friction first-pair shortcut. **Not** a continuous
-re-attestation; **not** an access-control mechanism. Just kills the
-6-digit-SAS friction for co-located devices.
+Target research for reducing manual five-word confirmation friction on
+co-located devices. **Not** a continuous re-attestation; **not** an
+access-control mechanism; **not** a current substitute for the transcript-bound
+five-word ceremony. It may shorten that ceremony only after measured entropy,
+replay, remote-relay, sensor-spoofing, and physical-device gates pass.
 
 Multimodal Bayesian fusion of whichever signals the platform
 exposes:
@@ -234,9 +262,9 @@ exposes:
 
 ### v1.0 — Alien-tier *(research; reserved)*
 
-These are real and proven in OneField's lab; whether they ship in
-One Link depends on whether household-scale trained-model training
-becomes practical:
+These are research hypotheses imported from separate OneField work. They have
+no One Link product-path or independent release evidence and must not be
+presented as current capability:
 
 - **Semantic-delta chat** with a shared household language model.
   Compression scales as `1 / (1 - p)` where `p` is the model's
@@ -245,9 +273,10 @@ becomes practical:
   sender; OneField's `confirm_ratio()` lock at 98%
 - **Federated (ε, δ)-DP refinement** — every message improves the
   shared model; no individual message is reconstructable
-- **Information-theoretic security** — no PKI, no cert authorities,
-  the trained model itself is the credential. Quantum-immune by
-  construction (no algebraic structure for Shor / Grover to attack)
+- **Model-as-credential research** — investigate whether a formally specified
+  construction can use shared model state safely. No “information-theoretic”
+  or “quantum-immune” property is assumed merely because a model lacks an
+  obvious public algebraic structure.
 
 ---
 
@@ -260,8 +289,10 @@ counterexample.
 
 We extend this to **security correctness** for One Link:
 
-- `net.aead.coverage.v1` — every byte that crosses the network
-  boundary passes through AEAD. Bypass = compile error.
+- `net.aead.coverage.v1` — every private application payload crosses an
+  authenticated-encryption boundary. Public discovery, negotiation, and
+  routing fields have separate authenticated schemas and disclosure budgets;
+  bypassing the declared class is a compile error.
 - `net.rate_limit.coverage.v1` — every inbound code path passes
   through the per-peer rate limiter.
 - `secret.no_log.v1` — private keys, ratchet state, and PSKs are
@@ -283,20 +314,26 @@ post-v0.3 hardening becomes structurally impossible to regress.
 These are commitments the architecture makes possible and that the
 project will hold to:
 
-- **No accounts.** Identity is a key on a device, not a row in our
-  database. We don't have a database.
+- **No required hosted account.** Identity authority is key material on the
+  user's device, not a login row in a mandatory account service. Optional
+  rendezvous/relay deployments keep bounded presence, abuse-control, and
+  operational state; local daemons also use encrypted databases.
 - **No mandatory relay operator.** A user can self-host or pick a
   federation; the protocol is symmetric, no operator has special
   capability.
-- **No telemetry.** The audit endpoint enumerates every outbound
-  destination; users can verify zero phone-home traffic against
-  the registered destination set.
-- **No data lock-in.** All state (sqlite + blob store) is on the
-  user's disk in documented schemas. Migration to another client is
-  a copy.
-- **All-source-everything.** No proprietary modules; every audit
-  rail, every primitive, every capability is in the repo and
-  reviewable.
+- **No product analytics phone-home.** The audit surfaces enumerate known
+  code/config destinations and runtime counters, but are not packet-capture
+  attestations. Zero undisclosed egress requires independent network capture
+  against the exact packaged build; optional infrastructure metadata remains
+  documented.
+- **No data lock-in.** Authoritative user data is local and export/migration
+  formats remain an engineering requirement. Schema documentation alone is
+  not proof that every encrypted/browser state surface migrates losslessly;
+  packaged cross-version restore tests are the gate.
+- **Reviewable source and supply chain.** Product code is published under
+  AGPLv3 and third-party components are inventoried. This does not pretend the
+  project wrote every dependency or that source availability authenticates a
+  binary without signed provenance.
 - **Zero-cost path.** A LAN-only / household-only deployment never
   needs a paid relay or third-party service; v0.4 already meets this.
 

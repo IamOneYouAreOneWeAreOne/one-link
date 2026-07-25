@@ -110,11 +110,11 @@ fn phase_e_path(
     // fragile in the band middle), so −log(field) is large there.
     // BE-RAR provides the asymptotic shape; we additionally apply
     // the BE-RAR multiplier to keep the α = 1/2 statistics encoded.
-    let field_min = solved.field.iter().cloned().fold(f64::INFINITY, f64::min);
+    let field_min = solved.field.iter().copied().fold(f64::INFINITY, f64::min);
     let field_max = solved
         .field
         .iter()
-        .cloned()
+        .copied()
         .fold(f64::NEG_INFINITY, f64::max);
     let span = (field_max - field_min).max(1e-9);
     let nu_score: Vec<f64> = solved
@@ -191,8 +191,23 @@ fn count_chunks_lost(path: &[usize], is_fragile: &[bool], chunks: usize) -> usiz
         };
         survival *= 1.0 - loss;
     }
-    let survivors = (chunks as f64 * survival).round() as usize;
+    // Accumulate the fractional expectation with a half-unit bias. This is
+    // exactly `round(chunks * survival)` for the fixture's [0, 1] survival
+    // probability, without a lossy float/integer round trip.
+    let mut survivors = 0_usize;
+    let mut fractional_survivor = 0.5_f64;
+    for _ in 0..chunks {
+        fractional_survivor += survival;
+        if fractional_survivor >= 1.0 {
+            survivors += 1;
+            fractional_survivor -= 1.0;
+        }
+    }
     chunks.saturating_sub(survivors)
+}
+
+fn fixture_count_as_f64(count: usize) -> f64 {
+    f64::from(u32::try_from(count).expect("fixture chunk counts fit u32"))
 }
 
 #[test]
@@ -206,16 +221,18 @@ fn phase_e_fragile_swarm_gate_reduction_at_least_80_percent() {
     eprintln!("Phase D path ({} hops): {:?}", pd_path.len() - 1, pd_path);
     eprintln!("Phase E path ({} hops): {:?}", pe_path.len() - 1, pe_path);
 
-    let pd_lost = count_chunks_lost(&pd_path, &is_fragile, n_chunks);
-    let pe_lost = count_chunks_lost(&pe_path, &is_fragile, n_chunks);
-    eprintln!("Phase D: {pd_lost} / {n_chunks} chunks lost");
-    eprintln!("Phase E: {pe_lost} / {n_chunks} chunks lost");
+    let baseline_chunks_lost = count_chunks_lost(&pd_path, &is_fragile, n_chunks);
+    let coherence_chunks_lost = count_chunks_lost(&pe_path, &is_fragile, n_chunks);
+    eprintln!("Phase D: {baseline_chunks_lost} / {n_chunks} chunks lost");
+    eprintln!("Phase E: {coherence_chunks_lost} / {n_chunks} chunks lost");
 
     assert!(
-        pd_lost > 0,
+        baseline_chunks_lost > 0,
         "test setup needs Phase D to lose chunks for a meaningful comparison"
     );
-    let reduction = (pd_lost as f64 - pe_lost as f64) / pd_lost as f64;
+    let baseline_loss_count = fixture_count_as_f64(baseline_chunks_lost);
+    let coherence_loss_count = fixture_count_as_f64(coherence_chunks_lost);
+    let reduction = (baseline_loss_count - coherence_loss_count) / baseline_loss_count;
     eprintln!("Phase E reduction over Phase D: {:.1}%", reduction * 100.0);
     assert!(
         reduction >= 0.80,

@@ -10,6 +10,7 @@
 //! transcript wire format or domain-separation constants change.
 
 use ol_onion::sphinx::aggsig::{verify, SchnorrSignature, SchnorrSigningKey, SchnorrVerifyingKey};
+use std::fmt::Write as _;
 
 // ── Pinned expected outputs ──────────────────────────────────────
 
@@ -36,7 +37,7 @@ const EXPECTED_SIG_SEED_FF_MSG_LONG_HEX: &str =
 fn hex(b: &[u8]) -> String {
     let mut s = String::with_capacity(b.len() * 2);
     for &byte in b {
-        s.push_str(&format!("{byte:02x}"));
+        write!(&mut s, "{byte:02x}").expect("writing to String is infallible");
     }
     s
 }
@@ -48,9 +49,10 @@ fn maybe_regen() -> bool {
 fn assert_or_regen(name: &str, expected: &str, actual: &str) {
     if expected.is_empty() || maybe_regen() {
         eprintln!("KAT regen: const EXPECTED_{name}_HEX = \"{actual}\";");
-        if expected.is_empty() && !maybe_regen() {
-            panic!("EXPECTED_{name}_HEX is empty; run with OL_AGGSIG_KAT_REGEN=1");
-        }
+        assert!(
+            !expected.is_empty() || maybe_regen(),
+            "EXPECTED_{name}_HEX is empty; run with OL_AGGSIG_KAT_REGEN=1"
+        );
         return;
     }
     assert_eq!(

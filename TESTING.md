@@ -1,83 +1,84 @@
-# Testing One_link
+# Testing One Link
 
-## Run the full suite
+This is the local quick start. [`docs/TESTING.md`](docs/TESTING.md) describes
+the test layers and CI contract in detail.
 
-```bash
-pip install -e .[dev]
-python -m pytest tests/ --ignore=tests/smoke_loopback.py -v
-```
+## Reproducible local setup
 
-Expect ~200 tests, ~2-3 minutes. The integration tests spin real daemons in
-subprocesses and use mDNS, which is the slow part.
-
-## Test layout
-
-| File | What it covers | Network |
-|---|---|---|
-| `tests/test_identity.py` | Ed25519 keypair gen, fingerprint, persistence, sign/verify, tampered/garbage rejection | none |
-| `tests/test_wire.py` | Length-prefixed framing round-trip, oversize attack, truncation, unicode envelope encoding | none |
-| `tests/test_paths.py` | Cross-platform config/data dirs, `ONE_LINK_HOME` override | none |
-| `tests/test_channel.py` | X25519 handshake (initiator + responder), AEAD send/recv, large payloads, bad signatures, tampered ciphertext, fresh ephemeral keys per session | TCP loopback |
-| `tests/test_discovery.py` | Peer registry: upsert, find by id / hostname / prefix, remove, on_change callback | none |
-| `tests/test_cli.py` | `one-link` CLI as subprocess: --version, --help, whoami persistence, friendly errors when daemon missing, full send/send-file round-trips | subprocess + mDNS |
-| `tests/test_integration.py` | Two-daemon end-to-end: TEXT, send-by-hostname, send-by-prefix, file matrix (0 / 1 / 255 / 256K-1 / 256K / 256K+1 / 512K / 5MB), unicode filenames, malformed control requests, concurrency (10 parallel sends) | mDNS |
-| `tests/test_raw_protocol.py` | Hand-crafted attacker traffic: path traversal across 7 vectors, oversize frame header, garbage handshake, truncated handshake | mDNS + raw TCP |
-| `tests/test_resilience.py` | Stale port files, garbage on peer port (×20), burst connect/disconnect (×50), two daemons same home, peer disconnect mid-frame | subprocess + mDNS |
-| `tests/test_tail.py` | Live event subscription, multiple subscribers, subscriber disconnect doesn't break others | mDNS |
-
-## What gets verified
-
-### Security
-- Path traversal blocked: `../../etc/passwd`, `..\\..\\Windows\\System32\\evil.dll`, `/etc/passwd`, `C:\\Windows\\System32\\evil.dll`, `subdir/inner.txt`, `..`, `.` — all land in inbox/, never escape.
-- Frame oversize attack rejected before allocation.
-- Garbage handshake rejected, daemon stays up.
-- Tampered ciphertext fails AEAD, channel closes.
-- Bad Ed25519 signature in handshake → reject.
-- Each new connection uses fresh X25519 ephemerals (no key reuse).
-- Outbound sends verify the responder's fingerprint matches the expected peer.
-
-### Correctness
-- File transfer is byte-identical for: 0, 1, 255, 256K-1, 256K, 256K+1, 512K, 5MB.
-- Unicode filenames round-trip on both Win and Mac filesystems.
-- Concurrent sends from one daemon all land without corruption.
-- Message log captures both directions.
-
-### Resilience
-- Stale `control.port`/`peer.port` from previous run don't break startup.
-- Daemon survives 20 garbage payloads on the peer port.
-- Daemon survives 50 abrupt connect/disconnect cycles.
-- Two daemons with the same `ONE_LINK_HOME` → no crash (race-tolerant, last-write wins).
-- Peer disconnect mid-frame doesn't break the server.
-- CLI gives a friendly error when the daemon isn't running (no traceback).
-
-## Known limitations / what's NOT tested
-
-- **Internet P2P** — we only run on loopback / LAN. Real NAT-traversal scenarios
-  aren't exercised yet.
-- **Long-running soak** — no multi-hour stability test. File-descriptor leaks
-  over weeks aren't covered.
-- **Cross-version compat** — we don't test "old daemon talks to new daemon".
-  The protocol header is `OL1`; we'll bump it for breaking changes.
-- **Memory pressure / OOM** — no test for "send many GB simultaneously".
-- **Filesystem race** — what if two peers send the same file at the same
-  time, with the same blob hash? Currently the second offer reopens the same
-  inbox path; not currently tested.
-
-## Smoke test (legacy)
-
-`tests/smoke_loopback.py` is a standalone script (not a pytest test) that
-exercises the same end-to-end path. It pre-dates the pytest suite and is kept
-as a quick manual sanity check:
+Use the repository lock instead of resolving an ad-hoc environment:
 
 ```bash
-python tests/smoke_loopback.py
+uv sync --frozen --extra dev --extra e2e
 ```
 
-## CI
+Browser tests also require a browser installed by Playwright:
 
-GitHub Actions matrix (`.github/workflows/tests.yml`):
-- Windows + macOS, Python 3.11 + 3.12
-- Unit and integration tests must pass. If hosted-runner mDNS flakes become
-  noisy, fix the harness or isolate the flaky scenario rather than hiding failures.
-- On push to `master`, builds Windows + macOS binaries and uploads them as
-  workflow artifacts.
+```bash
+uv run --frozen --extra e2e playwright install chromium firefox
+```
+
+## Required invocations
+
+Run the main and browser suites separately. Their session-scoped event-loop
+fixtures are intentionally isolated:
+
+```bash
+# Main unit + integration suite. Mirrors the full-suite workflow exclusions.
+uv run --frozen --extra dev python -m pytest tests/ \
+  --ignore=tests/e2e \
+  --ignore=tests/test_call_reliability_soak.py \
+  --deselect tests/test_pairing.py \
+  -q --tb=short --maxfail=20
+
+# Browser E2E.
+ONE_LINK_RUN_BROWSER_E2E=1 \
+  uv run --frozen --extra e2e python -m pytest tests/e2e/ -q --browser chromium
+
+# Cross-engine, no-public-STUN transport authority.
+ONE_LINK_RUN_BROWSER_E2E=1 \
+  uv run --frozen --extra e2e python -m pytest \
+  tests/e2e/test_peer_live_transport.py::test_two_isolated_peer_pages_complete_manual_webrtc_and_exchange_probe \
+  tests/e2e/test_browser_identity_possession_live.py::test_required_mode_live_pair_owner_request_and_immediate_revoke \
+  tests/e2e/test_call_local_candidate_live.py::test_call_media_local_candidate_augmentation_uses_real_browser_ice \
+  -q --browser firefox
+```
+
+The browser suite's named screenshots are capture-for-review evidence, not a
+pixel-diff regression gate. Normal runs write to the ignored
+`test-results/screenshots/` directory, which CI uploads as an artifact. Use
+`ONE_LINK_VISUAL_CAPTURE_DIR` for another artifact directory. Updating the
+checked-in references under `tests/e2e/screenshots/` requires the deliberate
+`ONE_LINK_UPDATE_VISUAL_BASELINES=1` opt-in; unsafe source-tree destinations
+are rejected before any screenshot is written.
+
+The repository also has native Rust tests, security gates, deterministic
+soaks, platform probes, and performance gates. Follow the commands in the
+workflows and [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) for a
+release candidate; a passing subset is never a release sign-off.
+
+## Coverage shape
+
+The suite includes, among other areas:
+
+- identity, handshake, channel, framing, replay, and malformed-input tests;
+- transfer durability, retry, deduplication, receipts, recovery, and file-size
+  boundary tests;
+- state, capability, personal-device mesh, rendezvous, relay, and WebRTC tests;
+- real subprocess/loopback daemon integration tests;
+- browser-driven UI tests and real-OS probes; and
+- Rust unit, property, fuzz-replay, and audit gates.
+
+Test counts and runtimes change continuously, so this document deliberately
+does not promise a fixed number or duration. Read the pytest summary from the
+exact commit and environment being evaluated.
+
+## Evidence limits
+
+- Simulated and loopback tests do not replace physical multi-host,
+  cross-network NAT, lossy-WAN, or long-duration soak evidence.
+- CI configuration is an intended gate, not proof that the latest run passed.
+- A green development suite does not establish production readiness,
+  independent security review, whole-product reproducibility, or release
+  provenance.
+- One Link currently has no verified production release. The mutable
+  `auto-latest` prerelease is not a trusted test or distribution baseline.

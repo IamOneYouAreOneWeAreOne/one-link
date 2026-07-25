@@ -7,6 +7,7 @@ A single sqlite database under ONE_LINK_HOME/data/state.db backs:
 - rooms (multi-party named conversations)
 - folders (designated sync folders)
 - folder_manifest (CRDT — file_path → blob_hash with vector clocks)
+- folder_pending_applies (crash-replay journal for materialize/delete)
 - blobs (content-addressed blob index)
 
 Concurrency model: a single shared `sqlite3.Connection` with
@@ -24,6 +25,7 @@ import json
 import contextlib
 import logging
 import os
+import secrets
 import sqlite3
 import threading
 import time
@@ -56,11 +58,72 @@ from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger(__name__)
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from one_link.paths import data_dir
 
 DB_FILE = "state.db"
+MAX_REMOTE_INSTRUCTION_SEEN_ROWS = 65_536
+MAX_REMOTE_INSTRUCTION_REPLAY_RETENTION_MS = 16 * 60 * 1000
+_LOWER_HEX_CHARS = frozenset("0123456789abcdef")
+_FOLDER_PENDING_APPLY_PHASES = frozenset({
+    "planned",
+    "staging",
+    "recovery_prepared",
+    "recovery_moved",
+    "publish_prepared",
+    "published",
+    "unlink_prepared",
+})
+_FOLDER_PENDING_APPLY_OPERATIONS = frozenset({"materialize", "delete"})
+MAX_FOLDER_PENDING_APPLIES = 262_144
+
+# Chat persistence is a peer-visible receipt boundary.  Keep a hard per-peer
+# ceiling so a compromised paired device cannot grow the encrypted database
+# without bound.  The daemon rejects new messages once either ceiling is
+# reached; exact retransmissions are still accepted idempotently.
+MAX_TEXT_MESSAGES_PER_PEER = 100_000
+MAX_TEXT_BODY_BYTES_PER_PEER = 256 * 1024 * 1024
+MAX_TEXT_BODY_BYTES = 64 * 1024
+MAX_GROUP_MESSAGES_PER_GROUP = 100_000
+MAX_GROUP_BODY_BYTES_PER_GROUP = 256 * 1024 * 1024
+MAX_GROUP_EVENTS_PER_GROUP = 25_000
+MAX_GROUP_EVENTS_TOTAL = 250_000
+MAX_OUTBOX_PENDING_PER_PEER = 10_000
+MAX_OUTBOX_ROWS_PER_PEER = 50_000
+MAX_OUTBOX_PENDING_BYTES_PER_PEER = 256 * 1024 * 1024
+MAX_OUTBOX_BODY_BYTES = 256 * 1024
+BOUNDED_CHAT_MESSAGE_TYPES = frozenset({
+    "TEXT",
+    "REACTION",
+    "EDIT_MSG",
+    "DELETE_MSG",
+    "READ_MARKER",
+    "GROUP_RECEIPT",
+    "GROUP_KEY_RECEIPT",
+})
+_BOUNDED_CHAT_MESSAGE_TYPES_ORDERED = tuple(sorted(BOUNDED_CHAT_MESSAGE_TYPES))
+if len(_BOUNDED_CHAT_MESSAGE_TYPES_ORDERED) != 7:
+    raise RuntimeError(
+        "bounded chat type inventory changed; update the fixed SQL parameter contract"
+    )
+_BOUNDED_CHAT_USAGE_SQL = (
+    "SELECT COUNT(*) AS n, COALESCE(SUM("
+    "length(CAST(COALESCE(metadata_json, '') AS BLOB)) + "
+    "CASE WHEN msg_type = 'TEXT' THEN "
+    "length(CAST(COALESCE(body, '') AS BLOB)) + "
+    "length(CAST(COALESCE(original_body, '') AS BLOB)) "
+    "ELSE 0 END), 0) AS storage_bytes "
+    "FROM messages WHERE peer_fp = ? AND msg_type IN (?, ?, ?, ?, ?, ?, ?)"
+)
+
+
+class MessageIdConflict(ValueError):
+    """A message identifier was reused for different immutable content."""
+
+
+class MessageQuotaExceeded(RuntimeError):
+    """A bounded peer or group chat-history quota has been exhausted."""
 
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -321,14 +384,16 @@ def _now_ms() -> int:
 # v0.21.x: forgiving FTS5 query builder. Plain users type 'k' and
 # expect to find messages with 'kanye' or 'kjg'; raw FTS5 token
 # matching only finds messages containing the standalone token 'k'.
-# Convert each alphanumeric token to a prefix-match ('k*') so
+# Convert each alphanumeric token to a quoted prefix-match ('"k"*') so
 # substring-feeling search works. Pass-through honors literal
 # phrase quotes ('"hello world"') for power users.
 _FTS5_TOKEN_RE = __import__("re").compile(r"\w+", __import__("re").UNICODE)
 
 
 def _normalize_user_query_to_fts5_prefix(raw: str) -> str:
-    s = (raw or "").strip()
+    if not isinstance(raw, str):
+        return ""
+    s = raw.strip()
     if not s:
         return ""
     # Pass through explicit phrase queries: "...".  Reject the
@@ -347,13 +412,19 @@ def _normalize_user_query_to_fts5_prefix(raw: str) -> str:
         # special-chars-only edge.)
         if not _FTS5_TOKEN_RE.search(inner):
             return ""
-        return s
+        # Treat the entire outer-quoted value as one literal phrase. Doubling
+        # embedded quotes is FTS5's string escape and prevents an input such
+        # as '"foo" OR "bar"' from escaping the phrase into query syntax.
+        return '"' + inner.replace('"', '""') + '"'
     tokens = _FTS5_TOKEN_RE.findall(s)
     if not tokens:
         return ""
-    # Each token becomes a prefix-match. Multi-token queries are
-    # implicit-AND in FTS5 (whitespace-separated terms).
-    return " ".join(f"{t}*" for t in tokens)
+    # Quote every token before adding the prefix operator. Bare uppercase
+    # tokens such as AND, OR, NOT, and NEAR are FTS5 grammar, not terms; the
+    # formerly emitted `AND*` raised OperationalError. A quoted prefix
+    # (`"AND"*`) remains a real prefix search while making every extracted
+    # token parser-safe. Multi-token terms retain implicit-AND semantics.
+    return " ".join(f'"{token}"*' for token in tokens)
 
 
 @dataclass
@@ -523,8 +594,21 @@ class State:
             # downstream code uses row["col"] subscripting which
             # both Row classes support; we just need the assignment
             # itself to land cleanly.
-            self._conn.row_factory = sqlite3.Row
+            try:
+                self._conn.row_factory = sqlite3.Row
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    self._conn.close()
+                raise
         self._write_lock = threading.RLock()
+        # Lazily hydrated from SQLite on the first TEXT insert per peer, then
+        # maintained under _write_lock. Near a limit we re-read authoritative
+        # SQL so history clears/expiry cannot leave a stale false rejection.
+        self._text_usage_cache: dict[str, tuple[int, int]] = {}
+        self._group_usage_cache: dict[bytes, tuple[int, int]] = {}
+        self._group_event_count_cache: dict[bytes, int] = {}
+        self._group_event_total_count: Optional[int] = None
+        self._outbox_usage_cache: dict[str, tuple[int, int, int]] = {}
         # 2026-05-21 audit T2-R: state.db holds DR chain keys, group
         # sender keys, message bodies, peer trust state. On POSIX
         # the default mkdir/file mode follows the process umask
@@ -535,11 +619,11 @@ class State:
             os.chmod(self.db_path, 0o600)
         # v0.20.7 (security audit H21 + partial C5): optional
         # at-rest wrap for the highest-value secrets in the schema
-        # (group sender chain_keys). Daemon wires a LockBox here at
-        # boot when ONE_LINK_PASSPHRASE is set; absent passphrase →
-        # None → values stored cleartext (legacy behavior). Wrapping
-        # is transparent to read paths via lockbox.maybe_unwrap so a
-        # mid-life passphrase opt-in coexists with legacy rows.
+        # (group sender chain keys and personal-mesh root seeds). Daemon
+        # wires a LockBox here at boot when ONE_LINK_PASSPHRASE is set;
+        # absent passphrase -> None -> values remain cleartext for legacy
+        # compatibility. Fixed-width binary readers use exact-length
+        # discrimination so a random leading wrap-marker byte is harmless.
         self._lockbox = None  # set via set_lockbox()
         # Boot-integrity dirty-bit. PRAGMA quick_check on an encrypted
         # DB decrypts + HMAC-verifies EVERY page — ~13-18s on a large
@@ -567,14 +651,96 @@ class State:
         # integrity-checks.
         with contextlib.suppress(Exception):
             self._clean_marker.unlink()
-        self._init_pragmas()
-        self._migrate()
+        try:
+            self._init_pragmas()
+            self._migrate()
+            self._cleanup_verified_plaintext_backup()
+        except BaseException:
+            # A half-constructed State must not retain a native SQLite handle.
+            # Windows otherwise refuses recovery's atomic state.db replace;
+            # repeated boot failures also leak descriptors and native memory.
+            with contextlib.suppress(Exception):
+                self._conn.close()
+            raise
+
+    def _cleanup_verified_plaintext_backup(self) -> None:
+        """Erase migration recovery only after schema + full integrity truth."""
+
+        if not self.is_encrypted:
+            return
+        from one_link import state_encryption as _se
+
+        backup_path = _se.plaintext_backup_path(Path(self.db_path))
+        try:
+            os.lstat(backup_path)
+        except FileNotFoundError:
+            self._encryption_backup_path = None
+            return
+        except OSError as inspect_exc:
+            # An ACL, transient I/O failure, or hostile filesystem object must
+            # never be interpreted as "no backup". Keep the path visible to
+            # operators and continue with the verified encrypted live DB; the
+            # next boot retries the cleanup gate.
+            self._encryption_backup_path = backup_path
+            log.critical(
+                "state.db encryption is active, but its plaintext migration "
+                "backup could not be inspected and was retained: %s",
+                inspect_exc,
+            )
+            return
+        try:
+            _se.verify_encrypted_state_for_backup_cleanup(
+                self._conn,
+                expected_schema_version=_se.STATE_SCHEMA_VERSION_CURRENT,
+            )
+            _se.cleanup_plaintext_migration_backup(self.db_path)
+            self._encryption_backup_path = None
+        except (
+            _se.EncryptedDatabaseVerificationError,
+            _se.PlaintextBackupCleanupError,
+        ) as cleanup_exc:
+            self._encryption_backup_path = backup_path
+            log.critical(
+                "state.db encryption is active, but its plaintext migration "
+                "backup was retained because a verification/cleanup gate "
+                "failed: %s",
+                cleanup_exc,
+            )
 
     def set_lockbox(self, lockbox) -> None:
         """v0.20.7: late-attach the at-rest wrap key. Daemon calls
         this once at boot after constructing State + the LockBox.
         Subsequent writes wrap; subsequent reads unwrap on demand."""
         self._lockbox = lockbox
+
+    @contextlib.contextmanager
+    def durable_write_transaction(self):
+        """Serialize a FULL-synchronous multi-row receipt boundary."""
+
+        sync_names = {0: "OFF", 1: "NORMAL", 2: "FULL", 3: "EXTRA"}
+        with self._write_lock:
+            if self._conn.in_transaction:
+                raise RuntimeError("nested durable state transaction")
+            sync_row = self._conn.execute("PRAGMA synchronous").fetchone()
+            previous_sync = int(sync_row[0]) if sync_row else 1
+            self._conn.execute("PRAGMA synchronous=FULL")
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                yield
+                self._conn.execute("COMMIT")
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.execute("ROLLBACK")
+                self._text_usage_cache.clear()
+                self._group_usage_cache.clear()
+                self._group_event_count_cache.clear()
+                self._group_event_total_count = None
+                self._outbox_usage_cache.clear()
+                raise
+            finally:
+                self._conn.execute(
+                    f"PRAGMA synchronous={sync_names.get(previous_sync, 'NORMAL')}"
+                )
 
     # v0.20.7 (security audit M30): path-PII encryptor. Daemon late-
     # attaches one of these at boot when the master seed is available;
@@ -674,6 +840,7 @@ class State:
         from one_link import keychain as _kc
         from one_link import state_encryption as _se
 
+        _kc.adopt_recovery_passphrase_for_database(Path(self.db_path))
         passphrase = _kc.ensure_passphrase()
         # Stash for run_deferred_integrity_check(), which opens its OWN
         # read connection (so the multi-second check never blocks the
@@ -898,6 +1065,9 @@ class State:
                     (25, self._migrate_v25_pending_folder_offers),
                     (26, self._migrate_v26_folder_lifecycle_audit),
                     (27, self._migrate_v27_ui_sessions),
+                    (28, self._migrate_v28_ui_session_token_hashes),
+                    (29, self._migrate_v29_file_index_identity),
+                    (30, self._migrate_v30_folder_pending_applies),
                 ]
                 for target_version, apply_fn in steps:
                     self._run_atomic_migration(
@@ -947,7 +1117,15 @@ class State:
             try:
                 c.execute("ROLLBACK")
             except Exception:
-                pass
+                # Preserve the migration's original exception, but never hide
+                # that rollback itself failed: the connection may now need to
+                # be discarded before any further schema work is attempted.
+                log.critical(
+                    "schema migration v%s rollback failed; database "
+                    "transaction state is uncertain",
+                    target_version,
+                    exc_info=True,
+                )
             raise
 
     def _migrate_v16_route_memory(self, c: sqlite3.Cursor) -> None:
@@ -1406,6 +1584,118 @@ class State:
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_ui_sessions_active"
             " ON ui_sessions(revoked_ms, last_seen_ms DESC)"
+        )
+
+    def _migrate_v28_ui_session_token_hashes(self, c: sqlite3.Cursor) -> None:
+        """Replace persistent UI bearer tokens with one-way record keys.
+
+        v27 stored the exact HttpOnly cookie value in ``state.db``. A local
+        database disclosure could therefore be replayed directly against a
+        running daemon. Tokens are 256-bit random values, so a domain-separated
+        SHA-256 record key is sufficient: lookup remains O(1), while the value
+        at rest is no longer a bearer credential. The schema version makes the
+        transformation exactly-once; hashing a record key a second time would
+        invalidate every outstanding browser session.
+        """
+        rows = c.execute(
+            "SELECT id, session_uuid FROM ui_sessions"
+        ).fetchall()
+        for row in rows:
+            token = str(row["session_uuid"] or "")
+            record_key = self.ui_session_token_id(token)
+            if record_key is None:
+                # A malformed row could never authenticate through the HTTP
+                # validator. Remove it instead of preserving attacker-chosen
+                # junk in the credential index.
+                c.execute("DELETE FROM ui_sessions WHERE id=?", (int(row["id"]),))
+                continue
+            c.execute(
+                "UPDATE ui_sessions SET session_uuid=? WHERE id=?",
+                (record_key, int(row["id"])),
+            )
+
+    def _migrate_v29_file_index_identity(self, c: sqlite3.Cursor) -> None:
+        """Bind cached hashes/manifests to stable file-object identity.
+
+        Path, size, and timestamps are not sufficient on Windows: ``st_ctime``
+        is creation time, and a same-size rewrite can restore ``mtime``. Device
+        + inode/file ID + NT change time prevent stale content proofs from
+        being reused after replacement or in-place mutation. Existing cache
+        rows deliberately miss once after migration because they lack that
+        evidence.
+        """
+
+        columns = {
+            str(row[1])
+            for row in c.execute("PRAGMA table_info(file_index_cache)").fetchall()
+        }
+        additions = (
+            ("device_id", "TEXT NOT NULL DEFAULT ''"),
+            ("inode_id", "TEXT NOT NULL DEFAULT ''"),
+            ("file_id", "TEXT NOT NULL DEFAULT ''"),
+            ("change_ns", "TEXT NOT NULL DEFAULT ''"),
+            ("index_mode", "TEXT NOT NULL DEFAULT ''"),
+        )
+        for name, declaration in additions:
+            if name not in columns:
+                c.execute(
+                    f"ALTER TABLE file_index_cache ADD COLUMN {name} {declaration}"
+                )
+
+    def _migrate_v30_folder_pending_applies(self, c: sqlite3.Cursor) -> None:
+        """Crash-replay journal for remote folder filesystem mutations.
+
+        A committed CRDT winner and its replace/delete preconditions must be
+        recoverable as one durable generation.  The journal tracks the exact
+        target plus any internal staging/recovery leaf names across the small
+        filesystem windows that SQLite cannot make transactional.
+        """
+
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS folder_pending_applies (
+                apply_id               TEXT PRIMARY KEY,
+                folder_name            TEXT NOT NULL,
+                file_path              TEXT NOT NULL,
+                operation              TEXT NOT NULL
+                    CHECK(operation IN ('materialize', 'delete')),
+                target_blob_hash       TEXT,
+                target_size            INTEGER,
+                target_mtime_ms        INTEGER,
+                target_vclock_json     TEXT NOT NULL,
+                baseline_blob_hash     TEXT,
+                baseline_evidence_json TEXT,
+                phase                  TEXT NOT NULL
+                    CHECK(phase IN (
+                        'planned', 'staging', 'recovery_prepared',
+                        'recovery_moved', 'publish_prepared', 'published',
+                        'unlink_prepared'
+                    )),
+                staging_name           TEXT,
+                recovery_name          TEXT,
+                attempts               INTEGER NOT NULL DEFAULT 0
+                    CHECK(attempts >= 0),
+                last_error             TEXT,
+                created_ms             INTEGER NOT NULL,
+                updated_ms             INTEGER NOT NULL,
+                UNIQUE(folder_name, file_path),
+                FOREIGN KEY(folder_name) REFERENCES folders(name)
+                    ON DELETE CASCADE,
+                CHECK(
+                    (operation = 'materialize' AND target_blob_hash IS NOT NULL)
+                    OR (operation = 'delete' AND target_blob_hash IS NULL)
+                )
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_folder_pending_applies_folder "
+            "ON folder_pending_applies(folder_name, updated_ms)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_folder_manifest_blob_hash "
+            "ON folder_manifest(blob_hash, folder_name, file_path) "
+            "WHERE blob_hash IS NOT NULL"
         )
 
     def _migrate_v24_held_recovery_shares(self, c: sqlite3.Cursor) -> None:
@@ -1898,10 +2188,16 @@ class State:
                             now=now,
                         )
                     except Exception:
-                        # Detection failure must never block a peer
-                        # upsert — log via daemon if needed, but the
-                        # peer table is the source of truth.
-                        pass
+                        # The new peer remains pending by default, so allowing
+                        # the upsert is fail-closed for capabilities. Missing a
+                        # hostname/key rotation alert is still security-
+                        # relevant and must be visible immediately.
+                        log.exception(
+                            "SECURITY: hostname key-change tracking failed "
+                            "for host=%r fingerprint=%s",
+                            hostname,
+                            fingerprint[:16],
+                        )
                 rec = self._row_to_peer(row)
                 if new_event_id is not None:
                     # Attach as a runtime-only attribute; the dataclass
@@ -1989,6 +2285,86 @@ class State:
             "SELECT * FROM peers ORDER BY last_seen_ms DESC"
         ).fetchall()
         return [self._row_to_peer(r) for r in rows]
+
+    def recovery_safety_counts(self) -> dict[str, int]:
+        """Return one consistent snapshot of state a restore can orphan.
+
+        Recovery preflight is a destructive-operation guard, not a UI-only
+        summary.  Keep the query inside :class:`State` so callers do not have
+        to materialize every message/folder/device merely to learn whether an
+        install is empty.  A single SQLite statement also gives all five
+        counts from the same read snapshot while concurrent writers are
+        active.
+
+        Database errors intentionally propagate.  The recovery layer treats
+        an unavailable safety snapshot as *not clean*; guessing zero here
+        would turn a storage fault into permission to replace an identity.
+        """
+        row = self._conn.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM peers WHERE trust = 'pinned')
+                    AS pinned_peers,
+                (SELECT COUNT(*) FROM messages) AS messages,
+                (SELECT COUNT(*) FROM group_messages) AS group_messages,
+                (SELECT COUNT(*) FROM groups) AS groups,
+                (SELECT COUNT(*) FROM folders) AS shared_folders,
+                (SELECT COUNT(*) FROM self_mesh_devices) AS self_mesh_devices,
+                (SELECT COUNT(*) FROM transfers
+                    WHERE status IN ('queued', 'offered', 'active', 'paused'))
+                    AS pending_transfers,
+                (SELECT COUNT(*) FROM outbox WHERE delivered_ms IS NULL)
+                    AS pending_outbox,
+                (SELECT COUNT(*) FROM pending_folder_offers
+                    WHERE state = 'pending') AS pending_folder_offers,
+                (SELECT COUNT(*) FROM pending_rotation_announcements
+                    WHERE acked_ms IS NULL) AS pending_rotation_announcements,
+                (SELECT COUNT(*) FROM held_recovery_shares)
+                    AS held_recovery_shares
+            """
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("recovery safety query returned no row")
+        return {
+            "pinned_peers": int(row["pinned_peers"] or 0),
+            "messages": int(row["messages"] or 0),
+            "group_messages": int(row["group_messages"] or 0),
+            "groups": int(row["groups"] or 0),
+            "shared_folders": int(row["shared_folders"] or 0),
+            "self_mesh_devices": int(row["self_mesh_devices"] or 0),
+            "pending_transfers": int(row["pending_transfers"] or 0),
+            "pending_outbox": int(row["pending_outbox"] or 0),
+            "pending_folder_offers": int(row["pending_folder_offers"] or 0),
+            "pending_rotation_announcements": int(
+                row["pending_rotation_announcements"] or 0
+            ),
+            "held_recovery_shares": int(row["held_recovery_shares"] or 0),
+        }
+
+    def update_handoff_safety_counts(self) -> dict[str, int]:
+        """Return durable work that must finish before replacing the app.
+
+        Queued and paused work is deliberately restart-safe.  ``offered`` and
+        ``active`` rows may have remote commit state in flight, so an updater
+        must defer until those rows reach a durable terminal/restartable state.
+        Storage errors propagate and therefore fail the handoff closed.
+        """
+
+        row = self._conn.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM transfers
+                    WHERE status IN ('offered', 'active')) AS active_transfers,
+                (SELECT COUNT(*) FROM pending_folder_offers
+                    WHERE state = 'pending') AS pending_folder_offers
+            """
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("update handoff safety query returned no row")
+        return {
+            "active_transfers": int(row["active_transfers"] or 0),
+            "pending_folder_offers": int(row["pending_folder_offers"] or 0),
+        }
 
     def set_peer_capabilities(self, fingerprint: str, caps: Iterable[str]) -> None:
         values = sorted({str(c) for c in caps if str(c)})
@@ -3281,6 +3657,12 @@ class State:
                             c.execute(upd_sql, (new_fp, old_fp))
 
                     c.execute("COMMIT")
+                    # Message rows moved between peer namespaces. Any cached
+                    # quota totals for either fingerprint are now stale.
+                    self._text_usage_cache.pop(old_fp, None)
+                    self._text_usage_cache.pop(new_fp, None)
+                    self._outbox_usage_cache.pop(old_fp, None)
+                    self._outbox_usage_cache.pop(new_fp, None)
                     return True
                 except Exception:
                     c.execute("ROLLBACK")
@@ -3328,6 +3710,128 @@ class State:
                 (peer_fp, old_fp, new_fp, cert_json, sig_hex, int(now_ms)),
             )
             return int(cur.lastrowid or 0)
+
+    def queue_rotation_announcements_durable(
+        self,
+        rows: list[dict[str, Any]],
+    ) -> list[int]:
+        """Atomically publish and exact-read-back one rotation peer snapshot.
+
+        Recovery boot replay uses this boundary after installing the staged
+        identity. Either every signed announcement is durable under
+        ``synchronous=FULL`` or none of the new rows are. A replay accepts an
+        existing row only when every committed certificate field is identical;
+        a colliding or partially-corrupt row fails closed.
+        """
+        from one_link import identity_rotation
+
+        if not isinstance(rows, list) or len(rows) > 65536:
+            raise ValueError("rotation announcement batch is invalid")
+        normalized: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        expected_keys = {
+            "peer_fp",
+            "old_fp",
+            "new_fp",
+            "cert_json",
+            "sig_hex",
+            "queued_ms",
+        }
+        for raw in rows:
+            if not isinstance(raw, dict) or set(raw) != expected_keys:
+                raise ValueError("rotation announcement row schema is invalid")
+            row = dict(raw)
+            for key in ("peer_fp", "old_fp", "new_fp"):
+                value = row[key]
+                if (
+                    not isinstance(value, str)
+                    or len(value) != 64
+                    or any(ch not in "0123456789abcdef" for ch in value)
+                ):
+                    raise ValueError(f"rotation announcement {key} is invalid")
+            queued_ms = row["queued_ms"]
+            if type(queued_ms) is not int or queued_ms < 0:
+                raise ValueError("rotation announcement queued_ms is invalid")
+            cert = identity_rotation.RotationCertificate.from_wire_dict(
+                {
+                    "cert_json": row["cert_json"],
+                    "sig_hex": row["sig_hex"],
+                }
+            )
+            if cert.old_fp != row["old_fp"] or cert.new_fp != row["new_fp"]:
+                raise ValueError(
+                    "rotation announcement certificate fingerprints mismatch"
+                )
+            batch_key = (row["peer_fp"], row["new_fp"])
+            if batch_key in seen:
+                raise ValueError("rotation announcement batch contains duplicates")
+            seen.add(batch_key)
+            normalized.append(row)
+
+        row_ids: list[int] = []
+        with self.durable_write_transaction():
+            for row in normalized:
+                matches = self._conn.execute(
+                    "SELECT id, peer_fp, old_fp, new_fp, cert_json, sig_hex, queued_ms"
+                    " FROM pending_rotation_announcements"
+                    " WHERE peer_fp = ? AND new_fp = ? ORDER BY id ASC",
+                    (row["peer_fp"], row["new_fp"]),
+                ).fetchall()
+                if len(matches) > 1:
+                    raise RuntimeError(
+                        "rotation announcement uniqueness proof failed"
+                    )
+                if matches:
+                    existing = matches[0]
+                    actual = {
+                        "peer_fp": existing["peer_fp"],
+                        "old_fp": existing["old_fp"],
+                        "new_fp": existing["new_fp"],
+                        "cert_json": existing["cert_json"],
+                        "sig_hex": existing["sig_hex"],
+                        "queued_ms": int(existing["queued_ms"]),
+                    }
+                    if actual != row:
+                        raise RuntimeError(
+                            "rotation announcement collision does not match journal"
+                        )
+                    row_id = int(existing["id"])
+                else:
+                    cur = self._conn.execute(
+                        """
+                        INSERT INTO pending_rotation_announcements(
+                            peer_fp, old_fp, new_fp, cert_json, sig_hex,
+                            queued_ms, last_attempt_ms, attempt_count, acked_ms
+                        ) VALUES(?, ?, ?, ?, ?, ?, NULL, 0, NULL)
+                        """,
+                        (
+                            row["peer_fp"],
+                            row["old_fp"],
+                            row["new_fp"],
+                            row["cert_json"],
+                            row["sig_hex"],
+                            row["queued_ms"],
+                        ),
+                    )
+                    row_id = int(cur.lastrowid or 0)
+                proof = self._conn.execute(
+                    "SELECT peer_fp, old_fp, new_fp, cert_json, sig_hex, queued_ms"
+                    " FROM pending_rotation_announcements WHERE id = ?",
+                    (row_id,),
+                ).fetchone()
+                if proof is None or {
+                    "peer_fp": proof["peer_fp"],
+                    "old_fp": proof["old_fp"],
+                    "new_fp": proof["new_fp"],
+                    "cert_json": proof["cert_json"],
+                    "sig_hex": proof["sig_hex"],
+                    "queued_ms": int(proof["queued_ms"]),
+                } != row:
+                    raise RuntimeError(
+                        "rotation announcement durable read-back failed"
+                    )
+                row_ids.append(row_id)
+        return row_ids
 
     def list_pending_rotation_announcements(
         self,
@@ -3438,32 +3942,104 @@ class State:
         wire_dict: dict,
     ) -> bool:
         """Persist a group event. Returns True if newly inserted,
-        False if already present (content-addressed, idempotent)."""
+        False for an exact replay. A colliding event id is rejected rather
+        than silently treating different durable state as idempotent."""
+        wire_json = json.dumps(
+            wire_dict, separators=(",", ":"), sort_keys=True, allow_nan=False,
+        )
         with self._write_lock:
+            existing = self._conn.execute(
+                "SELECT timestamp_ms, wire_json FROM group_events "
+                "WHERE group_id = ? AND event_id = ?",
+                (group_id, event_id),
+            ).fetchone()
+            if existing is not None:
+                try:
+                    stored_json = json.dumps(
+                        json.loads(existing["wire_json"]),
+                        separators=(",", ":"), sort_keys=True, allow_nan=False,
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise MessageIdConflict(
+                        f"stored group event {event_id!r} is invalid"
+                    ) from exc
+                if (
+                    int(existing["timestamp_ms"]) != int(timestamp_ms)
+                    or stored_json != wire_json
+                ):
+                    raise MessageIdConflict(
+                        f"group event id {event_id!r} was reused for different content"
+                    )
+                return False
+            group_count = self._group_event_count_cache.get(group_id)
+            if group_count is None:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM group_events WHERE group_id = ?",
+                    (group_id,),
+                ).fetchone()
+                group_count = int(row["n"] if row else 0)
+                self._group_event_count_cache[group_id] = group_count
+            total_count = self._group_event_total_count
+            if total_count is None:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM group_events",
+                ).fetchone()
+                total_count = int(row["n"] if row else 0)
+                self._group_event_total_count = total_count
+            if (
+                group_count >= MAX_GROUP_EVENTS_PER_GROUP
+                or total_count >= MAX_GROUP_EVENTS_TOTAL
+            ):
+                raise MessageQuotaExceeded(
+                    "group event-log quota reached; remove unused groups before "
+                    "accepting more events"
+                )
             cur = self._conn.execute(
                 """
-                INSERT OR IGNORE INTO group_events(
+                INSERT INTO group_events(
                     group_id, event_id, timestamp_ms, wire_json
                 ) VALUES(?, ?, ?, ?)
                 """,
-                (group_id, event_id, int(timestamp_ms), json.dumps(wire_dict)),
+                (group_id, event_id, int(timestamp_ms), wire_json),
             )
+            if cur.rowcount > 0:
+                self._group_event_count_cache[group_id] = group_count + 1
+                self._group_event_total_count = total_count + 1
             return cur.rowcount > 0
+
+    def has_group_event(self, group_id: bytes, event_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM group_events WHERE group_id = ? AND event_id = ?",
+            (group_id, event_id),
+        ).fetchone()
+        return row is not None
 
     def list_group_events(self, group_id: bytes) -> list[dict]:
         """All events for a group, returned as wire dicts ready to feed
         through GroupEvent.from_wire()."""
         rows = self._conn.execute(
-            "SELECT wire_json FROM group_events WHERE group_id = ? "
+            "SELECT event_id, wire_json FROM group_events WHERE group_id = ? "
             "ORDER BY timestamp_ms ASC, event_id ASC",
             (group_id,),
         ).fetchall()
         out: list[dict] = []
         for r in rows:
             try:
-                out.append(json.loads(r["wire_json"]))
-            except Exception:
-                continue
+                decoded = json.loads(r["wire_json"])
+            except (json.JSONDecodeError, TypeError) as exc:
+                # Silently skipping one durable event changes the reduced
+                # group state and can make replicas diverge. Surface explicit
+                # corruption instead of returning a plausible partial log.
+                raise ValueError(
+                    "corrupt group event JSON: "
+                    f"group={group_id.hex()} event={r['event_id']!r}"
+                ) from exc
+            if not isinstance(decoded, dict):
+                raise ValueError(
+                    "invalid group event shape: "
+                    f"group={group_id.hex()} event={r['event_id']!r}"
+                )
+            out.append(decoded)
         return out
 
     def list_group_ids(self) -> list[bytes]:
@@ -3590,7 +4166,11 @@ class State:
         # positive that a generic is_wrapped check would have on
         # the small-marker-byte collision class.
         chain_key = bytes(row["chain_key"])
-        if len(chain_key) != 32:
+        if len(chain_key) not in (32, 61):
+            raise ValueError(
+                f"invalid stored chain_key length: {len(chain_key)}"
+            )
+        if len(chain_key) == 61:
             from one_link.lockbox import LockBox  # noqa: F401
             if self._lockbox is None:
                 raise RuntimeError(
@@ -3604,6 +4184,63 @@ class State:
             "counter": row["counter"],
         }
 
+    def _group_storage_usage(
+        self, group_id: bytes, *, refresh: bool = False,
+    ) -> tuple[int, int]:
+        """Return cached (row count, retained UTF-8 body bytes) for a group."""
+
+        cached = None if refresh else self._group_usage_cache.get(group_id)
+        if cached is not None:
+            return cached
+        usage = self._conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM("
+            "length(CAST(COALESCE(body, '') AS BLOB)) + "
+            "length(CAST(COALESCE(original_body, '') AS BLOB))"
+            "), 0) AS storage_bytes FROM group_messages WHERE group_id = ?",
+            (group_id,),
+        ).fetchone()
+        cached = (
+            int(usage["n"] if usage else 0),
+            int(usage["storage_bytes"] if usage else 0),
+        )
+        self._group_usage_cache[group_id] = cached
+        return cached
+
+    def _group_edit_usage(
+        self,
+        *,
+        group_id: bytes,
+        current_body: object,
+        original_body: object,
+        new_body: str,
+    ) -> tuple[int, int]:
+        """Validate and return retained usage after one mutable group edit."""
+
+        current_size = len(
+            (current_body if isinstance(current_body, str) else "").encode("utf-8")
+        )
+        new_size = len(new_body.encode("utf-8"))
+
+        def prospective(usage: tuple[int, int]) -> tuple[int, int]:
+            count, byte_count = usage
+            updated = (
+                byte_count + new_size
+                if original_body is None
+                else byte_count - current_size + new_size
+            )
+            return count, updated
+
+        updated_usage = prospective(self._group_storage_usage(group_id))
+        if updated_usage[1] > MAX_GROUP_BODY_BYTES_PER_GROUP:
+            updated_usage = prospective(
+                self._group_storage_usage(group_id, refresh=True),
+            )
+        if updated_usage[1] > MAX_GROUP_BODY_BYTES_PER_GROUP:
+            raise MessageQuotaExceeded(
+                "group chat history quota reached; clear history before editing"
+            )
+        return updated_usage
+
     def insert_group_message(
         self,
         *,
@@ -3616,19 +4253,284 @@ class State:
         body: str,
         reply_to: Optional[str] = None,
         ts_ms: Optional[int] = None,
-    ) -> None:
+    ) -> bool:
+        if not isinstance(id, str) or not id or len(id) > 128:
+            raise ValueError("group message id must be 1..128 characters")
+        if len(group_id) != 16 or len(sender_pub) != 32:
+            raise ValueError("invalid group or sender identity")
+        if direction not in {"in", "out"}:
+            raise ValueError("group message direction must be 'in' or 'out'")
+        if not isinstance(body, str) or not body.strip():
+            raise ValueError("group message body must be non-empty")
+        if len(body.encode("utf-8")) > MAX_TEXT_BODY_BYTES:
+            raise ValueError(
+                f"group message body exceeds {MAX_TEXT_BODY_BYTES} UTF-8 bytes"
+            )
+        ts = int(ts_ms if ts_ms is not None else _now_ms())
+        values = (
+            id, group_id, sender_pub, int(epoch), int(counter),
+            direction, body, reply_to, ts,
+        )
         with self._write_lock:
+            existing = self._conn.execute(
+                "SELECT id, group_id, sender_pub, epoch, counter, direction, "
+                "body, original_body, reply_to, ts_ms "
+                "FROM group_messages WHERE id = ?",
+                (id,),
+            ).fetchone()
+            if existing is not None:
+                immutable_body = (
+                    existing["original_body"]
+                    if existing["original_body"] is not None
+                    else existing["body"]
+                )
+                stored = (
+                    existing["id"], existing["group_id"],
+                    existing["sender_pub"], existing["epoch"],
+                    existing["counter"], existing["direction"],
+                    immutable_body, existing["reply_to"], existing["ts_ms"],
+                )
+                if stored != values:
+                    raise MessageIdConflict(
+                        f"group message id {id!r} was reused for different content"
+                    )
+                return False
+            count, byte_count = self._group_storage_usage(group_id)
+            body_size = len(body.encode("utf-8"))
+            if (
+                count >= MAX_GROUP_MESSAGES_PER_GROUP
+                or byte_count + body_size > MAX_GROUP_BODY_BYTES_PER_GROUP
+            ):
+                # Recount only at the boundary so a history clear cannot leave
+                # a conservative cache as a permanent false rejection.
+                count, byte_count = self._group_storage_usage(
+                    group_id, refresh=True,
+                )
+            if (
+                count >= MAX_GROUP_MESSAGES_PER_GROUP
+                or byte_count + body_size > MAX_GROUP_BODY_BYTES_PER_GROUP
+            ):
+                raise MessageQuotaExceeded(
+                    "group chat history quota reached; clear history before "
+                    "accepting more messages"
+                )
             self._conn.execute(
                 """
-                INSERT OR IGNORE INTO group_messages(
+                INSERT INTO group_messages(
                     id, group_id, sender_pub, epoch, counter,
                     direction, body, reply_to, ts_ms
                 ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (id, group_id, sender_pub, int(epoch), int(counter),
-                 direction, body, reply_to,
-                 int(ts_ms if ts_ms is not None else _now_ms())),
+                values,
             )
+            self._group_usage_cache[group_id] = (
+                count + 1, byte_count + body_size,
+            )
+            return True
+
+    def commit_group_ratchet_boundary(
+        self,
+        *,
+        group_id: bytes,
+        sender_pub: bytes,
+        direction: str,
+        epoch: int,
+        expected_chain_key: bytes,
+        expected_counter: int,
+        advanced_chain_key: bytes,
+        advanced_counter: int,
+        message: Optional[dict[str, Any]] = None,
+        receipt: Optional[dict[str, Any]] = None,
+        action: Optional[dict[str, Any]] = None,
+        outbox: Iterable[dict[str, Any]] = (),
+    ) -> dict[str, Any]:
+        """FULL-sync one ratchet step with its history/outbox evidence.
+
+        The encrypted envelope must never become remotely visible unless the
+        exact chain advance and every intended recipient's durable outbox row
+        committed together.  The receive side uses the same primitive with no
+        outbox rows so a positive ACK binds the chain advance and plaintext
+        history row to one SQLite commit.
+        """
+
+        if len(group_id) != 16 or len(sender_pub) != 32:
+            raise ValueError("invalid group ratchet identity")
+        if direction not in {"in", "out"}:
+            raise ValueError("invalid group ratchet direction")
+        if len(expected_chain_key) != 32 or len(advanced_chain_key) != 32:
+            raise ValueError("group ratchet keys must be 32 bytes")
+        if advanced_counter <= expected_counter:
+            raise ValueError("group ratchet counter must advance")
+        queued = [dict(row) for row in outbox]
+        action_row = dict(action) if action is not None else None
+        if action_row is not None and action_row.get("kind") not in {
+            "reaction", "edit", "delete",
+        }:
+            raise ValueError("invalid durable group action")
+        sync_names = {0: "OFF", 1: "NORMAL", 2: "FULL", 3: "EXTRA"}
+        with self._write_lock:
+            sync_row = self._conn.execute("PRAGMA synchronous").fetchone()
+            previous_sync = int(sync_row[0]) if sync_row else 1
+            self._conn.execute("PRAGMA synchronous=FULL")
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                current = self.get_sender_chain(
+                    group_id=group_id,
+                    sender_pub=sender_pub,
+                    direction=direction,
+                    epoch=int(epoch),
+                )
+                if (
+                    current is None
+                    or int(current["counter"]) != int(expected_counter)
+                    or bytes(current["chain_key"]) != bytes(expected_chain_key)
+                ):
+                    raise MessageIdConflict(
+                        "group ratchet state changed before durable commit"
+                    )
+                self.upsert_sender_chain(
+                    group_id=group_id,
+                    sender_pub=sender_pub,
+                    direction=direction,
+                    epoch=int(epoch),
+                    chain_key=advanced_chain_key,
+                    counter=int(advanced_counter),
+                )
+                inserted = None
+                if message is not None:
+                    inserted = self.insert_group_message(
+                        id=str(message["id"]),
+                        group_id=group_id,
+                        sender_pub=sender_pub,
+                        epoch=int(epoch),
+                        counter=int(message["counter"]),
+                        direction=direction,
+                        body=message["body"],
+                        reply_to=message.get("reply_to"),
+                        ts_ms=int(message["ts_ms"]),
+                    )
+                receipt_inserted = None
+                if receipt is not None:
+                    receipt_inserted = self.record_message(
+                        id=str(receipt["id"]),
+                        ts_ms=int(receipt["ts_ms"]),
+                        direction=direction,
+                        peer_fp=str(receipt["peer_fp"]),
+                        msg_type="GROUP_RECEIPT",
+                        body=None,
+                        metadata=dict(receipt["metadata"]),
+                        durable=False,
+                    )
+                action_applied = None
+                if action_row is not None and (
+                    receipt is None or receipt_inserted is True
+                ):
+                    kind = str(action_row["kind"])
+                    target = str(action_row.get("target") or "")
+                    target_row = self._conn.execute(
+                        "SELECT group_id, sender_pub, body, original_body, "
+                        "deleted_at_ms "
+                        "FROM group_messages WHERE id = ?",
+                        (target,),
+                    ).fetchone()
+                    target_in_group = bool(
+                        target_row is not None
+                        and bytes(target_row["group_id"]) == group_id
+                    )
+                    if kind == "reaction":
+                        emoji = str(action_row.get("emoji") or "")
+                        actor_fp = str(action_row.get("actor_fp") or "")
+                        op = str(action_row.get("op") or "")
+                        if not actor_fp or not emoji or op not in {"add", "remove"}:
+                            raise ValueError("invalid durable group reaction")
+                        if target_in_group and target_row["deleted_at_ms"] is None:
+                            if op == "add":
+                                action_applied = self.record_reaction(
+                                    target_msg_id=target,
+                                    peer_fp=actor_fp,
+                                    emoji=emoji,
+                                )
+                            else:
+                                action_applied = self.remove_reaction(
+                                    target_msg_id=target,
+                                    peer_fp=actor_fp,
+                                    emoji=emoji,
+                                )
+                        else:
+                            action_applied = False
+                    elif kind == "edit":
+                        new_body = action_row.get("body")
+                        if not isinstance(new_body, str) or not new_body.strip():
+                            raise ValueError("invalid durable group edit body")
+                        if len(new_body.encode("utf-8")) > MAX_TEXT_BODY_BYTES:
+                            raise ValueError("durable group edit body is too large")
+                        if (
+                            target_in_group
+                            and bytes(target_row["sender_pub"]) == sender_pub
+                            and target_row["deleted_at_ms"] is None
+                        ):
+                            updated_usage = self._group_edit_usage(
+                                group_id=group_id,
+                                current_body=target_row["body"],
+                                original_body=target_row["original_body"],
+                                new_body=new_body,
+                            )
+                            update = self._conn.execute(
+                                "UPDATE group_messages SET body = ?, edited_at_ms = ?, "
+                                "original_body = COALESCE(original_body, body) "
+                                "WHERE id = ? AND deleted_at_ms IS NULL",
+                                (
+                                    new_body,
+                                    int(action_row["at_ms"]),
+                                    target,
+                                ),
+                            )
+                            action_applied = bool(update.rowcount)
+                            if action_applied:
+                                self._group_usage_cache[group_id] = updated_usage
+                        else:
+                            action_applied = False
+                    else:
+                        if target_in_group and bytes(target_row["sender_pub"]) == sender_pub:
+                            update = self._conn.execute(
+                                "UPDATE group_messages SET body = NULL, "
+                                "deleted_at_ms = ?, "
+                                "original_body = COALESCE(original_body, body) "
+                                "WHERE id = ? AND deleted_at_ms IS NULL",
+                                (int(action_row["at_ms"]), target),
+                            )
+                            action_applied = bool(update.rowcount)
+                            if action_applied:
+                                self._group_usage_cache.pop(group_id, None)
+                        else:
+                            action_applied = False
+                outbox_ids: dict[str, int] = {}
+                for row in queued:
+                    peer_fp = str(row["peer_fp"])
+                    outbox_ids[peer_fp] = self.enqueue_outbox(
+                        peer_fp=peer_fp,
+                        msg_id=str(row["msg_id"]),
+                        msg_body=dict(row["msg_body"]),
+                        msg_kind=str(row.get("msg_kind") or "GROUP_MSG"),
+                    )
+                self._conn.execute("COMMIT")
+                return {
+                    "message_inserted": inserted,
+                    "receipt_inserted": receipt_inserted,
+                    "action_applied": action_applied,
+                    "outbox_ids": outbox_ids,
+                }
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.execute("ROLLBACK")
+                self._text_usage_cache.clear()
+                self._group_usage_cache.clear()
+                self._outbox_usage_cache.clear()
+                raise
+            finally:
+                self._conn.execute(
+                    f"PRAGMA synchronous={sync_names.get(previous_sync, 'NORMAL')}"
+                )
 
     def recent_group_messages(
         self,
@@ -3688,33 +4590,53 @@ class State:
     def edit_group_message(
         self, *, id: str, new_body: str, edited_at_ms: int,
     ) -> Optional[dict]:
-        cur = self.get_group_message(id)
-        if cur is None or cur.get("deleted_at_ms"):
-            return None
-        original = cur.get("original_body") or cur.get("body")
+        if not isinstance(new_body, str) or not new_body.strip():
+            raise ValueError("group message body must be non-empty")
+        if len(new_body.encode("utf-8")) > MAX_TEXT_BODY_BYTES:
+            raise ValueError(
+                f"group message body exceeds {MAX_TEXT_BODY_BYTES} UTF-8 bytes"
+            )
         with self._write_lock:
-            self._conn.execute(
+            cur = self.get_group_message(id)
+            if cur is None or cur.get("deleted_at_ms"):
+                return None
+            group_id = bytes(cur["group_id"])
+            updated_usage = self._group_edit_usage(
+                group_id=group_id,
+                current_body=cur.get("body"),
+                original_body=cur.get("original_body"),
+                new_body=new_body,
+            )
+            original = cur.get("original_body") or cur.get("body")
+            update = self._conn.execute(
                 "UPDATE group_messages SET body = ?, edited_at_ms = ?, "
                 "original_body = COALESCE(original_body, ?) "
                 "WHERE id = ? AND deleted_at_ms IS NULL",
                 (new_body, int(edited_at_ms), original, id),
             )
+            if not update.rowcount:
+                return None
+            self._group_usage_cache[group_id] = updated_usage
         return self.get_group_message(id)
 
     def delete_group_message(
         self, *, id: str, deleted_at_ms: int,
     ) -> Optional[dict]:
-        cur = self.get_group_message(id)
-        if cur is None:
-            return None
-        if cur.get("deleted_at_ms"):
-            return cur
         with self._write_lock:
-            self._conn.execute(
-                "UPDATE group_messages SET body = NULL, deleted_at_ms = ? "
+            cur = self.get_group_message(id)
+            if cur is None:
+                return None
+            if cur.get("deleted_at_ms"):
+                return cur
+            update = self._conn.execute(
+                "UPDATE group_messages SET body = NULL, deleted_at_ms = ?, "
+                "original_body = COALESCE(original_body, body) "
                 "WHERE id = ? AND deleted_at_ms IS NULL",
                 (int(deleted_at_ms), id),
             )
+            if not update.rowcount:
+                return self.get_group_message(id)
+            self._group_usage_cache.pop(bytes(cur["group_id"]), None)
         return self.get_group_message(id)
 
     def _row_to_peer(self, row: sqlite3.Row) -> PeerRecord:
@@ -3788,7 +4710,13 @@ class State:
 
     # ─── verification (v0.7.7) ────────────────────────────────────────
 
-    _ALLOWED_VERIFY_METHODS = ("sas-digits", "sas-qr", "sas-audio", "manual")
+    _ALLOWED_VERIFY_METHODS = (
+        "sas-words-v3",
+        "sas-digits",
+        "sas-qr",
+        "sas-audio",
+        "manual",
+    )
 
     def set_peer_verified(
         self,
@@ -3912,21 +4840,142 @@ class State:
         metadata: Optional[dict] = None,
         reply_to: Optional[str] = None,
         expires_at_ms: Optional[int] = None,
-    ) -> None:
+        durable: bool = False,
+    ) -> bool:
+        """Persist one immutable message envelope.
+
+        ``id`` is an idempotency key, not a license to discard conflicts.
+        An exact replay returns ``False``; reuse for different content raises
+        :class:`MessageIdConflict`.  Chat/control writes can request a
+        FULL-synchronous commit so an ACK is never sent for a row that only
+        lived in process or OS page cache.
+        """
+        if not isinstance(id, str) or not id or len(id) > 128:
+            raise ValueError("message id must be 1..128 characters")
+        if direction not in {"in", "out"}:
+            raise ValueError("message direction must be 'in' or 'out'")
+        if not isinstance(peer_fp, str) or not peer_fp:
+            raise ValueError("peer fingerprint required")
+        if not isinstance(msg_type, str) or not msg_type:
+            raise ValueError("message type required")
+        if msg_type == "TEXT":
+            if not isinstance(body, str):
+                raise ValueError("TEXT body must be a string")
+            body_size = len(body.encode("utf-8"))
+            if body_size > MAX_TEXT_BODY_BYTES:
+                raise ValueError(
+                    f"TEXT body exceeds {MAX_TEXT_BODY_BYTES} UTF-8 bytes"
+                )
+        else:
+            body_size = 0
+        bounded_chat = msg_type in BOUNDED_CHAT_MESSAGE_TYPES
+        bounded_types = _BOUNDED_CHAT_MESSAGE_TYPES_ORDERED
+
+        metadata_json = json.dumps(
+            metadata or {}, separators=(",", ":"), sort_keys=True,
+            allow_nan=False,
+        )
+        storage_size = body_size + len(metadata_json.encode("utf-8"))
+        values = (
+            id, int(ts_ms), direction, peer_fp, msg_type, body, room_id,
+            metadata_json, reply_to, expires_at_ms,
+        )
         with self._write_lock:
-            self._conn.execute(
-                """
-                INSERT OR IGNORE INTO messages(
-                    id, ts_ms, direction, peer_fp, msg_type, body, room_id,
-                    metadata_json, reply_to, expires_at_ms
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    id, ts_ms, direction, peer_fp, msg_type, body, room_id,
-                    json.dumps(metadata or {}, separators=(",", ":")),
-                    reply_to, expires_at_ms,
-                ),
-            )
+            existing = self._conn.execute(
+                "SELECT id, ts_ms, direction, peer_fp, msg_type, body,"
+                " original_body, room_id, metadata_json, reply_to,"
+                " expires_at_ms FROM messages WHERE id = ?",
+                (id,),
+            ).fetchone()
+            if existing is not None:
+                try:
+                    existing_metadata = json.dumps(
+                        json.loads(existing["metadata_json"] or "{}"),
+                        separators=(",", ":"), sort_keys=True, allow_nan=False,
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise MessageIdConflict(
+                        f"stored metadata for message id {id!r} is invalid"
+                    ) from exc
+                immutable_body = (
+                    existing["original_body"]
+                    if existing["original_body"] is not None
+                    else existing["body"]
+                )
+                stored = (
+                    existing["id"], int(existing["ts_ms"]),
+                    existing["direction"], existing["peer_fp"],
+                    existing["msg_type"], immutable_body,
+                    existing["room_id"], existing_metadata,
+                    existing["reply_to"], existing["expires_at_ms"],
+                )
+                if stored != values:
+                    raise MessageIdConflict(
+                        f"message id {id!r} was reused for different content"
+                    )
+                return False
+
+            if bounded_chat:
+                cached_usage = self._text_usage_cache.get(peer_fp)
+                if cached_usage is None:
+                    usage = self._conn.execute(
+                        _BOUNDED_CHAT_USAGE_SQL,
+                        (peer_fp, *bounded_types),
+                    ).fetchone()
+                    cached_usage = (
+                        int(usage["n"] if usage else 0),
+                        int(usage["storage_bytes"] if usage else 0),
+                    )
+                    self._text_usage_cache[peer_fp] = cached_usage
+                count, byte_count = cached_usage
+                if (
+                    count >= MAX_TEXT_MESSAGES_PER_PEER
+                    or byte_count + storage_size > MAX_TEXT_BODY_BYTES_PER_PEER
+                ):
+                    # A clear/edit/expiry can reduce authoritative usage behind
+                    # the conservative cache. Recount only at the boundary.
+                    usage = self._conn.execute(
+                        _BOUNDED_CHAT_USAGE_SQL,
+                        (peer_fp, *bounded_types),
+                    ).fetchone()
+                    count = int(usage["n"] if usage else 0)
+                    byte_count = int(usage["storage_bytes"] if usage else 0)
+                    self._text_usage_cache[peer_fp] = (count, byte_count)
+                if (
+                    count >= MAX_TEXT_MESSAGES_PER_PEER
+                    or byte_count + storage_size > MAX_TEXT_BODY_BYTES_PER_PEER
+                ):
+                    raise MessageQuotaExceeded(
+                        "chat history quota reached; clear history before "
+                        "accepting more messages"
+                    )
+
+            previous_sync = 1
+            if durable:
+                sync_row = self._conn.execute("PRAGMA synchronous").fetchone()
+                previous_sync = int(sync_row[0]) if sync_row else 1
+                self._conn.execute("PRAGMA synchronous=FULL")
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO messages(
+                        id, ts_ms, direction, peer_fp, msg_type, body, room_id,
+                        metadata_json, reply_to, expires_at_ms
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values,
+                )
+                if bounded_chat:
+                    self._text_usage_cache[peer_fp] = (
+                        count + 1, byte_count + storage_size,
+                    )
+            finally:
+                if durable:
+                    sync_names = {0: "OFF", 1: "NORMAL", 2: "FULL", 3: "EXTRA"}
+                    self._conn.execute(
+                        f"PRAGMA synchronous={sync_names.get(previous_sync, 'NORMAL')}"
+                    )
+            return True
 
     # ─── disappearing messages (v0.10.2) ──────────────────────────────
 
@@ -4009,7 +5058,7 @@ class State:
         cutoff = now_ms if now_ms is not None else _now_ms()
         with self._write_lock:
             rows = self._conn.execute(
-                "SELECT id FROM messages"
+                "SELECT id, peer_fp FROM messages"
                 " WHERE expires_at_ms IS NOT NULL"
                 "   AND expires_at_ms <= ?"
                 "   AND deleted_at_ms IS NULL",
@@ -4020,12 +5069,15 @@ class State:
                 return []
             # Mark all expired in one statement.
             self._conn.execute(
-                "UPDATE messages SET body = NULL, deleted_at_ms = ?"
+                "UPDATE messages SET body = NULL, deleted_at_ms = ?,"
+                " original_body = COALESCE(original_body, body)"
                 " WHERE expires_at_ms IS NOT NULL"
                 "   AND expires_at_ms <= ?"
                 "   AND deleted_at_ms IS NULL",
                 (cutoff, cutoff),
             )
+            for row in rows:
+                self._text_usage_cache.pop(row["peer_fp"], None)
         return ids
 
     # ─── reactions (v0.7.5) ───────────────────────────────────────────
@@ -4098,7 +5150,7 @@ class State:
         """FTS5 search over message bodies. When prefix_match=True
         (default) the user's plain query is normalized so each
         whitespace-separated token becomes an FTS5 prefix-match
-        (`token*`). That turns 'k' into 'k*' so it finds messages
+        (`"token"*`). That turns 'k' into '"k"*' so it finds messages
         containing 'kanye', 'kjg', 'oksana' - not just messages
         with the standalone token 'k'. This matches naive-user
         expectations.
@@ -4271,17 +5323,50 @@ class State:
         Preserves the original body in original_body the first time
         an edit happens (subsequent edits don't overwrite it).
         Returns the refreshed record, or None if not found / deleted."""
-        cur = self.get_message(id)
-        if cur is None or cur.is_deleted:
-            return None
-        original = cur.original_body or cur.body
+        if not isinstance(new_body, str) or not new_body.strip():
+            raise ValueError("message body must be non-empty")
+        new_body_size = len(new_body.encode("utf-8"))
+        if new_body_size > MAX_TEXT_BODY_BYTES:
+            raise ValueError(
+                f"message body exceeds {MAX_TEXT_BODY_BYTES} UTF-8 bytes"
+            )
         with self._write_lock:
-            self._conn.execute(
+            cur = self.get_message(id)
+            if cur is None or cur.is_deleted:
+                return None
+            if cur.msg_type == "TEXT":
+                bounded_types = _BOUNDED_CHAT_MESSAGE_TYPES_ORDERED
+                usage = self._conn.execute(
+                    _BOUNDED_CHAT_USAGE_SQL,
+                    (cur.peer_fp, *bounded_types),
+                ).fetchone()
+                count = int(usage["n"] if usage else 0)
+                byte_count = int(usage["storage_bytes"] if usage else 0)
+                old_body_size = len((cur.body or "").encode("utf-8"))
+                # The first edit moves the prior body into original_body and
+                # adds the new body; later edits replace only the mutable copy.
+                edited_byte_count = (
+                    byte_count + new_body_size
+                    if cur.original_body is None
+                    else byte_count - old_body_size + new_body_size
+                )
+                if edited_byte_count > MAX_TEXT_BODY_BYTES_PER_PEER:
+                    raise MessageQuotaExceeded(
+                        "chat history quota reached; clear history before editing"
+                    )
+            original = cur.original_body or cur.body
+            update = self._conn.execute(
                 "UPDATE messages SET body = ?, edited_at_ms = ?,"
                 " original_body = COALESCE(original_body, ?)"
                 " WHERE id = ? AND deleted_at_ms IS NULL",
                 (new_body, int(edited_at_ms), original, id),
             )
+            if not update.rowcount:
+                return None
+            if cur.msg_type == "TEXT":
+                self._text_usage_cache[cur.peer_fp] = (
+                    count, edited_byte_count,
+                )
         return self.get_message(id)
 
     def clear_peer_history(self, peer_fp: str) -> int:
@@ -4293,43 +5378,87 @@ class State:
                 "DELETE FROM messages WHERE peer_fp = ?",
                 (peer_fp,),
             )
+            self._text_usage_cache.pop(peer_fp, None)
             return cur.rowcount or 0
 
     def clear_group_history(self, group_id_hex: str) -> int:
         """v0.11.5: hard-delete all group message rows locally.
         Group event log (membership) is preserved — only chat
-        content is wiped. Returns row count.
-
-        Tries `group_messages` table first; falls back to a no-op
-        if the build doesn't have the table yet (very old schemas)."""
+        content is wiped. Returns row count. Database failures propagate so
+        callers never report a successful destructive action that did not
+        happen."""
+        group_id = bytes.fromhex(group_id_hex)
         with self._write_lock:
-            try:
-                cur = self._conn.execute(
-                    "DELETE FROM group_messages WHERE group_id = ?",
-                    (group_id_hex,),
-                )
-                return cur.rowcount or 0
-            except Exception:
-                return 0
+            cur = self._conn.execute(
+                "DELETE FROM group_messages WHERE group_id = ?",
+                (group_id,),
+            )
+            self._group_usage_cache.pop(group_id, None)
+            return cur.rowcount or 0
 
     def _delete_all_locked(self, table: str, where: str = "", params: tuple = ()) -> int:
         sql = f"DELETE FROM {table}" + (f" WHERE {where}" if where else "")  # nosec B608
+        cur = self._conn.execute(sql, params)
+        return int(cur.rowcount or 0)
+
+    @contextlib.contextmanager
+    def _trace_clear_transaction_locked(self):
+        """Make one trace-clear request all-or-nothing.
+
+        The connection normally runs in autocommit mode.  Without an explicit
+        transaction, a failure after the first ``DELETE`` permanently removed
+        those earlier rows even if the HTTP request ultimately failed.  Keep
+        the write lock held by the caller, acquire SQLite's writer reservation
+        before the first mutation, and never disguise a rollback failure as a
+        successful wipe.
+        """
+        self._conn.execute("BEGIN IMMEDIATE")
         try:
-            cur = self._conn.execute(sql, params)
-            return int(cur.rowcount or 0)
-        except DB_ERRORS:
-            return 0
+            yield
+            self._conn.execute("COMMIT")
+        except BaseException:
+            try:
+                if self._conn.in_transaction:
+                    self._conn.execute("ROLLBACK")
+            except DB_ERRORS:
+                log.critical(
+                    "trace-clear rollback failed; database transaction "
+                    "state is uncertain",
+                    exc_info=True,
+                )
+            raise
+
+    def _clear_chat_traces_locked(self) -> dict[str, int]:
+        return {
+            "messages": self._delete_all_locked("messages"),
+            "group_messages": self._delete_all_locked("group_messages"),
+            "message_reactions": self._delete_all_locked("message_reactions"),
+            "outbox": self._delete_all_locked("outbox"),
+        }
 
     def clear_chat_traces(self) -> dict[str, int]:
         """Hard-delete local chat traces without removing peers/groups."""
         with self._write_lock:
-            counts = {
-                "messages": self._delete_all_locked("messages"),
-                "group_messages": self._delete_all_locked("group_messages"),
-                "message_reactions": self._delete_all_locked("message_reactions"),
-                "outbox": self._delete_all_locked("outbox"),
-            }
-            return counts
+            with self._trace_clear_transaction_locked():
+                cleared = self._clear_chat_traces_locked()
+            self._text_usage_cache.clear()
+            self._group_usage_cache.clear()
+            self._outbox_usage_cache.clear()
+            return cleared
+
+    def _clear_file_traces_locked(self) -> dict[str, int]:
+        return {
+            "file_messages": self._delete_all_locked(
+                "messages",
+                "LOWER(msg_type) IN ('file', 'file_done', 'file_offer')",
+            ),
+            "transfers": self._delete_all_locked(
+                "transfers", "LOWER(kind) = 'file'",
+            ),
+            "file_index_cache": self._delete_all_locked("file_index_cache"),
+            "chunk_sources": self._delete_all_locked("chunk_sources"),
+            "chunk_availability": self._delete_all_locked("chunk_availability"),
+        }
 
     def clear_file_traces(self) -> dict[str, int]:
         """Clear file-transfer records and file metadata caches only.
@@ -4338,53 +5467,51 @@ class State:
         from the user's filesystem.
         """
         with self._write_lock:
-            counts = {
-                "file_messages": self._delete_all_locked(
-                    "messages",
-                    "LOWER(msg_type) IN ('file', 'file_done', 'file_offer')",
-                ),
-                "transfers": self._delete_all_locked(
-                    "transfers", "LOWER(kind) = 'file'",
-                ),
-                "file_index_cache": self._delete_all_locked("file_index_cache"),
-                "chunk_sources": self._delete_all_locked("chunk_sources"),
-                "chunk_availability": self._delete_all_locked("chunk_availability"),
-            }
-            return counts
+            with self._trace_clear_transaction_locked():
+                return self._clear_file_traces_locked()
+
+    def _clear_folder_traces_locked(self) -> dict[str, int]:
+        return {
+            "folder_pending_applies": self._delete_all_locked(
+                "folder_pending_applies"
+            ),
+            "folders": self._delete_all_locked("folders"),
+            "folder_manifest": self._delete_all_locked("folder_manifest"),
+            "folder_audit": self._delete_all_locked("folder_audit"),
+            "manifest_conflicts": self._delete_all_locked("manifest_conflicts"),
+            "folder_permissions": self._delete_all_locked(
+                "settings", "key LIKE 'folder_permission:%'",
+            ),
+        }
 
     def clear_folder_traces(self) -> dict[str, int]:
         """Remove folder-sync metadata without deleting watched folders."""
         with self._write_lock:
-            counts = {
-                "folders": self._delete_all_locked("folders"),
-                "folder_manifest": self._delete_all_locked("folder_manifest"),
-                "folder_audit": self._delete_all_locked("folder_audit"),
-                "manifest_conflicts": self._delete_all_locked("manifest_conflicts"),
-                "folder_permissions": self._delete_all_locked(
-                    "settings", "key LIKE 'folder_permission:%'",
-                ),
-            }
-            return counts
+            with self._trace_clear_transaction_locked():
+                return self._clear_folder_traces_locked()
+
+    def _clear_activity_traces_locked(self) -> dict[str, int]:
+        self._conn.execute(
+            "INSERT INTO settings(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            ("activity_cleared_before_ms", str(_now_ms())),
+        )
+        return {
+            "transfers": self._delete_all_locked("transfers"),
+            "capability_audit": self._delete_all_locked("capability_audit"),
+            "key_change_events": self._delete_all_locked("key_change_events"),
+            "folder_audit": self._delete_all_locked("folder_audit"),
+            "self_mesh_audit": self._delete_all_locked("self_mesh_audit"),
+            "self_mesh_perf_samples": self._delete_all_locked("self_mesh_perf_samples"),
+            "device_guardian_events": self._delete_all_locked("device_guardian_events"),
+            "remote_instruction_seen": self._delete_all_locked("remote_instruction_seen"),
+        }
 
     def clear_activity_traces(self) -> dict[str, int]:
         """Clear local audit/activity rows. Peer identities are preserved."""
         with self._write_lock:
-            self._conn.execute(
-                "INSERT INTO settings(key, value) VALUES(?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                ("activity_cleared_before_ms", str(_now_ms())),
-            )
-            counts = {
-                "transfers": self._delete_all_locked("transfers"),
-                "capability_audit": self._delete_all_locked("capability_audit"),
-                "key_change_events": self._delete_all_locked("key_change_events"),
-                "folder_audit": self._delete_all_locked("folder_audit"),
-                "self_mesh_audit": self._delete_all_locked("self_mesh_audit"),
-                "self_mesh_perf_samples": self._delete_all_locked("self_mesh_perf_samples"),
-                "device_guardian_events": self._delete_all_locked("device_guardian_events"),
-                "remote_instruction_seen": self._delete_all_locked("remote_instruction_seen"),
-            }
-            return counts
+            with self._trace_clear_transaction_locked():
+                return self._clear_activity_traces_locked()
 
     def clear_all_app_traces(self) -> dict[str, dict[str, int] | int]:
         """Clear local app traces while preserving identity, peers, and trust.
@@ -4394,19 +5521,29 @@ class State:
         revoke device identity or pairing/trust state.
         """
         with self._write_lock:
-            result: dict[str, dict[str, int] | int] = {
-                "chat": self.clear_chat_traces(),
-                "files": self.clear_file_traces(),
-                "folders": self.clear_folder_traces(),
-                "activity": self.clear_activity_traces(),
-            }
-            result["route_memory"] = self._delete_all_locked("route_memory")
-            result["route_candidates"] = self._delete_all_locked("route_candidates")
-            result["courier_outbox"] = self._delete_all_locked("courier_outbox")
-            result["settings_trace_keys"] = self._delete_all_locked(
-                "settings",
-                "key LIKE 'chatpref:%'",
-            )
+            with self._trace_clear_transaction_locked():
+                result: dict[str, dict[str, int] | int] = {
+                    "chat": self._clear_chat_traces_locked(),
+                    "files": self._clear_file_traces_locked(),
+                    "folders": self._clear_folder_traces_locked(),
+                    "activity": self._clear_activity_traces_locked(),
+                }
+                result["route_memory"] = self._delete_all_locked("route_memory")
+                result["route_candidates"] = self._delete_all_locked(
+                    "route_candidates"
+                )
+                # Courier bundles use a filesystem outbox, not a SQLite
+                # table.  Preserve the response key for API compatibility;
+                # the former DELETE targeted a table that has never existed
+                # and depended on the broad exception swallow above.
+                result["courier_outbox"] = 0
+                result["settings_trace_keys"] = self._delete_all_locked(
+                    "settings",
+                    "key LIKE 'chatpref:%'",
+                )
+            self._text_usage_cache.clear()
+            self._group_usage_cache.clear()
+            self._outbox_usage_cache.clear()
             return result
 
     def storage_usage_by_peer(self) -> list[dict]:
@@ -4508,10 +5645,12 @@ class State:
             return cur
         with self._write_lock:
             self._conn.execute(
-                "UPDATE messages SET body = NULL, deleted_at_ms = ?"
+                "UPDATE messages SET body = NULL, deleted_at_ms = ?,"
+                " original_body = COALESCE(original_body, body)"
                 " WHERE id = ?",
                 (int(deleted_at_ms), id),
             )
+            self._text_usage_cache.pop(cur.peer_fp, None)
         return self.get_message(id)
 
     def get_message(self, id: str) -> Optional[MessageRecord]:
@@ -4742,6 +5881,56 @@ class State:
             data.update(fields)
             return self.upsert_transfer(**data)
 
+    def update_transfer_durable(
+        self,
+        id: str,
+        **fields: Any,
+    ) -> Optional[TransferRecord]:
+        """Commit a transfer boundary with power-loss durability.
+
+        The general activity ledger uses WAL + ``synchronous=NORMAL`` for
+        throughput.  A pre-wire offer boundary and a FILE_COMMIT receipt are
+        different: losing either row can turn crash recovery into a duplicate
+        delivery. Temporarily raise this one autocommit transaction to FULL
+        while holding the connection write lock. In WAL mode FULL synchronizes
+        the WAL at transaction commit, which is the durable boundary the wire
+        protocol requires.
+        """
+
+        synchronous_names = {0: "OFF", 1: "NORMAL", 2: "FULL", 3: "EXTRA"}
+        with self._write_lock:
+            row = self._conn.execute("PRAGMA synchronous").fetchone()
+            previous = int(row[0]) if row else 1
+            self._conn.execute("PRAGMA synchronous = FULL")
+            try:
+                return self.update_transfer(id, **fields)
+            finally:
+                self._conn.execute(
+                    f"PRAGMA synchronous = {synchronous_names.get(previous, 'NORMAL')}"
+                )
+
+    def upsert_transfer_durable(self, **fields: Any) -> TransferRecord:
+        """FULL-sync an entire transfer row before a peer-visible boundary.
+
+        ``update_transfer_durable`` cannot change immutable contract columns
+        such as ``peer_fp``. The authenticated peer fingerprint can become
+        known only after dialing, so the final pre-offer row occasionally has
+        to replace the provisional contract atomically. This companion keeps
+        that replacement under the same FULL-sync guarantee.
+        """
+
+        synchronous_names = {0: "OFF", 1: "NORMAL", 2: "FULL", 3: "EXTRA"}
+        with self._write_lock:
+            row = self._conn.execute("PRAGMA synchronous").fetchone()
+            previous = int(row[0]) if row else 1
+            self._conn.execute("PRAGMA synchronous = FULL")
+            try:
+                return self.upsert_transfer(**fields)
+            finally:
+                self._conn.execute(
+                    f"PRAGMA synchronous = {synchronous_names.get(previous, 'NORMAL')}"
+                )
+
     def get_transfer(self, id: str) -> Optional[TransferRecord]:
         row = self._conn.execute(
             "SELECT * FROM transfers WHERE id = ?", (id,)
@@ -4806,10 +5995,118 @@ class State:
             ).fetchall()
         return [self._row_to_transfer(r) for r in rows]
 
+    @staticmethod
+    def _transfer_has_commit_dedup_evidence(rec: TransferRecord) -> bool:
+        """Keep delivery idempotency/outcome evidence out of activity pruning.
+
+        A FILE_COMMIT response can be lost for arbitrarily long. Deleting the
+        only durable delivery-nonce/commit mapping would make that exact retry
+        look brand new and allocate a duplicate inbox path. These compact rows
+        are protocol tombstones, not disposable UI history.
+        """
+
+        metadata = dict(rec.metadata or {})
+        if rec.direction == "out":
+            # A legacy receiver cannot prove its final durable commit, and a
+            # local accounting crash after FILE_OFFER can likewise leave the
+            # remote outcome ambiguous. Removing either row would erase the
+            # sender-side no-offer guard and recreate the duplicate-delivery
+            # bug. Explicitly proven pre-wire refusals are safe to remove.
+            if metadata.get("pre_wire") is True:
+                return False
+            delivery_state = metadata.get("delivery_state")
+            if delivery_state in {"sent_unconfirmed", "outcome_unknown"}:
+                return True
+            if metadata.get("error_class") in {
+                "DeliveryUnconfirmed",
+                "SenderCommitAccountingError",
+            }:
+                return True
+            if (
+                isinstance(metadata.get("offer_boundary_contract"), dict)
+                and metadata.get("commit_confirmed") is not True
+            ):
+                return True
+            return False
+        if rec.direction != "in":
+            return False
+        for key in ("file_commit_evidence", "file_commit_prepare"):
+            evidence = metadata.get(key)
+            if not isinstance(evidence, dict):
+                continue
+            delivery_id = evidence.get("delivery_id")
+            if (
+                isinstance(delivery_id, str)
+                and len(delivery_id) == 32
+                and all(ch in "0123456789abcdef" for ch in delivery_id)
+                and evidence.get("peer_fp") == rec.peer_fp
+                and evidence.get("blob") == rec.blob_hash
+                and type(evidence.get("size")) is int
+                and int(evidence["size"]) == int(rec.size)
+            ):
+                return True
+        return False
+
     def delete_transfer(self, id: str) -> bool:
         with self._write_lock:
+            row = self._conn.execute(
+                "SELECT * FROM transfers WHERE id = ?",
+                (id,),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                raw_metadata = row["metadata_json"]
+                decoded_metadata = json.loads(raw_metadata) if raw_metadata else {}
+                if not isinstance(decoded_metadata, dict):
+                    return False
+                rec = self._row_to_transfer(row)
+            except Exception:
+                # Corrupt/unreadable accounting is not evidence that deleting
+                # a possible commit tombstone is safe.
+                return False
+            # A live transfer row is a storage/protocol root, not disposable
+            # activity history.  Cancellation first transitions it to a
+            # terminal state; only then may delete remove the ledger row and
+            # consider reclaiming daemon-owned upload staging.
+            if rec.status not in ("complete", "failed"):
+                return False
+            if self._transfer_has_commit_dedup_evidence(rec):
+                return False
             cur = self._conn.execute("DELETE FROM transfers WHERE id = ?", (id,))
-            return cur.rowcount > 0
+            deleted = cur.rowcount > 0
+            if deleted:
+                # Filesystem reclamation is deliberately subordinate to the
+                # state lock: another transfer cannot acquire the same source
+                # between last-reference proof and unlink.  The lifecycle
+                # helper fails closed (and leaves the file in place) on any
+                # unreadable row, path escape, link, or identity race.
+                try:
+                    from one_link.storage_lifecycle import (
+                        reclaim_removed_transfer_uploads,
+                    )
+
+                    result = reclaim_removed_transfer_uploads(
+                        self,
+                        [raw_metadata],
+                    )
+                    if result.errors:
+                        log.warning(
+                            "transfer %s deleted but upload cleanup retained "
+                            "its source: %s",
+                            id,
+                            "; ".join(result.errors),
+                        )
+                except Exception as exc:
+                    # Ledger deletion is already committed in autocommit mode.
+                    # Never turn an incidental cleanup failure into a caller
+                    # retry that could obscure the successful state mutation.
+                    log.warning(
+                        "transfer %s deleted; upload cleanup failed closed: %s",
+                        id,
+                        exc,
+                    )
+            return deleted
 
     def peer_had_blob(self, peer_fp: str, blob_hash: str) -> bool:
         """2026-05-22 audit Batch S — has this peer ever legitimately
@@ -4836,11 +6133,22 @@ class State:
         statuses: Iterable[str] = ("complete", "failed"),
         older_than_ms: Optional[int] = None,
         keep_latest: int = 200,
+        max_remove: int = 500,
     ) -> int:
-        clean_statuses = [str(s) for s in statuses if str(s)]
+        # Only terminal activity is eligible, regardless of caller input.
+        # Deduplication also caps SQL placeholders at two for untrusted API
+        # arrays instead of allowing a huge local request to inflate a query.
+        clean_statuses = sorted(
+            {
+                str(status)
+                for status in statuses
+                if str(status) in ("complete", "failed")
+            }
+        )
         if not clean_statuses:
             return 0
         keep_latest = max(0, int(keep_latest))
+        max_remove = max(1, min(int(max_remove), 5_000))
         params: list[Any] = clean_statuses
         where = f"status IN ({','.join('?' for _ in clean_statuses)})"
         if older_than_ms is not None:
@@ -4854,12 +6162,65 @@ class State:
                 ")"
             )
             params.append(keep_latest)
+        # Scan beyond the removal budget so old commit tombstones or corrupt
+        # fail-closed rows cannot permanently starve later disposable
+        # history. The scan itself remains finite; only ``max_remove`` rows
+        # are ever mutated per call.
+        scan_limit = min(50_000, max(5_000, max_remove * 20))
+        params.append(scan_limit)
         with self._write_lock:
-            cur = self._conn.execute(
-                f"DELETE FROM transfers WHERE {where}{keep_clause}",  # nosec B608
+            candidates = self._conn.execute(
+                f"SELECT * FROM transfers WHERE {where}{keep_clause} "  # nosec B608
+                "ORDER BY updated_ms ASC, id ASC LIMIT ?",
                 params,
+            ).fetchall()
+            removable: list[tuple[str]] = []
+            removed_metadata: list[str] = []
+            for row in candidates:
+                try:
+                    raw_metadata = row["metadata_json"]
+                    decoded_metadata = json.loads(raw_metadata) if raw_metadata else {}
+                    if not isinstance(decoded_metadata, dict):
+                        rec = None
+                    else:
+                        rec = self._row_to_transfer(row)
+                except (KeyError, TypeError, ValueError):
+                    # Fail closed on unreadable metadata; it may be the only
+                    # surviving commit proof for a delivery nonce.
+                    rec = None
+                if rec is None:
+                    continue
+                if (
+                    rec.status in ("complete", "failed")
+                    and not self._transfer_has_commit_dedup_evidence(rec)
+                ):
+                    removable.append((rec.id,))
+                    removed_metadata.append(raw_metadata)
+                    if len(removable) >= max_remove:
+                        break
+            if not removable:
+                return 0
+            self._conn.executemany(
+                "DELETE FROM transfers WHERE id = ?",
+                removable,
             )
-            return int(cur.rowcount)
+            try:
+                from one_link.storage_lifecycle import (
+                    reclaim_removed_transfer_uploads,
+                )
+
+                result = reclaim_removed_transfer_uploads(
+                    self,
+                    removed_metadata,
+                )
+                if result.errors:
+                    log.warning(
+                        "transfer prune retained one or more upload sources: %s",
+                        "; ".join(result.errors),
+                    )
+            except Exception as exc:
+                log.warning("transfer prune upload cleanup failed closed: %s", exc)
+            return len(removable)
 
     # ─── outbox (v0.7.1: store-and-forward) ──────────────────────────
 
@@ -5276,6 +6637,11 @@ class State:
         self._validate_self_mesh_pub(root_pub, "root_pub")
         if root_seed is not None and len(bytes(root_seed)) != 32:
             raise ValueError("root_seed must be 32 bytes")
+        if root_seed is not None:
+            self._validate_self_mesh_root_seed(
+                root_seed=bytes(root_seed),
+                root_pub=bytes(root_pub),
+            )
         from one_link.lockbox import maybe_wrap as _lb_wrap
 
         now = _now_ms()
@@ -5531,16 +6897,18 @@ class State:
             }
 
     def is_self_mesh_peer(self, peer_fp: str) -> bool:
-        """v0.21.x: True iff the peer fingerprint matches one of OUR
-        self-mesh devices (same identity-root, different physical
-        device). Used by folder receive flow to AUTO-ACCEPT incoming
-        folder offers from our own devices — implicit consent.
+        """Return whether ``peer_fp`` is a currently eligible self device.
 
-        Compares fingerprint_of(device_pub) for every non-revoked
-        self_mesh_devices row against the supplied peer_fp. Returns
-        False on any malformed input rather than raising.
+        This predicate grants implicit consent to inbound folder offers, so a
+        mere database row is not authority.  The row must represent another
+        physical device, remain trusted and route-eligible, and carry a live
+        root-signed certificate binding its root, public key, and device kind.
+        Malformed or legacy uncertified rows fail closed and can be re-enrolled.
         """
+        from one_link.device_guardian import safety_blocks_routing
         from one_link.identity import fingerprint_of
+        from one_link.identity_dag import verify_device_cert
+
         if not isinstance(peer_fp, str) or not peer_fp:
             return False
         target = peer_fp.lower()
@@ -5549,13 +6917,34 @@ class State:
         except Exception:
             return False
         for row in rows:
+            if (
+                bool(row.get("local"))
+                or not bool(row.get("trusted"))
+                or bool(row.get("revoked"))
+                or safety_blocks_routing(row.get("safety_state"))
+            ):
+                continue
             pub = row.get("device_pub")
-            if not isinstance(pub, (bytes, bytearray)) or len(pub) != 32:
+            root_pub = row.get("root_pub")
+            cert = row.get("cert")
+            if (
+                not isinstance(pub, bytes)
+                or len(pub) != 32
+                or not isinstance(root_pub, bytes)
+                or len(root_pub) != 32
+                or not isinstance(cert, bytes)
+                or not cert
+            ):
                 continue
             try:
-                fp = fingerprint_of(bytes(pub))
-            except Exception:
+                parsed = verify_device_cert(cert, expected_root_pub=root_pub)
+            except (TypeError, ValueError):
+                parsed = None
+            if parsed is None:
                 continue
+            if parsed.device_pub != pub or parsed.device_kind != row.get("device_kind"):
+                continue
+            fp = fingerprint_of(pub)
             if fp and fp.lower() == target:
                 return True
         return False
@@ -5708,43 +7097,92 @@ class State:
         """Remember a remote-instruct command id.
 
         Returns True on first sight and False for a replay. Expired rows
-        are pruned before insertion so the table stays bounded.
+        are pruned before insertion. New ids fail closed at a hard capacity
+        rather than evicting still-live replay evidence. The insert is
+        FULL-synchronized before the caller is allowed to execute the command,
+        so an immediate crash or power loss cannot silently reopen the replay
+        window.
         """
-        cid = str(command_id or "").strip()
-        if not cid:
-            raise ValueError("command_id is required")
-        if len(cid) > 128:
-            raise ValueError("command_id is too long")
-        now = _now_ms() if now_ms is None else int(now_ms)
-        exp = int(expires_ms)
+        if (
+            not isinstance(command_id, str)
+            or len(command_id) != 64
+            or any(ch not in _LOWER_HEX_CHARS for ch in command_id)
+        ):
+            raise ValueError("command_id must be lowercase SHA-256 hex")
+        cid = command_id
+        if now_ms is None:
+            now = _now_ms()
+        else:
+            if isinstance(now_ms, bool) or not isinstance(now_ms, int):
+                raise ValueError("now_ms must be an integer")
+            now = now_ms
+        if isinstance(expires_ms, bool) or not isinstance(expires_ms, int):
+            raise ValueError("expires_ms must be an integer")
+        exp = expires_ms
+        if not (0 <= now <= 2**63 - 1 and 0 <= exp <= 2**63 - 1):
+            raise ValueError("remote instruction timestamp out of range")
         if exp <= now:
             raise ValueError("expires_ms must be in the future")
+        if exp - now > MAX_REMOTE_INSTRUCTION_REPLAY_RETENTION_MS:
+            raise ValueError("expires_ms exceeds replay retention limit")
+        if not isinstance(action, str):
+            raise ValueError("action must be text")
+        if len(action) > 80 or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in action):
+            raise ValueError("action is invalid")
         if controller_device_pub is not None:
             self._validate_self_mesh_pub(controller_device_pub, "controller_device_pub")
         if target_device_pub is not None:
             self._validate_self_mesh_pub(target_device_pub, "target_device_pub")
+        synchronous_names = {0: "OFF", 1: "NORMAL", 2: "FULL", 3: "EXTRA"}
         with self._write_lock:
-            self._conn.execute(
-                "DELETE FROM remote_instruction_seen WHERE expires_ms <= ?",
-                (now,),
-            )
-            cur = self._conn.execute(
-                """
-                INSERT OR IGNORE INTO remote_instruction_seen(
-                    command_id, first_seen_ms, expires_ms, action,
-                    controller_device_pub, target_device_pub
-                ) VALUES(?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    cid,
-                    now,
-                    exp,
-                    str(action or "")[:80],
-                    bytes(controller_device_pub) if controller_device_pub is not None else None,
-                    bytes(target_device_pub) if target_device_pub is not None else None,
-                ),
-            )
-            return int(cur.rowcount) == 1
+            row = self._conn.execute("PRAGMA synchronous").fetchone()
+            previous_sync = int(row[0]) if row else 1
+            self._conn.execute("PRAGMA synchronous = FULL")
+            try:
+                self._conn.execute(
+                    "DELETE FROM remote_instruction_seen WHERE expires_ms <= ?",
+                    (now,),
+                )
+                cur = self._conn.execute(
+                    """
+                    INSERT OR IGNORE INTO remote_instruction_seen(
+                        command_id, first_seen_ms, expires_ms, action,
+                        controller_device_pub, target_device_pub
+                    )
+                    SELECT ?, ?, ?, ?, ?, ?
+                    WHERE (
+                        SELECT COUNT(*) FROM remote_instruction_seen
+                    ) < ?
+                    """,
+                    (
+                        cid,
+                        now,
+                        exp,
+                        action,
+                        (
+                            bytes(controller_device_pub)
+                            if controller_device_pub is not None else None
+                        ),
+                        (
+                            bytes(target_device_pub)
+                            if target_device_pub is not None else None
+                        ),
+                        MAX_REMOTE_INSTRUCTION_SEEN_ROWS,
+                    ),
+                )
+                if int(cur.rowcount) == 1:
+                    return True
+                replay = self._conn.execute(
+                    "SELECT 1 FROM remote_instruction_seen WHERE command_id = ?",
+                    (cid,),
+                ).fetchone()
+                if replay is not None:
+                    return False
+                raise RuntimeError("remote instruction replay cache is full")
+            finally:
+                self._conn.execute(
+                    f"PRAGMA synchronous = {synchronous_names.get(previous_sync, 'NORMAL')}"
+                )
 
     def record_self_mesh_audit(
         self,
@@ -5893,6 +7331,28 @@ class State:
         ).fetchall()
         return [self._row_to_self_mesh_perf_sample(r) for r in rows]
 
+    def _outbox_usage(self, peer_fp: str) -> tuple[int, int, int]:
+        """Return (pending rows, pending payload bytes, all rows) for a peer."""
+
+        cached = self._outbox_usage_cache.get(peer_fp)
+        if cached is not None:
+            return cached
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS total, "
+            "COALESCE(SUM(CASE WHEN delivered_ms IS NULL THEN 1 ELSE 0 END), 0) "
+            "AS pending, COALESCE(SUM(CASE WHEN delivered_ms IS NULL THEN "
+            "length(CAST(msg_body_json AS BLOB)) ELSE 0 END), 0) AS bytes "
+            "FROM outbox WHERE peer_fp = ?",
+            (peer_fp,),
+        ).fetchone()
+        cached = (
+            int(row["pending"] if row else 0),
+            int(row["bytes"] if row else 0),
+            int(row["total"] if row else 0),
+        )
+        self._outbox_usage_cache[peer_fp] = cached
+        return cached
+
     def enqueue_outbox(
         self,
         *,
@@ -5906,25 +7366,74 @@ class State:
         (delivered or not), returns the existing row id — idempotent."""
         if not peer_fp or not msg_id:
             raise ValueError("peer_fp and msg_id required")
-        body_json = json.dumps(msg_body, separators=(",", ":"))
+        body_json = json.dumps(
+            msg_body, separators=(",", ":"), sort_keys=True, allow_nan=False,
+        )
+        body_size = len(body_json.encode("utf-8"))
+        if body_size > MAX_OUTBOX_BODY_BYTES:
+            raise MessageQuotaExceeded("outbox message exceeds payload limit")
         now = _now_ms()
         with self._write_lock:
+            row = self._conn.execute(
+                "SELECT id, msg_kind, msg_body_json FROM outbox "
+                "WHERE peer_fp = ? AND msg_id = ?",
+                (peer_fp, msg_id),
+            ).fetchone()
+            if row is not None:
+                try:
+                    stored_json = json.dumps(
+                        json.loads(row["msg_body_json"]), separators=(",", ":"),
+                        sort_keys=True, allow_nan=False,
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise MessageIdConflict(
+                        f"stored outbox message {msg_id!r} is invalid"
+                    ) from exc
+                if row["msg_kind"] != msg_kind or stored_json != body_json:
+                    raise MessageIdConflict(
+                        f"outbox message id {msg_id!r} was reused for different content"
+                    )
+                return int(row["id"])
+
+            pending, pending_bytes, total = self._outbox_usage(peer_fp)
+            if total >= MAX_OUTBOX_ROWS_PER_PEER:
+                prune_count = max(
+                    1000, total - MAX_OUTBOX_ROWS_PER_PEER + 1,
+                )
+                pruned = self._conn.execute(
+                    "DELETE FROM outbox WHERE id IN ("
+                    "SELECT id FROM outbox WHERE peer_fp = ? "
+                    "AND delivered_ms IS NOT NULL "
+                    "ORDER BY delivered_ms ASC, id ASC LIMIT ?)",
+                    (peer_fp, prune_count),
+                )
+                total -= int(pruned.rowcount or 0)
+            if (
+                total >= MAX_OUTBOX_ROWS_PER_PEER
+                or pending >= MAX_OUTBOX_PENDING_PER_PEER
+                or pending_bytes + body_size
+                > MAX_OUTBOX_PENDING_BYTES_PER_PEER
+            ):
+                self._outbox_usage_cache[peer_fp] = (
+                    pending, pending_bytes, total,
+                )
+                raise MessageQuotaExceeded(
+                    "outbox quota reached; deliver or cancel pending messages"
+                )
             cur = self._conn.execute(
                 """
                 INSERT INTO outbox(
                     peer_fp, msg_id, msg_kind, msg_body_json, enqueued_ms
                 ) VALUES(?, ?, ?, ?, ?)
-                ON CONFLICT(peer_fp, msg_id) DO NOTHING
                 """,
                 (peer_fp, msg_id, msg_kind, body_json, now),
             )
-            if cur.rowcount > 0 and cur.lastrowid is not None:
-                return int(cur.lastrowid)
-            row = self._conn.execute(
-                "SELECT id FROM outbox WHERE peer_fp = ? AND msg_id = ?",
-                (peer_fp, msg_id),
-            ).fetchone()
-            return int(row["id"]) if row else -1
+            if cur.lastrowid is None:
+                raise RuntimeError("outbox insert did not return a row id")
+            self._outbox_usage_cache[peer_fp] = (
+                pending + 1, pending_bytes + body_size, total + 1,
+            )
+            return int(cur.lastrowid)
 
     def list_outbox(
         self,
@@ -5963,12 +7472,30 @@ class State:
 
     def mark_outbox_delivered(self, entry_id: int) -> bool:
         with self._write_lock:
+            row = self._conn.execute(
+                "SELECT peer_fp, length(CAST(msg_body_json AS BLOB)) AS bytes "
+                "FROM outbox WHERE id = ? AND delivered_ms IS NULL",
+                (int(entry_id),),
+            ).fetchone()
+            if row is None:
+                return False
             cur = self._conn.execute(
                 "UPDATE outbox SET delivered_ms = ?, last_error = NULL"
                 " WHERE id = ? AND delivered_ms IS NULL",
                 (_now_ms(), int(entry_id)),
             )
-            return cur.rowcount > 0
+            changed = cur.rowcount > 0
+            if changed:
+                peer_fp = str(row["peer_fp"])
+                usage = self._outbox_usage_cache.get(peer_fp)
+                if usage is not None:
+                    pending, pending_bytes, total = usage
+                    self._outbox_usage_cache[peer_fp] = (
+                        max(0, pending - 1),
+                        max(0, pending_bytes - int(row["bytes"] or 0)),
+                        total,
+                    )
+            return changed
 
     def record_outbox_attempt(
         self, entry_id: int, *, error: Optional[str] = None,
@@ -5983,11 +7510,29 @@ class State:
     def cancel_outbox(self, entry_id: int) -> bool:
         """Drop a pending entry without delivery. Idempotent."""
         with self._write_lock:
+            row = self._conn.execute(
+                "SELECT peer_fp, length(CAST(msg_body_json AS BLOB)) AS bytes "
+                "FROM outbox WHERE id = ? AND delivered_ms IS NULL",
+                (int(entry_id),),
+            ).fetchone()
+            if row is None:
+                return False
             cur = self._conn.execute(
                 "DELETE FROM outbox WHERE id = ? AND delivered_ms IS NULL",
                 (int(entry_id),),
             )
-            return cur.rowcount > 0
+            changed = cur.rowcount > 0
+            if changed:
+                peer_fp = str(row["peer_fp"])
+                usage = self._outbox_usage_cache.get(peer_fp)
+                if usage is not None:
+                    pending, pending_bytes, total = usage
+                    self._outbox_usage_cache[peer_fp] = (
+                        max(0, pending - 1),
+                        max(0, pending_bytes - int(row["bytes"] or 0)),
+                        max(0, total - 1),
+                    )
+            return changed
 
     def clear_outbox_for_peer(self, peer_fp: str) -> int:
         """Drop every (delivered or not) outbox row for a peer.
@@ -5997,6 +7542,7 @@ class State:
             cur = self._conn.execute(
                 "DELETE FROM outbox WHERE peer_fp = ?", (peer_fp,),
             )
+            self._outbox_usage_cache.pop(peer_fp, None)
             return int(cur.rowcount)
 
     def prune_outbox(
@@ -6020,6 +7566,7 @@ class State:
         sql = "DELETE FROM outbox WHERE " + " AND ".join(clauses)  # nosec B608
         with self._write_lock:
             cur = self._conn.execute(sql, tuple(params))
+            self._outbox_usage_cache.clear()
             return int(cur.rowcount)
 
     def _row_to_outbox(self, row: sqlite3.Row) -> OutboxEntry:
@@ -6074,6 +7621,27 @@ class State:
         if not isinstance(value, (bytes, bytearray)) or len(value) != 32:
             raise ValueError(f"{name} must be 32 bytes")
 
+    @staticmethod
+    def _validate_self_mesh_root_seed(*, root_seed: bytes, root_pub: bytes) -> None:
+        """Reject corrupt or mismatched personal-mesh root material.
+
+        The public key is stored separately from the wrapped seed.  Checking
+        the relationship at both write and unwrap time prevents a damaged or
+        tampered seed from minting certificates that appear successful but
+        can never verify against the advertised root identity.
+        """
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PrivateKey,
+        )
+
+        if len(root_seed) != 32:
+            raise ValueError("root_seed must be 32 bytes")
+        derived_pub = Ed25519PrivateKey.from_private_bytes(
+            root_seed
+        ).public_key().public_bytes_raw()
+        if not secrets.compare_digest(derived_pub, root_pub):
+            raise ValueError("root_seed does not match root_pub")
+
     def _row_to_self_mesh_root(
         self,
         row: sqlite3.Row,
@@ -6093,8 +7661,33 @@ class State:
             "metadata": metadata if isinstance(metadata, dict) else {},
         }
         if include_seed and row["root_seed"] is not None:
-            from one_link.lockbox import maybe_unwrap as _lb_unwrap
-            out["root_seed"] = _lb_unwrap(bytes(row["root_seed"]), self._lockbox)
+            # A cleartext root seed is exactly 32 bytes; wrapping that seed
+            # produces 61 bytes (marker + nonce + ciphertext + tag).  Length
+            # is therefore the authoritative discriminator.  The generic
+            # one-byte marker check has a 1/256 false-positive rate for random
+            # 32-byte seeds, which previously made enrollment minting fail
+            # intermittently whenever a valid seed happened to begin 0x01.
+            stored_seed = bytes(row["root_seed"])
+            if len(stored_seed) == 32:
+                root_seed = stored_seed
+            elif len(stored_seed) == 61:
+                if self._lockbox is None:
+                    raise RuntimeError(
+                        "found a non-cleartext self-mesh root seed but no "
+                        "lockbox is configured (was ONE_LINK_PASSPHRASE "
+                        "removed?)"
+                    )
+                root_seed = self._lockbox.unwrap(stored_seed)
+            else:
+                raise ValueError(
+                    "invalid stored self-mesh root seed length: "
+                    f"{len(stored_seed)}"
+                )
+            self._validate_self_mesh_root_seed(
+                root_seed=root_seed,
+                root_pub=bytes(row["root_pub"]),
+            )
+            out["root_seed"] = root_seed
         return out
 
     def _row_to_self_mesh_device(self, row: sqlite3.Row) -> dict:
@@ -7093,6 +8686,304 @@ class State:
 
     # ─── manifest (CRDT entries per file) ─────────────────────────────
 
+    @staticmethod
+    def _validate_pending_apply_artifact_name(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        name = str(value)
+        if (
+            not name
+            or len(name.encode("utf-8")) > 160
+            or Path(name).name != name
+            or "/" in name
+            or "\\" in name
+            or not name.startswith(".one-link-")
+            or not name.endswith(".tmp")
+        ):
+            raise ValueError("invalid pending-apply artifact leaf name")
+        return name
+
+    @staticmethod
+    def _validate_pending_apply_hash(
+        value: object,
+        *,
+        nullable: bool,
+    ) -> Optional[str]:
+        if value is None and nullable:
+            return None
+        if not isinstance(value, str) or (
+            len(value) != 64
+            or any(ch not in _LOWER_HEX_CHARS for ch in value)
+        ):
+            raise ValueError("pending-apply hash must be canonical lower hex")
+        return value
+
+    @classmethod
+    def _normalize_folder_pending_apply(
+        cls,
+        *,
+        folder_name: str,
+        value: dict[str, Any],
+    ) -> dict[str, Any]:
+        apply_id = str(value.get("apply_id") or "")
+        if len(apply_id) != 32 or any(
+            ch not in _LOWER_HEX_CHARS for ch in apply_id
+        ):
+            raise ValueError("pending apply_id must be 128-bit lower hex")
+        file_path = str(value.get("file_path") or "")
+        if (
+            not file_path
+            or len(file_path.encode("utf-8")) > 16 * 1024
+            or "\x00" in file_path
+        ):
+            raise ValueError("invalid pending-apply file path")
+        operation = str(value.get("operation") or "")
+        if operation not in _FOLDER_PENDING_APPLY_OPERATIONS:
+            raise ValueError("invalid pending-apply operation")
+        target_hash = cls._validate_pending_apply_hash(
+            value.get("target_blob_hash"),
+            nullable=operation == "delete",
+        )
+        if operation == "delete" and target_hash is not None:
+            raise ValueError("delete pending apply cannot have a target hash")
+        baseline_hash = cls._validate_pending_apply_hash(
+            value.get("baseline_blob_hash"),
+            nullable=True,
+        )
+        raw_evidence = value.get("baseline_evidence")
+        baseline_evidence: tuple[int, int, int, int, int] | None = None
+        if raw_evidence is not None:
+            if (
+                not isinstance(raw_evidence, (list, tuple))
+                or len(raw_evidence) != 5
+                or any(type(item) is not int or item < 0 for item in raw_evidence)
+            ):
+                raise ValueError("invalid pending-apply baseline evidence")
+            baseline_evidence = tuple(raw_evidence)  # type: ignore[assignment]
+        if (baseline_hash is None) != (baseline_evidence is None):
+            raise ValueError("baseline hash and evidence must be present together")
+        target_size_raw = value.get("target_size")
+        target_size = None
+        if target_size_raw is not None:
+            if type(target_size_raw) is not int or target_size_raw < 0:
+                raise ValueError("invalid pending-apply target size")
+            target_size = int(target_size_raw)
+        if operation == "materialize" and target_size is None:
+            raise ValueError("materialize pending apply requires target size")
+        target_mtime_raw = value.get("target_mtime_ms")
+        target_mtime = None
+        if target_mtime_raw is not None:
+            if type(target_mtime_raw) is not int or target_mtime_raw < 0:
+                raise ValueError("invalid pending-apply target mtime")
+            target_mtime = int(target_mtime_raw)
+        raw_vclock = value.get("target_vclock")
+        if not isinstance(raw_vclock, dict):
+            raise ValueError("pending apply requires a target vector clock")
+        target_vclock: dict[str, int] = {}
+        if len(raw_vclock) > 65_536:
+            raise ValueError("pending-apply vector clock exceeds safety bound")
+        for key, counter in raw_vclock.items():
+            if (
+                not isinstance(key, str)
+                or not key
+                or len(key.encode("utf-8")) > 512
+                or type(counter) is not int
+                or counter < 0
+            ):
+                raise ValueError("invalid pending-apply vector clock")
+            target_vclock[key] = counter
+        phase = str(value.get("phase") or "planned")
+        if phase not in _FOLDER_PENDING_APPLY_PHASES:
+            raise ValueError("invalid pending-apply phase")
+        return {
+            "apply_id": apply_id,
+            "folder_name": str(folder_name),
+            "file_path": file_path,
+            "operation": operation,
+            "target_blob_hash": target_hash,
+            "target_size": target_size,
+            "target_mtime_ms": target_mtime,
+            "target_vclock": target_vclock,
+            "baseline_blob_hash": baseline_hash,
+            "baseline_evidence": baseline_evidence,
+            "phase": phase,
+            "staging_name": cls._validate_pending_apply_artifact_name(
+                value.get("staging_name"),
+            ),
+            "recovery_name": cls._validate_pending_apply_artifact_name(
+                value.get("recovery_name"),
+            ),
+        }
+
+    @classmethod
+    def _row_to_folder_pending_apply(
+        cls,
+        row: sqlite3.Row,
+    ) -> dict[str, Any]:
+        raw_clock = json.loads(str(row["target_vclock_json"]))
+        raw_evidence = (
+            json.loads(str(row["baseline_evidence_json"]))
+            if row["baseline_evidence_json"] is not None
+            else None
+        )
+        if not isinstance(raw_clock, dict):
+            raise ValueError("corrupt pending-apply vector clock")
+        if raw_evidence is not None and (
+            not isinstance(raw_evidence, list) or len(raw_evidence) != 5
+        ):
+            raise ValueError("corrupt pending-apply baseline evidence")
+        normalized = cls._normalize_folder_pending_apply(
+            folder_name=str(row["folder_name"]),
+            value={
+            "apply_id": str(row["apply_id"]),
+            "file_path": str(row["file_path"]),
+            "operation": str(row["operation"]),
+            "target_blob_hash": row["target_blob_hash"],
+            "target_size": row["target_size"],
+            "target_mtime_ms": row["target_mtime_ms"],
+            "target_vclock": {
+                str(key): int(counter) for key, counter in raw_clock.items()
+            },
+            "baseline_blob_hash": row["baseline_blob_hash"],
+            "baseline_evidence": (
+                tuple(int(item) for item in raw_evidence)
+                if raw_evidence is not None
+                else None
+            ),
+            "phase": str(row["phase"]),
+            "staging_name": row["staging_name"],
+            "recovery_name": row["recovery_name"],
+            },
+        )
+        normalized.update({
+            "attempts": int(row["attempts"]),
+            "last_error": row["last_error"],
+            "created_ms": int(row["created_ms"]),
+            "updated_ms": int(row["updated_ms"]),
+        })
+        return normalized
+
+    def get_folder_pending_apply(
+        self,
+        folder_name: str,
+        file_path: str,
+    ) -> Optional[dict[str, Any]]:
+        row = self._conn.execute(
+            "SELECT * FROM folder_pending_applies "
+            "WHERE folder_name=? AND file_path=?",
+            (folder_name, file_path),
+        ).fetchone()
+        return self._row_to_folder_pending_apply(row) if row is not None else None
+
+    def list_folder_pending_applies(
+        self,
+        *,
+        folder_name: Optional[str] = None,
+        limit: int = MAX_FOLDER_PENDING_APPLIES,
+    ) -> list[dict[str, Any]]:
+        bounded = max(0, min(int(limit), MAX_FOLDER_PENDING_APPLIES))
+        if folder_name is None:
+            rows = self._conn.execute(
+                "SELECT * FROM folder_pending_applies "
+                "ORDER BY created_ms, apply_id LIMIT ?",
+                (bounded,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM folder_pending_applies WHERE folder_name=? "
+                "ORDER BY created_ms, apply_id LIMIT ?",
+                (folder_name, bounded),
+            ).fetchall()
+        return [self._row_to_folder_pending_apply(row) for row in rows]
+
+    def transition_folder_pending_apply(
+        self,
+        *,
+        apply_id: str,
+        phase: str,
+        staging_name: Optional[str],
+        recovery_name: Optional[str],
+        last_error: Optional[str] = None,
+        increment_attempts: bool = False,
+    ) -> bool:
+        """Durably publish a journal phase before its filesystem mutation."""
+
+        if phase not in _FOLDER_PENDING_APPLY_PHASES:
+            raise ValueError("invalid pending-apply phase")
+        staging = self._validate_pending_apply_artifact_name(staging_name)
+        recovery = self._validate_pending_apply_artifact_name(recovery_name)
+        error = None if last_error is None else str(last_error)[:2048]
+        with self._write_lock:
+            previous_row = self._conn.execute("PRAGMA synchronous").fetchone()
+            previous = int(previous_row[0]) if previous_row else 1
+            sync_names = {0: "OFF", 1: "NORMAL", 2: "FULL", 3: "EXTRA"}
+            self._conn.execute("PRAGMA synchronous=FULL")
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                cur = self._conn.execute(
+                    "UPDATE folder_pending_applies SET phase=?, staging_name=?, "
+                    "recovery_name=?, last_error=?, attempts=attempts+?, "
+                    "updated_ms=? WHERE apply_id=?",
+                    (
+                        phase,
+                        staging,
+                        recovery,
+                        error,
+                        1 if increment_attempts else 0,
+                        _now_ms(),
+                        apply_id,
+                    ),
+                )
+                self._conn.execute("COMMIT")
+                return int(cur.rowcount or 0) == 1
+            except BaseException:
+                with contextlib.suppress(*DB_ERRORS):
+                    self._conn.execute("ROLLBACK")
+                raise
+            finally:
+                self._conn.execute(
+                    f"PRAGMA synchronous={sync_names.get(previous, 'NORMAL')}"
+                )
+
+    def delete_folder_pending_apply(
+        self,
+        *,
+        folder_name: str,
+        file_path: str,
+        apply_id: Optional[str] = None,
+    ) -> bool:
+        """Durably retire exactly one completed/superseded journal row."""
+
+        with self._write_lock:
+            previous_row = self._conn.execute("PRAGMA synchronous").fetchone()
+            previous = int(previous_row[0]) if previous_row else 1
+            sync_names = {0: "OFF", 1: "NORMAL", 2: "FULL", 3: "EXTRA"}
+            self._conn.execute("PRAGMA synchronous=FULL")
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                if apply_id is None:
+                    cur = self._conn.execute(
+                        "DELETE FROM folder_pending_applies "
+                        "WHERE folder_name=? AND file_path=?",
+                        (folder_name, file_path),
+                    )
+                else:
+                    cur = self._conn.execute(
+                        "DELETE FROM folder_pending_applies "
+                        "WHERE folder_name=? AND file_path=? AND apply_id=?",
+                        (folder_name, file_path, apply_id),
+                    )
+                self._conn.execute("COMMIT")
+                return int(cur.rowcount or 0) == 1
+            except BaseException:
+                with contextlib.suppress(*DB_ERRORS):
+                    self._conn.execute("ROLLBACK")
+                raise
+            finally:
+                self._conn.execute(
+                    f"PRAGMA synchronous={sync_names.get(previous, 'NORMAL')}"
+                )
+
     def upsert_manifest_entry(
         self,
         *,
@@ -7102,26 +8993,42 @@ class State:
         size: Optional[int],
         mtime_ms: Optional[int],
         vclock: dict[str, int],
+        clear_pending_apply: bool = False,
     ) -> None:
         with self._write_lock:
-            self._conn.execute(
-                """
-                INSERT INTO folder_manifest(
-                    folder_name, file_path, blob_hash, size, mtime_ms,
-                    vclock_json, updated_ms
-                ) VALUES(?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(folder_name, file_path) DO UPDATE SET
-                    blob_hash    = excluded.blob_hash,
-                    size         = excluded.size,
-                    mtime_ms     = excluded.mtime_ms,
-                    vclock_json  = excluded.vclock_json,
-                    updated_ms   = excluded.updated_ms
-                """,
-                (
-                    folder_name, file_path, blob_hash, size, mtime_ms,
-                    json.dumps(vclock, sort_keys=True), _now_ms(),
-                ),
-            )
+            if clear_pending_apply:
+                self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO folder_manifest(
+                        folder_name, file_path, blob_hash, size, mtime_ms,
+                        vclock_json, updated_ms
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(folder_name, file_path) DO UPDATE SET
+                        blob_hash    = excluded.blob_hash,
+                        size         = excluded.size,
+                        mtime_ms     = excluded.mtime_ms,
+                        vclock_json  = excluded.vclock_json,
+                        updated_ms   = excluded.updated_ms
+                    """,
+                    (
+                        folder_name, file_path, blob_hash, size, mtime_ms,
+                        json.dumps(vclock, sort_keys=True), _now_ms(),
+                    ),
+                )
+                if clear_pending_apply:
+                    self._conn.execute(
+                        "DELETE FROM folder_pending_applies "
+                        "WHERE folder_name=? AND file_path=?",
+                        (folder_name, file_path),
+                    )
+                    self._conn.execute("COMMIT")
+            except BaseException:
+                if clear_pending_apply:
+                    with contextlib.suppress(*DB_ERRORS):
+                        self._conn.execute("ROLLBACK")
+                raise
 
     def get_manifest_entry(
         self, folder_name: str, file_path: str
@@ -7138,6 +9045,39 @@ class State:
             (folder_name,),
         ).fetchall()
         return [self._row_to_manifest(r) for r in rows]
+
+    def list_manifest_entries_by_blob(
+        self,
+        blob_hash: str,
+        *,
+        limit: int = 4096,
+        after: Optional[tuple[str, str]] = None,
+    ) -> list[dict]:
+        """Return one keyset-paginated page addressed by an arrived blob."""
+
+        canonical = self._validate_pending_apply_hash(blob_hash, nullable=False)
+        bounded = max(0, min(int(limit), MAX_FOLDER_PENDING_APPLIES))
+        if after is None:
+            rows = self._conn.execute(
+                "SELECT * FROM folder_manifest WHERE blob_hash=? "
+                "ORDER BY folder_name, file_path LIMIT ?",
+                (canonical, bounded),
+            ).fetchall()
+        else:
+            after_folder, after_path = str(after[0]), str(after[1])
+            rows = self._conn.execute(
+                "SELECT * FROM folder_manifest WHERE blob_hash=? AND "
+                "(folder_name>? OR (folder_name=? AND file_path>?)) "
+                "ORDER BY folder_name, file_path LIMIT ?",
+                (
+                    canonical,
+                    after_folder,
+                    after_folder,
+                    after_path,
+                    bounded,
+                ),
+            ).fetchall()
+        return [self._row_to_manifest(row) for row in rows]
 
     def _row_to_manifest(self, row: sqlite3.Row) -> dict:
         return {
@@ -7451,20 +9391,15 @@ class State:
         after the on-disk cache file has been unlinked so a future
         ``has_chunk`` query doesn't falsely claim we still hold it.
 
-        Idempotent — if the row is already absent (or the schema
-        somehow rejects the delete), we swallow it; the cache file
-        is what matters and that's already gone.
+        Idempotent when the row is already absent. Database failures are
+        propagated so the caller can report the stale availability index;
+        silently retaining the row would make ``has_chunk`` lie.
         """
-        try:
-            with self._write_lock:
-                self._conn.execute(
-                    "DELETE FROM chunk_availability WHERE chunk_hash = ?",
-                    (str(chunk_hash),),
-                )
-        except Exception:
-            # Defensive — see docstring. State-DB errors must not
-            # take down the daemon's startup path.
-            pass
+        with self._write_lock:
+            self._conn.execute(
+                "DELETE FROM chunk_availability WHERE chunk_hash = ?",
+                (str(chunk_hash),),
+            )
 
     def has_chunk(self, chunk_hash: str) -> bool:
         row = self._conn.execute(
@@ -7562,12 +9497,18 @@ class State:
         )
         clean: list[tuple[str, str, int, int, int, int, str, int]] = []
         avail: list[tuple[str, int, str, int]] = []
-        for c in chunks:
+        for index, c in enumerate(chunks):
             try:
                 chunk_hash = str(c["hash"])
                 start = int(c["start"])
                 size = int(c.get("size", int(c["end"]) - start))
-            except Exception:
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                log.warning(
+                    "record_chunk_sources_for_file: skipping malformed "
+                    "chunk index=%d (%s)",
+                    index,
+                    type(exc).__name__,
+                )
                 continue
             if not chunk_hash or start < 0 or size <= 0:
                 continue
@@ -7643,6 +9584,40 @@ class State:
             }
             for r in rows
         ]
+
+    def forget_chunk_source(
+        self,
+        chunk_hash: str,
+        *,
+        path: str,
+        start: int,
+    ) -> None:
+        """Forget one stale lazy-source claim.
+
+        Source rows are only advisory: files can be deleted, replaced, or
+        modified after they were indexed.  Readers call this after proving a
+        row no longer identifies the promised chunk so future availability
+        checks do not repeatedly reopen the same invalid source.
+        """
+        wrapped_path = self._wrap_path(
+            str(path), aad=self._PATH_PII_AAD_CHUNK_SOURCES,
+        )
+        with self._write_lock:
+            self._conn.execute(
+                "DELETE FROM chunk_sources "
+                "WHERE chunk_hash = ? AND path = ? AND start = ?",
+                (str(chunk_hash), wrapped_path, int(start)),
+            )
+            remaining = self._conn.execute(
+                "SELECT 1 FROM chunk_sources WHERE chunk_hash = ? LIMIT 1",
+                (str(chunk_hash),),
+            ).fetchone()
+            if remaining is None:
+                self._conn.execute(
+                    "DELETE FROM chunk_availability "
+                    "WHERE chunk_hash = ? AND source != 'local'",
+                    (str(chunk_hash),),
+                )
 
     def find_complete_source_file(
         self,
@@ -7794,6 +9769,11 @@ class State:
         blob_hash: str,
         index_kind: str,
         chunks: Iterable[dict],
+        dev: int | str = 0,
+        ino: int | str = 0,
+        file_id: str = "",
+        change_ns: int | str = 0,
+        index_mode: str = "",
     ) -> None:
         clean_chunks: list[dict] = []
         for c in chunks:
@@ -7813,8 +9793,9 @@ class State:
                 """
                 INSERT INTO file_index_cache(
                     path, size, mtime_ns, ctime_ns, blob_hash, index_kind,
-                    chunks_json, updated_ms
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    chunks_json, updated_ms, device_id, inode_id, file_id,
+                    change_ns, index_mode
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     size = excluded.size,
                     mtime_ns = excluded.mtime_ns,
@@ -7822,7 +9803,12 @@ class State:
                     blob_hash = excluded.blob_hash,
                     index_kind = excluded.index_kind,
                     chunks_json = excluded.chunks_json,
-                    updated_ms = excluded.updated_ms
+                    updated_ms = excluded.updated_ms,
+                    device_id = excluded.device_id,
+                    inode_id = excluded.inode_id,
+                    file_id = excluded.file_id,
+                    change_ns = excluded.change_ns,
+                    index_mode = excluded.index_mode
                 """,
                 (
                     wrapped_path,
@@ -7833,8 +9819,149 @@ class State:
                     str(index_kind or "unknown"),
                     json.dumps(clean_chunks, separators=(",", ":")),
                     _now_ms(),
+                    str(dev),
+                    str(ino),
+                    str(file_id or ""),
+                    str(change_ns),
+                    str(index_mode or index_kind or "unknown"),
                 ),
             )
+
+    def upsert_manifest_entries_atomic(
+        self,
+        *,
+        folder_name: str,
+        entries: Iterable[dict[str, Any]],
+        pending_applies: Optional[Iterable[dict[str, Any]]] = None,
+    ) -> None:
+        """Commit one reconciled manifest generation atomically and durably.
+
+        Receipt-critical folder merge rows must never become visible as a
+        prefix when a later row fails.  FULL synchronous mode is scoped to
+        this transaction so a positive durable receipt is backed by the WAL
+        commit rather than the process cache alone.
+        """
+
+        rows = list(entries)
+        if not rows:
+            return
+        if len(rows) > MAX_FOLDER_PENDING_APPLIES:
+            raise ValueError("manifest generation exceeds the durable safety bound")
+        normalized_pending = None
+        if pending_applies is not None:
+            normalized_pending = [
+                self._normalize_folder_pending_apply(
+                    folder_name=folder_name,
+                    value=dict(value),
+                )
+                for value in pending_applies
+            ]
+            entry_paths = {str(row["file_path"]) for row in rows}
+            pending_paths = {row["file_path"] for row in normalized_pending}
+            if len(pending_paths) != len(normalized_pending):
+                raise ValueError("duplicate pending apply path in manifest generation")
+            if not pending_paths.issubset(entry_paths):
+                raise ValueError("pending apply path is outside manifest generation")
+        with self._write_lock:
+            previous_sync_row = self._conn.execute(
+                "PRAGMA synchronous",
+            ).fetchone()
+            previous_sync = int(previous_sync_row[0]) if previous_sync_row else 1
+            sync_names = {0: "OFF", 1: "NORMAL", 2: "FULL", 3: "EXTRA"}
+            self._conn.execute("PRAGMA synchronous=FULL")
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                updated_ms = _now_ms()
+                self._conn.executemany(
+                    """
+                    INSERT INTO folder_manifest(
+                        folder_name, file_path, blob_hash, size, mtime_ms,
+                        vclock_json, updated_ms
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(folder_name, file_path) DO UPDATE SET
+                        blob_hash    = excluded.blob_hash,
+                        size         = excluded.size,
+                        mtime_ms     = excluded.mtime_ms,
+                        vclock_json  = excluded.vclock_json,
+                        updated_ms   = excluded.updated_ms
+                    """,
+                    [
+                        (
+                            folder_name,
+                            str(entry["file_path"]),
+                            entry.get("blob_hash"),
+                            entry.get("size"),
+                            entry.get("mtime_ms"),
+                            json.dumps(
+                                dict(entry.get("vclock") or {}),
+                                sort_keys=True,
+                            ),
+                            updated_ms,
+                        )
+                        for entry in rows
+                    ],
+                )
+                if normalized_pending is not None:
+                    self._conn.executemany(
+                        "DELETE FROM folder_pending_applies "
+                        "WHERE folder_name=? AND file_path=?",
+                        [
+                            (folder_name, str(entry["file_path"]))
+                            for entry in rows
+                        ],
+                    )
+                    self._conn.executemany(
+                        """
+                        INSERT INTO folder_pending_applies(
+                            apply_id, folder_name, file_path, operation,
+                            target_blob_hash, target_size, target_mtime_ms,
+                            target_vclock_json, baseline_blob_hash,
+                            baseline_evidence_json, phase, staging_name,
+                            recovery_name, attempts, last_error, created_ms,
+                            updated_ms
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+                        """,
+                        [
+                            (
+                                pending["apply_id"],
+                                folder_name,
+                                pending["file_path"],
+                                pending["operation"],
+                                pending["target_blob_hash"],
+                                pending["target_size"],
+                                pending["target_mtime_ms"],
+                                json.dumps(
+                                    pending["target_vclock"],
+                                    separators=(",", ":"),
+                                    sort_keys=True,
+                                ),
+                                pending["baseline_blob_hash"],
+                                (
+                                    json.dumps(
+                                        pending["baseline_evidence"],
+                                        separators=(",", ":"),
+                                    )
+                                    if pending["baseline_evidence"] is not None
+                                    else None
+                                ),
+                                pending["phase"],
+                                pending["staging_name"],
+                                pending["recovery_name"],
+                                updated_ms,
+                                updated_ms,
+                            )
+                            for pending in normalized_pending
+                        ],
+                    )
+                self._conn.execute("COMMIT")
+            except BaseException:
+                with contextlib.suppress(*DB_ERRORS):
+                    self._conn.execute("ROLLBACK")
+                raise
+            finally:
+                self._conn.execute(
+                    f"PRAGMA synchronous={sync_names.get(previous_sync, 'NORMAL')}"
+                )
 
     def get_file_index_cache(
         self,
@@ -7843,6 +9970,10 @@ class State:
         size: int,
         mtime_ns: int,
         ctime_ns: int,
+        dev: int | str = 0,
+        ino: int | str = 0,
+        file_id: str = "",
+        change_ns: int | str = 0,
     ) -> Optional[dict]:
         # v0.20.7 (M30): wrap query path so the SELECT matches the
         # deterministic-encrypted row written in record_file_index_cache.
@@ -7854,11 +9985,23 @@ class State:
         row = self._conn.execute(
             """
             SELECT path, size, mtime_ns, ctime_ns, blob_hash, index_kind,
-                   chunks_json, updated_ms
+                   chunks_json, updated_ms, device_id, inode_id, file_id,
+                   change_ns, index_mode
             FROM file_index_cache
             WHERE path = ? AND size = ? AND mtime_ns = ? AND ctime_ns = ?
+              AND device_id = ? AND inode_id = ? AND file_id = ?
+              AND change_ns = ?
             """,
-            (wrapped_path, int(size), int(mtime_ns), int(ctime_ns)),
+            (
+                wrapped_path,
+                int(size),
+                int(mtime_ns),
+                int(ctime_ns),
+                str(dev),
+                str(ino),
+                str(file_id or ""),
+                str(change_ns),
+            ),
         ).fetchone()
         # If the wrapped lookup missed but we have an encryptor, also
         # try the legacy cleartext path so pre-v0.20.7 rows still hit.
@@ -7866,11 +10009,23 @@ class State:
             row = self._conn.execute(
                 """
                 SELECT path, size, mtime_ns, ctime_ns, blob_hash, index_kind,
-                       chunks_json, updated_ms
+                       chunks_json, updated_ms, device_id, inode_id, file_id,
+                       change_ns, index_mode
                 FROM file_index_cache
                 WHERE path = ? AND size = ? AND mtime_ns = ? AND ctime_ns = ?
+                  AND device_id = ? AND inode_id = ? AND file_id = ?
+                  AND change_ns = ?
                 """,
-                (str(path), int(size), int(mtime_ns), int(ctime_ns)),
+                (
+                    str(path),
+                    int(size),
+                    int(mtime_ns),
+                    int(ctime_ns),
+                    str(dev),
+                    str(ino),
+                    str(file_id or ""),
+                    str(change_ns),
+                ),
             ).fetchone()
         if row is None:
             return None
@@ -7887,8 +10042,13 @@ class State:
             "size": int(row["size"]),
             "mtime_ns": int(row["mtime_ns"]),
             "ctime_ns": int(row["ctime_ns"]),
+            "dev": row["device_id"],
+            "ino": row["inode_id"],
+            "file_id": row["file_id"],
+            "change_ns": row["change_ns"],
             "blob_hash": row["blob_hash"],
             "index_kind": row["index_kind"],
+            "index_mode": row["index_mode"],
             "chunks": chunks,
             "updated_ms": int(row["updated_ms"]),
         }
@@ -7931,20 +10091,43 @@ class State:
             os_name = "Linux"
         return f"{browser} on {os_name}"
 
+    _UI_SESSION_HASH_DOMAIN = b"OL/ui-session/token/v1\0"
+
+    @classmethod
+    def ui_session_token_id(cls, session_token: object) -> Optional[str]:
+        """Return the non-replayable database key for a cookie token.
+
+        Only canonical 256-bit lowercase-hex tokens are accepted. Keeping the
+        token grammar exact avoids ambiguous encodings and ensures a value read
+        from the database cannot itself be replayed as a cookie (it hashes to a
+        different key).
+        """
+        if not isinstance(session_token, str) or len(session_token) != 64:
+            return None
+        if any(char not in "0123456789abcdef" for char in session_token):
+            return None
+        return hashlib.sha256(
+            cls._UI_SESSION_HASH_DOMAIN + session_token.encode("ascii")
+        ).hexdigest()
+
     def create_ui_session(
         self,
         *,
         user_agent: Optional[str] = None,
         remote: Optional[str] = None,
     ) -> dict:
-        """Mint a new ui_sessions row. The caller plants the returned
-        ``session_uuid`` in an HttpOnly SameSite=Strict cookie and is
-        thereafter authenticated by it (cookie survives daemon
-        restarts; the UI token does not, so this is the persistence
-        layer). Returns the full row."""
-        import uuid as _uuid
+        """Mint a persistent UI session and return its bearer token once.
+
+        The raw ``session_uuid`` return value is planted in an HttpOnly,
+        SameSite=Strict cookie. Only its domain-separated SHA-256 record key is
+        persisted, so copying ``state.db`` does not disclose a replayable
+        credential.
+        """
         now = int(time.time() * 1000)
-        sid = _uuid.uuid4().hex + _uuid.uuid4().hex  # 64 hex chars
+        sid = secrets.token_hex(32)
+        record_key = self.ui_session_token_id(sid)
+        if record_key is None:  # pragma: no cover - token_hex contract
+            raise RuntimeError("failed to generate a canonical UI session token")
         ua_hash = self._hash_user_agent(user_agent)
         label = self._label_user_agent(user_agent)
         with self._write_lock:
@@ -7955,7 +10138,7 @@ class State:
                     user_agent_hash, label, remote_first
                 ) VALUES(?, ?, ?, ?, ?, ?)
                 """,
-                (sid, now, now, ua_hash, label, remote),
+                (record_key, now, now, ua_hash, label, remote),
             )
             self._conn.commit()
         return {
@@ -7972,18 +10155,17 @@ class State:
         the session exists + is not revoked; False otherwise. Cheap
         because it's a single UPDATE on an indexed column.
 
-        Constant-time semantics aren't possible at the SQL layer, but
-        the auth path BEFORE this call already does a constant-time
-        equality on the cookie value vs the uuid, so a timing oracle
-        can't peel uuid bytes."""
-        if not session_uuid or not isinstance(session_uuid, str):
+        The bearer token is hashed before the indexed lookup; the raw token is
+        never compared with, or stored in, SQLite."""
+        record_key = self.ui_session_token_id(session_uuid)
+        if record_key is None:
             return False
         now = int(time.time() * 1000)
         with self._write_lock:
             cur = self._conn.execute(
                 "UPDATE ui_sessions SET last_seen_ms=?"
                 " WHERE session_uuid=? AND revoked_ms IS NULL",
-                (now, session_uuid),
+                (now, record_key),
             )
             self._conn.commit()
             return cur.rowcount > 0
@@ -7992,12 +10174,13 @@ class State:
         """Return the session row iff valid + not revoked. Does NOT
         touch last_seen_ms (auth path uses touch_ui_session for that
         atomically). Read-only helper for the Sessions list UI."""
-        if not session_uuid or not isinstance(session_uuid, str):
+        record_key = self.ui_session_token_id(session_uuid)
+        if record_key is None:
             return None
         row = self._conn.execute(
             "SELECT * FROM ui_sessions"
             " WHERE session_uuid=? AND revoked_ms IS NULL",
-            (session_uuid,),
+            (record_key,),
         ).fetchone()
         if row is None:
             return None
@@ -8034,12 +10217,31 @@ class State:
     def revoke_ui_session(self, session_uuid: str) -> bool:
         """Mark a specific session revoked. Returns True if a row was
         actually flipped (i.e. it existed + was active)."""
+        record_key = self.ui_session_token_id(session_uuid)
+        if record_key is None:
+            return False
         now = int(time.time() * 1000)
         with self._write_lock:
             cur = self._conn.execute(
                 "UPDATE ui_sessions SET revoked_ms=?"
                 " WHERE session_uuid=? AND revoked_ms IS NULL",
-                (now, session_uuid),
+                (now, record_key),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def revoke_ui_session_by_id(self, session_id: int) -> bool:
+        """Revoke a management-list row without exposing its bearer token."""
+        if isinstance(session_id, bool) or not isinstance(session_id, int):
+            return False
+        if session_id <= 0:
+            return False
+        now = int(time.time() * 1000)
+        with self._write_lock:
+            cur = self._conn.execute(
+                "UPDATE ui_sessions SET revoked_ms=?"
+                " WHERE id=? AND revoked_ms IS NULL",
+                (now, session_id),
             )
             self._conn.commit()
             return cur.rowcount > 0
@@ -8104,6 +10306,45 @@ class State:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
+
+    def apply_settings_batch(
+        self,
+        *,
+        upserts: Mapping[str, str],
+        deletes: Iterable[str] = (),
+    ) -> None:
+        """Atomically apply one validated settings request.
+
+        A settings screen saves many independent controls in one HTTP request.
+        Applying those rows one at a time made a late validation or storage
+        failure leave an internally inconsistent half-save.  Callers must
+        normalize and validate first; this method provides the durable SQLite
+        commit boundary and rejects ambiguous delete/upsert plans.
+        """
+        normalized_upserts = {
+            str(key): str(value)
+            for key, value in upserts.items()
+        }
+        normalized_deletes = {str(key) for key in deletes}
+        overlap = normalized_deletes.intersection(normalized_upserts)
+        if overlap:
+            names = ", ".join(sorted(overlap))
+            raise ValueError(f"settings batch deletes and upserts the same key: {names}")
+        if not normalized_upserts and not normalized_deletes:
+            return
+
+        with self.durable_write_transaction():
+            if normalized_deletes:
+                self._conn.executemany(
+                    "DELETE FROM settings WHERE key = ?",
+                    ((key,) for key in sorted(normalized_deletes)),
+                )
+            if normalized_upserts:
+                self._conn.executemany(
+                    "INSERT INTO settings(key, value) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    sorted(normalized_upserts.items()),
+                )
 
     def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
         row = self._conn.execute(

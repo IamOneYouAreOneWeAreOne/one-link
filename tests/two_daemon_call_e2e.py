@@ -29,7 +29,6 @@ import json
 import os
 import shutil
 import socket
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -39,6 +38,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
+
+from one_link import control_ipc
+
+
+_CONTROL_SECRETS: dict[int, str] = {}
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -98,20 +102,12 @@ def _spawn_daemon(home: Path, log_path: Path) -> subprocess.Popen:
 # ---------------------------------------------------------------------------
 
 def _control(control_port: int, **req: Any) -> dict:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(15.0)
-    s.connect(("127.0.0.1", control_port))
-    try:
-        s.sendall((json.dumps(req) + "\n").encode("utf-8"))
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf.decode("utf-8").strip() or "{}")
-    finally:
-        s.close()
+    return control_ipc.request_control(
+        control_port,
+        req,
+        timeout=15.0,
+        secret=_CONTROL_SECRETS[control_port],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +270,7 @@ class _Daemon:
         self.control_port = int(
             _read_file_until_present(data_dir / "control.port")
         )
+        _CONTROL_SECRETS[self.control_port] = control_ipc.read_control_secret(data_dir)
         if not _wait_port(self.control_port, timeout=15):
             raise RuntimeError(
                 f"daemon {self.name} control socket never came up"
@@ -398,7 +395,7 @@ def main() -> int:
             print(f"  A peers: {a.peers()}")
             print(f"  B peers: {b.peers()}")
             return 1
-        print(f"[smoke] mDNS converged — A sees B and B sees A")
+        print("[smoke] mDNS converged — A sees B and B sees A")
 
         # Step 3: force-pair both sides (skip SAS for test)
         _force_pair_both_sides(a, b)
@@ -832,7 +829,7 @@ def main() -> int:
         if status != 200 or not body.get("ok"):
             print(f"[smoke] FAIL — send_ice_candidate: {status} {body}")
             return 1
-        print(f"[smoke] ICE candidate POST succeeded — wire path OK")
+        print("[smoke] ICE candidate POST succeeded — wire path OK")
         # Hang up cleanly.
         _http_post(
             a.ui_port, a.ui_token, "/api/v1/calls",

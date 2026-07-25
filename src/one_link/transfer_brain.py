@@ -15,10 +15,15 @@ likely to save more than it costs.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterable, Mapping
+
+from one_link.fault_observability import report_best_effort_failure
+
+log = logging.getLogger(__name__)
 
 
 MiB = 1024 * 1024
@@ -689,16 +694,40 @@ class AdaptiveTransferScheduler:
         *,
         min_window_chunks: int = 1,
         max_window_chunks: int = 32,
+        max_window_bytes: int | None = None,
         timeline_limit: int = 80,
     ) -> None:
         self.chunk_size = max(1, int(profile.get("chunk_size") or MiB))
         self.min_window_chunks = max(1, int(min_window_chunks))
-        self.max_window_chunks = max(self.min_window_chunks, int(max_window_chunks))
+        requested_max_chunks = max(
+            self.min_window_chunks,
+            int(max_window_chunks),
+        )
+        if max_window_bytes is None:
+            byte_limited_max_chunks = requested_max_chunks
+        else:
+            byte_limited_max_chunks = max(
+                1,
+                int(max_window_bytes) // self.chunk_size,
+            )
+        self.max_window_chunks = max(
+            self.min_window_chunks,
+            min(requested_max_chunks, byte_limited_max_chunks),
+        )
+        self.max_window_bytes = self.max_window_chunks * self.chunk_size
         self.window_chunks = max(
             self.min_window_chunks,
             min(self.max_window_chunks, int(profile.get("window_chunks") or 1)),
         )
         self.window_bytes = self.window_chunks * self.chunk_size
+        growth_step_bytes = max(
+            self.chunk_size,
+            int(profile.get("growth_step_bytes") or self.chunk_size),
+        )
+        self.growth_step_chunks = max(
+            1,
+            growth_step_bytes // self.chunk_size,
+        )
         self.reason = str(profile.get("reason") or "runtime")
         self.timeline_limit = max(8, int(timeline_limit))
         self._good_acks = 0
@@ -741,12 +770,16 @@ class AdaptiveTransferScheduler:
         if ack <= self.target_ack_ms * 1.35:
             self._good_acks += 1
             if self._good_acks >= max(2, self.window_chunks) and self.window_chunks < self.max_window_chunks:
-                self.window_chunks += 1
+                self.window_chunks = min(
+                    self.max_window_chunks,
+                    self.window_chunks + self.growth_step_chunks,
+                )
                 self.window_bytes = self.window_chunks * self.chunk_size
                 self._good_acks = 0
                 self._record(
                     "window_up",
                     window=self.window_chunks,
+                    growth_step_chunks=self.growth_step_chunks,
                     ack_ms=round(ack, 3),
                     ack_ema_ms=round(self._ack_ema_ms, 3),
                 )
@@ -789,6 +822,9 @@ class AdaptiveTransferScheduler:
         return {
             "window_chunks": self.window_chunks,
             "window_bytes": self.window_bytes,
+            "max_window_chunks": self.max_window_chunks,
+            "max_window_bytes": self.max_window_bytes,
+            "growth_step_chunks": self.growth_step_chunks,
             "target_ack_ms": round(self.target_ack_ms, 3),
             "ack_count": self._ack_count,
             "ack_ema_ms": (
@@ -829,14 +865,14 @@ def pareto_frontier(candidates: Iterable[TransferCandidate]) -> tuple[TransferCa
 class AdaptiveTransferBrain:
     """Learns route cost and chooses a transfer strategy.
 
-    Phase C-3 (ADR-0019): when ``one_link_native.bandit`` is available
-    the brain ALSO feeds every observation into a
-    :class:`BanditRouteSelector` so the Thompson-sampled posterior
-    builds in parallel with the EMA. ``best_route_bandit()`` exposes
-    the bandit's greedy pick for diagnostics + the future cutover
-    (per stress-test #3 the bandit *replaces*, doesn't coexist with,
-    the EMA route memory; today the EMA path is still authoritative
-    so the legacy 798-test daemon suite keeps passing)."""
+    Phase C-3 (ADRs 0019 and 0027): when
+    ``one_link_native.bandit`` is available, observations train a
+    :class:`BanditRouteSelector` and ``decide()`` uses its Thompson
+    sample for the route-choice axis. EMA route statistics remain
+    inputs to cost/reliability calculations and the explicit rollback
+    path; they are not a second route-ranking policy. No bandit control
+    loop is currently wired for chunk size, parallelism, FEC ratio,
+    prefetch, pacing, or compression threshold."""
 
     DEFAULT_HASH_MIB_S = 1500.0
     DEFAULT_FIXED_MIB_S = 1100.0
@@ -845,7 +881,7 @@ class AdaptiveTransferBrain:
 
     def __init__(self) -> None:
         self._routes: dict[str, RouteStats] = {}
-        # Phase C-3 bandit shadow. Built lazily on first observe() so
+        # Phase C-3 route bandit. Built lazily on first observe() so
         # the route arms match what the daemon actually sees.
         self._bandit: BanditRouteSelector | None = None
 
@@ -855,8 +891,10 @@ class AdaptiveTransferBrain:
         self._bandit_record(obs)
 
     def _bandit_record(self, obs: TransferRouteObservation) -> None:
-        """Mirror every legacy observation into the bandit. Pure
-        observer — failures are swallowed and never affect routing."""
+        """Record a route observation for the authoritative route bandit.
+
+        Failures in this optional native optimization are isolated so
+        the safe Pareto/EMA rollback path remains available."""
         try:
             from . import bandit_native
 
@@ -887,12 +925,14 @@ class AdaptiveTransferBrain:
             )
         except Exception:
             # A divergence (e.g. unknown arm) silently drops the
-            # observation; the EMA path is unaffected.
+            # observation; the safe Pareto/EMA fallback remains available.
             return
 
     def best_route_bandit(self) -> str | None:
-        """Greedy bandit pick — useful for diagnostics + the future
-        cutover. Returns ``None`` when the bandit isn't initialised."""
+        """Return the route arm with the highest posterior mean.
+
+        This diagnostic differs from ``decide()``'s exploratory Thompson
+        sample. Returns ``None`` when the bandit is not initialized."""
         return self._bandit.best_route() if self._bandit is not None else None
 
     def route_stats(self) -> tuple[RouteStats, ...]:
@@ -919,8 +959,8 @@ class AdaptiveTransferBrain:
         hit_rate = min(1.0, max(0.0, float(prior_hit_rate or 0.0)))
         candidate_routes = tuple(routes or (s.route for s in self.route_stats()) or ("lan",))
         # Phase C-3 (ADR-0027): bandit-driven route picker. Per the
-        # plan's stress-test #3, the bandit REPLACES (not coexists with)
-        # the EMA route memory. When the bandit has been seeded by
+        # plan's stress-test #3, the bandit replaces EMA ranking for
+        # the route-choice axis. When the bandit has been seeded by
         # observations and we have ≥2 candidate routes, Thompson-sample
         # one route and constrain decide()'s candidate generation to
         # that route only. The Pareto frontier still picks the MODE
@@ -938,11 +978,16 @@ class AdaptiveTransferBrain:
                 bandit_pick = self._bandit.select_route()
                 if bandit_pick in candidate_routes:
                     candidate_routes = (bandit_pick,)
-            except Exception:
-                # Bandit divergence (e.g. arm-count mismatch) silently
+            except Exception as exc:
+                # Bandit divergence (e.g. arm-count mismatch) observably
                 # falls back to the legacy multi-route path. Never
                 # break a transfer because of a bandit hiccup.
-                pass
+                report_best_effort_failure(
+                    log,
+                    "bandit_route_selection",
+                    exc,
+                    interval_s=30.0,
+                )
         mesh = tuple(mesh_nodes or ())
         mesh_coherence = max((n.coherence for n in mesh), default=0.5)
         mesh_parallelism = max(1, min(8, sum(1 for n in mesh if n.coherence >= 0.55)))
@@ -1093,8 +1138,8 @@ class AdaptiveTransferBrain:
 
 
 class BanditRouteSelector:
-    """Per peer-pair bandit for route selection (ADR-0019, Phase C
-    item #5). Replaces the EMA-derived route choice in
+    """Route-arm bandit for route selection (ADR-0019, Phase C item
+    #5). Replaces the EMA-derived route ranking in
     :class:`AdaptiveTransferBrain` when ``one_link_native.bandit`` is
     available.
 

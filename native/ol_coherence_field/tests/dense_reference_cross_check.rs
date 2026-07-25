@@ -1,7 +1,3 @@
-// Indexed loops mirror the textbook dense linear-algebra notation
-// (matrix rows/cols addressed across several arrays); idiomatic
-// iterators would obscure the math this cross-check is verifying.
-#![allow(clippy::needless_range_loop)]
 //! Dense-linalg cross-check: solve `(Γ·I + D·L)·x = b` with a naive
 //! Gaussian elimination on a fully-materialized dense matrix, and
 //! verify the sparse CG path produces the same answer.
@@ -20,10 +16,10 @@ use ol_coherence_field::{pde::CgConfig, solve_helmholtz, GraphLaplacian};
 fn dense_helmholtz_matrix(g: &GraphLaplacian, d: f64, gamma: f64) -> Vec<Vec<f64>> {
     let n = g.n();
     let mut m = vec![vec![0.0_f64; n]; n];
-    for i in 0..n {
-        m[i][i] = gamma + d * g.degree(i);
+    for (i, row) in m.iter_mut().enumerate() {
+        row[i] = gamma + d * g.degree(i);
         for &(j, w) in g.neighbors(i) {
-            m[i][j] -= d * w;
+            row[j] -= d * w;
         }
     }
     m
@@ -39,8 +35,8 @@ fn dense_gaussian_solve(mut m: Vec<Vec<f64>>, mut b: Vec<f64>) -> Vec<f64> {
         // Partial pivot: find max |M[r][col]| over rows r ≥ col.
         let mut pivot = col;
         let mut pivot_val = m[col][col].abs();
-        for r in (col + 1)..n {
-            let v = m[r][col].abs();
+        for (r, row) in m.iter().enumerate().skip(col + 1) {
+            let v = row[col].abs();
             if v > pivot_val {
                 pivot = r;
                 pivot_val = v;
@@ -56,25 +52,28 @@ fn dense_gaussian_solve(mut m: Vec<Vec<f64>>, mut b: Vec<f64>) -> Vec<f64> {
         }
         // Eliminate below.
         let m_col = m[col][col];
-        for r in (col + 1)..n {
-            let factor = m[r][col] / m_col;
+        let pivot_row = m[col].clone();
+        let pivot_rhs = b[col];
+        for (r, row) in m.iter_mut().enumerate().skip(col + 1) {
+            let factor = row[col] / m_col;
             if factor == 0.0 {
                 continue;
             }
-            for c in col..n {
-                let v = m[col][c];
-                m[r][c] -= factor * v;
+            for (entry, &pivot_entry) in row[col..].iter_mut().zip(&pivot_row[col..]) {
+                *entry -= factor * pivot_entry;
             }
-            b[r] -= factor * b[col];
+            b[r] -= factor * pivot_rhs;
         }
     }
     // Back-substitution.
     let mut x = vec![0.0_f64; n];
     for r in (0..n).rev() {
-        let mut acc = b[r];
-        for c in (r + 1)..n {
-            acc -= m[r][c] * x[c];
-        }
+        let tail = m[r][r + 1..]
+            .iter()
+            .zip(&x[r + 1..])
+            .map(|(&coefficient, &known)| coefficient * known)
+            .sum::<f64>();
+        let acc = b[r] - tail;
         x[r] = acc / m[r][r];
     }
     x
@@ -88,15 +87,12 @@ fn cg_vs_dense(graph: &GraphLaplacian, d: f64, gamma: f64, b: &[f64]) {
     let cg = solve_helmholtz(graph, d, gamma, b, cfg).expect("CG converges");
     let dense_m = dense_helmholtz_matrix(graph, d, gamma);
     let dense = dense_gaussian_solve(dense_m, b.to_vec());
-    let n = graph.n();
-    for i in 0..n {
-        let diff = (cg.field[i] - dense[i]).abs();
-        let rel = diff / dense[i].abs().max(1e-12);
+    for (i, (&cg_value, &dense_value)) in cg.field.iter().zip(&dense).enumerate() {
+        let diff = (cg_value - dense_value).abs();
+        let rel = diff / dense_value.abs().max(1e-12);
         assert!(
             diff < 1e-6 && rel < 1e-3,
-            "node {i}: CG={:.9}, dense={:.9}, abs={diff:.3e}, rel={rel:.3e}",
-            cg.field[i],
-            dense[i],
+            "node {i}: CG={cg_value:.9}, dense={dense_value:.9}, abs={diff:.3e}, rel={rel:.3e}",
         );
     }
 }
@@ -124,7 +120,9 @@ fn small_ring_with_chords_matches_dense() {
     g.add_edge(0, 5, 0.7).unwrap();
     g.add_edge(2, 8, 0.3).unwrap();
     g.add_edge(4, 11, 0.4).unwrap();
-    let b: Vec<f64> = (0..n).map(|i| (i as f64).sin()).collect();
+    let b: Vec<f64> = (0..n)
+        .map(|i| f64::from(u32::try_from(i).expect("the 12-node fixture index fits u32")).sin())
+        .collect();
     cg_vs_dense(&g, 1.0, 0.5, &b);
 }
 

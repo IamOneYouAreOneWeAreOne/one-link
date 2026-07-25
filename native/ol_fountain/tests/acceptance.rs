@@ -20,6 +20,14 @@ fn loss_draw(rng: &mut StdRng, p: f64) -> bool {
 /// Fixed Phase B v1 wire symbol length per ADR-0015.
 const SYMBOL_LEN: usize = 1024;
 
+fn index_u64(index: usize) -> u64 {
+    u64::try_from(index).expect("fountain test-vector index fits in u64")
+}
+
+fn low_byte(value: u64) -> u8 {
+    u8::try_from(value & 0xFF).expect("masked test-vector value fits in u8")
+}
+
 /// Run one decode trial: encode the source, send packets through a 5%
 /// loss channel up to `max_symbols`, and return true if decode
 /// completed.
@@ -42,14 +50,17 @@ fn one_trial(source: &[u8], loss_rate: f64, max_symbols: u32, seed: u64) -> bool
 }
 
 fn run_acceptance(k_target: u32, trials: u32) -> u32 {
-    let source_len = (k_target as usize) * SYMBOL_LEN;
+    let source_len = usize::try_from(k_target).expect("test K fits in usize") * SYMBOL_LEN;
     let mut source = vec![0u8; source_len];
     // Fill with a non-byte-periodic stream so source symbols are distinct.
     for (i, b) in source.iter_mut().enumerate() {
-        *b = ((i as u64)
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .wrapping_add(0xCAFE)
-            ^ ((i as u64) >> 13)) as u8;
+        let index = index_u64(i);
+        *b = low_byte(
+            index
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add(0xCAFE)
+                ^ (index >> 13),
+        );
     }
 
     // Allow up to 5K symbols per trial; well above the per-chunk encode
@@ -60,7 +71,7 @@ fn run_acceptance(k_target: u32, trials: u32) -> u32 {
             &source,
             0.05,
             4096.min(ol_fountain::MAX_ENCODED_PER_CHUNK - 1),
-            seed as u64,
+            u64::from(seed),
         ) {
             success += 1;
         }
@@ -72,7 +83,7 @@ fn run_acceptance(k_target: u32, trials: u32) -> u32 {
 fn adr0015_k_8_decodes_at_5pct_loss() {
     // K=8 is the smallest case in the ADR. ~99% expected.
     let success = run_acceptance(8, 200);
-    let rate = success as f64 / 200.0;
+    let rate = f64::from(success) / 200.0;
     eprintln!("K=8: {success}/200 ({:.1}%)", rate * 100.0);
     assert!(
         rate >= 0.98,
@@ -83,7 +94,7 @@ fn adr0015_k_8_decodes_at_5pct_loss() {
 #[test]
 fn adr0015_k_64_decodes_at_5pct_loss() {
     let success = run_acceptance(64, 200);
-    let rate = success as f64 / 200.0;
+    let rate = f64::from(success) / 200.0;
     eprintln!("K=64: {success}/200 ({:.1}%)", rate * 100.0);
     assert!(
         rate >= 0.97,
@@ -96,7 +107,7 @@ fn adr0015_k_256_decodes_at_5pct_loss() {
     // K=256 is the largest case in the ADR. Slower decode; we run
     // 50 trials for runtime budget. Still expected ≥98%.
     let success = run_acceptance(256, 50);
-    let rate = success as f64 / 50.0;
+    let rate = f64::from(success) / 50.0;
     eprintln!("K=256: {success}/50 ({:.1}%)", rate * 100.0);
     assert!(
         rate >= 0.94,
@@ -109,7 +120,7 @@ fn high_loss_still_decodes_with_enough_symbols() {
     // Sanity: 20% loss should still decode given enough symbols.
     let source_len = 64 * SYMBOL_LEN;
     let source: Vec<u8> = (0..source_len)
-        .map(|i| ((i as u64).wrapping_mul(0xC4CEB9FE1A85EC53) >> 33) as u8)
+        .map(|i| low_byte(index_u64(i).wrapping_mul(0xC4CE_B9FE_1A85_EC53) >> 33))
         .collect();
     assert!(one_trial(
         &source,
@@ -123,7 +134,7 @@ fn high_loss_still_decodes_with_enough_symbols() {
 fn stress_10pct_loss_k_64_high_success_rate() {
     let source_len = 64 * SYMBOL_LEN;
     let source: Vec<u8> = (0..source_len)
-        .map(|i| ((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)) as u8)
+        .map(|i| low_byte(index_u64(i).wrapping_mul(0x9E37_79B9_7F4A_7C15)))
         .collect();
     let mut success = 0u32;
     let trials = 50u32;
@@ -132,12 +143,12 @@ fn stress_10pct_loss_k_64_high_success_rate() {
             &source,
             0.10,
             ol_fountain::MAX_ENCODED_PER_CHUNK - 1,
-            seed as u64,
+            u64::from(seed),
         ) {
             success += 1;
         }
     }
-    let rate = success as f64 / trials as f64;
+    let rate = f64::from(success) / f64::from(trials);
     eprintln!("K=64, 10% loss: {success}/{trials} ({:.1}%)", rate * 100.0);
     // ADR-0015 targets 99% at 5% loss; at 10% loss we expect ≥95%.
     assert!(rate >= 0.95, "K=64 at 10% loss: {rate} below 95% gate");
@@ -147,7 +158,7 @@ fn stress_10pct_loss_k_64_high_success_rate() {
 fn stress_20pct_loss_k_64_still_usable() {
     let source_len = 64 * SYMBOL_LEN;
     let source: Vec<u8> = (0..source_len)
-        .map(|i| ((i as u64).wrapping_mul(0xC4CEB9FE1A85EC53)) as u8)
+        .map(|i| low_byte(index_u64(i).wrapping_mul(0xC4CE_B9FE_1A85_EC53)))
         .collect();
     let mut success = 0u32;
     let trials = 50u32;
@@ -156,12 +167,12 @@ fn stress_20pct_loss_k_64_still_usable() {
             &source,
             0.20,
             ol_fountain::MAX_ENCODED_PER_CHUNK - 1,
-            seed as u64,
+            u64::from(seed),
         ) {
             success += 1;
         }
     }
-    let rate = success as f64 / trials as f64;
+    let rate = f64::from(success) / f64::from(trials);
     eprintln!("K=64, 20% loss: {success}/{trials} ({:.1}%)", rate * 100.0);
     // At 20% loss we still expect high success thanks to LT's rateless
     // property — every received symbol moves us forward.
@@ -172,7 +183,7 @@ fn stress_20pct_loss_k_64_still_usable() {
 fn stress_50pct_loss_k_64_degrades_gracefully() {
     let source_len = 64 * SYMBOL_LEN;
     let source: Vec<u8> = (0..source_len)
-        .map(|i| ((i as u64).wrapping_mul(0xCAFE_BABE_F00D_BAAD)) as u8)
+        .map(|i| low_byte(index_u64(i).wrapping_mul(0xCAFE_BABE_F00D_BAAD)))
         .collect();
     let mut success = 0u32;
     let trials = 30u32;
@@ -181,12 +192,12 @@ fn stress_50pct_loss_k_64_degrades_gracefully() {
             &source,
             0.50,
             ol_fountain::MAX_ENCODED_PER_CHUNK - 1,
-            seed as u64,
+            u64::from(seed),
         ) {
             success += 1;
         }
     }
-    let rate = success as f64 / trials as f64;
+    let rate = f64::from(success) / f64::from(trials);
     eprintln!("K=64, 50% loss: {success}/{trials} ({:.1}%)", rate * 100.0);
     // At 50% loss the per-chunk encode cap of MAX_ENCODED_PER_CHUNK
     // delivers roughly K*0.5 effective symbols × 1023 attempts = ~32 K
@@ -207,7 +218,7 @@ fn adversarial_random_packet_garbage_dropped() {
     let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF);
     let source_len = 16 * SYMBOL_LEN;
     let real_source: Vec<u8> = (0..source_len)
-        .map(|i| ((i as u64).wrapping_mul(0x9E37_79B9)) as u8)
+        .map(|i| low_byte(index_u64(i).wrapping_mul(0x9E37_79B9)))
         .collect();
     let mut dec = LtDecoder::new(16, SYMBOL_LEN, source_len).unwrap();
 
@@ -242,7 +253,7 @@ fn fountain_round_trip_blake3_invariant() {
     // validation.
     let source_len = 64 * SYMBOL_LEN;
     let source: Vec<u8> = (0..source_len)
-        .map(|i| ((i as u64).wrapping_mul(0x9E37_79B9) >> 7) as u8)
+        .map(|i| low_byte(index_u64(i).wrapping_mul(0x9E37_79B9) >> 7))
         .collect();
     let original_id = *blake3::hash(&source).as_bytes();
 

@@ -14,12 +14,19 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyList, PyTuple};
 
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
+use curve25519_dalek::traits::Identity;
+use hybrid_array::Array;
 use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
 use rand_core_06::OsRng;
+
+type MlKemEncapsulationKeySize =
+    <<MlKem768 as KemCore>::EncapsulationKey as EncodedSizeUser>::EncodedSize;
+type MlKemDecapsulationKeySize =
+    <<MlKem768 as KemCore>::DecapsulationKey as EncodedSizeUser>::EncodedSize;
 
 use ol_onion::sphinx::core::{
     build_sphinx_onion as core_build, generate_static_keypair as core_keypair,
@@ -34,8 +41,9 @@ use ol_onion::sphinx::core::{
 use ol_onion::sphinx::cover::is_cover_payload as cover_is_sentinel;
 use ol_onion::sphinx::cover::{
     build_cover_packet as cover_build, is_cover_payload_authenticated as cover_is_auth,
-    CoverScheduler, RateEqualizer, COVER_DEFAULT_RATE_HZ, COVER_PAYLOAD_MIN, COVER_SENTINEL,
-    COVER_TRAILER_LEN, RATE_EQ_DEFAULT_HALF_LIFE_SEC,
+    CoverScheduler, RateEqualizer, COVER_DEFAULT_RATE_HZ, COVER_MAX_RATE_HZ, COVER_MIN_RATE_HZ,
+    COVER_PAYLOAD_MIN, COVER_SENTINEL, COVER_TRAILER_LEN, RATE_EQ_DEFAULT_HALF_LIFE_SEC,
+    RATE_EQ_MAX_HALF_LIFE_SEC,
 };
 use ol_onion::sphinx::pq::{
     build_pq_sphinx_onion as pq_build, generate_pq_keypair as pq_keypair,
@@ -49,7 +57,7 @@ use ol_onion::{HopId, OnionError, HOP_ID_LEN};
 // ── Helpers ──────────────────────────────────────────────────────
 
 fn map_err(e: OnionError) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    PyValueError::new_err(crate::errors::owned_error_message(e))
 }
 
 fn scalar_from_bytes(b: &[u8]) -> PyResult<Scalar> {
@@ -61,7 +69,12 @@ fn scalar_from_bytes(b: &[u8]) -> PyResult<Scalar> {
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(b);
-    Ok(Scalar::from_bytes_mod_order(arr))
+    let scalar = Option::<Scalar>::from(Scalar::from_canonical_bytes(arr))
+        .ok_or_else(|| PyValueError::new_err("scalar encoding is non-canonical"))?;
+    if scalar == Scalar::ZERO {
+        return Err(PyValueError::new_err("scalar must be non-zero"));
+    }
+    Ok(scalar)
 }
 
 fn point_from_bytes(b: &[u8]) -> PyResult<RistrettoPoint> {
@@ -71,10 +84,16 @@ fn point_from_bytes(b: &[u8]) -> PyResult<RistrettoPoint> {
             b.len()
         )));
     }
-    CompressedRistretto::from_slice(b)
+    let point = CompressedRistretto::from_slice(b)
         .map_err(|_| PyValueError::new_err("invalid Ristretto255 point"))?
         .decompress()
-        .ok_or_else(|| PyValueError::new_err("Ristretto255 point not on curve"))
+        .ok_or_else(|| PyValueError::new_err("Ristretto255 point not on curve"))?;
+    if point == RistrettoPoint::identity() {
+        return Err(PyValueError::new_err(
+            "Ristretto255 identity point rejected",
+        ));
+    }
+    Ok(point)
 }
 
 fn hop_id_from_bytes(b: &[u8]) -> PyResult<HopId> {
@@ -89,41 +108,68 @@ fn hop_id_from_bytes(b: &[u8]) -> PyResult<HopId> {
     Ok(HopId::from_bytes(arr))
 }
 
-fn parse_circuit(circuit: Vec<(Vec<u8>, Vec<u8>)>) -> PyResult<Vec<SphinxHop>> {
+fn parse_circuit(circuit: &Bound<'_, PyList>) -> PyResult<Vec<SphinxHop>> {
+    if circuit.is_empty() || circuit.len() > MAX_HOPS {
+        return Err(PyValueError::new_err(format!(
+            "circuit must contain 1..={MAX_HOPS} hops, got {}",
+            circuit.len()
+        )));
+    }
     let mut hops = Vec::with_capacity(circuit.len());
-    for (id_bytes, pk_bytes) in circuit {
-        let id = hop_id_from_bytes(&id_bytes)?;
-        let pk = point_from_bytes(&pk_bytes)?;
+    for item in circuit.iter() {
+        let tuple = item
+            .cast::<PyTuple>()
+            .map_err(|_| PyValueError::new_err("each circuit hop must be a 2-tuple"))?;
+        if tuple.len() != 2 {
+            return Err(PyValueError::new_err(
+                "each circuit hop must contain exactly (hop_id, public_key)",
+            ));
+        }
+        let id_item = tuple.get_item(0)?;
+        let pk_item = tuple.get_item(1)?;
+        let id = hop_id_from_bytes(id_item.extract::<&[u8]>()?)?;
+        let pk = point_from_bytes(pk_item.extract::<&[u8]>()?)?;
         hops.push(SphinxHop { id, static_pk: pk });
     }
     Ok(hops)
 }
 
-fn parse_pq_circuit(
-    circuit: Vec<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)>,
-) -> PyResult<Vec<PqSphinxHop>> {
+fn parse_pq_circuit(circuit: &Bound<'_, PyList>) -> PyResult<Vec<PqSphinxHop>> {
+    if circuit.is_empty() || circuit.len() > MAX_HOPS {
+        return Err(PyValueError::new_err(format!(
+            "circuit must contain 1..={MAX_HOPS} hops, got {}",
+            circuit.len()
+        )));
+    }
     let mut hops = Vec::with_capacity(circuit.len());
-    for (id_bytes, x_pk_bytes, pq_pk_bytes) in circuit {
-        let id = hop_id_from_bytes(&id_bytes)?;
-        let x_pk = point_from_bytes(&x_pk_bytes)?;
-        let pq_pk = match pq_pk_bytes {
-            Some(b) => {
-                if b.len() != ML_KEM_EK_LEN {
-                    return Err(PyValueError::new_err(format!(
-                        "ML-KEM pubkey must be {ML_KEM_EK_LEN} bytes, got {}",
-                        b.len()
-                    )));
-                }
-                use hybrid_array::Array;
-                type EkSize =
-                    <<MlKem768 as KemCore>::EncapsulationKey as EncodedSizeUser>::EncodedSize;
-                let arr: Array<u8, EkSize> = Array::try_from(b.as_slice())
-                    .map_err(|_| PyValueError::new_err("ML-KEM pubkey size mismatch"))?;
-                let ek =
-                    <<MlKem768 as KemCore>::EncapsulationKey as EncodedSizeUser>::from_bytes(&arr);
-                Some(ek)
+    for item in circuit.iter() {
+        let tuple = item
+            .cast::<PyTuple>()
+            .map_err(|_| PyValueError::new_err("each PQ circuit hop must be a 3-tuple"))?;
+        if tuple.len() != 3 {
+            return Err(PyValueError::new_err(
+                "each PQ circuit hop must contain exactly (hop_id, public_key, pq_public_key_or_none)",
+            ));
+        }
+        let id_item = tuple.get_item(0)?;
+        let x_pk_item = tuple.get_item(1)?;
+        let pq_pk_item = tuple.get_item(2)?;
+        let id = hop_id_from_bytes(id_item.extract::<&[u8]>()?)?;
+        let x_pk = point_from_bytes(x_pk_item.extract::<&[u8]>()?)?;
+        let pq_pk = if pq_pk_item.is_none() {
+            None
+        } else {
+            let b = pq_pk_item.extract::<&[u8]>()?;
+            if b.len() != ML_KEM_EK_LEN {
+                return Err(PyValueError::new_err(format!(
+                    "ML-KEM pubkey must be {ML_KEM_EK_LEN} bytes, got {}",
+                    b.len()
+                )));
             }
-            None => None,
+            let arr: Array<u8, MlKemEncapsulationKeySize> = Array::try_from(b)
+                .map_err(|_| PyValueError::new_err("ML-KEM pubkey size mismatch"))?;
+            let ek = <<MlKem768 as KemCore>::EncapsulationKey as EncodedSizeUser>::from_bytes(&arr);
+            Some(ek)
         };
         hops.push(PqSphinxHop {
             id,
@@ -135,24 +181,22 @@ fn parse_pq_circuit(
 }
 
 fn parse_pq_dk(b: &[u8]) -> PyResult<<MlKem768 as KemCore>::DecapsulationKey> {
-    use hybrid_array::Array;
-    type DkSize = <<MlKem768 as KemCore>::DecapsulationKey as EncodedSizeUser>::EncodedSize;
-    let arr: Array<u8, DkSize> =
+    let arr: Array<u8, MlKemDecapsulationKeySize> =
         Array::try_from(b).map_err(|_| PyValueError::new_err("ML-KEM decap key size mismatch"))?;
     Ok(<<MlKem768 as KemCore>::DecapsulationKey as EncodedSizeUser>::from_bytes(&arr))
 }
 
 // ── Standard Sphinx wrappers ─────────────────────────────────────
 
-/// Generate a fresh Ristretto255 keypair. Returns (sk_bytes, pk_bytes)
+/// Generate a fresh Ristretto255 keypair. Returns (`sk_bytes`, `pk_bytes`)
 /// where sk is a 32-byte scalar and pk is a 32-byte compressed point.
 #[pyfunction]
-fn generate_keypair<'py>(py: Python<'py>) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+fn generate_keypair(py: Python<'_>) -> (Bound<'_, PyBytes>, Bound<'_, PyBytes>) {
     let (sk, pk) = core_keypair(&mut OsRng);
-    Ok((
-        PyBytes::new_bound(py, sk.as_bytes()),
-        PyBytes::new_bound(py, &pk.compress().to_bytes()),
-    ))
+    (
+        PyBytes::new(py, sk.as_bytes()),
+        PyBytes::new(py, &pk.compress().to_bytes()),
+    )
 }
 
 /// Derive the public key from a 32-byte scalar (Ristretto basepoint mult).
@@ -163,27 +207,27 @@ fn derive_pubkey_from_scalar<'py>(
 ) -> PyResult<Bound<'py, PyBytes>> {
     let sk = scalar_from_bytes(sk_bytes)?;
     let pk = &sk * curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
-    Ok(PyBytes::new_bound(py, &pk.compress().to_bytes()))
+    Ok(PyBytes::new(py, &pk.compress().to_bytes()))
 }
 
 /// Build a standard Sphinx packet for `circuit`.
 ///
 /// `eph_sk_bytes`: 32-byte ephemeral scalar (fresh per circuit).
-/// `circuit`: list of (hop_id_32, pubkey_32) tuples ordered first→destination.
-/// `payload`: up to SPHINX_MAX_USER_PAYLOAD bytes.
+/// `circuit`: list of (`hop_id_32`, `pubkey_32`) tuples ordered first→destination.
+/// `payload`: up to `SPHINX_MAX_USER_PAYLOAD` bytes.
 ///
-/// Returns the fixed-size SPHINX_PACKET_LEN wire bytes.
+/// Returns the fixed-size `SPHINX_PACKET_LEN` wire bytes.
 #[pyfunction]
 fn build_sphinx<'py>(
     py: Python<'py>,
     eph_sk_bytes: &[u8],
-    circuit: Vec<(Vec<u8>, Vec<u8>)>,
+    circuit: &Bound<'py, PyList>,
     payload: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
     let eph_sk = scalar_from_bytes(eph_sk_bytes)?;
     let hops = parse_circuit(circuit)?;
     let packet = core_build(&eph_sk, &hops, payload, &mut OsRng).map_err(map_err)?;
-    Ok(PyBytes::new_bound(py, packet.as_bytes()))
+    Ok(PyBytes::new(py, packet.as_bytes()))
 }
 
 /// Peel one Sphinx layer.
@@ -211,55 +255,53 @@ fn peel_sphinx<'py>(
             next_packet,
         } => Ok((
             "forward".to_string(),
-            PyBytes::new_bound(py, next_hop.as_bytes()),
-            PyBytes::new_bound(py, next_packet.as_bytes()),
+            PyBytes::new(py, next_hop.as_bytes()),
+            PyBytes::new(py, next_packet.as_bytes()),
         )),
         SphinxPeelOutcome::Deliver { payload } => Ok((
             "deliver".to_string(),
-            PyBytes::new_bound(py, &[]),
-            PyBytes::new_bound(py, &payload),
+            PyBytes::new(py, &[]),
+            PyBytes::new(py, &payload),
         )),
         SphinxPeelOutcome::Cover => Ok((
             "cover".to_string(),
-            PyBytes::new_bound(py, &[]),
-            PyBytes::new_bound(py, &[]),
+            PyBytes::new(py, &[]),
+            PyBytes::new(py, &[]),
         )),
     }
 }
 
 // ── PQ-hybrid Sphinx wrappers ────────────────────────────────────
 
-/// Generate a fresh ML-KEM-768 keypair. Returns (dk_bytes, ek_bytes)
+/// Generate a fresh ML-KEM-768 keypair. Returns (`dk_bytes`, `ek_bytes`)
 /// where dk is the 2400-byte decapsulation key and ek is the
 /// 1184-byte encapsulation key.
 #[pyfunction]
-fn generate_pq_keypair<'py>(
-    py: Python<'py>,
-) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+fn generate_pq_keypair(py: Python<'_>) -> (Bound<'_, PyBytes>, Bound<'_, PyBytes>) {
     let (dk, ek) = pq_keypair(&mut OsRng);
     let dk_bytes = dk.as_bytes();
     let ek_bytes = ek.as_bytes();
-    Ok((
-        PyBytes::new_bound(py, dk_bytes.as_slice()),
-        PyBytes::new_bound(py, ek_bytes.as_slice()),
-    ))
+    (
+        PyBytes::new(py, dk_bytes.as_slice()),
+        PyBytes::new(py, ek_bytes.as_slice()),
+    )
 }
 
 /// Build a PQ-hybrid Sphinx packet.
 ///
-/// `circuit`: list of (hop_id_32, x25519_pk_32, pq_pk_1184_or_None).
+/// `circuit`: list of (`hop_id_32`, `x25519_pk_32`, `pq_pk_1184_or_None`).
 /// The FIRST hop MUST supply a PQ pubkey; downstream hops may pass None.
 #[pyfunction]
 fn build_pq_sphinx<'py>(
     py: Python<'py>,
     eph_sk_bytes: &[u8],
-    circuit: Vec<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)>,
+    circuit: &Bound<'py, PyList>,
     payload: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
     let eph_sk = scalar_from_bytes(eph_sk_bytes)?;
     let hops = parse_pq_circuit(circuit)?;
     let packet = pq_build(&eph_sk, &hops, payload, &mut OsRng).map_err(map_err)?;
-    Ok(PyBytes::new_bound(py, packet.as_bytes()))
+    Ok(PyBytes::new(py, packet.as_bytes()))
 }
 
 /// Peel a PQ-hybrid Sphinx packet at the ENTRY relay (decapsulates
@@ -281,13 +323,13 @@ fn peel_pq_sphinx_entry<'py>(
             next_packet,
         } => Ok((
             "forward".to_string(),
-            PyBytes::new_bound(py, next_hop.as_bytes()),
-            PyBytes::new_bound(py, next_packet.as_bytes()),
+            PyBytes::new(py, next_hop.as_bytes()),
+            PyBytes::new(py, next_packet.as_bytes()),
         )),
         PqSphinxPeelOutcome::Deliver { payload } => Ok((
             "deliver".to_string(),
-            PyBytes::new_bound(py, &[]),
-            PyBytes::new_bound(py, &payload),
+            PyBytes::new(py, &[]),
+            PyBytes::new(py, &payload),
         )),
     }
 }
@@ -310,33 +352,35 @@ fn peel_pq_sphinx_intermediate<'py>(
             next_packet,
         } => Ok((
             "forward".to_string(),
-            PyBytes::new_bound(py, next_hop.as_bytes()),
-            PyBytes::new_bound(py, next_packet.as_bytes()),
+            PyBytes::new(py, next_hop.as_bytes()),
+            PyBytes::new(py, next_packet.as_bytes()),
         )),
         PqSphinxPeelOutcome::Deliver { payload } => Ok((
             "deliver".to_string(),
-            PyBytes::new_bound(py, &[]),
-            PyBytes::new_bound(py, &payload),
+            PyBytes::new(py, &[]),
+            PyBytes::new(py, &payload),
         )),
     }
 }
 
 // ── Cover traffic ────────────────────────────────────────────────
 
-/// Build a cover Sphinx packet bound for `circuit`. Indistinguishable
-/// on the wire from a real Sphinx packet (same size, same blinding).
-/// The destination identifies it via [`is_cover_payload`].
+/// Build a cover Sphinx packet bound for `circuit`. Its encoded layout
+/// and length match an equally shaped real Sphinx packet; this does not
+/// establish traffic indistinguishability under timing, volume, or route
+/// observation. The destination identifies the authenticated cover marker
+/// during peel.
 #[pyfunction]
 fn build_cover_packet<'py>(
     py: Python<'py>,
     eph_sk_bytes: &[u8],
-    circuit: Vec<(Vec<u8>, Vec<u8>)>,
+    circuit: &Bound<'py, PyList>,
     cover_size: usize,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let eph_sk = scalar_from_bytes(eph_sk_bytes)?;
     let hops = parse_circuit(circuit)?;
     let packet = cover_build(&eph_sk, &hops, cover_size, &mut OsRng).map_err(map_err)?;
-    Ok(PyBytes::new_bound(py, packet.as_bytes()))
+    Ok(PyBytes::new(py, packet.as_bytes()))
 }
 
 /// **Deprecated (audit M4):** plaintext-prefix sentinel check. A
@@ -356,9 +400,10 @@ fn is_cover_payload(payload: &[u8]) -> bool {
 ///
 /// Returns true iff `payload` (the cleartext after Sphinx peel)
 /// carries a valid MAC trailer for `shared_key`. The sender is
-/// expected to have derived the trailer with the same shared key
-/// the destination computes locally during `peel_sphinx` —
-/// unforgeable without that key.
+/// expected to have derived the trailer with the same circuit shared key
+/// the destination computes locally during `peel_sphinx`. This prevents
+/// an in-path party without that key from retagging an existing payload;
+/// it is not user-identity authentication for freshly built circuits.
 ///
 /// Daemon code that bypasses `peel_sphinx`'s built-in "cover"
 /// return path can use this to verify cover status directly.
@@ -396,13 +441,10 @@ impl PyCoverScheduler {
                 seed.len()
             )));
         }
-        if rate_hz <= 0.0 {
-            return Err(PyValueError::new_err("rate_hz must be positive"));
-        }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(seed);
         Ok(Self {
-            inner: CoverScheduler::new(rate_hz, arr),
+            inner: CoverScheduler::new(rate_hz, arr).map_err(map_err)?,
         })
     }
 
@@ -415,16 +457,13 @@ impl PyCoverScheduler {
     }
 
     fn set_rate_hz(&mut self, rate_hz: f64) -> PyResult<()> {
-        if rate_hz <= 0.0 {
-            return Err(PyValueError::new_err("rate_hz must be positive"));
-        }
-        self.inner.set_rate_hz(rate_hz);
-        Ok(())
+        self.inner.set_rate_hz(rate_hz).map_err(map_err)
     }
 }
 
-/// Adaptive rate equalizer: maintains a constant total emission rate
-/// (cover + real) regardless of real-traffic load.
+/// Adaptive rate estimator for filling the difference between a target
+/// and observed real-emission EWMA. It does not itself emit packets or
+/// guarantee a constant observable traffic process.
 #[pyclass(name = "RateEqualizer")]
 pub struct PyRateEqualizer {
     inner: RateEqualizer,
@@ -434,11 +473,8 @@ pub struct PyRateEqualizer {
 impl PyRateEqualizer {
     #[new]
     fn new(target_total_hz: f64) -> PyResult<Self> {
-        if target_total_hz <= 0.0 {
-            return Err(PyValueError::new_err("target_total_hz must be positive"));
-        }
         Ok(Self {
-            inner: RateEqualizer::new(target_total_hz),
+            inner: RateEqualizer::new(target_total_hz).map_err(map_err)?,
         })
     }
 
@@ -463,17 +499,13 @@ impl PyRateEqualizer {
     }
 
     fn set_half_life_sec(&mut self, half_life_sec: f64) -> PyResult<()> {
-        if half_life_sec <= 0.0 {
-            return Err(PyValueError::new_err("half_life_sec must be positive"));
-        }
-        self.inner.set_half_life_sec(half_life_sec);
-        Ok(())
+        self.inner.set_half_life_sec(half_life_sec).map_err(map_err)
     }
 }
 
 // ── Registration ─────────────────────────────────────────────────
 
-pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(generate_keypair, m)?)?;
     m.add_function(wrap_pyfunction!(derive_pubkey_from_scalar, m)?)?;
     m.add_function(wrap_pyfunction!(build_sphinx, m)?)?;
@@ -487,14 +519,17 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(is_cover_payload_authenticated, m)?)?;
     m.add_class::<PyCoverScheduler>()?;
     m.add_class::<PyRateEqualizer>()?;
-    m.add("COVER_SENTINEL", PyBytes::new_bound(_py, COVER_SENTINEL))?;
+    m.add("COVER_SENTINEL", PyBytes::new(py, COVER_SENTINEL))?;
     m.add("COVER_PAYLOAD_MIN", COVER_PAYLOAD_MIN)?;
     m.add("COVER_TRAILER_LEN", COVER_TRAILER_LEN)?;
     m.add("COVER_DEFAULT_RATE_HZ", COVER_DEFAULT_RATE_HZ)?;
+    m.add("COVER_MIN_RATE_HZ", COVER_MIN_RATE_HZ)?;
+    m.add("COVER_MAX_RATE_HZ", COVER_MAX_RATE_HZ)?;
     m.add(
         "RATE_EQ_DEFAULT_HALF_LIFE_SEC",
         RATE_EQ_DEFAULT_HALF_LIFE_SEC,
     )?;
+    m.add("RATE_EQ_MAX_HALF_LIFE_SEC", RATE_EQ_MAX_HALF_LIFE_SEC)?;
     m.add("HOP_ID_LEN", HOP_ID_LEN)?;
     m.add("MAX_HOPS", MAX_HOPS)?;
     m.add("SPHINX_MAX_USER_PAYLOAD", SPHINX_MAX_USER_PAYLOAD)?;

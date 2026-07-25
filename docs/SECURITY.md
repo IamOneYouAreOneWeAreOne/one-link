@@ -6,7 +6,26 @@ Status: living document. The companion to
 real security primitive corporations provide, and document every
 threat model with the countermeasure that addresses it."
 
-Last updated: 2026-05-09 (v0.20.7 audit honesty pass).
+Last release-truth audit: 2026-07-21.
+
+## Evidence boundary
+
+This is a threat model and hardening plan, not a security certification. One
+Link is alpha software and has **no verified production release**. At the audit
+date, GitHub exposed only the old, mutable `auto-latest` prerelease. That entry
+has no Sigstore bundles, published SBOM, or provenance assets. The repository
+contains release, signing, reproducibility, and verification workflows, but
+`release.yml` has not produced a production tagged release. Workflow source is
+an intended control; a successful immutable run and its published evidence are
+the proof.
+
+Unless a section explicitly says **current implementation**, its defenses are
+design requirements or roadmap targets. A check mark in an older version of
+this document must not be used as release evidence. Before trusting binary
+bytes, require an immutable version tag, green tag-scoped gates, a signed
+checksum manifest, per-artifact Sigstore bundles, provenance, an SBOM, and a
+fresh-device smoke result. None is currently available as a complete public
+release set.
 
 ---
 
@@ -28,9 +47,9 @@ OPFS encryption is on the v0.21+ track). T2 / T4 / T5 cells that read
 ✅ in earlier revisions of this doc were forward-looking commitments,
 not currently shipped guarantees.
 
-**Tier B — Desktop daemon (alive).** The Python daemon shipped via
-`pip install one_link` or the bundled binary is what most users run
-today. As of 2026-06-16 (external-audit remediation) the SQLite state
+**Tier B — Desktop daemon (development tree).** The Python daemon is the most
+complete implementation shape, but there is no verified PyPI or bundled
+production release today. As of 2026-06-16 (external-audit remediation) the SQLite state
 file is **encrypted at rest by default** (SQLCipher AES-256). The key
 is obtained from the OS keychain (Windows Credential Manager / macOS
 Keychain / Linux Secret Service) when available, and from a local
@@ -90,10 +109,10 @@ better, and what we add that no corporation provides.
 
 ## Threat model
 
-We commit to defending against the following adversary classes,
-in increasing order of capability. A "tier passed" means the
-default product is hardened against that class. Hardened tier
-extends defenses; air-gap tier extends further.
+The following adversary classes define required defenses, in increasing order
+of capability. Historical "tier passed" labels record source-level assessments;
+they are not current production certification. Hardened and air-gap tiers are
+design targets unless exact-commit evidence says otherwise.
 
 ### T1 — Casual snoop (network-adjacent, passive)
 
@@ -101,49 +120,44 @@ extends defenses; air-gap tier extends further.
 same coffee-shop hotspot, or as the user's ISP. Cannot inject;
 cannot break TLS.
 
-**Defenses (default tier):**
-- All wire traffic is end-to-end encrypted (Double Ratchet 1:1,
-  MLS for groups), nested inside TLS for the rendezvous hop.
-- Sealed sender: even given the rendezvous traffic, this attacker
-  can't tell who is talking to whom.
-- Per-message random pseudonyms for outer envelope.
+**Current source controls:** daemon channels use a mutually authenticated
+ephemeral X25519 handshake and AEAD framing. Compatible peers advertise and
+activate the Double Ratchet after CAPS negotiation. Legacy compatibility paths
+do not provide the same post-compromise properties. The existence of TreeKEM,
+sealed-sender, and pseudonym primitives is not evidence that every group,
+relay, or browser path uses them. Rendezvous and network observers may still
+learn metadata.
 
-**Status:** ✅ defeated by default.
+**Status:** partial source-level mitigation for payload confidentiality; no
+production release or complete metadata-resistance claim.
 
 ### T2 — Active network attacker (MITM)
 
 **Capabilities:** can inject, replay, and manipulate packets.
 Can attempt to MITM the TLS connection to our CDN.
 
-**Defenses (default tier):**
-- Service Worker pins our release Ed25519 public key in source.
-  An update fetched over MITM-broken TLS still has to verify
-  against the pinned key. Mismatch → SW refuses to install.
-  *Tier A status: planned for v0.21+. As of v0.20.7 the SW does
-  cache-first asset delivery without pinned-pubkey signature
-  verification; release integrity for the PWA path currently
-  rests on GitHub release HTTPS plus the multi-mirror parity
-  story rather than cryptographic verification.*
+**Target and current controls:**
+- Service Worker release-key pinning is planned, not current. The existing PWA
+  cache path and mutable prerelease do not provide a cryptographically verified
+  update channel.
 - WebRTC DataChannel uses DTLS-SRTP (active negotiation; certs
   exchanged at handshake; tampered offer/answer breaks the
-  handshake). *Audit 2026-05-09 finding C1: the daemon-side
-  /api/v1/peer-rtc signaling endpoint accepts an unsigned answer,
-  and neither side cross-checks the SDP a=fingerprint against the
-  Ed25519 identity, so a network-on-path attacker can MITM the
-  DataChannel. Active fix in flight; until it lands, browser-as-
-  peer should be treated as MITM-vulnerable on hostile networks.*
+  handshake). *The 2026-05-09 audit found unsigned-answer and SDP-fingerprint
+  binding gaps. The current development tree contains signed/bound signaling
+  changes, but those changes still need exact-commit hostile-network evidence
+  and a verified release.*
 - Wire frames carry HMAC over content + sequence; replay attacks
   fail. *Daemon-to-daemon channel: solid (transcript-bound AEAD
   AAD plus required CAPS channel_bind as of v0.20.7 fix H1).*
-- Subresource Integrity on every external script (none currently;
-  future-proofed).
+- Any future external script must be pinned and integrity-checked; the preferred
+  current posture is to load no third-party script at all.
 
-**Status:** ✅ defeated for daemon-to-daemon channels at v0.20.7
-(transcript-bound AEAD, transcript-bound CAPS, no third-party
-JS / scripts). 🔄 in progress for browser-as-peer transport
-(audit C1) and Service Worker update integrity (audit C2). The
-release process compensates for the SW gap today; the WebRTC
-gap requires the C1 fix before it becomes "defeated".
+**Status:** daemon-to-daemon source paths have transcript-bound AEAD and CAPS
+controls. The development tree also contains signed WebRTC signaling and
+fingerprint-binding work, but this document does not substitute for a fresh
+hostile-network proof at an exact commit. Service Worker update integrity and
+verified production distribution are unavailable; no release process
+compensates for that gap today.
 
 ### T3 — Compromised peer (a "friend" turns)
 
@@ -151,16 +165,15 @@ gap requires the C1 fix before it becomes "defeated".
 arbitrary messages claiming to be themselves, can read everything
 the user sent them historically.
 
-**Defenses (default tier):**
+**Current controls and historical gaps:**
 - Forward secrecy via Double Ratchet: even compromise of the
   peer's CURRENT keys doesn't expose old messages, because old
   ratchet keys are deleted. *The Double Ratchet primitive ships
   at `src/one_link/double_ratchet.py` and the activation pathway
   is wired into the channel. Audit 2026-05-09 finding C4: the
-  daemon currently filters `double_ratchet_v1` out of advertised
-  CAPS, so the activation half-step never fires and channels
-  remain on the static AEAD keys derived once at handshake. DR
-  activation ships next.*
+  daemon historically filtered `double_ratchet_v1` out of advertised CAPS.
+  The current development tree advertises the capability and activates after
+  mutual negotiation; legacy peers can still remain on the session AEAD path.*
 - Post-compromise security: future messages between user and a
   not-yet-compromised peer recover security after the ratchet
   steps forward. *Same caveat as above; PCS depends on DR being
@@ -175,17 +188,16 @@ the user sent them historically.
   (chat-only). A compromised paired peer cannot drive file
   transfer, folder sync, or group operations without explicit
   user consent for each capability.
-- Verifiable revocation log (v1.x): users can publish a
+- Verifiable revocation log (planned): users would publish a
   revocation that propagates through the network; their other
   contacts cryptographically refuse messages from the revoked
   peer key.
 
-**Status:** 🔄 partially contained at v0.20.7. The deny-by-default
-capability policy (C3 fix) limits a compromised peer's reach to
-chat-only without user consent. Forward secrecy + post-compromise
-security + cryptographic block-cutoff land when the DR activation
-ship completes (in flight). Until then a peer-key compromise
-exposes captured ciphertext history under that peer's static key.
+**Status:** partial. The capability policy constrains authorized operations,
+and mutually capable current peers activate the Double Ratchet. Those facts do
+not establish a universal post-compromise guarantee for legacy sessions,
+already-delivered plaintext, compromised endpoints, group paths, or revoked
+peers. Each path needs exact-commit adversarial evidence before release.
 
 ### T4 — Lost / stolen device
 
@@ -239,43 +251,41 @@ finding C5 tracks the gap.
 **Capabilities:** controls the bytes served at the user's
 canonical install URL. Could push a backdoored bundle.
 
-**Defenses (default tier):**
-- Pinned release public key in source. The Service Worker checks
-  every update's signature against it. A backdoored bundle from
-  a compromised mirror fails signature → install refused.
-- Reproducible builds: any third party can clone source + build
-  + verify hash. Community watchdogs.
-- SLSA-3 build provenance attestation published with every
-  release.
-- Multi-source mirrors (v0.18.0+): user can fetch from
-  whichever they trust most; signature check is the same.
+**Current implementation controls:**
+- Release and verification workflows are present in source and pin their
+  intended workflow identity and immutable tag.
+- The verification script fails closed when a checksum manifest, manifest
+  signature, artifact signature, or exact tag binding is missing.
+- Those controls have not yet produced a complete public production release
+  evidence set.
 
-**Status:** 🔄 in progress. The pinned-pubkey + signature
-verification path described above is the v0.21+ design; today
-(v0.20.7) `web/sw.js` is plain cache-first with no crypto, and
-the published binaries / pip wheels rely on GitHub release
-HTTPS plus the multi-mirror parity story rather than
-cryptographic signature verification at the client. Audit
-2026-05-09 finding C2 tracks the gap. Multi-maintainer threshold
-signing (T6 below) is the structural defense that, once SW
-verification ships, blocks the compromised-mirror path.
+**Planned release controls:** signed checksum manifest, per-artifact Sigstore
+bundles, provenance, published SBOM, independently compared Linux native wheel,
+pinned-update verification, and mirror diversity. Whole-product
+byte-for-byte reproducibility is not claimed.
+
+**Status:** ⚠️ not currently defeated for public binary distribution. The
+mutable `auto-latest` prerelease is not trusted or supported. There is no
+production binary download until an immutable tag publishes and passes the
+full evidence contract.
 
 ### T6 — Compromised maintainer key
 
 **Capabilities:** has a valid release-signing key; can sign a
 backdoored release.
 
-**Defenses (default tier):**
-- Multi-maintainer threshold release signing. A release is valid
-  only if signed by ≥2-of-N maintainer keys. A single compromised
-  key can't ship malware.
-- Reproducible builds: a backdoored release whose source doesn't
-  reproduce gets caught by community rebuilders within a release
-  cycle.
-- Warrant canary: the absence of a regularly-signed canary
-  signals "something happened to a maintainer."
+**Current controls:** the proposed release workflow uses short-lived GitHub
+OIDC identity for Sigstore rather than a long-lived project signing key. At the
+audit date there is no enforced multi-maintainer threshold signature, no
+published project release key, and no repository tag ruleset preventing a
+`v*` tag from being moved or deleted.
 
-**Status:** ✅ defeated by structural threshold requirement.
+**Planned controls:** immutable protected version tags, least-privilege release
+approval, multi-maintainer authorization, transparency-log monitoring, and
+independent rebuild evidence scoped only to artifacts actually compared.
+
+**Status:** ⚠️ not defeated. Threshold signing is a roadmap control, not a
+current release property.
 
 ### T7 — Compromised browser engine (RCE in WebKit / Blink)
 
@@ -333,8 +343,8 @@ but don't claim full immunity.
 all internet traffic globally; can compel app store removal; can
 compel cloud providers to disclose stored data.
 
-**Defenses (hardened tier + air-gap tier):**
-- All real defenses above, plus:
+**Target defenses (hardened tier + air-gap tier):**
+- All applicable current defenses above, plus these unfinished targets:
 - Tor-routed signaling (hardened tier).
 - `.onion` mirror distribution (no DNS, no clearnet visible).
 - Cover traffic + mix-net (hardened tier default-on): traffic
@@ -346,9 +356,13 @@ compel cloud providers to disclose stored data.
   refuse-acquisition charter (`GOVERNANCE.md`): no corporate entity
   can be compelled to ship a backdoor on our behalf.
 
-**Status:** hardened tier defeats most observable
-state-actor capabilities; air-gap tier defeats them all by
-removing internet.
+**Status:** not established. Tor signaling, `.onion`/IPFS release
+distribution, constant-rate cover, an independent mix-net, browser air-gap
+transport coverage, and threshold release/identity authority are not deployed
+as one verified product path. The native v2 single-relay path blinds pairwise
+route tags and seals identity first flights, but still exposes endpoints,
+timing, sizes, counts, and tag linkage. No state-actor resistance claim follows
+from that narrower control.
 
 ---
 
@@ -381,14 +395,16 @@ them communicate with us back-side:
    the sandbox.
 
 5. **DTLS-SRTP (in WebRTC).** The browser's WebRTC stack does the
-   transport-layer encryption. We layer Double Ratchet on top
-   (defense in depth) but DTLS handles the network-level attacker
-   without our needing to reimplement it.
+   transport-layer encryption. Browser signaling and pairing add application
+   identity checks, but browser/WebRTC paths do not inherit the daemon's
+   ML-KEM or Double-Ratchet claim unless that exact session reports it.
 
-6. **TLS to the rendezvous.** Let's Encrypt cert + browser TLS
-   stack provides the network-layer encryption to the rendezvous.
-   We layer sealed sender on top to ensure the rendezvous itself
-   can't read what passes through.
+6. **TLS to the rendezvous.** TLS protects the client-to-service hop. Native
+   peer payloads remain inside the authenticated end-to-end channel. The v2
+   relay additionally uses rotating pairwise tags and seals both identity
+   first flights; that keeps identity keys off its relay wire but does not hide
+   endpoint/timing/size/count metadata or make the operator unable to perform
+   correlation.
 
 What we **don't** accept:
 - iCloud Keychain / Google Password Manager **default** sync of
@@ -405,19 +421,25 @@ What we **don't** accept:
 This is where security engineering gets surgical. Every primitive
 we ship has to be correct.
 
-### Constant-time everything
+### Constant-time requirements and limits
 
-All cryptographic operations + their wrappers must be
-constant-time and constant-memory. Pinned in tests:
+Secret-dependent comparisons and native cryptographic primitives should use
+constant-time implementations. Python/JavaScript wrappers, allocations,
+parsing, and protocol control flow cannot honestly be described as globally
+constant-time or constant-memory. Timing tests detect regressions within their
+noise model; they are not a side-channel proof.
 
 - AES-GCM via Web Crypto: browser-provided; assumed correct (modulo
   CVEs we can't fix). Wrapper code (key wrap/unwrap, IV generation)
   must be constant-time.
 - ChaCha20-Poly1305: same.
-- Ed25519 + X25519: Web Crypto where available; `@noble/curves`
-  fallback (it's audited constant-time).
-- ML-KEM, ML-DSA: `@noble/post-quantum` (audited constant-time).
-- HMAC, HKDF: Web Crypto. Wrapper constant-time.
+- Ed25519 + X25519: Web Crypto where available; selected browser paths use
+  `@noble/curves`. Library choice is not proof that wrapper behavior is
+  constant-time.
+- ML-KEM and ML-DSA paths use reviewed libraries where wired; runtime and
+  integration side channels remain in scope.
+- HMAC and HKDF use platform/library primitives. Wrapper control flow must be
+  reviewed separately.
 
 ### Nonce / IV uniqueness
 
@@ -427,29 +449,30 @@ The single most common cryptographic failure. Defenses:
   ratchet keys, random for one-shot. Counter is per-key, not
   per-message. Reuse → game over for that key, so we abort if
   counter wraps.
-- ChaCha20-Poly1305 nonces: 192-bit XChaCha20 variant, random.
-  Birthday bound is comfortable (~2^96 messages before collision
-  risk).
+- ChaCha20-Poly1305 takes a 96-bit nonce. The daemon channel encodes its bounded
+  sequence counter into that nonce; Double Ratchet message keys are fresh and
+  use the message number in the nonce. Reuse under one key is forbidden.
 - WebRTC DataChannel sequence numbers: tracked per session.
 - Tests: a "nonce reuse detector" that tracks (key, nonce) pairs
   in a test database and fails any message that reuses one.
 
 ### Forward secrecy + post-compromise security
 
-- Double Ratchet (Signal protocol) for 1:1, **always-on** (no
-  "advanced" toggle).
-- MLS for groups (RFC 9420), TreeKEM-based, automatic key rotation
-  on every member add/remove, application keys rotate per epoch.
-- Old keys deleted from memory and storage as soon as they're no
-  longer needed. Forward-secrecy regression test: simulate
-  compromise of current state; verify old messages can't be
-  decrypted.
+- Current mutually capable daemon peers negotiate and activate the Double
+  Ratchet after the initial session handshake. Legacy compatibility paths may
+  stay on per-session AEAD and must not inherit the ratchet claim.
+- A TreeKEM primitive exists, but full RFC 9420 MLS behavior on every group path
+  is not claimed without integration and interoperability evidence.
+- Tests cover ratchet transitions and key erasure at the application level.
+  Python runtime copies, crash dumps, swap, endpoint compromise, and delivered
+  plaintext remain outside a strict zeroization guarantee.
 
 ### Key separation
 
-Every cryptographic context uses a distinct key derived via HKDF
-with a context-binding `info` parameter. No key is reused across
-purposes. Specifically:
+Distinct protocol contexts are required to derive distinct keys via HKDF with
+registered context-binding labels. The inventory and collision tests are
+release gates; this paragraph is not proof that an unregistered path cannot
+reuse a key. Intended separations include:
 
 - Identity signing key (Ed25519) ≠ identity encryption key (X25519).
 - Identity encryption key ≠ session ratchet key.
@@ -458,10 +481,27 @@ purposes. Specifically:
 
 ### Post-quantum hybrid
 
-From v0.21.0 onward, every long-term key agreement is hybrid
-ML-KEM-768 + X25519. Even if a quantum attacker breaks X25519 in
-2030, captured 2026 traffic remains opaque because ML-KEM-768
-holds. Reuses
+Current daemon-to-daemon `channel.py` sessions use a distinct v3 handshake that:
+
+- signs the exact version, ordered suite offer/selection, identities, nonces,
+  X25519 shares, ML-KEM hybrid public key/ciphertext, and prior-flight hash;
+- extracts an independent channel X25519 secret together with the verified
+  native ML-KEM-768/X25519 KEM secret into the full transcript;
+- requires mutual HMAC key confirmation before either endpoint returns a
+  usable channel; and
+- rejects legacy/classical handshakes by default. Migration requires an
+  explicit downgrade flag/environment policy and the resulting `Channel`
+  reports `pq_protected=False`.
+
+The native capability is not advertised unless its exact ABI sizes and a live
+encapsulation/decapsulation self-test pass. A missing or unhealthy native wheel
+fails closed before the initiator writes a handshake frame.
+
+This is a session-confidentiality/HNDL claim, not a blanket post-quantum product
+claim. The handshake authentication signature remains Ed25519, browser/WebRTC
+paths are separate, and `ol_pqsig`/ML-DSA is not yet authoritative on every
+identity, recovery, update, and transport path. A verified release and
+cross-platform/two-device qualification remain required. The broader design reuses
 [`std/crypto/quantum_safe.cl`](../../coherence_lang/coherence_lang/bootstrap/stdlib/std/crypto/quantum_safe.cl)
 where mature, else `@noble/post-quantum`.
 
@@ -474,7 +514,8 @@ hard to exploit even given a vulnerability.
 
 ### Content Security Policy
 
-Strict CSP shipped as a `<meta>` tag and HTTP header:
+The application serves a CSP header and related browser hardening. The policy
+shape under review is:
 
 ```
 default-src 'self';
@@ -489,58 +530,61 @@ base-uri 'self';
 form-action 'none';
 ```
 
-No inline scripts, no eval (except wasm), no third-party origins,
-no iframes, no plugins. A successful XSS injection has nothing to
-exfiltrate to.
+This policy reduces browser attack surface but still permits inline styles,
+WASM evaluation, selected connection targets, data/blob content, and product
+frames where explicitly allowed by endpoint policy. CSP does not make a
+successful XSS harmless or prevent access to data already available to the UI.
 
 ### Trusted Types
 
-Where supported (Chrome, Edge), enforce that all DOM-text-as-HTML
-sinks go through a sanitizer policy. Defense against DOM-based
-XSS that survives CSP.
+Trusted Types enforcement is a roadmap hardening gate. Source-level sanitizer
+helpers are not equivalent to browser-enforced Trusted Types on every sink.
 
 ### Subresource Integrity
 
-If we ever load a third-party resource (we don't, currently), it
-ships with `integrity="sha384-..."` so a compromised CDN can't
-replace it.
+If a third-party resource is introduced, release review must either remove it
+or pin its exact bytes with an appropriate integrity and origin policy.
 
 ### Memory safety
 
-JavaScript / WebAssembly are memory-safe by construction. No
-buffer overflows, no use-after-free. Our crypto code prefers
-audited libraries (`@noble`) over hand-rolled implementations.
+JavaScript reduces common memory-corruption exposure, while WebAssembly and
+native Rust extensions still require their own memory-safety review (including
+`unsafe` and FFI boundaries). Memory safety does not prevent logic errors,
+resource exhaustion, side channels, or compromised dependencies.
 
 ### Sensitive material lifecycle
 
-- Identity keys: non-extractable Web Crypto CryptoKey objects
-  where possible. Generated in workers; never handled by the main
-  thread.
-- Session keys: zeroized when the session closes.
-- Passphrase-derived keys: zeroized on app background. App
-  re-prompts on resume.
-- Clipboard: never write secrets. Copy-fingerprint copies the
-  fingerprint hex; copying the actual key material is not exposed
-  in any UI.
+Non-extractable browser keys, worker-only handling, prompt-on-resume, and
+reliable zeroization are target properties, not blanket current guarantees.
+The desktop Python process necessarily handles key bytes in ordinary process
+memory, where copies and interpreter lifetime cannot be proven erased. The UI
+should expose fingerprints rather than private key material; this remains a
+regression-test requirement.
 
 ### Worker isolation
 
-Crypto operations run in a Web Worker (`worker.js`). The main UI
-thread can request operations via postMessage but cannot inspect
-the worker's memory. An XSS-style compromise of the main thread
-cannot read identity keys from the worker.
+Worker isolation is a Tier A design control. It is useful only for operations
+whose keys are actually created and retained in that worker; it does not
+describe the desktop daemon or prove that an XSS cannot request authorized
+operations through the worker API.
 
 ### Dependency hygiene
 
-- Zero runtime dependencies on third-party SDKs. Currently shipped:
+- The project has third-party runtime dependencies, including:
   `cryptography`, `aiohttp`, `zeroconf`, `click`, `blake3`,
-  `platformdirs`, `watchdog`. All open-source, audited, no telemetry.
-- For the v0.15.0+ JS bundle: `@noble/curves`, `@noble/hashes`,
-  `@noble/post-quantum`, `yjs`. Audited, no telemetry, MIT/Apache.
-- Each dependency pinned by exact version + integrity hash.
-- `pip-audit` + `npm audit` run in CI; fail-the-build on critical /
-  high severity CVE.
-- Reproducible builds end-to-end (Python + JS).
+  `platformdirs`, and `watchdog`. Open-source availability does not itself
+  establish that a dependency or the integration has been independently audited.
+- Browser paths also reference `@noble/curves`, `@noble/hashes`,
+  `@noble/post-quantum`, and `yjs`. Their licenses, versions, advisories, and
+  integration behavior need verification at the release commit.
+- The universal lock records resolved registry versions and hashes; project
+  declarations intentionally use bounded compatibility ranges.
+- Configured CI runs lock-drift checks, Python/Rust/JavaScript advisory scans,
+  secret scanning, workflow linting, SAST, and SBOM generation. A workflow's
+  presence is not evidence that every historical or future run is green.
+- End-to-end byte-for-byte reproducibility is not established. The configured
+  reproducibility check is intentionally limited to two Linux native-wheel
+  builds and needs successful tag-run evidence.
 
 ---
 
@@ -548,137 +592,105 @@ cannot read identity keys from the worker.
 
 Where the bytes come from is as important as how they're written.
 
-- **Reproducible builds.** Source → bundle is deterministic. Any
-  third party can rebuild and verify.
-- **SLSA-3 attestations.** Build provenance signed by HSM-bound
-  CI keys.
-- **Multi-maintainer threshold release signing.** ≥2-of-N
-  maintainers' Ed25519 signatures required to ship a release.
-- **Pinned release public key** in source. Service Worker verifies
-  every update against the pin. CA-MITM cannot ship a working
-  update.
-- **Mirror diversity.** Releases distributed via GitHub, GitLab,
-  Codeberg, IPFS, Tor hidden service, project's own server.
-  Cryptographic verification doesn't care which mirror; mirror
-  takedowns don't deplatform us.
-- **Dependency transparency.** SBOM (CycloneDX) auto-generated and
-  published with every release.
+**Current evidence (2026-07-21):** source, frozen dependency locks, a
+least-privilege release workflow, an exact-tag verifier, and security workflow
+definitions exist in the repository. There is no immutable production release
+run proving the pipeline end to end, and the only extant prerelease has no
+Sigstore, SBOM, or provenance assets.
+
+**Release gate (not yet satisfied):** an immutable `v*` tag must run the full
+tag-scoped gates and publish exact-byte checksums, signed manifest and artifact
+bundles, build provenance, an SBOM, and fresh-device smoke evidence. The
+separate reproducibility workflow compares one Linux native wheel twice; it
+does not establish reproducibility of Windows, macOS, standalone archives, or
+the entire product.
+
+**Roadmap, not current guarantees:** SLSA-level certification,
+multi-maintainer threshold signing, a pinned release key in the Service Worker,
+and GitLab/Codeberg/IPFS/Tor mirror diversity. These controls become claims
+only after their enforcement and public evidence are independently verified.
 
 ---
 
 ## Vulnerability response
 
 - **Coordinated disclosure.** A `SECURITY.md` at repo root (separate
-  from this design doc) tells researchers how to report. PGP key
-  for encrypted reporting. 90-day disclosure window standard.
+  from this design doc) tells researchers how to report. No authenticated
+  project PGP disclosure key is currently published.
 - **CVE response process.** A documented runbook: triage → patch →
   ship → backport → publish advisory → update warrant canary if
   applicable.
-- **Bug bounty.** Funded by donations; no corporate sponsor with
-  influence. Tiered payouts for severity.
-- **Penetration test cadence.** Annual external pentest by a
-  reputable firm. Findings published after fix.
-- **Cryptographic review.** Major crypto changes (Double Ratchet
-  activation, MLS landing, post-quantum hybrid) get external
-  cryptographer review before ship.
+- **Bug bounty (planned).** No funded bounty is currently offered; the root
+  policy describes the present recognition-only arrangement.
+- **Penetration testing (planned).** An annual independent assessment is a
+  target, not current evidence of external certification.
+- **Cryptographic review (required before production).** Major crypto changes
+  need external review before they can support a production-readiness claim.
 
 ---
 
 ## What we promise vs. what we can't promise
 
-**We promise (v0.20.7 — what's actually shipped today):**
-- Source is open and auditable.
-- Reproducible builds (planned; pinning + SBOM gates landed at
-  v0.7.2).
-- The cryptographic primitives we ship are vetted libraries
-  (`cryptography` + audited `@noble/*` for the JS path) used in
-  constant-time, with key separation and unique nonces. The
-  Double Ratchet primitive ships at `src/one_link/double_ratchet.py`
-  and is wired into the channel; activation is gated behind audit
-  finding C4 and lands next.
-- No analytics, telemetry, third-party SDK, or phone-home of any
-  kind from the daemon or PWA shell. WebRTC's STUN traffic is the
-  one third-party touchpoint; that's documented in
-  `architecture.md` and tunable.
-- Every layer of corporate substrate has a documented defang
-  (some shipped, some in flight; see the matrix above).
-- T1 (casual snoop) defeated.
-- T2 (active MITM) defeated for daemon-to-daemon channels;
-  browser-as-peer transport requires the C1 fix to fully defeat.
-- T3 (compromised peer) bounded to chat-only by the deny-by-
-  default capability gate (v0.20.7 fix C3); forward secrecy +
-  post-compromise security + cryptographic block-cutoff arrive
-  with the C4 / H14 ship.
-- T4 (lost device): Tier A (browser PWA) defended once the
-  OPFS-encryption + Argon2id ship lands. Tier B (desktop daemon)
-  protected today by user-account isolation only; identity-key
-  passphrase encryption is opt-in via `ONE_LINK_PASSPHRASE`.
-- T5-T6 (supply chain): in progress.
+**Evidence-backed statements about the current development tree:**
+- The source and dependency locks are public and can be reviewed at an exact
+  commit. Public source is not proof that every path has been independently
+  audited.
+- The desktop state database is configured to use SQLCipher by default and to
+  refuse silent plaintext fallback; an operator can explicitly opt into
+  plaintext. Identity keys, received blobs, runtime memory, and OS account
+  security have separate limits documented above.
+- Automated test, security, release, and verification workflows exist. Their
+  configuration is reviewable, but there is no production-tag run or published
+  release evidence set to rely on today.
 
-**We don't promise:**
-- That the at-rest cell for Tier B (desktop daemon) is encrypted
-  by default. It isn't, today; user-account isolation is the
-  current line of defense. The roadmap to closing this is in
-  `docs/ROADMAP.md` under "first-launch lockbox".
-- Immunity from a 0-day RCE in WebKit / Blink. (Apple/Mozilla/
-  Google's job.)
-- Immunity from a fully compromised OS during an active session.
-- Anonymity at the network-metadata layer in the default tier
-  (default tier still uses the project rendezvous; Hardened or
-  air-gap tier is what does this).
-- That we'll never ship a bug. (Bugs happen; CVE response process
-  exists.)
-
-**We don't promise:**
-- Immunity from a 0-day RCE in WebKit / Blink. (Apple/Mozilla/
-  Google's job.)
-- Immunity from a fully compromised OS during an active session.
-- Anonymity at the network-metadata layer in the default tier
-  (default tier still uses the project rendezvous; Hardened or
-  air-gap tier is what does this).
-- That we'll never ship a bug. (Bugs happen; CVE response process
-  exists.)
-
-We also don't promise that the user's PHONE is secure. They have
-to keep their OS patched and not install malicious apps. We can
-strengthen the door of our own house; we can't strengthen the
-locks on theirs.
+**We do not promise:**
+- Production readiness, independent security certification, complete code-path
+  coverage, or that the development tree is suitable for sensitive data.
+- Whole-product reproducible builds, a SLSA level, threshold release signing,
+  signed updates, or signatures/SBOM/provenance on every download. Those are
+  gates or roadmap targets until public artifacts prove otherwise.
+- Immunity from browser or OS zero-days, a compromised OS during an active
+  session, or malicious software already running as the user.
+- Network-metadata anonymity in the default tier, or availability against a
+  capable denial-of-service adversary.
+- That no bug will ship. Security-sensitive use requires independent review,
+  a verified immutable release, and the user's patched, trustworthy OS.
 
 ---
 
 ## Threat-model coverage matrix
 
-The matrix tracks what's actually shipped at the indicated tier as
-of v0.20.7 (2026-05-09). ✅ = defeated as documented. 🔄 = in
-progress (design committed; implementation still landing). ⚠️ =
-known gap; reading the threat row above describes the compensating
-control. Tier A = browser PWA path; Tier B = desktop daemon path;
-"Default" sums them (where a threat applies to both, the WORSE
-status wins).
+This matrix is a historical implementation assessment, not production-release
+evidence or a fresh audit of every feature at current `master`. ✅ means the
+named source-level defense had evidence at the cited audit; 🔄 means a design or
+implementation was incomplete; ⚠️ means a known gap. Any row not reverified at
+an exact commit must be treated as unknown by a release reviewer. Tier A =
+browser PWA path; Tier B = desktop daemon path; "Default" sums them (where a
+threat applies to both, the worse status wins).
 
 | Threat | Default | Hardened | Air-gap |
 |---|---|---|---|
 | T1 Casual snoop | ✅ | ✅ | N/A |
 | T2 Active MITM (daemon channel) | ✅ | ✅ | N/A |
-| T2 Active MITM (browser-as-peer) | ⚠️ audit C1 | 🔄 fix in flight | N/A |
+| T2 Active MITM (browser-as-peer) | partial: signed signaling, identity-possession and live Chromium/Firefox direct probes; physical route matrix open | partial | N/A |
 | T3 Compromised peer (chat only) | ✅ (cap policy C3) | ✅ | ✅ |
-| T3 Compromised peer (FS / PCS) | 🔄 awaits DR activation (C4) | 🔄 | 🔄 |
+| T3 Compromised peer (FS / PCS) | partial: mutually capable daemon peers activate DR; legacy/browser boundaries remain | partial | partial |
 | T4 Lost device (Tier A — browser PWA) | 🔄 (OPFS + Argon2id v0.16+) | 🔄 (plausibly deniable) | 🔄 |
-| T4 Lost device (Tier B — daemon) | ⚠️ user-account isolation only; identity-key passphrase opt-in | ⚠️ same | ⚠️ same |
-| T5 Compromised CDN/mirror | 🔄 (audit C2; SW pinning planned) | 🔄 (.onion / IPFS planned) | ✅ (no fetch ever) |
-| T6 Compromised maintainer key | 🔄 (threshold-quorum design; not yet enforced) | 🔄 | ✅ |
+| T4 Lost device (Tier B — daemon) | partial: SQLCipher state DB default; identity/blob/runtime/OS limits remain | partial | partial |
+| T5 Compromised CDN/mirror | ⚠️ no verified public binary release; SW pinning planned | 🔄 (.onion / IPFS planned) | ✅ (no fetch ever) |
+| T6 Compromised maintainer key | ⚠️ no threshold signing or protected version-tag ruleset | ⚠️ | ✅ |
 | T7 Compromised browser engine | mitigated (CSP on `/` + `/peer` at v0.20.7) | mitigated (Trusted Types aspirational) | mitigated |
 | T8 Compromised OS (Tier A) | mitigated (Secure Enclave on) | mitigated (no Secure Enclave reliance) | mitigated |
 | T8 Compromised OS (Tier B) | ⚠️ keys swappable to disk; no mlock yet | ⚠️ same | ⚠️ same |
-| T9 State actor (passive global obs) | partial (sealed sender planned; rendezvous still seen) | 🔄 (Tor + cover traffic planned) | ✅ (no internet) |
-| T9 State actor (active disruption) | partial (no app store; signed updates pending C2) | 🔄 | ✅ |
+| T9 State actor (passive global obs) | partial payload secrecy; v2 relay identity blinding still leaks correlatable metadata | 🔄 (Tor + cover/mix planned) | target only; whole-product air-gap proof absent |
+| T9 State actor (active disruption) | ⚠️ signed updates and verified production distribution unavailable | 🔄 | ✅ |
 
 The cells that read ✅ in the 2026-05-08 revision of this doc and
 now read 🔄 / ⚠️ were not regressions in the code; they were
 overstated promises. The 2026-05-09 audit identified five critical
 gaps (C1-C5 in the audit findings file) and the project is shipping
 fixes for all of them across the v0.20.7 → v0.21 cycle. Bundles 1-6
-of those fixes shipped on 2026-05-09 (commits `8857bcf`, `cd64bd6`,
+of those fixes landed in source on 2026-05-09 (commits `8857bcf`, `cd64bd6`,
 `e56e7ce`, `9a880f7`, `9f5a137`, `8a2cb1d` — 32 audit findings closed).
 
 ---
@@ -692,8 +704,9 @@ Per `PRINCIPLES.md`, every quarter:
    classes.)
 2. Re-test the cryptographic primitives. Run nonce-reuse detector
    over recent code. Verify constant-time tests still pass.
-3. Re-verify reproducible builds: clone HEAD, build, hash matches
-   latest release.
+3. If a verified tagged release exists, reproduce only the artifacts covered
+   by an explicit comparison gate and record the exact hashes. Do not use
+   `latest` or a mutable prerelease as a reproducibility reference.
 4. Re-publish the warrant canary (also tracked in `GOVERNANCE.md`).
 5. External pentest: annual. Cryptographic review: per-major-crypto-
    change.

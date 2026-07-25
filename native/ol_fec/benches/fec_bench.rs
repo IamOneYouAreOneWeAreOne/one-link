@@ -11,7 +11,7 @@ use rand::{Rng, SeedableRng};
 fn make_data(k: usize, shard_len: usize, seed: u64) -> Vec<Vec<u8>> {
     let mut rng = StdRng::seed_from_u64(seed);
     (0..k)
-        .map(|_| (0..shard_len).map(|_| rng.r#gen::<u8>()).collect())
+        .map(|_| (0..shard_len).map(|_| rng.random::<u8>()).collect())
         .collect()
 }
 
@@ -25,7 +25,7 @@ fn bench_encode(c: &mut Criterion) {
     for &(k, m, shard_len) in configs {
         let codec = Codec::new(k, m).unwrap();
         let data = make_data(k, shard_len, 0x9E37_79B9);
-        let refs: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
+        let refs: Vec<&[u8]> = data.iter().map(std::vec::Vec::as_slice).collect();
         let total_data_bytes = (k * shard_len) as u64;
         group.throughput(Throughput::Bytes(total_data_bytes));
         group.bench_with_input(
@@ -49,7 +49,7 @@ fn bench_decode(c: &mut Criterion) {
     for &(k, m, shard_len) in configs {
         let codec = Codec::new(k, m).unwrap();
         let data = make_data(k, shard_len, 0xCAFE_BABE);
-        let data_refs: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
+        let data_refs: Vec<&[u8]> = data.iter().map(std::vec::Vec::as_slice).collect();
         let parity = codec.encode(&data_refs).unwrap();
         // Drop the first `m` data shards to force full recovery work.
         let mut present: Vec<Option<&[u8]>> = Vec::with_capacity(k + m);
@@ -79,5 +79,12 @@ fn bench_decode(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_encode, bench_decode);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{bench_decode, bench_encode, criterion_group};
+
+    criterion_group!(benches, bench_encode, bench_decode);
+}
+criterion_main!(criterion_benchmark_harness::benches);

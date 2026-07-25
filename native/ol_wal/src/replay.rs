@@ -2,12 +2,10 @@
 //!
 //! [`replay_log_dir`] is the canonical recovery entry point: it sorts
 //! every `*.wal` file in the directory by file id, validates each file's
-//! header, then linearly scans every record's CRC. The first CRC failure
-//! within a file is the truncation point: that file's tail is
-//! lopped to the offset of the previous valid record (because crash
-//! recovery, by definition, can only corrupt the *last* record of the
-//! *last* file — earlier records are already fsync'd before later ones
-//! start).
+//! header, then linearly scans every record's CRC. Only a torn or invalid
+//! final record in the final file is crash-repairable. Corruption in a
+//! sealed file, or before another complete record, is reported without
+//! truncating evidence: crash recovery cannot legitimately explain it.
 //!
 //! Determinism: two replay runs over the same on-disk state produce
 //! identical [`ReplayOutcome`] values. The fixture in
@@ -18,7 +16,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::error::WalError;
-use crate::file::{parse_header, LogKind, FILE_HEADER_LEN};
+use crate::file::{parse_header, LogKind, FILE_HEADER_LEN, FILE_HEADER_LEN_USIZE};
 use crate::record::{
     crc_valid, parse_header as parse_record_header, Record, RECORD_HEADER_LEN, RECORD_TRAILER_LEN,
 };
@@ -47,6 +45,14 @@ pub fn replay_log_file(
     path: &Path,
     expected_kind: LogKind,
 ) -> Result<(ReplayOutcome, u64), WalError> {
+    replay_log_file_with_policy(path, expected_kind, true)
+}
+
+fn replay_log_file_with_policy(
+    path: &Path,
+    expected_kind: LogKind,
+    allow_tail_repair: bool,
+) -> Result<(ReplayOutcome, u64), WalError> {
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     let file_len = file.metadata()?.len();
     let mut outcome = ReplayOutcome::default();
@@ -60,14 +66,14 @@ pub fn replay_log_file(
         });
     }
 
-    let mut header = [0u8; FILE_HEADER_LEN as usize];
+    let mut header = [0u8; FILE_HEADER_LEN_USIZE];
     file.read_exact(&mut header)?;
     let kind = parse_header(&header, &path.to_string_lossy())?;
     if kind != expected_kind {
         return Err(WalError::MagicMismatch {
             path: path.to_string_lossy().to_string(),
-            got_hex: format!("{:?}", kind),
-            expected_hex: format!("{:?}", expected_kind),
+            got_hex: format!("{kind:?}"),
+            expected_hex: format!("{expected_kind:?}"),
         });
     }
     outcome.bytes_scanned += FILE_HEADER_LEN;
@@ -83,43 +89,61 @@ pub fn replay_log_file(
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 // Torn record header in the tail; truncate.
+                if !allow_tail_repair {
+                    return Err(non_tail_corruption(path, cursor));
+                }
                 truncated_at = Some(cursor);
                 break;
             }
             Err(e) => return Err(WalError::Io(e)),
         }
-        let header = match parse_record_header(&hbuf, cursor) {
-            Ok(h) => h,
-            Err(_) => {
-                // Bad reserved bytes mid-stream → corruption; truncate.
-                truncated_at = Some(cursor);
-                break;
+        let Ok(header) = parse_record_header(&hbuf, cursor) else {
+            // Bad reserved bytes mid-stream → corruption; truncate.
+            if !allow_tail_repair
+                || file_len.saturating_sub(cursor)
+                    > (RECORD_HEADER_LEN + crate::record::MAX_PAYLOAD_LEN + RECORD_TRAILER_LEN)
+                        as u64
+            {
+                return Err(non_tail_corruption(path, cursor));
             }
+            truncated_at = Some(cursor);
+            break;
         };
-        let total_record_len =
-            (RECORD_HEADER_LEN + header.length as usize + RECORD_TRAILER_LEN) as u64;
-        if cursor + total_record_len > file_len {
+        let payload_len = usize::try_from(header.length)
+            .expect("supported targets can represent every u32 payload length");
+        let total_record_len_usize = RECORD_HEADER_LEN + payload_len + RECORD_TRAILER_LEN;
+        let total_record_len = u64::try_from(total_record_len_usize)
+            .expect("bounded WAL record length is representable as u64");
+        let record_end = cursor
+            .checked_add(total_record_len)
+            .ok_or_else(|| non_tail_corruption(path, cursor))?;
+        if record_end > file_len {
             // Torn payload or trailer in the tail.
+            if !allow_tail_repair {
+                return Err(non_tail_corruption(path, cursor));
+            }
             truncated_at = Some(cursor);
             break;
         }
         // Read the whole record body for CRC verification.
-        let mut record_bytes = vec![0u8; total_record_len as usize];
+        let mut record_bytes = vec![0u8; total_record_len_usize];
         file.seek(SeekFrom::Start(cursor))?;
         file.read_exact(&mut record_bytes)?;
         if !crc_valid(&record_bytes) {
             // CRC failure within the file → tail corruption; truncate.
+            if !allow_tail_repair || record_end != file_len {
+                return Err(non_tail_corruption(path, cursor));
+            }
             truncated_at = Some(cursor);
             break;
         }
-        let payload =
-            record_bytes[RECORD_HEADER_LEN..RECORD_HEADER_LEN + header.length as usize].to_vec();
+        let payload = record_bytes[RECORD_HEADER_LEN..RECORD_HEADER_LEN + payload_len].to_vec();
         outcome.records.push(Record {
             kind: header.kind,
             flags: header.flags,
             payload,
         });
-        cursor += total_record_len;
+        cursor = record_end;
         outcome.bytes_scanned += total_record_len;
     }
 
@@ -136,13 +160,18 @@ pub fn replay_log_file(
     Ok((outcome, final_len))
 }
 
+fn non_tail_corruption(path: &Path, offset: u64) -> WalError {
+    WalError::NonTailCorruption {
+        path: path.to_string_lossy().into_owned(),
+        offset,
+    }
+}
+
 /// Replay every WAL file in `dir`, in ascending file-id order.
 ///
-/// Truncation can only occur on the LAST record of the LAST file (per
-/// ADR-0007 invariant). If recovery encounters a CRC failure earlier
-/// than that, this function returns whatever was recovered up to the
-/// failure plus a [`ReplayOutcome::truncated`] entry recording the
-/// truncation; the caller decides whether to refuse to start.
+/// Truncation can only occur on the last record of the last file (per
+/// ADR-0007 invariant). Corruption anywhere else fails closed with
+/// [`WalError::NonTailCorruption`] and leaves the file unchanged.
 ///
 /// # Errors
 ///
@@ -166,9 +195,11 @@ pub fn replay_log_dir(dir: &Path, expected_kind: LogKind) -> Result<ReplayOutcom
     file_ids.sort_unstable();
 
     let mut combined = ReplayOutcome::default();
-    for id in file_ids {
+    let final_index = file_ids.len().saturating_sub(1);
+    for (index, id) in file_ids.into_iter().enumerate() {
         let path = dir.join(format!("{id:06}.wal"));
-        let (outcome, _final_len) = replay_log_file(&path, expected_kind)?;
+        let (outcome, _final_len) =
+            replay_log_file_with_policy(&path, expected_kind, index == final_index)?;
         combined.records.extend(outcome.records);
         combined.bytes_scanned += outcome.bytes_scanned;
         combined.truncated.extend(outcome.truncated);
@@ -190,6 +221,21 @@ mod tests {
             flags,
             payload: payload.to_vec(),
         }
+    }
+
+    fn flip_byte(path: &Path, offset: u64) {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).unwrap();
+        byte[0] ^= 0x80;
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.write_all(&byte).unwrap();
+        file.sync_all().unwrap();
     }
 
     #[test]
@@ -228,8 +274,9 @@ mod tests {
         let outcome = replay_log_dir(dir.path(), LogKind::ManifestLog).unwrap();
         assert_eq!(outcome.records.len(), 10);
         for (i, r) in outcome.records.iter().enumerate() {
-            assert_eq!(r.flags, i as u8);
-            assert_eq!(r.payload, vec![i as u8; 16]);
+            let expected = u8::try_from(i).expect("test range fits in u8");
+            assert_eq!(r.flags, expected);
+            assert_eq!(r.payload, vec![expected; 16]);
         }
     }
 
@@ -277,17 +324,65 @@ mod tests {
             dir.path().join("000001.wal")
         };
         // Corrupt the LAST byte of the file (in the second record's CRC).
-        {
-            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
-            let len = f.metadata().unwrap().len();
-            f.seek(SeekFrom::Start(len - 1)).unwrap();
-            f.write_all(&[0xFF]).unwrap();
-            f.sync_all().unwrap();
-        }
+        let len = path.metadata().unwrap().len();
+        flip_byte(&path, len - 1);
         let outcome = replay_log_dir(dir.path(), LogKind::ChunkLog).unwrap();
         assert_eq!(outcome.records.len(), 1);
         assert_eq!(outcome.records[0].payload, b"first");
         assert_eq!(outcome.truncated.len(), 1);
+    }
+
+    #[test]
+    fn corruption_in_sealed_file_is_never_truncated() {
+        let dir = tempdir().unwrap();
+        let first_len = {
+            let mut wal = Wal::create(dir.path(), LogKind::ChunkLog).unwrap();
+            wal.append(&rec(0x01, 0xA1, b"sealed record")).unwrap();
+            wal.flush().unwrap();
+            let len = wal.active_file_size();
+            wal.rotate().unwrap();
+            wal.append(&rec(0x01, 0xA2, b"active record")).unwrap();
+            wal.flush().unwrap();
+            len
+        };
+        let first_path = dir.path().join("000001.wal");
+        flip_byte(&first_path, first_len - 1);
+
+        let error = replay_log_dir(dir.path(), LogKind::ChunkLog).unwrap_err();
+        assert!(matches!(
+            error,
+            WalError::NonTailCorruption {
+                offset: FILE_HEADER_LEN,
+                ..
+            }
+        ));
+        assert_eq!(first_path.metadata().unwrap().len(), first_len);
+    }
+
+    #[test]
+    fn corruption_before_complete_record_is_never_truncated() {
+        let dir = tempdir().unwrap();
+        let first = rec(0x01, 0xB1, b"first record");
+        let path = {
+            let mut wal = Wal::create(dir.path(), LogKind::ChunkLog).unwrap();
+            wal.append(&first).unwrap();
+            wal.append(&rec(0x01, 0xB2, b"second record")).unwrap();
+            wal.flush().unwrap();
+            dir.path().join("000001.wal")
+        };
+        let original_len = path.metadata().unwrap().len();
+        let first_crc_end = FILE_HEADER_LEN + first.on_disk_len() as u64;
+        flip_byte(&path, first_crc_end - 1);
+
+        let error = replay_log_dir(dir.path(), LogKind::ChunkLog).unwrap_err();
+        assert!(matches!(
+            error,
+            WalError::NonTailCorruption {
+                offset: FILE_HEADER_LEN,
+                ..
+            }
+        ));
+        assert_eq!(path.metadata().unwrap().len(), original_len);
     }
 
     #[test]

@@ -25,7 +25,6 @@ from one_link.frame_provenance import PathClass
 from one_link.route_brain import (
     RouteBrain,
     RouteCandidate,
-    RouteCommand,
     RouteCommandKind,
     RouteState,
     score_path,

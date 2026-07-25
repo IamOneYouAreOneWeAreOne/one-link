@@ -22,11 +22,11 @@ Per FILE_ENGINE_V2_PLAN.md (corrected runtime decision): hot-path code goes to R
 
 Specifically:
 
-- **`pyo3 = "0.22"`** (current stable) for Python bindings on each Rust crate that needs Python-callable surface.
+- **`pyo3 = "0.29"`** for Python bindings on each Rust crate that needs Python-callable surface. This is the workspace security floor; older 0.22.x releases are affected by RustSec advisories for an out-of-bounds string read and a missing `Sync` bound on Python-callable closures.
 - **`maturin = ">=1.5"`** for build-and-package. Replaces `setuptools` for the native portion.
 - **`pyproject.toml`** in `One_link/native/` declares maturin as build backend for the native package.
-- **`abi3` mode** (stable Python ABI, Python 3.8+) so a single wheel works across Python versions.
-- **GIL released around long-running ops** via `py.allow_threads(|| ...)` so Python concurrency isn't blocked by Rust work.
+- **`abi3` mode** (stable Python ABI, Python 3.11+) so a single wheel works across supported Python versions.
+- **Interpreter detached around long-running ops** via `py.detach(|| ...)` so Python concurrency isn't blocked by Rust work.
 - **Zero-copy buffer passing** via `pyo3::buffer::PyBuffer` for byte arrays. Rust receives a `&[u8]` directly into Python's bytes/bytearray/memoryview, no copy.
 - **Error model**: Rust errors (`anyhow::Error` / custom `OlError`) map to Python exceptions via `PyErr` derivation. Each crate defines its own `PyErr` subclass: `OlChunkError`, `OlStoreError`, `OlAeadError`, etc. All inherit from a base `OlError(Exception)` for catch-all handling.
 
@@ -64,14 +64,14 @@ mod blake3_wrap;
 
 #[pyclass]
 pub struct ChunkBoundaryIterator {
-    inner: cdc::Boundaries,
+    inner: std::vec::IntoIter<cdc::Boundary>,
 }
 
 #[pymethods]
 impl ChunkBoundaryIterator {
     fn __iter__(slf: PyRef<Self>) -> PyRef<Self> { slf }
     fn __next__(mut slf: PyRefMut<Self>) -> Option<(usize, usize, Vec<u8>)> {
-        slf.inner.next().map(|b| (b.start, b.end, b.blake3.to_vec()))
+        slf.inner.next().map(|b| (b.start, b.end, b.raw_address.to_vec()))
     }
 }
 
@@ -79,11 +79,22 @@ impl ChunkBoundaryIterator {
 /// Releases GIL for the duration of the scan.
 #[pyfunction]
 pub fn cdc_iter(py: Python<'_>, buf: PyBuffer<u8>) -> PyResult<ChunkBoundaryIterator> {
-    let bytes = buf.as_slice(py).ok_or_else(|| PyValueError::new_err("buffer not contiguous"))?;
-    // SAFETY: PyBuffer keeps the underlying memory pinned while held; Rust slice valid for borrow lifetime.
-    let bytes_static: &'static [u8] = unsafe { std::mem::transmute(&*bytes as &[u8]) };
-    let boundaries = py.allow_threads(|| cdc::scan(bytes_static));
-    Ok(ChunkBoundaryIterator { inner: boundaries })
+    if !buf.is_c_contiguous() {
+        return Err(PyValueError::new_err("buffer must be C-contiguous"));
+    }
+    let len = buf.item_count();
+    // SAFETY: PyBuffer owns the exported buffer view until this function
+    // returns. Detaching the interpreter does not release that view, and the
+    // scan returns owned boundaries before `buf` can drop.
+    let bytes = if len == 0 {
+        &[]
+    } else {
+        // SAFETY: `len > 0`, so a successful PyBuffer export supplies a
+        // non-null, correctly aligned pointer valid for `len` bytes.
+        unsafe { std::slice::from_raw_parts(buf.buf_ptr().cast::<u8>(), len) }
+    };
+    let boundaries = py.detach(|| cdc::scan_to_vec_parallel(bytes));
+    Ok(ChunkBoundaryIterator { inner: boundaries.into_iter() })
 }
 
 #[pymodule]
@@ -113,8 +124,8 @@ fn bad_pattern(buf: PyBuffer<u8>) -> Vec<&'static [u8]> {
 
 ### GIL handling rules:
 
-- **Always** wrap long-running Rust computation in `py.allow_threads(|| ...)`. This releases the GIL so Python threads (e.g., the asyncio event loop) keep running.
-- **Never** call PyO3 reflection APIs (Python object access) while in `allow_threads`. The GIL is released; touching a `&PyAny` is UB.
+- **Always** wrap long-running Rust computation in `py.detach(|| ...)`. This detaches from the interpreter so Python threads (e.g., the asyncio event loop) keep running.
+- **Never** call PyO3 reflection APIs (Python object access) while in `detach`. The thread is detached; touching Python-bound values there violates PyO3's safety contract.
 - **CPU-bound operations** (CDC scan, BLAKE3 hash, AEAD encrypt) always release the GIL.
 - **I/O-bound operations** (chunk_store writes, WAL fsync) always release the GIL.
 - **Quick metadata lookups** (memtable get) may hold the GIL; cost is microseconds.

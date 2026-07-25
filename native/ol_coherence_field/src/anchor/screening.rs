@@ -1,7 +1,7 @@
 //! Screening length `ell_screen = √(D / Γ)`.
 //!
 //! On galaxy scales, `D` and `Γ` are the reaction-diffusion
-//! coefficients in the τ_c PDE; the screening length comes out to
+//! coefficients in the `τ_c` PDE; the screening length comes out to
 //! `c / (√3 · H_0)` ≈ 4.4 Gpc — much larger than any galaxy radius,
 //! so the field response is in the Poisson limit there.
 //!

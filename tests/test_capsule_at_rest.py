@@ -21,7 +21,6 @@ from one_link.capsule_at_rest import (
     MAGIC,
     NONCE_LEN,
     SEAL_VERSION,
-    SealedHeader,
     derive_capsule_key,
     inspect_header,
     open_from_path,
@@ -270,6 +269,40 @@ def test_inspect_header_rejects_truncated_file(tmp_path: Path) -> None:
     p.write_bytes(b"x" * 5)
     with pytest.raises(ValueError):
         inspect_header(p)
+
+
+def test_sealed_paths_reject_symbolic_link_indirection(tmp_path: Path) -> None:
+    target = tmp_path / "target.bin"
+    seed = secrets.token_bytes(32)
+    seal_to_path(
+        plaintext=b"private capsule",
+        out_path=target,
+        master_seed=seed,
+        call_id="call-link",
+        finalized_at_ms=1,
+    )
+    link = tmp_path / "link.bin"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are unavailable for this test account")
+    with pytest.raises(ValueError, match="not a regular file"):
+        open_from_path(
+            sealed_path=link,
+            master_seed=seed,
+            call_id="call-link",
+            finalized_at_ms=1,
+        )
+    with pytest.raises(ValueError, match="not a regular file"):
+        inspect_header(link)
+    with pytest.raises(ValueError, match="destination is not a regular file"):
+        seal_to_path(
+            plaintext=b"replacement",
+            out_path=link,
+            master_seed=seed,
+            call_id="call-link",
+            finalized_at_ms=2,
+        )
 
 
 # ---------------------------------------------------------------------------

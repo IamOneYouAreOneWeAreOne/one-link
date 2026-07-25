@@ -18,7 +18,6 @@ the secret).
 from __future__ import annotations
 
 import itertools
-import secrets
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from hypothesis import HealthCheck, given, settings, strategies as st

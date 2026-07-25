@@ -4,30 +4,36 @@
 //! module decodes / encodes the *payload* contents for each frame kind we
 //! care about:
 //!
-//! - `ChunkRequest (0x01)` payload = 32 bytes (the chunk_id).
-//! - `ChunkResponse (0x02)` payload = `[record_kind: u8][record_flags: u8][record_payload: N bytes]`
-//!   — the chunk_record encoded form, same as on-disk before WAL framing.
-//! - `ChunkNotFound (0x03)` payload = 32 bytes (the missing chunk_id).
-//! - `BloomFilter (0x20)` payload = `[ol_bloom encoded bytes]` per ADR-0011.
-//! - `MissingChunks (0x21)` payload = `[count: u32 LE][chunk_id_1..n: 32 bytes each]`.
-//! - `Ping (0xF0)` / `Pong (0xF1)` payload = opaque echo bytes (≤64 KiB).
-//! - `ProtoError (0xFE)` payload = ASCII reason (≤64 KiB).
+//! - `ChunkRequest` (`0x01`) payload = 32 bytes (the `chunk_id`).
+//! - `ChunkResponse` (`0x02`) payload = `[record_kind: u8][record_flags: u8][record_payload: N bytes]`
+//!   — the `chunk_record` encoded form, same as on-disk before WAL framing.
+//! - `ChunkNotFound` (`0x03`) payload = 32 bytes (the missing `chunk_id`).
+//! - `BloomFilter` (`0x20`) payload = `[ol_bloom encoded bytes]` per ADR-0011.
+//! - `MissingChunks` (`0x21`) payload = `[count: u32 LE][chunk_id_1..n: 32 bytes each]`.
+//! - `Ping` (`0xF0`) / `Pong` (`0xF1`) payload = opaque echo bytes (≤64 KiB).
+//! - `ProtoError` (`0xFE`) payload = ASCII reason (≤64 KiB).
 
 use ol_quic::FrameKind;
 
 use crate::error::TransferError;
 
-/// Length of one chunk_id on the wire.
+/// Length of one `chunk_id` on the wire.
 pub const CHUNK_ID_LEN: usize = 32;
 
-/// Encode a `ChunkRequest` payload from a chunk_id.
+const MAX_BULK_FRAME_BYTES: usize = 1024 * 1024;
+const _: () = assert!(ol_quic::MAX_BULK_FRAME_BYTES == 1024 * 1024);
+
+/// Maximum chunk ids fitting in one bounded bulk frame after the count.
+pub const MAX_CHUNK_IDS_PER_MESSAGE: usize = (MAX_BULK_FRAME_BYTES - 4) / CHUNK_ID_LEN;
+
+/// Encode a `ChunkRequest` payload from a `chunk_id`.
 #[inline]
 #[must_use]
 pub fn encode_chunk_request(chunk_id: &[u8; 32]) -> Vec<u8> {
     chunk_id.to_vec()
 }
 
-/// Decode a `ChunkRequest` payload into a chunk_id.
+/// Decode a `ChunkRequest` payload into a `chunk_id`.
 ///
 /// # Errors
 ///
@@ -44,7 +50,7 @@ pub fn decode_chunk_request(payload: &[u8]) -> Result<[u8; 32], TransferError> {
     Ok(out)
 }
 
-/// Encode a `ChunkResponse` payload: prepends the record_kind + flags
+/// Encode a `ChunkResponse` payload: prepends the `record_kind` + flags
 /// bytes before the record payload.
 #[inline]
 #[must_use]
@@ -56,8 +62,8 @@ pub fn encode_chunk_response(record_kind: u8, record_flags: u8, record_payload: 
     out
 }
 
-/// Decode a `ChunkResponse` payload into (record_kind, record_flags,
-/// record_payload).
+/// Decode a `ChunkResponse` payload into (`record_kind`, `record_flags`,
+/// `record_payload`).
 ///
 /// # Errors
 ///
@@ -97,43 +103,81 @@ pub fn decode_chunk_not_found(payload: &[u8]) -> Result<[u8; 32], TransferError>
     Ok(out)
 }
 
-/// Encode a `MissingChunks` payload from an iterator of chunk_ids.
+/// Encode a `MissingChunks` payload from an iterator of `chunk_ids`.
 ///
 /// Format: `[count: u32 LE][chunk_id_1..n: 32 bytes each]`.
-#[must_use]
-pub fn encode_missing_chunks(ids: &[[u8; 32]]) -> Vec<u8> {
-    let count = u32::try_from(ids.len()).unwrap_or(u32::MAX);
+pub fn encode_missing_chunks(ids: &[[u8; 32]]) -> Result<Vec<u8>, TransferError> {
+    if ids.len() > MAX_CHUNK_IDS_PER_MESSAGE {
+        return Err(TransferError::ResourceLimit {
+            resource: "missing chunk ids",
+            got: ids.len(),
+            max: MAX_CHUNK_IDS_PER_MESSAGE,
+        });
+    }
+    let count = u32::try_from(ids.len()).map_err(|_| TransferError::ResourceLimit {
+        resource: "missing chunk ids",
+        got: ids.len(),
+        max: MAX_CHUNK_IDS_PER_MESSAGE,
+    })?;
     let mut out = Vec::with_capacity(4 + ids.len() * CHUNK_ID_LEN);
     out.extend_from_slice(&count.to_le_bytes());
     for id in ids {
         out.extend_from_slice(id);
     }
-    out
+    Ok(out)
 }
 
 /// Encode a `ScopedBloomFilter` payload.
 ///
 /// Format: `[want_count: u32 LE][want_id_1..n: 32 bytes each][bloom_bytes]`.
-#[must_use]
-pub fn encode_scoped_bloom(want_list: &[[u8; 32]], bloom_bytes: &[u8]) -> Vec<u8> {
-    let count = u32::try_from(want_list.len()).unwrap_or(u32::MAX);
-    let mut out = Vec::with_capacity(4 + want_list.len() * CHUNK_ID_LEN + bloom_bytes.len());
+pub fn encode_scoped_bloom(
+    want_list: &[[u8; 32]],
+    bloom_bytes: &[u8],
+) -> Result<Vec<u8>, TransferError> {
+    if want_list.len() > MAX_CHUNK_IDS_PER_MESSAGE {
+        return Err(TransferError::ResourceLimit {
+            resource: "scoped Bloom want ids",
+            got: want_list.len(),
+            max: MAX_CHUNK_IDS_PER_MESSAGE,
+        });
+    }
+    let total = 4usize
+        .checked_add(want_list.len().saturating_mul(CHUNK_ID_LEN))
+        .and_then(|prefix| prefix.checked_add(bloom_bytes.len()))
+        .ok_or(TransferError::ResourceLimit {
+            resource: "scoped Bloom payload bytes",
+            got: usize::MAX,
+            max: MAX_BULK_FRAME_BYTES,
+        })?;
+    if total > MAX_BULK_FRAME_BYTES {
+        return Err(TransferError::ResourceLimit {
+            resource: "scoped Bloom payload bytes",
+            got: total,
+            max: MAX_BULK_FRAME_BYTES,
+        });
+    }
+    let count = u32::try_from(want_list.len()).map_err(|_| TransferError::ResourceLimit {
+        resource: "scoped Bloom want ids",
+        got: want_list.len(),
+        max: MAX_CHUNK_IDS_PER_MESSAGE,
+    })?;
+    let mut out = Vec::with_capacity(total);
     out.extend_from_slice(&count.to_le_bytes());
     for id in want_list {
         out.extend_from_slice(id);
     }
     out.extend_from_slice(bloom_bytes);
-    out
+    Ok(out)
 }
 
-/// Decode a `ScopedBloomFilter` payload into the want_list and the
+/// Decode a `ScopedBloomFilter` payload into the `want_list` and the
 /// encoded bloom bytes (caller passes the bloom bytes to
 /// `Bloom::decode`).
 ///
 /// # Errors
 ///
 /// [`TransferError::MalformedPayload`] if the header is missing or
-/// the declared want_count overflows the available bytes.
+/// the declared `want_count` overflows the available bytes.
 pub fn decode_scoped_bloom(payload: &[u8]) -> Result<(Vec<[u8; 32]>, &[u8]), TransferError> {
     if payload.len() < 4 {
         return Err(TransferError::MalformedPayload {
@@ -141,9 +185,35 @@ pub fn decode_scoped_bloom(payload: &[u8]) -> Result<(Vec<[u8; 32]>, &[u8]), Tra
             reason: "scoped-bloom payload < 4 bytes",
         });
     }
-    let count = u32::from_le_bytes(payload[0..4].try_into().expect("4 bytes")) as usize;
-    let want_bytes_len = count * CHUNK_ID_LEN;
-    if payload.len() < 4 + want_bytes_len {
+    let count = usize::try_from(u32::from_le_bytes([
+        payload[0], payload[1], payload[2], payload[3],
+    ]))
+    .map_err(|_| TransferError::ResourceLimit {
+        resource: "scoped Bloom want ids",
+        got: usize::MAX,
+        max: MAX_CHUNK_IDS_PER_MESSAGE,
+    })?;
+    if count > MAX_CHUNK_IDS_PER_MESSAGE {
+        return Err(TransferError::ResourceLimit {
+            resource: "scoped Bloom want ids",
+            got: count,
+            max: MAX_CHUNK_IDS_PER_MESSAGE,
+        });
+    }
+    let want_bytes_len =
+        count
+            .checked_mul(CHUNK_ID_LEN)
+            .ok_or(TransferError::MalformedPayload {
+                kind: FrameKind::ScopedBloomFilter,
+                reason: "scoped-bloom want_list length overflow",
+            })?;
+    let list_end = 4usize
+        .checked_add(want_bytes_len)
+        .ok_or(TransferError::MalformedPayload {
+            kind: FrameKind::ScopedBloomFilter,
+            reason: "scoped-bloom want_list length overflow",
+        })?;
+    if payload.len() < list_end {
         return Err(TransferError::MalformedPayload {
             kind: FrameKind::ScopedBloomFilter,
             reason: "scoped-bloom want_list exceeds payload",
@@ -156,11 +226,11 @@ pub fn decode_scoped_bloom(payload: &[u8]) -> Result<(Vec<[u8; 32]>, &[u8]), Tra
         cid.copy_from_slice(&payload[start..start + CHUNK_ID_LEN]);
         want.push(cid);
     }
-    let bloom_bytes = &payload[4 + want_bytes_len..];
+    let bloom_bytes = &payload[list_end..];
     Ok((want, bloom_bytes))
 }
 
-/// Decode a `MissingChunks` payload into a vector of chunk_ids.
+/// Decode a `MissingChunks` payload into a vector of `chunk_ids`.
 ///
 /// # Errors
 ///
@@ -173,8 +243,33 @@ pub fn decode_missing_chunks(payload: &[u8]) -> Result<Vec<[u8; 32]>, TransferEr
             reason: "missing-chunks payload < 4 bytes",
         });
     }
-    let count = u32::from_le_bytes(payload[0..4].try_into().expect("4 bytes")) as usize;
-    let expected_len = 4 + count * CHUNK_ID_LEN;
+    let count = usize::try_from(u32::from_le_bytes([
+        payload[0], payload[1], payload[2], payload[3],
+    ]))
+    .map_err(|_| TransferError::ResourceLimit {
+        resource: "missing chunk ids",
+        got: usize::MAX,
+        max: MAX_CHUNK_IDS_PER_MESSAGE,
+    })?;
+    if count > MAX_CHUNK_IDS_PER_MESSAGE {
+        return Err(TransferError::ResourceLimit {
+            resource: "missing chunk ids",
+            got: count,
+            max: MAX_CHUNK_IDS_PER_MESSAGE,
+        });
+    }
+    let expected_len =
+        4usize
+            .checked_add(count.checked_mul(CHUNK_ID_LEN).ok_or(
+                TransferError::MalformedPayload {
+                    kind: FrameKind::MissingChunks,
+                    reason: "missing-chunks count overflow",
+                },
+            )?)
+            .ok_or(TransferError::MalformedPayload {
+                kind: FrameKind::MissingChunks,
+                reason: "missing-chunks length overflow",
+            })?;
     if payload.len() != expected_len {
         return Err(TransferError::MalformedPayload {
             kind: FrameKind::MissingChunks,
@@ -243,7 +338,7 @@ mod tests {
     #[test]
     fn missing_chunks_round_trip() {
         let ids: Vec<[u8; 32]> = (0u8..5).map(|i| [i; 32]).collect();
-        let payload = encode_missing_chunks(&ids);
+        let payload = encode_missing_chunks(&ids).unwrap();
         assert_eq!(payload.len(), 4 + 5 * 32);
         let parsed = decode_missing_chunks(&payload).unwrap();
         assert_eq!(parsed, ids);
@@ -251,7 +346,7 @@ mod tests {
 
     #[test]
     fn missing_chunks_empty() {
-        let payload = encode_missing_chunks(&[]);
+        let payload = encode_missing_chunks(&[]).unwrap();
         assert_eq!(payload, vec![0u8, 0, 0, 0]);
         let parsed = decode_missing_chunks(&payload).unwrap();
         assert!(parsed.is_empty());
@@ -265,6 +360,26 @@ mod tests {
         assert!(matches!(
             decode_missing_chunks(&buf),
             Err(TransferError::MalformedPayload { .. })
+        ));
+    }
+
+    #[test]
+    fn chunk_id_collections_reject_count_bombs_before_allocation() {
+        let mut forged = Vec::from(u32::MAX.to_le_bytes());
+        forged.extend_from_slice(&[0u8; 32]);
+        assert!(matches!(
+            decode_missing_chunks(&forged),
+            Err(TransferError::ResourceLimit { .. })
+        ));
+        assert!(matches!(
+            decode_scoped_bloom(&forged),
+            Err(TransferError::ResourceLimit { .. })
+        ));
+
+        let too_many = vec![[0u8; 32]; MAX_CHUNK_IDS_PER_MESSAGE + 1];
+        assert!(matches!(
+            encode_missing_chunks(&too_many),
+            Err(TransferError::ResourceLimit { .. })
         ));
     }
 }

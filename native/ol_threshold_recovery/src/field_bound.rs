@@ -1,31 +1,23 @@
 //! Coherence-field-bound threshold recovery (alien-tech layer).
 //!
-//! Adds an XOR mask layer on top of plain Shamir. Each share-stream is
-//! masked with a one-time pad derived from:
+//! Adds a keyed mask layer on top of plain Shamir. Each share-stream is
+//! masked with a domain-separated BLAKE3 keyed-XOF stream derived from:
 //!
-//! 1. The coherence-field state at the moment of minting (a 32-byte
-//!    "field seed" the caller produces from
-//!    `coherence_field_native.solve_helmholtz`'s output).
+//! 1. A secret 32-byte CSPRNG-grade binding key. A public field-solver
+//!    output is context, not sufficient key material by itself.
 //! 2. The share-holder's per-peer field score at mint time (in [0, 1]).
 //!
-//! The OTP for share i across all bytes is computed from
-//! `HKDF(field_seed || holder_field_score_i)`. Recovery requires the
-//! caller to produce the same OTP, which in turn requires reconstructing
-//! the field witness — and that requires the field seed AND the same
-//! N share-holders' field scores at mint time.
+//! Recovery requires the same binding key and context. Keep that key in a
+//! separate trust domain from the masked shares.
 //!
 //! ## What this defeats
 //!
-//! - **Cloud backup capture**: an attacker who exfiltrates all N raw
-//!   share-files from cloud backups still cannot decrypt — the OTPs
-//!   are derived from the swarm's coherence-field state, which the
-//!   attacker doesn't have.
-//! - **Offline brute force**: the field seed has 256 bits of entropy
-//!   from the field solver's PDE result. Not searchable.
-//! - **Lone-attacker reconstruction**: even with all 5 shares + the
-//!   field seed in hand, the attacker also needs the share-holders'
-//!   field scores at mint time. Those are bound to the actual peer
-//!   identities in the swarm.
+//! - **Separated-backup capture**: stealing all masked share files is not
+//!   enough when the binding key is stored independently.
+//! - **Context binding**: holder scores, epoch, and share index are committed
+//!   into distinct mask streams.
+//! - **Primary threshold remains explicit**: possession of the witness never
+//!   substitutes for K valid Shamir shares.
 //!
 //! ## What this gracefully degrades to
 //!
@@ -35,21 +27,20 @@
 //! replacement. With a `FieldWitness::placeholder()`, the layer is a
 //! no-op and behaviour is identical to plain Shamir.
 //!
-//! ## Implementation: pure-rust XOR mask
+//! ## Implementation
 //!
-//! We deliberately avoid pulling in a heavy HKDF crate. The OTP
-//! derivation is a simple SHAKE-style PRF built from the same
-//! xoshiro256** we already use, seeded with the field-bound key
-//! material. This keeps the crate dependency-free; production
-//! deployments that prefer a FIPS-compliant HKDF can swap in their
-//! own KDF via the [`FieldWitness::with_kdf`] hook.
+//! BLAKE3 keyed-XOF supplies the mask stream with an explicit v2 domain tag.
 
 use thiserror::Error;
 
-use crate::prng::{PrngState, SplitMix64};
+use crate::prng::PrngState;
 use crate::shamir::{
-    reconstruct_bytes as plain_reconstruct_bytes, share_bytes as plain_share_bytes, ShareError,
+    reconstruct_bytes as plain_reconstruct_bytes, share_bytes as plain_share_bytes,
+    share_bytes_secure as plain_share_bytes_secure, ShareError, MAX_SECRET_BYTES,
 };
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
+const FIELD_OTP_DOMAIN: &[u8] = b"one-link/field-bound-share-mask/v2";
 
 /// Errors from field-bound operations.
 #[derive(Debug, Error, PartialEq)]
@@ -72,33 +63,52 @@ pub enum FieldBindingError {
         /// Bad value.
         got: f64,
     },
+
+    /// A supplied share index does not identify a witness holder.
+    #[error("share index {index} is outside witness holder range 0..{holder_count}")]
+    ShareIndexOutOfRange {
+        /// Invalid index.
+        index: usize,
+        /// Number of holders committed by the witness.
+        holder_count: usize,
+    },
+
+    /// The same original share index was supplied more than once.
+    #[error("duplicate original share index {index}")]
+    DuplicateShareIndex {
+        /// Duplicated index.
+        index: usize,
+    },
 }
 
-/// Public commitment to the field state at mint time.
+/// Secret field-binding context required at recovery time.
 ///
-/// This is the witness that recovery must reproduce. It carries enough
-/// material to derive the OTPs but NOT enough to recover them without
-/// also knowing the field seed (which is private — only the original
-/// minter and the share-holders' devices know it through the mesh).
-///
-/// The witness IS public — it's stored alongside the shares — but it's
-/// the field-seed-keyed input to the KDF that makes the OTPs
-/// unrecoverable from the witness alone.
-#[derive(Clone, Debug, PartialEq)]
+/// This value is not safe to store beside the masked shares: it contains the
+/// keyed-XOF key and therefore can remove the field mask. The Shamir threshold
+/// remains the primary security boundary; field binding is defense in depth.
+#[derive(Clone, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct FieldWitness {
-    /// 32-byte seed derived from `coherence_field_native.solve_helmholtz`
-    /// output. Caller produces this from the field state at mint time.
-    /// For minting: secret to the minter + share-holders. For recovery:
-    /// must be supplied (typically reconstructed by the share-holders
-    /// who still have the swarm topology).
+    /// Secret 32-byte binding key. It must contain CSPRNG-grade entropy.
+    /// Public or low-entropy field output alone is not a cryptographic key.
     pub field_seed: [u8; 32],
     /// Per-share field scores in [0, 1]. Same length as `n`. The score
-    /// is the OneField τ_c normalised value for each share-holder.
+    /// is the `OneField` `τ_c` normalised value for each share-holder.
     pub holder_scores: Vec<f64>,
     /// Mint-time epoch (caller-supplied; nanoseconds since arbitrary
     /// epoch). Mixed into the KDF so refresh ticks produce different
     /// masks even when field state hasn't changed.
     pub epoch_ns: u64,
+}
+
+impl std::fmt::Debug for FieldWitness {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FieldWitness")
+            .field("field_seed", &"[REDACTED]")
+            .field("holder_count", &self.holder_scores.len())
+            .field("epoch_ns", &self.epoch_ns)
+            .finish()
+    }
 }
 
 impl FieldWitness {
@@ -126,45 +136,42 @@ impl FieldWitness {
     /// Pure function of the witness + share index, so a recovering
     /// caller with the same witness produces the same OTP.
     fn derive_otp(&self, share_index: usize, n_bytes: usize) -> Vec<u8> {
-        // Build a 64-bit seed from the field_seed + share_index +
-        // holder_score + epoch_ns. SplitMix64 expands it; xoshiro256**
-        // generates the byte stream.
-        let mut acc: u64 = 0;
-        for chunk in self.field_seed.chunks(8) {
-            let mut buf = [0u8; 8];
-            for (i, &b) in chunk.iter().enumerate() {
-                buf[i] = b;
-            }
-            acc ^= u64::from_le_bytes(buf);
-            acc = SplitMix64::next(acc);
+        if self.is_placeholder() {
+            return vec![0u8; n_bytes];
         }
-        let score_bits = self
-            .holder_scores
-            .get(share_index)
-            .copied()
-            .unwrap_or(0.0)
-            .to_bits();
-        acc ^= score_bits;
-        acc = SplitMix64::next(acc);
-        acc ^= self.epoch_ns;
-        acc = SplitMix64::next(acc);
-        acc ^= share_index as u64;
-        acc = SplitMix64::next(acc);
-        let mut prng = PrngState::new(acc);
-        let mut otp = Vec::with_capacity(n_bytes);
-        for _ in 0..n_bytes {
-            otp.push(prng.next_byte());
-        }
+        let score = self.holder_scores.get(share_index).copied().unwrap_or(0.0);
+        let score_bits = if score == 0.0 { 0.0f64 } else { score }.to_bits();
+        let mut hasher = blake3::Hasher::new_keyed(&self.field_seed);
+        hasher.update(FIELD_OTP_DOMAIN);
+        hasher.update(&(share_index as u64).to_be_bytes());
+        hasher.update(&score_bits.to_be_bytes());
+        hasher.update(&self.epoch_ns.to_be_bytes());
+        let mut reader = hasher.finalize_xof();
+        let mut otp = vec![0u8; n_bytes];
+        reader.fill(&mut otp);
         otp
     }
+}
+
+fn validate_witness(witness: &FieldWitness) -> Result<(), FieldBindingError> {
+    if witness.holder_scores.len() > crate::shamir::max_participants() as usize {
+        return Err(FieldBindingError::ScoreCountMismatch {
+            expected: crate::shamir::max_participants() as usize,
+            got: witness.holder_scores.len(),
+        });
+    }
+    for &score in &witness.holder_scores {
+        if !score.is_finite() || !(0.0..=1.0).contains(&score) {
+            return Err(FieldBindingError::FieldScoreOutOfRange { got: score });
+        }
+    }
+    Ok(())
 }
 
 /// Split a multi-byte secret with field-bound shares.
 ///
 /// Each share-stream produced by plain Shamir is XOR-masked with a
-/// witness-derived OTP. The witness is returned alongside; store it
-/// publicly with the shares. To reconstruct, the caller must reproduce
-/// the same witness AND have at least K masked share-streams.
+/// witness-derived mask. Keep the witness key separate from the shares.
 ///
 /// # Errors
 /// - [`FieldBindingError::Inner`] for plain-Shamir layer errors.
@@ -179,29 +186,43 @@ pub fn field_bound_split(
     state: &mut PrngState,
     witness: &FieldWitness,
 ) -> Result<Vec<Vec<u8>>, FieldBindingError> {
+    validate_witness(witness)?;
     if witness.holder_scores.len() != n as usize {
         return Err(FieldBindingError::ScoreCountMismatch {
             expected: n as usize,
             got: witness.holder_scores.len(),
         });
     }
-    for &s in &witness.holder_scores {
-        if !(0.0..=1.0).contains(&s) {
-            return Err(FieldBindingError::FieldScoreOutOfRange { got: s });
-        }
-    }
     let plain_streams = plain_share_bytes(secret, k, n, state)?;
-    debug_assert_eq!(plain_streams.len(), n as usize);
-    let mut masked: Vec<Vec<u8>> = Vec::with_capacity(plain_streams.len());
-    for (i, stream) in plain_streams.iter().enumerate() {
-        let otp = witness.derive_otp(i, stream.len());
-        let mut row = Vec::with_capacity(stream.len());
-        for (b, m) in stream.iter().zip(otp.iter()) {
-            row.push(*b ^ *m);
-        }
-        masked.push(row);
+    Ok(mask_share_streams(plain_streams, witness))
+}
+
+/// Production field-bound split using operating-system CSPRNG coefficients.
+pub fn field_bound_split_secure(
+    secret: &[u8],
+    k: u32,
+    n: u32,
+    witness: &FieldWitness,
+) -> Result<Vec<Vec<u8>>, FieldBindingError> {
+    validate_witness(witness)?;
+    if witness.holder_scores.len() != n as usize {
+        return Err(FieldBindingError::ScoreCountMismatch {
+            expected: n as usize,
+            got: witness.holder_scores.len(),
+        });
     }
-    Ok(masked)
+    let plain_streams = plain_share_bytes_secure(secret, k, n)?;
+    Ok(mask_share_streams(plain_streams, witness))
+}
+
+fn mask_share_streams(mut plain_streams: Vec<Vec<u8>>, witness: &FieldWitness) -> Vec<Vec<u8>> {
+    for (i, stream) in plain_streams.iter_mut().enumerate() {
+        let otp = Zeroizing::new(witness.derive_otp(i, stream.len()));
+        for (b, m) in stream.iter_mut().zip(otp.iter()) {
+            *b ^= *m;
+        }
+    }
+    plain_streams
 }
 
 /// Reconstruct a multi-byte secret from at least K field-bound shares.
@@ -226,23 +247,39 @@ pub fn field_bound_reconstruct(
     k: u32,
     witness: &FieldWitness,
 ) -> Result<Vec<u8>, FieldBindingError> {
+    validate_witness(witness)?;
     if xs.len() != streams.len() || xs.len() != share_indices.len() {
         return Err(FieldBindingError::Inner(ShareError::NotEnoughShares {
             have: xs.len().min(streams.len()).min(share_indices.len()),
             need: k,
         }));
     }
-    if witness.holder_scores.len() < *share_indices.iter().max().unwrap_or(&0) + 1 {
-        return Err(FieldBindingError::ScoreCountMismatch {
-            expected: share_indices.iter().max().copied().unwrap_or(0) + 1,
-            got: witness.holder_scores.len(),
-        });
+    let mut seen = [false; 255];
+    for &index in share_indices {
+        if index >= witness.holder_scores.len() || index >= seen.len() {
+            return Err(FieldBindingError::ShareIndexOutOfRange {
+                index,
+                holder_count: witness.holder_scores.len(),
+            });
+        }
+        if seen[index] {
+            return Err(FieldBindingError::DuplicateShareIndex { index });
+        }
+        seen[index] = true;
+    }
+    for stream in streams {
+        if stream.len() > MAX_SECRET_BYTES {
+            return Err(FieldBindingError::Inner(ShareError::SecretTooLarge {
+                actual: stream.len(),
+                max: MAX_SECRET_BYTES,
+            }));
+        }
     }
     // Unmask each provided stream with its OTP.
     let mut unmasked: Vec<Vec<u8>> = Vec::with_capacity(streams.len());
     for (idx_in_supply, &original_index) in share_indices.iter().enumerate() {
         let stream = streams[idx_in_supply];
-        let otp = witness.derive_otp(original_index, stream.len());
+        let otp = Zeroizing::new(witness.derive_otp(original_index, stream.len()));
         let mut row = Vec::with_capacity(stream.len());
         for (b, m) in stream.iter().zip(otp.iter()) {
             row.push(*b ^ *m);
@@ -261,7 +298,12 @@ mod tests {
     fn make_witness(n: usize, seed_byte: u8) -> FieldWitness {
         let mut field_seed = [0u8; 32];
         field_seed.fill(seed_byte);
-        let holder_scores = (0..n).map(|i| 0.1 + 0.1 * i as f64).collect();
+        let holder_scores = (0..n)
+            .map(|i| {
+                let index = u32::try_from(i).expect("test holder count fits in u32");
+                0.1 + 0.1 * f64::from(index)
+            })
+            .collect();
         FieldWitness {
             field_seed,
             holder_scores,
@@ -297,6 +339,9 @@ mod tests {
         assert!(witness.is_placeholder());
         let mut st = PrngState::new(0xBEEF_0000_0000_0001);
         let masked = field_bound_split(secret, 3, 5, &mut st, &witness).unwrap();
+        let mut plain_state = PrngState::new(0xBEEF_0000_0000_0001);
+        let plain = plain_share_bytes(secret, 3, 5, &mut plain_state).unwrap();
+        assert_eq!(masked, plain, "placeholder must be a literal no-op");
         let xs = vec![1u8, 2, 3];
         let supplied: Vec<&[u8]> = vec![
             masked[0].as_slice(),
@@ -309,9 +354,41 @@ mod tests {
     }
 
     #[test]
+    fn impossible_and_duplicate_share_indices_are_rejected() {
+        let witness = make_witness(5, 0x55);
+        assert!(matches!(
+            field_bound_reconstruct(&[1], &[b"x"], &[usize::MAX], 1, &witness),
+            Err(FieldBindingError::ShareIndexOutOfRange { .. })
+        ));
+        assert!(matches!(
+            field_bound_reconstruct(&[1, 2], &[b"x", b"y"], &[0, 0], 2, &witness),
+            Err(FieldBindingError::DuplicateShareIndex { index: 0 })
+        ));
+    }
+
+    #[test]
+    fn secure_field_bound_split_is_fresh_and_roundtrips() {
+        let witness = make_witness(5, 0x77);
+        let secret = b"field-bound production key";
+        let first = field_bound_split_secure(secret, 3, 5, &witness).unwrap();
+        let second = field_bound_split_secure(secret, 3, 5, &witness).unwrap();
+        assert_ne!(first, second);
+        let supplied = [
+            first[0].as_slice(),
+            first[2].as_slice(),
+            first[4].as_slice(),
+        ];
+        assert_eq!(
+            field_bound_reconstruct(&[1, 3, 5], &supplied, &[0, 2, 4], 3, &witness).unwrap(),
+            secret
+        );
+    }
+
+    #[test]
     fn wrong_witness_breaks_recovery() {
-        // Cornerstone of the alien-tech promise: an attacker with all
-        // K masked shares but a wrong field-state CANNOT recover.
+        // Regression for key/context mismatch: these fixture inputs do
+        // not reconstruct the original bytes under a different witness.
+        // This is not a brute-force or entropy proof.
         let secret = b"sensitive identity material";
         let real_witness = make_witness(5, 0x42);
         let mut st = PrngState::new(0xCAFE_F00D_DEAD_BEEF);
@@ -327,16 +404,15 @@ mod tests {
         let indices = vec![0usize, 1, 2];
         let recovered =
             field_bound_reconstruct(&xs, &supplied, &indices, 3, &fake_witness).unwrap();
-        // The recovered bytes are statistically random vs the true
-        // secret. ~almost certainly different — the OTP differs in
-        // every byte position.
+        // The derived mask differs for this fixture, so the recovered
+        // bytes differ from the original secret.
         assert_ne!(recovered, secret);
     }
 
     #[test]
     fn wrong_holder_scores_break_recovery() {
-        // Attacker has all shares AND the field seed AND epoch — but
-        // doesn't have the right per-holder field scores. Still fails.
+        // A changed holder score selects a different mask stream for
+        // this fixture. Scores are context, not assumed secret entropy.
         let secret = b"defense in depth, identity-bound";
         let real_witness = make_witness(5, 0x42);
         let mut st = PrngState::new(0x1111_2222_3333_4444);

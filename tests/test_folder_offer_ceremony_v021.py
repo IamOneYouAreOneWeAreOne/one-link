@@ -28,10 +28,8 @@ silently revert any of it.
 """
 from __future__ import annotations
 
-import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -164,7 +162,9 @@ def test_handle_manifest_push_caches_unknown_folder_offer_in_source():
     ).read_text(encoding="utf-8")
     idx = src.find("async def _handle_manifest_push(")
     assert idx > 0
-    body = src[idx:idx + 5000]
+    next_handler = src.find("\n    async def _handle_manifest_wants(", idx)
+    assert next_handler > idx
+    body = src[idx:next_handler]
     # Must call upsert_pending_folder_offer when the folder is unknown.
     assert "upsert_pending_folder_offer" in body, (
         "_handle_manifest_push must cache unknown-folder offers "
@@ -215,7 +215,10 @@ def test_accept_handler_requires_local_path():
     ).read_text(encoding="utf-8")
     idx = src.find("async def api_accept_folder_offer(")
     assert idx > 0
-    body = src[idx:idx + 12000]
+    # Keep enough of the handler to include the post-validation dial-back.
+    # Security validation for untrusted folder names and fallback containment
+    # intentionally makes this handler longer than the original ceremony.
+    body = src[idx:idx + 16000]
     # Must validate local_path is supplied.
     assert "local_path required" in body, (
         "accept handler must require a local_path; without one we "
@@ -256,7 +259,7 @@ def test_accept_sets_receiver_pull_only():
     ).read_text(encoding="utf-8")
     idx = src.find("async def api_accept_folder_offer(")
     assert idx > 0
-    body = src[idx:idx + 12000]
+    body = src[idx:idx + 16000]
     assert 'set_folder_peer_permission(' in body and '"pull"' in body, (
         "accept handler must downgrade the received folder's per-peer "
         "permission to pull-only so the receiver never spuriously "

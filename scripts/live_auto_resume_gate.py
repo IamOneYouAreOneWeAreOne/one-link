@@ -13,12 +13,12 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import socket
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
+from one_link import control_ipc
 from one_link import daemon as daemon_mod
 
 
@@ -27,20 +27,11 @@ RESULTS_DIR = Path("benchmarks") / "results"
 
 def _request(cmd: str, *, timeout: float = 60.0, **kwargs: Any) -> dict[str, Any]:
     port = daemon_mod.read_control_port()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    try:
-        sock.connect(("127.0.0.1", port))
-        sock.sendall((json.dumps({"cmd": cmd, **kwargs}) + "\n").encode("utf-8"))
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = sock.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf.decode("utf-8").strip() or "{}")
-    finally:
-        sock.close()
+    return control_ipc.request_control(
+        port,
+        {"cmd": cmd, **kwargs},
+        timeout=timeout,
+    )
 
 
 def _make_file(path: Path, size: int, *, seed: int) -> None:

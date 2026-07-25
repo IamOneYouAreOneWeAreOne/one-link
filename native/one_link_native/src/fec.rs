@@ -6,7 +6,7 @@
 //! Decoding takes the same `(k, m)` codec + a `list[bytes | None]` of
 //! `k + m` slots and returns the recovered data shards.
 
-use ol_fec::{Codec, FecError};
+use ol_fec::{Codec, FecError, MAX_FEC_SHARD_BYTES, MAX_FEC_WORKING_SET_BYTES};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
@@ -53,17 +53,30 @@ impl PyCodec {
         py: Python<'py>,
         data_shards: &Bound<'py, PyList>,
     ) -> PyResult<Bound<'py, PyList>> {
-        let shards: Vec<Vec<u8>> = data_shards
-            .iter()
-            .map(|item| item.extract::<Vec<u8>>())
-            .collect::<PyResult<_>>()?;
-        let refs: Vec<&[u8]> = shards.iter().map(|s| s.as_slice()).collect();
+        if data_shards.len() != self.inner.k() {
+            return Err(fec_err_to_py(FecError::DataShardCount {
+                expected: self.inner.k(),
+                got: data_shards.len(),
+            }));
+        }
+        let mut shards = Vec::with_capacity(self.inner.k());
+        for item in data_shards.iter() {
+            let shard = item.extract::<&[u8]>()?;
+            if shard.len() > MAX_FEC_SHARD_BYTES {
+                return Err(fec_err_to_py(FecError::ShardTooLarge {
+                    got: shard.len(),
+                    max: MAX_FEC_SHARD_BYTES,
+                }));
+            }
+            shards.push(shard.to_vec());
+        }
+        let refs: Vec<&[u8]> = shards.iter().map(std::vec::Vec::as_slice).collect();
         let parity = py
-            .allow_threads(|| self.inner.encode(&refs))
+            .detach(|| self.inner.encode(&refs))
             .map_err(fec_err_to_py)?;
-        let out = PyList::empty_bound(py);
+        let out = PyList::empty(py);
         for p in parity {
-            out.append(PyBytes::new_bound(py, &p))?;
+            out.append(PyBytes::new(py, &p))?;
         }
         Ok(out)
     }
@@ -87,19 +100,26 @@ impl PyCodec {
             if item.is_none() {
                 owned.push(None);
             } else {
-                owned.push(Some(item.extract::<Vec<u8>>()?));
+                let shard = item.extract::<&[u8]>()?;
+                if shard.len() > MAX_FEC_SHARD_BYTES {
+                    return Err(fec_err_to_py(FecError::ShardTooLarge {
+                        got: shard.len(),
+                        max: MAX_FEC_SHARD_BYTES,
+                    }));
+                }
+                owned.push(Some(shard.to_vec()));
             }
         }
         let view: Vec<Option<&[u8]>> = owned
             .iter()
-            .map(|o| o.as_ref().map(|v| v.as_slice()))
+            .map(|o| o.as_ref().map(std::vec::Vec::as_slice))
             .collect();
         let data = py
-            .allow_threads(|| self.inner.decode(&view))
+            .detach(|| self.inner.decode(&view))
             .map_err(fec_err_to_py)?;
-        let out = PyList::empty_bound(py);
+        let out = PyList::empty(py);
         for d in data {
-            out.append(PyBytes::new_bound(py, &d))?;
+            out.append(PyBytes::new(py, &d))?;
         }
         Ok(out)
     }
@@ -110,12 +130,14 @@ impl PyCodec {
 }
 
 fn fec_err_to_py(err: FecError) -> PyErr {
-    crate::errors::OlFecError::new_err(err.to_string())
+    crate::errors::OlFecError::new_err(crate::errors::owned_error_message(err))
 }
 
 /// Register the `fec` submodule.
 pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", ol_fec::VERSION)?;
+    m.add("MAX_FEC_SHARD_BYTES", MAX_FEC_SHARD_BYTES)?;
+    m.add("MAX_FEC_WORKING_SET_BYTES", MAX_FEC_WORKING_SET_BYTES)?;
     m.add_class::<PyCodec>()?;
     Ok(())
 }

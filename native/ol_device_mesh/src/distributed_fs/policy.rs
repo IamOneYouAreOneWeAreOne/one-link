@@ -26,25 +26,34 @@ pub struct ErasurePolicy {
 
 impl ErasurePolicy {
     /// Construct a new policy and validate its shape.
-    pub const fn new(k: u8, m: u8, min_devices_per_shard: u8) -> DeviceMeshResult<Self> {
-        if k == 0 {
-            return Err(DeviceMeshError::ErasurePolicyZeroData);
-        }
-        if (k as u16) + (m as u16) > MAX_K_PLUS_M as u16 {
-            return Err(DeviceMeshError::ErasurePolicyOversize {
-                k,
-                m,
-                max: MAX_K_PLUS_M,
-            });
-        }
-        if min_devices_per_shard == 0 {
-            return Err(DeviceMeshError::ErasurePolicyZeroMinDevices);
-        }
-        Ok(Self {
+    pub fn new(k: u8, m: u8, min_devices_per_shard: u8) -> DeviceMeshResult<Self> {
+        let policy = Self {
             k,
             m,
             min_devices_per_shard,
-        })
+        };
+        match policy.validate() {
+            Ok(()) => Ok(policy),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Validate a policy, including values created through the public fields.
+    pub const fn validate(self) -> DeviceMeshResult<()> {
+        if self.k == 0 {
+            return Err(DeviceMeshError::ErasurePolicyZeroData);
+        }
+        if (self.k as u16) + (self.m as u16) > MAX_K_PLUS_M as u16 {
+            return Err(DeviceMeshError::ErasurePolicyOversize {
+                k: self.k,
+                m: self.m,
+                max: MAX_K_PLUS_M,
+            });
+        }
+        if self.min_devices_per_shard == 0 {
+            return Err(DeviceMeshError::ErasurePolicyZeroMinDevices);
+        }
+        Ok(())
     }
 
     /// Total shard count `k + m`.
@@ -98,6 +107,19 @@ mod tests {
     fn zero_min_devices_rejected() {
         let err = ErasurePolicy::new(10, 4, 0).unwrap_err();
         assert!(matches!(err, DeviceMeshError::ErasurePolicyZeroMinDevices));
+    }
+
+    #[test]
+    fn public_field_construction_still_requires_validation() {
+        let forged = ErasurePolicy {
+            k: 0,
+            m: 0,
+            min_devices_per_shard: 1,
+        };
+        assert!(matches!(
+            forged.validate(),
+            Err(DeviceMeshError::ErasurePolicyZeroData)
+        ));
     }
 
     #[test]

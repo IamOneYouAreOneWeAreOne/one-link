@@ -1,6 +1,6 @@
 //! Known-answer test vectors (KAT) for the pair-by-QR wire surface.
 //!
-//! Pins the exact byte output of Invite / PairResponse / PairConfirm
+//! Pins the exact byte output of Invite / `PairResponse` / `PairConfirm`
 //! / transcript / SAS / chain-key derivation for deterministic seed
 //! inputs. A future refactor that silently changes the encoder, the
 //! domain-separation tags, the BLAKE3 derivation order, or any of
@@ -12,7 +12,7 @@
 //! ## Determinism
 //!
 //! - Ed25519 signing is deterministic per RFC 8032 (SHA-512 of secret
-//!   ‖ message). Same SigningKey + same body = byte-identical
+//!   ‖ message). Same `SigningKey` + same body = byte-identical
 //!   signature, every platform, every build.
 //! - X25519 ECDH is deterministic over its inputs.
 //! - BLAKE3 is deterministic.
@@ -73,11 +73,7 @@ const EXPECTED_CONFIRM_HEX: &str = "0103bc7cbcb5636375fa1d82434d466724d92377f53b
 // ── Helpers ───────────────────────────────────────────────────────
 
 fn hex(b: &[u8]) -> String {
-    let mut s = String::with_capacity(b.len() * 2);
-    for &byte in b {
-        s.push_str(&format!("{:02x}", byte));
-    }
-    s
+    hex::encode(b)
 }
 
 fn maybe_regen() -> bool {
@@ -99,31 +95,29 @@ fn assert_or_regen(name: &str, expected: &str, actual: &str) {
 }
 
 fn build_kat_pair() -> (Invite, PairResponse, PairConfirm) {
-    let inviter_sk = SigningKey::from_bytes(&INVITER_ID_SEED);
-    let inviter_esk = StaticSecret::from(INVITER_EPHEM_SEED);
-    let inviter_epk = PublicKey::from(&inviter_esk).to_bytes();
+    let alice_identity = SigningKey::from_bytes(&INVITER_ID_SEED);
+    let alice_exchange = PublicKey::from(&StaticSecret::from(INVITER_EPHEM_SEED)).to_bytes();
 
     let invite = Invite::sign(
-        &inviter_sk,
-        inviter_epk,
+        &alice_identity,
+        alice_exchange,
         INVITE_NONCE,
         INVITE_EXPIRY,
         CapabilityScope::from_bytes(SCOPE).unwrap(),
     );
 
-    let scanner_sk = SigningKey::from_bytes(&SCANNER_ID_SEED);
-    let scanner_esk = StaticSecret::from(SCANNER_EPHEM_SEED);
-    let scanner_epk = PublicKey::from(&scanner_esk).to_bytes();
+    let bob_identity = SigningKey::from_bytes(&SCANNER_ID_SEED);
+    let bob_exchange = PublicKey::from(&StaticSecret::from(SCANNER_EPHEM_SEED)).to_bytes();
 
     let response = PairResponse::sign_for_transcript(
-        &scanner_sk,
-        scanner_epk,
+        &bob_identity,
+        bob_exchange,
         RESPONSE_NONCE,
         &invite.body_bytes(),
     );
 
     let t = transcript_hash(&invite, &response);
-    let confirm = PairConfirm::sign(&inviter_sk, t);
+    let confirm = PairConfirm::sign(&alice_identity, t);
     (invite, response, confirm)
 }
 

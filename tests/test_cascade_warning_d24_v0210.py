@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
 
 from one_link import daemon as daemon_module
 

@@ -21,7 +21,6 @@ Auto-accept rules:
 
 from __future__ import annotations
 
-import asyncio
 import time
 from pathlib import Path
 

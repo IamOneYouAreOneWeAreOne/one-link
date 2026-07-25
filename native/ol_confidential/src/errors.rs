@@ -90,8 +90,8 @@ pub enum ConfidentialError {
     /// Peer's nonce in the doc does not match the nonce the peer sent.
     #[error("attestation peer-nonce mismatch")]
     AttestationPeerNonceMismatch,
-    /// Field witness in the doc does not match the verifier's local
-    /// witness — the doc is bound to a different physical environment.
+    /// Field-context commitment in the doc does not match the verifier's
+    /// expected bytes. No physical-environment inference is implied.
     #[error("attestation field-witness mismatch")]
     AttestationFieldWitnessMismatch,
     /// Provider tag declared in the doc disagrees with what the master
@@ -100,7 +100,7 @@ pub enum ConfidentialError {
     AttestationProviderTagMismatch,
     /// Provider tier carried in the doc is below the verifier's
     /// required floor. Closes the silent-TPM-downgrade vector: a
-    /// peer that previously pinned a HardwareBound master_vk
+    /// peer that previously pinned a `HardwareBound` `master_vk`
     /// refuses a later Software-tier doc.
     #[error("attestation provider tier {got:?} below required min {min:?}")]
     AttestationProviderTierTooLow {
@@ -112,7 +112,7 @@ pub enum ConfidentialError {
     /// Issuer's SDP-layer Ed25519 pubkey embedded in the attestation
     /// doc does not match the SDP identity the verifier is actually
     /// talking to over the wire. Closes the identity-confusion attack
-    /// where a peer attests with someone else's master_vk under
+    /// where a peer attests with someone else's `master_vk` under
     /// their own SDP identity (audit C1 May 2026).
     #[error("attestation issuer SDP pubkey does not match channel identity")]
     AttestationIssuerSdpPubkeyMismatch,

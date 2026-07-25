@@ -1,4 +1,4 @@
-//! Zeroize verification for sensitive material in ol_onion.
+//! Zeroize verification for sensitive material in `ol_onion`.
 //!
 //! The crate uses `zeroize::Zeroize` on:
 //! - [`HopId`]: not sensitive per se, but uniform handling.

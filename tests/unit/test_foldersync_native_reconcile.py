@@ -47,7 +47,12 @@ def _engine(tmp_path: Path):
     return state, blobs, loop, engine
 
 
-def _entry(path: str, blob: str | None = "abc", size: int = 1024, mtime: int = 100):
+def _entry(
+    path: str,
+    blob: str | None = "ab" * 32,
+    size: int = 1024,
+    mtime: int = 100,
+):
     return ManifestEntry(
         file_path=path,
         blob_hash=blob,

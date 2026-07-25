@@ -1,10 +1,9 @@
-//! FUSE mount entry point. On Linux, this is where `fuser::mount2`
-//! gets called (deferred until the daemon endpoint goes live). On
-//! every other platform, the mount call returns
-//! [`MountError::UnsupportedPlatform`] immediately so consumers can
-//! fail fast without runtime panics.
+//! FUSE mount entry point. Linux release builds call `fuser::mount2`
+//! through the callback-backed adapter. Platforms without a completed
+//! adapter return an explicit unsupported error so consumers fail closed
+//! without manufacturing a mount-success claim.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -17,7 +16,8 @@ pub struct MountOptions {
     pub mountpoint: PathBuf,
     /// Filesystem name shown in `mount` output (e.g. `one_link_folder`).
     pub fs_name: String,
-    /// Mount read-only. Default false (production folders are RW).
+    /// Mount read-only. The generic crate defaults to false for backend tests,
+    /// while One Link's packaged Python binding requires this to be true.
     pub read_only: bool,
     /// Allow non-root users to access the mount. Requires
     /// `user_allow_other` in `/etc/fuse.conf` on Linux.
@@ -42,17 +42,14 @@ pub enum MountError {
     #[error("FUSE not supported on this platform")]
     UnsupportedPlatform,
     #[error(
-        "macOS does not ship a built-in FUSE driver; install FSKit-based \
-         filesystem helper (Apple-maintained, no monthly bill) or macFUSE \
-         (GPL+commercial, paid). The ol_fuse crate ships scaffold only \
-         for this platform."
+        "One Link's macOS FSKit filesystem adapter is not implemented; \
+         installing FSKit or macFUSE support alone cannot enable this build."
     )]
     UnsupportedMacOS,
     #[error(
         "Windows requires WinFSP or Dokan to expose user-mode filesystems. \
-         The ol_fuse crate ships scaffold only for this platform — install \
-         WinFSP (free, open source) and ship the WinFSP-backed binding via \
-         ol_winfs (separate crate)."
+         One Link does not yet implement its Windows filesystem adapter; \
+         installing a driver alone cannot enable this build."
     )]
     UnsupportedWindows,
     #[error("mountpoint does not exist or is not a directory: {0}")]
@@ -71,15 +68,75 @@ pub enum PlatformMountStatus {
     /// libfuse-backed real mount is wired and ready to call.
     LinuxFuserReady,
     /// Running on Linux but the crate was built without the
-    /// ``linux-mount`` feature. Rebuild with
-    /// ``--features linux-mount`` to enable.
+    /// `linux-mount` feature. Rebuild with
+    /// `--features linux-mount` to enable.
     LinuxFuserDisabled,
-    /// macOS — needs FSKit / macFUSE; see [`MountError::UnsupportedMacOS`].
+    /// macOS — needs `FSKit` / `macFUSE`; see [`MountError::UnsupportedMacOS`].
     MacOsUnsupported,
-    /// Windows — needs WinFSP / Dokan; see [`MountError::UnsupportedWindows`].
+    /// Windows — needs `WinFSP` / `Dokan`; see [`MountError::UnsupportedWindows`].
     WindowsUnsupported,
     /// Any other Unix-like target — currently unsupported.
     OtherUnsupported,
+}
+
+/// Owned handle for a filesystem serving requests on a background thread.
+///
+/// Dropping the handle unmounts the filesystem.  Consumers which need an
+/// explicit lifecycle (the Python binding does) should retain the handle and
+/// call [`MountedFilesystem::unmount`] when the user requests unmounting.
+/// This type can only be constructed by [`spawn_mount`]; unsupported builds
+/// return a [`MountError`] instead of manufacturing a non-functional handle.
+pub struct MountedFilesystem {
+    mountpoint: PathBuf,
+    #[cfg(all(target_os = "linux", feature = "linux-mount"))]
+    session: Option<fuser::BackgroundSession>,
+}
+
+impl std::fmt::Debug for MountedFilesystem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MountedFilesystem")
+            .field("mountpoint", &self.mountpoint)
+            .field("running", &self.is_running())
+            .finish()
+    }
+}
+
+impl MountedFilesystem {
+    /// Canonical mountpoint supplied when the session was created.
+    #[must_use]
+    pub fn mountpoint(&self) -> &Path {
+        &self.mountpoint
+    }
+
+    /// Whether the background FUSE service thread is still running.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        #[cfg(all(target_os = "linux", feature = "linux-mount"))]
+        {
+            return self
+                .session
+                .as_ref()
+                .is_some_and(|session| !session.guard.is_finished());
+        }
+        #[cfg(not(all(target_os = "linux", feature = "linux-mount")))]
+        {
+            false
+        }
+    }
+
+    /// Unmount this filesystem by dropping fuser's owned kernel-mount guard.
+    ///
+    /// The background worker observes the closed FUSE device and exits.  The
+    /// handle is consumed so an unmount cannot be repeated accidentally.
+    pub fn unmount(self) -> Result<(), MountError> {
+        #[cfg(all(target_os = "linux", feature = "linux-mount"))]
+        {
+            let mut session = self.session;
+            drop(session.take());
+        }
+        Ok(())
+    }
 }
 
 /// Report the platform mount status of this build. Pure introspection;
@@ -139,16 +196,7 @@ where
     #[cfg(all(target_os = "linux", feature = "linux-mount"))]
     {
         use crate::adapter::FuserAdapter;
-        let mut fuse_opts: Vec<fuser::MountOption> = vec![
-            fuser::MountOption::FSName(opts.fs_name.clone()),
-            fuser::MountOption::DefaultPermissions,
-        ];
-        if opts.read_only {
-            fuse_opts.push(fuser::MountOption::RO);
-        }
-        if opts.allow_other {
-            fuse_opts.push(fuser::MountOption::AllowOther);
-        }
+        let fuse_opts = fuser_options(&opts);
         let adapter = FuserAdapter::new(backend);
         fuser::mount2(adapter, &opts.mountpoint, &fuse_opts)
             .map_err(|e| MountError::Backend(format!("fuser::mount2: {e}")))
@@ -173,6 +221,70 @@ where
     }
 }
 
+/// Mount `backend` and serve FUSE requests on a background thread.
+///
+/// Unlike [`mount`], this function returns once the kernel mount session has
+/// been established.  The returned [`MountedFilesystem`] owns that session;
+/// dropping or explicitly unmounting it tears the mount down.  Platform and
+/// feature behavior is identical to [`mount`].
+pub fn spawn_mount<B>(
+    #[cfg(all(target_os = "linux", feature = "linux-mount"))] backend: B,
+    #[cfg(not(all(target_os = "linux", feature = "linux-mount")))] _backend: B,
+    opts: MountOptions,
+) -> Result<MountedFilesystem, MountError>
+where
+    B: FilesystemBackend + 'static,
+{
+    if !opts.mountpoint.is_dir() {
+        return Err(MountError::InvalidMountpoint(opts.mountpoint));
+    }
+    #[cfg(all(target_os = "linux", feature = "linux-mount"))]
+    {
+        use crate::adapter::FuserAdapter;
+        let fuse_opts = fuser_options(&opts);
+        let adapter = FuserAdapter::new(backend);
+        let session = fuser::spawn_mount2(adapter, &opts.mountpoint, &fuse_opts)
+            .map_err(|error| MountError::Backend(format!("fuser::spawn_mount2: {error}")))?;
+        Ok(MountedFilesystem {
+            mountpoint: opts.mountpoint,
+            session: Some(session),
+        })
+    }
+    #[cfg(all(target_os = "linux", not(feature = "linux-mount")))]
+    {
+        Err(MountError::Backend(
+            "rebuild ol_fuse with --features linux-mount to enable FUSE".into(),
+        ))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Err(MountError::UnsupportedMacOS)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Err(MountError::UnsupportedWindows)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        Err(MountError::UnsupportedPlatform)
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-mount"))]
+fn fuser_options(opts: &MountOptions) -> Vec<fuser::MountOption> {
+    let mut fuse_opts = vec![
+        fuser::MountOption::FSName(opts.fs_name.clone()),
+        fuser::MountOption::DefaultPermissions,
+    ];
+    if opts.read_only {
+        fuse_opts.push(fuser::MountOption::RO);
+    }
+    if opts.allow_other {
+        fuse_opts.push(fuser::MountOption::AllowOther);
+    }
+    fuse_opts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_with_valid_mountpoint_errors_on_scaffold() {
+    fn mount_with_valid_mountpoint_errors_without_active_backend() {
         let tmp = tempfile::tempdir().unwrap();
         let opts = MountOptions {
             mountpoint: tmp.path().to_path_buf(),
@@ -209,7 +321,9 @@ mod tests {
             | MountError::UnsupportedMacOS
             | MountError::UnsupportedWindows
             | MountError::Backend(_) => {}
-            other => panic!("expected platform-unsupported or Backend variant, got {other:?}"),
+            other @ MountError::InvalidMountpoint(_) => {
+                panic!("expected platform-unsupported or Backend variant, got {other:?}")
+            }
         }
     }
 
@@ -234,5 +348,15 @@ mod tests {
         assert_eq!(s, PlatformMountStatus::WindowsUnsupported);
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         assert_eq!(s, PlatformMountStatus::OtherUnsupported);
+    }
+
+    #[test]
+    fn background_mount_refuses_missing_mountpoint_before_platform_dispatch() {
+        let opts = MountOptions {
+            mountpoint: PathBuf::from("/nonexistent/path/for/background-mount"),
+            ..Default::default()
+        };
+        let error = spawn_mount(MemoryBackend::new(), opts).unwrap_err();
+        assert!(matches!(error, MountError::InvalidMountpoint(_)));
     }
 }

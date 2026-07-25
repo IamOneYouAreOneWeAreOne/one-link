@@ -7,6 +7,15 @@ This file is the canonical responsible-disclosure entry point. The
 in-depth threat model + cryptographic correctness contract lives
 separately at [`docs/SECURITY.md`](docs/SECURITY.md).
 
+## Release-security status
+
+One Link is alpha software and has **no verified production release**. As last
+checked on 2026-07-24, the only GitHub release is the old, mutable
+`auto-latest` prerelease, with no Sigstore bundles, published SBOM, or
+provenance assets. Do not treat that prerelease as trusted distribution
+evidence. The signing and provenance workflows in the repository describe
+release gates; they do not prove a release has passed them.
+
 ## Reporting a vulnerability
 
 **Do not file public GitHub issues for security bugs.** Vulnerability
@@ -16,11 +25,10 @@ reports go to:
 weareone@oneunity.earth
 ```
 
-PGP key (recommended for credible reports): published at
-[https://github.com/IamOneYouAreOneWeAreOne.gpg](https://github.com/IamOneYouAreOneWeAreOne.gpg)
-once we set up the multi-maintainer threshold-signing key. Until
-then, reports in plaintext to the address above are accepted and
-acknowledged within 72 hours.
+No authenticated project PGP disclosure key is currently published. Do not
+encrypt to a key discovered only by username or an unauthenticated link. Until
+a fingerprint is published through independent project channels, reports in
+plaintext to the address above are accepted.
 
 Include:
 
@@ -51,8 +59,9 @@ Include:
   is the firm wall (per industry norm - Project Zero / CERT/CC
   alignment).
 - **Don't test against production / third-party deployments**
-  without explicit permission. The project's own rendezvous server
-  is fair game for non-disruptive testing.
+  without explicit written permission. Public project infrastructure is not
+  blanket authorization for scanning, load testing, denial-of-service, or
+  access to other users' data.
 - **Don't extract or retain user data** beyond what's needed to
   demonstrate the vulnerability.
 

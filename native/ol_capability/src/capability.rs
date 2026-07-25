@@ -16,7 +16,7 @@ pub const SIGNATURE_LEN: usize = 32;
 
 /// Maximum number of caveats accepted by [`Capability::decode`].
 /// `verify` re-derives the HMAC chain in O(n caveats), so allowing
-/// an attacker-controlled count enables a DoS (audit H15 May 2026).
+/// an attacker-controlled count enables a denial of service (audit H15 May 2026).
 /// 32 is well above any legitimate delegation chain depth.
 pub const MAX_CAVEATS: usize = 32;
 
@@ -26,9 +26,9 @@ pub const MAX_CAVEATS: usize = 32;
 /// 32 caveats with reasonable payload sizes.
 pub const MAX_WIRE_BYTES: usize = 8 * 1024;
 
-/// BLAKE3 derive_key context for the root → initial-signature derivation.
+/// BLAKE3 `derive_key` context for the root → initial-signature derivation.
 const ROOT_HMAC_CONTEXT: &str = "ol-capability-root-v1";
-/// BLAKE3 derive_key context for each caveat-step in the chain.
+/// BLAKE3 `derive_key` context for each caveat-step in the chain.
 const STEP_HMAC_CONTEXT: &str = "ol-capability-step-v1";
 
 /// A 32-byte root HMAC key. Issuer keeps this secret. Zeroized on drop.
@@ -56,11 +56,10 @@ impl Capability {
     /// `id` identifies the cap (e.g. BLAKE3 of root + a nonce). Pick
     /// a fresh nonce per cap so identical caveat chains don't collide.
     pub fn root(id: [u8; CAP_ID_LEN], root_key: &RootKey) -> Self {
-        // Initial signature = derive_key("ol-capability-root-v1", root_key || id)
-        let mut input = Vec::with_capacity(ROOT_KEY_LEN + CAP_ID_LEN);
-        input.extend_from_slice(&root_key[..]);
-        input.extend_from_slice(&id);
-        let signature = blake3::derive_key(ROOT_HMAC_CONTEXT, &input);
+        // Stream the two fields directly into BLAKE3.  This is byte-for-byte
+        // equivalent to `derive_key(context, root_key || id)` and avoids a
+        // short-lived heap allocation on every mint/verify operation.
+        let signature = derive_root_signature(root_key, &id);
         Self {
             id,
             caveats: Vec::new(),
@@ -93,20 +92,34 @@ impl Capability {
     /// returned cap is verifiable under the SAME root key — the chain
     /// re-derives identically because each step is deterministic in
     /// `(prev_sig, caveat_bytes)`.
-    pub fn attenuate(&self, caveat: Caveat) -> Self {
+    pub fn attenuate(&self, caveat: Caveat) -> Result<Self, CapError> {
+        if self.caveats.len() >= MAX_CAVEATS {
+            return Err(CapError::ResourceLimit {
+                reason: "caveat count exceeds MAX_CAVEATS",
+            });
+        }
+        let current_len = self.encoded_len()?;
+        let caveat_len = caveat.encoded_len()?;
+        let next_len = current_len
+            .checked_add(caveat_len)
+            .ok_or(CapError::ResourceLimit {
+                reason: "capability encoded length overflow",
+            })?;
+        if next_len > MAX_WIRE_BYTES {
+            return Err(CapError::ResourceLimit {
+                reason: "wire bytes exceed MAX_WIRE_BYTES",
+            });
+        }
         let caveat_bytes = caveat.encode();
-        let mut input = Vec::with_capacity(SIGNATURE_LEN + caveat_bytes.len());
-        input.extend_from_slice(&self.signature);
-        input.extend_from_slice(&caveat_bytes);
-        let new_sig = blake3::derive_key(STEP_HMAC_CONTEXT, &input);
+        let new_sig = derive_step_signature(&self.signature, &caveat_bytes);
 
         let mut caveats = self.caveats.clone();
         caveats.push(caveat);
-        Self {
+        Ok(Self {
             id: self.id,
             caveats,
             signature: new_sig,
-        }
+        })
     }
 
     /// Verify this capability against `root_key` + a runtime `ctx`.
@@ -124,18 +137,10 @@ impl Capability {
     /// - [`CapError::CaveatRejected`] on caveat failure.
     pub fn verify(&self, root_key: &RootKey, ctx: &Context) -> Result<(), CapError> {
         // Re-derive the expected signature.
-        let mut expected = {
-            let mut input = Vec::with_capacity(ROOT_KEY_LEN + CAP_ID_LEN);
-            input.extend_from_slice(&root_key[..]);
-            input.extend_from_slice(&self.id);
-            blake3::derive_key(ROOT_HMAC_CONTEXT, &input)
-        };
+        let mut expected = derive_root_signature(root_key, &self.id);
         for caveat in &self.caveats {
             let caveat_bytes = caveat.encode();
-            let mut input = Vec::with_capacity(SIGNATURE_LEN + caveat_bytes.len());
-            input.extend_from_slice(&expected);
-            input.extend_from_slice(&caveat_bytes);
-            expected = blake3::derive_key(STEP_HMAC_CONTEXT, &input);
+            expected = derive_step_signature(&expected, &caveat_bytes);
         }
         // Constant-time compare.
         if expected.ct_eq(&self.signature).unwrap_u8() != 1 {
@@ -161,7 +166,8 @@ impl Capability {
     /// `[id (32 B)][caveat_count u32 LE][caveat_1 .. caveat_n][signature (32 B)]`.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(CAP_ID_LEN + 4 + 1024 + SIGNATURE_LEN);
+        let capacity = self.encoded_len().unwrap_or(CAP_ID_LEN + 4 + SIGNATURE_LEN);
+        let mut out = Vec::with_capacity(capacity);
         out.extend_from_slice(&self.id);
         let count = u32::try_from(self.caveats.len()).unwrap_or(u32::MAX);
         out.extend_from_slice(&count.to_le_bytes());
@@ -227,6 +233,7 @@ impl Capability {
                 });
             }
             let (caveat, consumed) = Caveat::decode(&bytes[cursor..bytes.len() - SIGNATURE_LEN])?;
+            caveat.validate_for_wire()?;
             caveats.push(caveat);
             cursor += consumed;
         }
@@ -243,6 +250,35 @@ impl Capability {
             signature,
         })
     }
+
+    fn encoded_len(&self) -> Result<usize, CapError> {
+        let mut len = CAP_ID_LEN + 4 + SIGNATURE_LEN;
+        for caveat in &self.caveats {
+            len = len
+                .checked_add(caveat.encoded_len()?)
+                .ok_or(CapError::ResourceLimit {
+                    reason: "capability encoded length overflow",
+                })?;
+        }
+        Ok(len)
+    }
+}
+
+fn derive_root_signature(root_key: &RootKey, id: &[u8; CAP_ID_LEN]) -> [u8; SIGNATURE_LEN] {
+    let mut hasher = blake3::Hasher::new_derive_key(ROOT_HMAC_CONTEXT);
+    hasher.update(&root_key[..]);
+    hasher.update(id);
+    *hasher.finalize().as_bytes()
+}
+
+fn derive_step_signature(
+    previous: &[u8; SIGNATURE_LEN],
+    caveat_bytes: &[u8],
+) -> [u8; SIGNATURE_LEN] {
+    let mut hasher = blake3::Hasher::new_derive_key(STEP_HMAC_CONTEXT);
+    hasher.update(previous);
+    hasher.update(caveat_bytes);
+    *hasher.finalize().as_bytes()
 }
 
 #[cfg(test)]
@@ -270,7 +306,9 @@ mod tests {
     #[test]
     fn attenuated_cap_verifies_when_context_satisfies_caveat() {
         let root = fixed_root();
-        let cap = Capability::root(fixed_id(), &root).attenuate(Caveat::ExpiresAt(1_000_000));
+        let cap = Capability::root(fixed_id(), &root)
+            .attenuate(Caveat::ExpiresAt(1_000_000))
+            .unwrap();
         let ctx_ok = Context::new().with_now(500_000);
         assert!(cap.verify(&root, &ctx_ok).is_ok());
 
@@ -292,8 +330,9 @@ mod tests {
     #[test]
     fn tampered_caveat_breaks_signature() {
         let root = fixed_root();
-        let cap =
-            Capability::root(fixed_id(), &root).attenuate(Caveat::PathPrefix("/safe".to_string()));
+        let cap = Capability::root(fixed_id(), &root)
+            .attenuate(Caveat::PathPrefix("/safe".to_string()))
+            .unwrap();
         // Tamper: rewrite caveat without recomputing signature.
         let mut tampered = cap.clone();
         tampered.caveats[0] = Caveat::PathPrefix("/danger".to_string());
@@ -307,13 +346,18 @@ mod tests {
         let root = fixed_root();
         let cap = Capability::root(fixed_id(), &root)
             .attenuate(Caveat::ExpiresAt(123))
+            .unwrap()
             .attenuate(Caveat::PathPrefix("/a/b".to_string()))
+            .unwrap()
             .attenuate(Caveat::OperationIn(vec![
                 "read".to_string(),
                 "list".to_string(),
             ]))
+            .unwrap()
             .attenuate(Caveat::PeerFingerprint([0x77u8; 32]))
-            .attenuate(Caveat::AuditTag("share-from-alice".to_string()));
+            .unwrap()
+            .attenuate(Caveat::AuditTag("share-from-alice".to_string()))
+            .unwrap();
         let bytes = cap.encode();
         let decoded = Capability::decode(&bytes).unwrap();
         assert_eq!(decoded, cap);
@@ -329,8 +373,9 @@ mod tests {
     #[test]
     fn path_prefix_caveat_rejects_non_matching() {
         let root = fixed_root();
-        let cap =
-            Capability::root(fixed_id(), &root).attenuate(Caveat::PathPrefix("/a/b".to_string()));
+        let cap = Capability::root(fixed_id(), &root)
+            .attenuate(Caveat::PathPrefix("/a/b".to_string()))
+            .unwrap();
         let ctx_ok = Context::new().with_path("/a/b/c");
         let ctx_bad = Context::new().with_path("/a/c");
         assert!(cap.verify(&root, &ctx_ok).is_ok());
@@ -341,7 +386,8 @@ mod tests {
     fn operation_in_caveat_works() {
         let root = fixed_root();
         let cap = Capability::root(fixed_id(), &root)
-            .attenuate(Caveat::OperationIn(vec!["read".to_string()]));
+            .attenuate(Caveat::OperationIn(vec!["read".to_string()]))
+            .unwrap();
         assert!(cap
             .verify(&root, &Context::new().with_operation("read"))
             .is_ok());
@@ -354,7 +400,8 @@ mod tests {
     fn audit_tag_never_rejects() {
         let root = fixed_root();
         let cap = Capability::root(fixed_id(), &root)
-            .attenuate(Caveat::AuditTag("for-tax-audit".to_string()));
+            .attenuate(Caveat::AuditTag("for-tax-audit".to_string()))
+            .unwrap();
         assert!(cap.verify(&root, &Context::new()).is_ok());
     }
 
@@ -362,7 +409,9 @@ mod tests {
     fn cap_missing_context_field_rejects() {
         let root = fixed_root();
         // ExpiresAt caveat but Context has no `now_unix_ms`.
-        let cap = Capability::root(fixed_id(), &root).attenuate(Caveat::ExpiresAt(1000));
+        let cap = Capability::root(fixed_id(), &root)
+            .attenuate(Caveat::ExpiresAt(1000))
+            .unwrap();
         assert!(cap.verify(&root, &Context::new()).is_err());
     }
 
@@ -376,7 +425,7 @@ mod tests {
                 assert!(reason.contains("MAX_WIRE_BYTES"), "{}", reason);
             }
             Ok(_) => panic!("oversized wire bytes must be rejected"),
-            Err(e) => panic!("expected Malformed, got {:?}", e),
+            Err(e) => panic!("expected Malformed, got {e:?}"),
         }
     }
 
@@ -394,7 +443,107 @@ mod tests {
                 assert!(reason.contains("MAX_CAVEATS"), "{}", reason);
             }
             Ok(_) => panic!("MAX_CAVEATS overflow must be rejected"),
-            Err(e) => panic!("expected Malformed, got {:?}", e),
+            Err(e) => panic!("expected Malformed, got {e:?}"),
         }
+    }
+
+    #[test]
+    fn historical_nightly_oom_artifact_is_rejected_before_allocation() {
+        // Exact libFuzzer artifact from Actions run 29807862984:
+        // crash-2d52b3564a26e2971f552534b63e5b130d048643 (145 bytes),
+        // Base64: CgAAAAAAAAAAAAAAAAAAAAAcAAAAgxsaGhoAAAD///cFAAAABCoAAAAA
+        //          ///3BQAgAAAAAAAAAAAAAABOAKkAAAAAAAADAAAGAAAAAAAAAAAAAAAA
+        //          AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        //          AAAAAAAAAAAAAAAAAAAAAA==
+        let artifact = [
+            0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x83, 0x1b, 0x1a, 0x1a, 0x1a, 0x00, 0x00,
+            0x00, 0xff, 0xff, 0xf7, 0x05, 0x00, 0x00, 0x00, 0x04, 0x2a, 0x00, 0x00, 0x00, 0x00,
+            0xff, 0xff, 0xf7, 0x05, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x4e, 0x00, 0xa9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00,
+            0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(artifact.len(), 145);
+        assert!(matches!(
+            Capability::decode(&artifact),
+            Err(CapError::Malformed {
+                reason: "OperationIn count exceeds encoded body"
+            })
+        ));
+    }
+
+    #[test]
+    fn july_22_nightly_oom_artifact_is_rejected_before_allocation() {
+        // Exact 105-byte artifact from Actions run 29897656293. The outer
+        // caveat count is the allowed maximum (32), while the first
+        // OperationIn body claims 0x3800_0000 entries. Before the nested
+        // structural bound this requested a 0x5400_0000-byte allocation.
+        let artifact = [
+            0x38, 0x38, 0x38, 0xbf, 0x38, 0x38, 0x38, 0x38, 0x38, 0x38, 0x38, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x38, 0x38, 0x39, 0x7a, 0x38, 0x38, 0x38, 0x38, 0x38, 0x38, 0x38, 0x38,
+            0x38, 0x38, 0x38, 0x01, 0x20, 0x00, 0x00, 0x00, 0x04, 0x20, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x38, 0x38, 0x38, 0x38, 0x38, 0x38, 0x38, 0x00, 0x00, 0x38, 0x01, 0x20,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x38, 0x38, 0x38, 0x38, 0x01, 0x00, 0x00, 0x7e,
+            0x00, 0x00, 0x38, 0x38, 0x38, 0x38, 0xc8, 0xcd, 0x38, 0x38, 0x38, 0x38, 0x38, 0x38,
+            0x36, 0x38, 0xdb, 0x38, 0x34, 0xdb, 0xdb, 0xdb, 0xdb, 0x35, 0x35, 0x38, 0x38, 0x38,
+            0x38, 0x30, 0x39, 0x30, 0x38, 0x20, 0x0a,
+        ];
+        assert_eq!(artifact.len(), 105);
+        assert!(matches!(
+            Capability::decode(&artifact),
+            Err(CapError::Malformed {
+                reason: "OperationIn count exceeds encoded body"
+            })
+        ));
+    }
+
+    #[test]
+    fn local_attenuation_enforces_wire_and_count_budgets() {
+        let root = fixed_root();
+        let mut cap = Capability::root(fixed_id(), &root);
+        for _ in 0..MAX_CAVEATS {
+            cap = cap.attenuate(Caveat::ExpiresAt(1_000)).unwrap();
+        }
+        assert!(matches!(
+            cap.attenuate(Caveat::ExpiresAt(1_000)),
+            Err(CapError::ResourceLimit {
+                reason: "caveat count exceeds MAX_CAVEATS"
+            })
+        ));
+
+        let huge = Caveat::AuditTag("x".repeat(MAX_WIRE_BYTES));
+        assert!(matches!(
+            Capability::root(fixed_id(), &root).attenuate(huge),
+            Err(CapError::ResourceLimit {
+                reason: "wire bytes exceed MAX_WIRE_BYTES"
+            })
+        ));
+    }
+
+    #[test]
+    fn streaming_signature_derivation_matches_frozen_concatenation_algorithm() {
+        let root = fixed_root();
+        let id = fixed_id();
+        let mut root_input = Vec::new();
+        root_input.extend_from_slice(&root[..]);
+        root_input.extend_from_slice(&id);
+        assert_eq!(
+            derive_root_signature(&root, &id),
+            blake3::derive_key(ROOT_HMAC_CONTEXT, &root_input)
+        );
+
+        let previous = [0xA5; SIGNATURE_LEN];
+        let caveat = Caveat::AuditTag("frozen".to_string()).encode();
+        let mut step_input = previous.to_vec();
+        step_input.extend_from_slice(&caveat);
+        assert_eq!(
+            derive_step_signature(&previous, &caveat),
+            blake3::derive_key(STEP_HMAC_CONTEXT, &step_input)
+        );
     }
 }

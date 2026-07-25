@@ -95,14 +95,13 @@ proptest! {
         // be fast but large enough to exercise multi-byte varints.
         payload in prop::collection::vec(any::<u8>(), 0..4096),
     ) {
-        let frame = match Frame::new(kind, payload.clone()) {
-            Ok(f) => f,
-            Err(_) => return Ok(()),  // payload too large for the kind; skip
+        let Ok(frame) = Frame::new(kind, payload.clone()) else {
+            return Ok(()); // payload too large for the kind; skip
         };
         let encoded = frame.encode();
         prop_assert_eq!(encoded[0], kind.as_u8());
         let (length, consumed) = decode_varint(&encoded, 1).unwrap();
-        prop_assert_eq!(length as usize, payload.len());
+        prop_assert_eq!(usize::try_from(length).unwrap(), payload.len());
         prop_assert_eq!(&encoded[1 + consumed..], &payload[..]);
         prop_assert_eq!(encoded.len(), frame.on_wire_len());
     }
@@ -112,10 +111,10 @@ proptest! {
     fn frame_max_payload_caps(kind in arb_frame_kind()) {
         let max = kind.max_payload_bytes();
         // Just-fit payload always succeeds.
-        let fit = vec![0u8; max as usize];
+        let fit = vec![0u8; usize::try_from(max).unwrap()];
         prop_assert!(Frame::new(kind, fit).is_ok());
         // Strictly-larger payload always fails.
-        let over = vec![0u8; (max + 1) as usize];
+        let over = vec![0u8; usize::try_from(max + 1).unwrap()];
         prop_assert!(Frame::new(kind, over).is_err());
     }
 

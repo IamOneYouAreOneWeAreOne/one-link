@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Build a Linux AppImage from the PyInstaller bundle.
 #
-# AppImage is the most universal Linux install format: a single
-# self-contained executable file that runs across distros (Ubuntu,
-# Debian, Fedora, Arch, etc.) without dependency-hell or root
-# install. Compare:
+# AppImage is a portable Linux install format: one executable file,
+# built separately for x86_64 and aarch64. Compatibility still depends
+# on the kernel/glibc baseline of the PyInstaller payload; packaging as
+# an AppImage is not a claim that every Linux distribution is supported.
 #
 #   .deb       — Debian + Ubuntu only, needs apt + sudo
 #   .rpm       — Fedora + RHEL + openSUSE only
 #   Flatpak    — needs Flatpak runtime pre-installed
 #   Snap       — Ubuntu-centric, snapd dependency
-#   AppImage   — single file, chmod +x, double-click. Done.
+#   AppImage   — single file, no root install; supported hosts can run it.
 #
 # Design contract — same "for the people, not corp" stance as the
 # Windows installer + macOS .dmg:
@@ -20,8 +20,8 @@
 #   * No package-manager integration (the user can drop a .desktop
 #     file via the in-app autostart feature; the AppImage doesn't
 #     mutate the system).
-#   * No telemetry. No update-framework injection. The in-app
-#     updater handles updates on its own terms.
+#   * No telemetry or update-framework injection is added by this
+#     packaging step.
 #   * Single file the user can move, delete, or back up trivially.
 #
 # Usage:
@@ -40,19 +40,36 @@ if [ ! -d "$PAYLOAD_DIR" ]; then
   exit 1
 fi
 
+if [ ! -f "$PAYLOAD_DIR/one-link" ] || [ ! -x "$PAYLOAD_DIR/one-link" ]; then
+  echo "[appimage] FATAL: payload must contain executable one-link" >&2
+  exit 1
+fi
+
+OUT_PARENT="$(dirname "$OUT_APPIMAGE")"
+if [ ! -d "$OUT_PARENT" ]; then
+  echo "[appimage] FATAL: output directory $OUT_PARENT does not exist" >&2
+  exit 1
+fi
+if [ -e "$OUT_APPIMAGE" ] || [ -L "$OUT_APPIMAGE" ]; then
+  echo "[appimage] FATAL: refusing to overwrite $OUT_APPIMAGE" >&2
+  exit 1
+fi
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ASSETS="$REPO_ROOT/src/one_link/web/assets"
 DESKTOP="$REPO_ROOT/packaging/linux/one-link.desktop"
 
 # Stage the AppDir.
 TMP="$(mktemp -d)"
+# The path comes directly from mktemp, not an environment variable or glob.
+# Always remove incomplete staging state when curl/appimagetool fails.
+trap 'rm -rf -- "$TMP"' EXIT HUP INT TERM
 APPDIR="$TMP/One_Link.AppDir"
-mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/share/applications" \
+mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib/one-link" "$APPDIR/usr/share/applications" \
          "$APPDIR/usr/share/icons/hicolor/512x512/apps"
 
-# Copy the PyInstaller payload into the AppDir. ``cp -aL`` preserves
-# permissions + dereferences symlinks (AppImage can't easily ship
-# dangling symlinks).
+# Copy the PyInstaller payload into the AppDir while preserving its executable
+# bits, directory structure, and internal symlinks.
 cp -a "$PAYLOAD_DIR/." "$APPDIR/usr/lib/one-link/"
 
 # Wire the launcher: AppImage runs whatever ``AppRun`` is at the
@@ -95,24 +112,57 @@ cp "$ICON_SRC" "$APPDIR/usr/share/icons/hicolor/512x512/apps/one-link.png"
 # .DirIcon is what file managers use when previewing the AppDir.
 cp "$ICON_SRC" "$APPDIR/.DirIcon"
 
-# Download appimagetool for the matching arch. The official release
-# stays at the AppImage/AppImageKit GH releases. We cache it under
-# /tmp so subsequent CI runs reuse it.
+# Download an exact GitHub release *asset id*, then verify both its size and
+# SHA-256 before executing it. The upstream `continuous` tag and its browser
+# download URLs are mutable, so they are deliberately not build inputs.
+#
+# Asset provenance (audited 2026-07-22):
+#   repository: AppImage/AppImageKit
+#   release target: 5735cc5bed206497cddfbd2a75e1982c2606c35d
+# GitHub cannot replace an asset's bytes in place: replacement requires a new
+# asset id. The digest remains the fail-closed content boundary in either case.
 APPIMAGETOOL_BIN="$TMP/appimagetool"
 case "$ARCH" in
   x86_64)
-    URL="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+    ASSET_ID="98605504"
+    EXPECTED_BYTES="8811712"
+    EXPECTED_SHA256="b90f4a8b18967545fda78a445b27680a1642f1ef9488ced28b65398f2be7add2"
     ;;
   aarch64)
-    URL="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage"
+    ASSET_ID="98605483"
+    EXPECTED_BYTES="6115712"
+    EXPECTED_SHA256="a48972e5ae91c944c5a7c80214e7e0a42dd6aa3ae979d8756203512a74ff574d"
     ;;
   *)
     echo "[appimage] FATAL: unknown arch $ARCH (want x86_64 or aarch64)" >&2
     exit 1
     ;;
 esac
+URL="https://api.github.com/repos/AppImage/AppImageKit/releases/assets/$ASSET_ID"
 echo "[appimage] downloading appimagetool ($ARCH) ..."
-curl -fsSL -o "$APPIMAGETOOL_BIN" "$URL"
+curl --fail --silent --show-error --location \
+  --proto '=https' --tlsv1.2 \
+  --connect-timeout 30 --max-time 300 \
+  --retry 4 --retry-all-errors \
+  --header 'Accept: application/octet-stream' \
+  --header 'X-GitHub-Api-Version: 2022-11-28' \
+  --header 'User-Agent: One-Link-AppImage-build' \
+  --output "$APPIMAGETOOL_BIN" \
+  "$URL"
+
+ACTUAL_BYTES="$(wc -c < "$APPIMAGETOOL_BIN" | tr -d '[:space:]')"
+if [ "$ACTUAL_BYTES" != "$EXPECTED_BYTES" ]; then
+  echo "[appimage] FATAL: appimagetool size mismatch" >&2
+  echo "[appimage] expected=$EXPECTED_BYTES actual=$ACTUAL_BYTES" >&2
+  exit 1
+fi
+
+ACTUAL_SHA256="$(sha256sum "$APPIMAGETOOL_BIN" | awk '{print $1}')"
+if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+  echo "[appimage] FATAL: appimagetool SHA-256 mismatch" >&2
+  echo "[appimage] expected=$EXPECTED_SHA256 actual=$ACTUAL_SHA256" >&2
+  exit 1
+fi
 chmod +x "$APPIMAGETOOL_BIN"
 
 # Pack. ``--no-appstream`` skips AppStream metadata validation;
@@ -129,4 +179,3 @@ ARCH="$ARCH" "$APPIMAGETOOL_BIN" --no-appstream "$APPDIR" "$OUT_APPIMAGE"
 
 chmod +x "$OUT_APPIMAGE"
 echo "[appimage] wrote $OUT_APPIMAGE ($(wc -c < "$OUT_APPIMAGE") bytes)"
-rm -rf "$TMP"

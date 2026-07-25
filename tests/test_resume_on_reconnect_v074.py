@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from one_link import control_ipc
 from one_link.daemon import (
     Daemon,
     _delivery_backoff_ms_for_error,
@@ -34,6 +35,69 @@ from one_link.daemon import (
 from one_link.discovery import Discovery, Peer
 from one_link.identity import Identity, fingerprint_of
 from one_link.state import State
+
+
+async def _invoke_authenticated_control(
+    daemon: Daemon,
+    request: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, Any]:
+    secret = control_ipc._b64u(b"k" * control_ipc.CONTROL_SECRET_BYTES)
+    client_nonce = control_ipc._b64u(b"c" * control_ipc.CONTROL_NONCE_BYTES)
+    server_nonce = control_ipc._b64u(b"s" * control_ipc.CONTROL_NONCE_BYTES)
+    hello, _ = control_ipc.make_client_hello(client_nonce=client_nonce)
+    envelope, exchange = control_ipc.make_client_request(
+        request,
+        secret,
+        client_nonce=client_nonce,
+        server_nonce=server_nonce,
+    )
+    original_challenge = control_ipc.make_server_challenge
+
+    def fixed_challenge(hello_value, secret_value):
+        return original_challenge(
+            hello_value,
+            secret_value,
+            server_nonce=server_nonce,
+        )
+
+    monkeypatch.setattr(control_ipc, "make_server_challenge", fixed_challenge)
+    daemon._control_secret = secret
+    reader = asyncio.StreamReader()
+    reader.feed_data(
+        control_ipc.encode_json_line(
+            hello,
+            max_bytes=control_ipc.CONTROL_HANDSHAKE_MAX_BYTES,
+        )
+        + control_ipc.encode_json_line(
+            envelope,
+            max_bytes=control_ipc.CONTROL_REQUEST_MAX_BYTES,
+        )
+    )
+    reader.feed_eof()
+
+    class _Writer:
+        def __init__(self):
+            self.buf = b""
+
+        def write(self, data):
+            self.buf += data
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+        async def wait_closed(self):
+            return None
+
+    writer = _Writer()
+    await daemon._handle_control(reader, writer)  # type: ignore[arg-type]
+    lines = writer.buf.splitlines()
+    assert len(lines) == 2
+    response_envelope = json.loads(lines[1].decode("utf-8"))
+    return control_ipc.verify_server_response(response_envelope, secret, exchange)
 
 
 def _new_identity() -> Identity:
@@ -88,6 +152,15 @@ def test_runtimeerror_no_ack_is_transient():
     assert _is_transient_send_error(e) is True
 
 
+def test_closed_ratchet_cutover_session_is_transient():
+    """A simultaneous reconnect can close a negotiated session before the
+    first application byte.  The durable TEXT id makes one fresh-session
+    retry safe; treating this as permanent strands a send during pairing.
+    """
+    e = RuntimeError("channel closed while waiting for ratchet cutover")
+    assert _is_transient_send_error(e) is True
+
+
 def test_capability_disabled_is_permanent():
     e = RuntimeError("files capability disabled for peer abc")
     assert _is_transient_send_error(e) is False
@@ -108,6 +181,54 @@ def test_unknown_runtimeerror_is_permanent():
     peer. Only known-transient markers flip the bit."""
     e = RuntimeError("something obscure happened")
     assert _is_transient_send_error(e) is False
+
+
+def test_queue_persists_conversational_file_intent(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path / "home"))
+    from one_link import daemon as daemon_module
+
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    staged = tmp_path / "1784625365239_deadbeef_ACE.zip"
+    staged.write_bytes(b"queued")
+
+    row = daemon.queue_file_transfer(
+        peer_fp=them.fingerprint,
+        path=staged,
+        schedule_resume=False,
+        display_name="ACE.zip",
+        chat_inline=True,
+        rel_path="exports/ACE.zip",
+    )
+
+    assert row.name == "ACE.zip"
+    assert row.metadata["display_name"] == "ACE.zip"
+    assert row.metadata["chat_inline"] is True
+    assert row.metadata["rel_path"] == "exports/ACE.zip"
+    assert row.metadata["source_staged"] is True
+    assert row.metadata["file_index_mode"] == "cdc"
+    monkeypatch.setattr(
+        daemon_module,
+        "index_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("verified durable copy was re-indexed")
+        ),
+    )
+    resumed_plan = daemon.prepare_file_for_transfer(
+        Path(row.metadata["path"]),
+        peer_fp=them.fingerprint,
+    )
+    assert resumed_plan.cache_hit is True
+    assert resumed_plan.file_index.blob_hash == row.blob_hash
+    state.close()
 
 
 # ─── resume_paused_transfers_for orchestrator ─────────────────────
@@ -196,6 +317,62 @@ async def test_resume_marks_failed_when_source_gone(tmp_path: Path):
     rec = state.get_transfer("t-gone")
     assert rec.status == "failed"
     assert "no longer exists" in (rec.metadata or {}).get("error", "")
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_preserves_display_name_and_chat_inline_intent(tmp_path: Path):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    staged = tmp_path / "1784625365239_deadbeef_ACE.zip"
+    staged.write_bytes(b"partial-retry-source")
+    state.upsert_transfer(
+        id="t-chat", direction="out", peer_fp=them.fingerprint,
+        kind="file", name="ACE.zip", size=staged.stat().st_size,
+        status="paused", progress_bytes=4, total_bytes=staged.stat().st_size,
+        chunks_done=1, chunks_total=2,
+        metadata={
+            "path": str(staged), "display_name": "ACE.zip",
+            "chat_inline": True, "rel_path": "exports/ACE.zip",
+            "next_retry_ms": 0,
+        },
+    )
+    peer = Peer(
+        short_id=them.short_id, hostname="them", address="127.0.0.1",
+        port=12345, ed_pub_hex=them.public_bytes.hex(),
+    )
+
+    async def _resolve(_needle):
+        return peer
+
+    calls: list[dict[str, Any]] = []
+
+    async def _send(_peer, path, *, transfer_id=None, **kwargs):
+        calls.append({"path": Path(path), "transfer_id": transfer_id, **kwargs})
+        state.update_transfer(transfer_id, status="complete")
+        return {"ok": True}
+
+    daemon.resolve_for_send = _resolve  # type: ignore[method-assign]
+    daemon.send_file = _send  # type: ignore[method-assign]
+
+    result = await daemon.resume_paused_transfers_for(them.fingerprint)
+
+    assert result["resumed"] == 1
+    assert calls == [{
+        "path": staged,
+        "transfer_id": "t-chat",
+        "display_name": "ACE.zip",
+        "chat_inline": True,
+        "rel_path": "exports/ACE.zip",
+    }]
     state.close()
 
 
@@ -486,7 +663,10 @@ def test_control_resolves_pinned_peer_when_offline(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_control_queue_file_transfer_creates_auto_resume_intent(tmp_path: Path):
+async def test_control_queue_file_transfer_creates_auto_resume_intent(
+    tmp_path: Path,
+    monkeypatch,
+):
     me = _new_identity()
     them = _new_identity()
     state = State(db_path=tmp_path / "s.db")
@@ -504,34 +684,11 @@ async def test_control_queue_file_transfer_creates_auto_resume_intent(tmp_path: 
     scheduled: list[str] = []
     daemon._schedule_resume_paused = scheduled.append  # type: ignore[method-assign]
 
-    reader = asyncio.StreamReader()
-    reader.feed_data(json.dumps({
+    payload = await _invoke_authenticated_control(daemon, {
         "cmd": "queue_file_transfer",
         "peer": "Computer 2",
         "path": str(src),
-    }).encode("utf-8") + b"\n")
-    reader.feed_eof()
-
-    class _Writer:
-        def __init__(self):
-            self.buf = b""
-            self.closed = False
-
-        def write(self, data):
-            self.buf += data
-
-        async def drain(self):
-            return None
-
-        def close(self):
-            self.closed = True
-
-        async def wait_closed(self):
-            return None
-
-    writer = _Writer()
-    await daemon._handle_control(reader, writer)  # type: ignore[arg-type]
-    payload = json.loads(writer.buf.decode("utf-8"))
+    }, monkeypatch)
 
     assert payload["ok"] is True
     assert payload["transfer"]["status"] == "paused"
@@ -546,7 +703,10 @@ async def test_control_queue_file_transfer_creates_auto_resume_intent(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_control_queue_file_transfer_can_wait_for_boot_resume(tmp_path: Path):
+async def test_control_queue_file_transfer_can_wait_for_boot_resume(
+    tmp_path: Path,
+    monkeypatch,
+):
     """Live restart gates need a deterministic way to queue durable work
     without immediately racing the background sender. The next daemon boot or
     explicit resume command then owns the drain.
@@ -568,34 +728,12 @@ async def test_control_queue_file_transfer_can_wait_for_boot_resume(tmp_path: Pa
     scheduled: list[str] = []
     daemon._schedule_resume_paused = scheduled.append  # type: ignore[method-assign]
 
-    reader = asyncio.StreamReader()
-    reader.feed_data(json.dumps({
+    payload = await _invoke_authenticated_control(daemon, {
         "cmd": "queue_file_transfer",
         "peer": "Computer 2",
         "path": str(src),
         "schedule_resume": "false",
-    }).encode("utf-8") + b"\n")
-    reader.feed_eof()
-
-    class _Writer:
-        def __init__(self):
-            self.buf = b""
-
-        def write(self, data):
-            self.buf += data
-
-        async def drain(self):
-            return None
-
-        def close(self):
-            return None
-
-        async def wait_closed(self):
-            return None
-
-    writer = _Writer()
-    await daemon._handle_control(reader, writer)  # type: ignore[arg-type]
-    payload = json.loads(writer.buf.decode("utf-8"))
+    }, monkeypatch)
 
     assert payload["ok"] is True
     assert payload["transfer"]["status"] == "paused"
@@ -685,7 +823,11 @@ async def test_resume_concurrent_calls_are_serialized(tmp_path: Path):
         ed_pub_hex=them.public_bytes.hex(),
     )
 
+    resolve_calls = 0
+
     async def _fake_resolve(needle):
+        nonlocal resolve_calls
+        resolve_calls += 1
         return fake_peer
     daemon.resolve_for_send = _fake_resolve  # type: ignore[method-assign]
 
@@ -706,10 +848,12 @@ async def test_resume_concurrent_calls_are_serialized(tmp_path: Path):
     # Second call hits the lock and returns skipped_concurrent.
     r2 = await daemon.resume_paused_transfers_for(them.fingerprint)
     assert r2.get("skipped_concurrent") is True
+    assert resolve_calls == 1
 
     release.set()
     r1 = await task1
     assert r1["resumed"] == 1
+    assert resolve_calls == 1
     state.close()
 
 

@@ -28,12 +28,12 @@ when crossing WebRTC data channels) — see ``to_wire_dict`` /
 from __future__ import annotations
 
 import base64
+import binascii
 import logging
 import time
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from one_link._coerce import to_int
 from one_link.confidential_native import (
     HAS_NATIVE,
     AttestationDoc,
@@ -44,6 +44,84 @@ from one_link.confidential_native import (
 )
 
 log = logging.getLogger(__name__)
+
+MASTER_VERIFYING_KEY_BYTES = 1984
+ATTESTATION_NONCE_BYTES = 32
+FIELD_WITNESS_COMMITMENT_BYTES = 32
+ISSUER_SDP_PUBLIC_KEY_BYTES = 32
+HYBRID_MASTER_SIGNATURE_BYTES = 3373
+MAX_PLATFORM_QUOTE_BYTES = 64 * 1024
+MAX_ATTESTATION_UNIX = 2**63 - 1
+MAX_ATTESTATION_WINDOW_SECONDS = 30
+VALID_PROVIDER_TAGS = frozenset(range(1, 8))
+
+
+def _strict_nonnegative_int(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"attestation wire field {field!r} must be an integer")
+    if not (0 <= value <= MAX_ATTESTATION_UNIX):
+        raise ValueError(f"attestation wire field {field!r} is out of range")
+    return value
+
+
+def _decode_b64_canonical(
+    value: str,
+    *,
+    field: str,
+    exact_bytes: int | None = None,
+    max_bytes: int | None = None,
+) -> bytes:
+    """Decode canonical padded RFC 4648 base64 under a decoded-size cap."""
+
+    if not isinstance(value, str) or not value.isascii():
+        raise ValueError(f"attestation wire field {field!r} is not ASCII base64")
+    if exact_bytes is not None:
+        expected_chars = 4 * ((exact_bytes + 2) // 3)
+        if len(value) != expected_chars:
+            raise ValueError(
+                f"attestation wire field {field!r} has invalid encoded length"
+            )
+    if max_bytes is not None and len(value) > 4 * ((max_bytes + 2) // 3):
+        raise ValueError(
+            f"attestation wire field {field!r} exceeds its encoded-size limit"
+        )
+    try:
+        decoded = base64.b64decode(value.encode("ascii"), validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError(f"attestation wire field {field!r} is invalid base64") from exc
+    if base64.b64encode(decoded).decode("ascii") != value:
+        raise ValueError(f"attestation wire field {field!r} is not canonical base64")
+    if exact_bytes is not None and len(decoded) != exact_bytes:
+        raise ValueError(
+            f"attestation wire field {field!r} must decode to {exact_bytes} bytes"
+        )
+    if max_bytes is not None and len(decoded) > max_bytes:
+        raise ValueError(
+            f"attestation wire field {field!r} exceeds its decoded-size limit"
+        )
+    return decoded
+
+
+def decode_challenge_b64(value: object) -> bytes:
+    """Parse one canonical, padded 32-byte handshake challenge."""
+    if not isinstance(value, str):
+        raise ValueError("challenge_b64 must be a string")
+    return _decode_b64_canonical(
+        value,
+        field="challenge_b64",
+        exact_bytes=ATTESTATION_NONCE_BYTES,
+    )
+
+
+def decode_issuer_sdp_public_key_b64(value: object) -> bytes:
+    """Parse one canonical, padded Ed25519 SDP identity key."""
+    if not isinstance(value, str):
+        raise ValueError("expected_issuer_sdp_pubkey_b64 must be a string")
+    return _decode_b64_canonical(
+        value,
+        field="expected_issuer_sdp_pubkey_b64",
+        exact_bytes=ISSUER_SDP_PUBLIC_KEY_BYTES,
+    )
 
 
 class HandshakeAttestationNotInstalled(RuntimeError):
@@ -175,20 +253,60 @@ class AttestationWire:
         )
 
     def to_doc(self) -> AttestationDoc:
+        provider_tag = _strict_nonnegative_int(
+            self.provider_tag,
+            field="provider_tag",
+        )
+        if provider_tag not in VALID_PROVIDER_TAGS:
+            raise ValueError("attestation wire provider_tag is unsupported")
+        issued_unix = _strict_nonnegative_int(self.issued_unix, field="issued_unix")
+        deadline_unix = _strict_nonnegative_int(
+            self.deadline_unix,
+            field="deadline_unix",
+        )
+        if not (
+            issued_unix <= deadline_unix
+            and deadline_unix - issued_unix <= MAX_ATTESTATION_WINDOW_SECONDS
+        ):
+            raise ValueError("attestation wire freshness window is invalid")
         return AttestationDoc(
-            provider_tag=self.provider_tag,
-            master_vk=base64.b64decode(self.master_vk_b64),
-            peer_nonce=base64.b64decode(self.peer_nonce_b64),
-            issued_unix=self.issued_unix,
-            deadline_unix=self.deadline_unix,
+            provider_tag=provider_tag,
+            master_vk=_decode_b64_canonical(
+                self.master_vk_b64,
+                field="master_vk",
+                exact_bytes=MASTER_VERIFYING_KEY_BYTES,
+            ),
+            peer_nonce=_decode_b64_canonical(
+                self.peer_nonce_b64,
+                field="peer_nonce",
+                exact_bytes=ATTESTATION_NONCE_BYTES,
+            ),
+            issued_unix=issued_unix,
+            deadline_unix=deadline_unix,
             field_witness_commitment=(
-                base64.b64decode(self.field_witness_commitment_b64)
+                _decode_b64_canonical(
+                    self.field_witness_commitment_b64,
+                    field="field_witness_commitment",
+                    exact_bytes=FIELD_WITNESS_COMMITMENT_BYTES,
+                )
                 if self.field_witness_commitment_b64 is not None
                 else None
             ),
-            platform_quote=base64.b64decode(self.platform_quote_b64),
-            issuer_sdp_pubkey=base64.b64decode(self.issuer_sdp_pubkey_b64),
-            master_sig=base64.b64decode(self.master_sig_b64),
+            platform_quote=_decode_b64_canonical(
+                self.platform_quote_b64,
+                field="platform_quote",
+                max_bytes=MAX_PLATFORM_QUOTE_BYTES,
+            ),
+            issuer_sdp_pubkey=_decode_b64_canonical(
+                self.issuer_sdp_pubkey_b64,
+                field="issuer_sdp_pubkey",
+                exact_bytes=ISSUER_SDP_PUBLIC_KEY_BYTES,
+            ),
+            master_sig=_decode_b64_canonical(
+                self.master_sig_b64,
+                field="master_sig",
+                exact_bytes=HYBRID_MASTER_SIGNATURE_BYTES,
+            ),
         )
 
     def to_wire_dict(self) -> Dict[str, object]:
@@ -227,6 +345,8 @@ class AttestationWire:
         also denies attacker-supplied extra keys from surviving
         through to higher layers.
         """
+        if not isinstance(d, dict):
+            raise ValueError("attestation wire value must be an object")
         v = d.get("v")
         if v != 2:
             raise ValueError(f"unsupported attestation wire version: {v!r}")
@@ -286,17 +406,26 @@ class AttestationWire:
         # Per-field byte caps. Derived from the native fixed sizes:
         # - master_vk: 1984 raw → 2648 base64 chars (round up)
         # - peer_nonce: 32 raw → 44 chars
-        # - master_sig: 3357 raw → 4476 chars
+        # - master_sig: 3373 raw → 4500 chars
         # - issuer_sdp_pubkey: 32 raw → 44 chars
         # - field_witness_commitment: 32 raw → 44 chars
         # - platform_quote: bounded to 64 KiB raw → ~87382 chars
         #   (TPM-quote upper bound)
-        return cls(
-            provider_tag=to_int(d["provider_tag"]),
+        wire = cls(
+            provider_tag=_strict_nonnegative_int(
+                d["provider_tag"],
+                field="provider_tag",
+            ),
             master_vk_b64=_b64str("master_vk", 2700),
             peer_nonce_b64=_b64str("peer_nonce", 60),
-            issued_unix=to_int(d["issued_unix"]),
-            deadline_unix=to_int(d["deadline_unix"]),
+            issued_unix=_strict_nonnegative_int(
+                d["issued_unix"],
+                field="issued_unix",
+            ),
+            deadline_unix=_strict_nonnegative_int(
+                d["deadline_unix"],
+                field="deadline_unix",
+            ),
             field_witness_commitment_b64=(
                 None
                 if d.get("field_witness_commitment") is None
@@ -306,3 +435,8 @@ class AttestationWire:
             issuer_sdp_pubkey_b64=_b64str("issuer_sdp_pubkey", 60),
             master_sig_b64=_b64str("master_sig", 4600),
         )
+        # Validate canonical encodings, exact fixed-width fields, provider tag,
+        # and freshness semantics at the trust boundary rather than deferring
+        # allocation/validation until the native verifier is invoked.
+        wire.to_doc()
+        return wire

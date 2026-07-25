@@ -32,7 +32,6 @@ from __future__ import annotations
 import argparse
 import json
 import platform
-import socket
 import sys
 import time
 from pathlib import Path
@@ -47,7 +46,7 @@ def _require_quic():
     except ImportError as e:
         raise RuntimeError(
             "one_link_native.quic not installed; build via "
-            "`cd native && maturin develop --release`"
+            "`cd native && maturin develop --release --locked`"
         ) from e
 
 

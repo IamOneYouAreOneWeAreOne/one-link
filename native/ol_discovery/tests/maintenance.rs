@@ -34,12 +34,11 @@ fn make_peer(seed_peers: Vec<(NodeId, std::net::SocketAddr)>) -> Peer {
         endpoints: vec![format!("udp://{addr}")],
         publish_time_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
+            .map_or(0, |duration| duration.as_secs()),
         ttl_secs: RECORD_DEFAULT_TTL_SECS,
     };
     let signed = SignedRecord::sign(rec, &sk).unwrap();
-    node.publish_self_record(signed.clone());
+    node.publish_self_record(signed.clone()).unwrap();
     Peer {
         sk,
         id,
@@ -102,10 +101,8 @@ fn refresh_stale_buckets_marks_buckets_fresh() {
 }
 
 #[test]
-fn republish_records_fires_for_aged_records() {
-    // Node has one record (its own). With max_age=0, that record
-    // counts as aged and should be republished. With max_age=large,
-    // nothing republishes.
+fn republish_without_peers_reports_no_acknowledgement() {
+    // The record is eligible at max_age=0 but no peer can acknowledge it.
     let sk = SigningKey::generate(&mut OsRng);
     let id = NodeId::from_pubkey(&sk.verifying_key().to_bytes());
     let node = DhtNode::new("127.0.0.1:0".parse().unwrap(), id, vec![]).unwrap();
@@ -120,24 +117,46 @@ fn republish_records_fires_for_aged_records() {
         ttl_secs: RECORD_DEFAULT_TTL_SECS,
     };
     let signed = SignedRecord::sign(rec, &sk).unwrap();
-    node.publish_self_record(signed);
+    node.cache_verified_record(signed).unwrap();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    // No peers known → store_at is fire-and-forget but the record
-    // still counts as "republished" from our perspective (we tried).
-    // Actually since closest_to returns an empty list when routing is
-    // empty, we'll do 0 store_at calls but still count the record.
+    // No peers are known, so no peer can acknowledge this record.
     let republished = node.republish_records(now, 0);
-    assert_eq!(republished, 1);
+    assert_eq!(republished, 0);
 
     // With max_age very large, the record is still young → 0.
     let republished_young = node.republish_records(now, 10_000);
     assert_eq!(republished_young, 0);
 
     node.shutdown();
+}
+
+#[test]
+fn republish_counts_record_acknowledged_by_reachable_peer() {
+    let peer_a = make_peer(vec![]);
+    let peer_b = make_peer(vec![(peer_a.id, peer_a.node.local_addr())]);
+    peer_a
+        .node
+        .add_seed_peer(peer_b.id, peer_b.node.local_addr())
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 10;
+    assert_eq!(peer_b.node.republish_records(now, 0), 1);
+    assert_eq!(
+        peer_a.node.lookup_record(peer_b.id).unwrap(),
+        Some(peer_b.record.clone())
+    );
+
+    peer_a.node.shutdown();
+    peer_b.node.shutdown();
 }
 
 #[test]
@@ -149,11 +168,11 @@ fn tick_maintenance_combines_both_passes() {
     let rec = PeerRecord {
         publisher_pubkey: sk.verifying_key().to_bytes(),
         endpoints: vec![format!("udp://{addr}")],
-        publish_time_unix: 0, // ancient
+        publish_time_unix: 0, // ancient recovery-cache entry
         ttl_secs: RECORD_DEFAULT_TTL_SECS,
     };
     let signed = SignedRecord::sign(rec, &sk).unwrap();
-    node.publish_self_record(signed);
+    node.cache_verified_record(signed).unwrap();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -161,7 +180,7 @@ fn tick_maintenance_combines_both_passes() {
         .as_secs();
     let (refreshed, republished) = node.tick_maintenance(now, 0, 0);
     assert_eq!(refreshed, 0); // no peers → 0 stale buckets
-    assert_eq!(republished, 1); // 1 ancient record
+    assert_eq!(republished, 0); // expired cache entry is pruned, never republished
 
     node.shutdown();
 }

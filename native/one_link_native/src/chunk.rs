@@ -1,9 +1,9 @@
 //! `one_link_native.chunk` — Python binding for the `ol_chunk` Rust crate.
 //!
-//! Surfaces FastCDC + BLAKE3 chunk addressing + domain-separated key
+//! Surfaces `FastCDC` + BLAKE3 chunk addressing + domain-separated key
 //! derivation. Per [ADR-0008](../../../docs/decisions/0008-ffi-contract.md):
 //!
-//! - Long-running operations release the GIL via `py.allow_threads`.
+//! - Long-running operations detach from the interpreter via `py.detach`.
 //! - Buffer arguments use the Python buffer protocol (`bytes`, `bytearray`,
 //!   `memoryview`) for zero-copy ingest.
 //! - Errors map to `one_link_native.OlChunkError` (subclass of `OlError`).
@@ -15,10 +15,16 @@ use ol_chunk::{
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::PyBytes;
 
 /// Python-visible boundary record. Wraps `(start, end, blake3_hash)`.
-#[pyclass(name = "Boundary", frozen, module = "one_link_native.chunk")]
+#[pyclass(
+    from_py_object,
+    name = "Boundary",
+    frozen,
+    module = "one_link_native.chunk"
+)]
 #[derive(Debug, Clone)]
 pub struct PyBoundary {
     /// Inclusive start byte offset.
@@ -42,7 +48,7 @@ impl PyBoundary {
     /// Raw chunk address as a 32-byte `bytes` object.
     #[getter]
     fn raw_address<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.raw_address)
+        PyBytes::new(py, &self.raw_address)
     }
 
     /// Hex-encoded raw address (lowercase, no separators).
@@ -96,53 +102,27 @@ impl PyBoundaryIterator {
 /// min, 64 KiB avg, 256 KiB max) and return an iterator of
 /// :class:`Boundary` objects.
 ///
-/// **Zero-copy fast path.** Borrows the underlying Python buffer
-/// memory directly via the buffer protocol (no `Vec` allocation, no
-/// memcpy). This is sound because :class:`PyBuffer` keeps the
-/// underlying Python object alive (and the bytes pinned) for the
-/// duration of this function; the buffer's `Drop` releases the
-/// pin AFTER the scan completes. GIL release via `py.allow_threads`
-/// does not invalidate the pin — that's an explicit guarantee of
-/// the Python buffer protocol.
+/// **Zero-copy immutable fast path.** Python ``bytes`` are borrowed
+/// directly. Mutable exporters (``bytearray`` and writable/readonly
+/// views over mutable storage) are snapshotted before the interpreter
+/// is detached; a buffer export prevents resize but does not prevent a
+/// second Python thread from mutating existing bytes.
 ///
 /// Releases the GIL while scanning. The buffer must be a contiguous,
 /// readable Python object (``bytes``, ``bytearray``, ``memoryview``).
 ///
 /// :param buf: input buffer
 /// :return: an iterator over Boundary instances
-/// :raises OlChunkError: if the buffer cannot be read as a contiguous u8 slice
+/// :raises `OlChunkError`: if the buffer cannot be read as a contiguous u8 slice
 #[pyfunction]
-pub fn cdc_iter(py: Python<'_>, buf: PyBuffer<u8>) -> PyResult<PyBoundaryIterator> {
-    if !buf.is_c_contiguous() {
-        return Err(PyValueError::new_err(
-            "buffer must be C-contiguous (got fortran-order or non-contiguous)",
-        ));
-    }
-    let len = buf.item_count();
-    if len == 0 {
-        return Ok(PyBoundaryIterator {
-            boundaries: Vec::new().into_iter(),
-        });
-    }
-    // SAFETY: `buf` (a PyBuffer) holds the buffer-protocol lock on the
-    // underlying Python object for the duration of this function. The
-    // bytes are pinned in memory until `buf` drops, which happens after
-    // we return. `py.allow_threads` releases the GIL, but the buffer
-    // protocol's pin is independent of GIL state — the Python object
-    // cannot be deallocated while a buffer view is held. The slice we
-    // form here is valid for the entirety of the scan.
-    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(buf.buf_ptr().cast::<u8>(), len) };
-
-    let boundaries: Vec<PyBoundary> = py.allow_threads(|| {
-        scan_to_vec_parallel(bytes)
-            .into_iter()
-            .map(|b| PyBoundary {
-                start: b.start,
-                end: b.end,
-                raw_address: b.raw_address,
-            })
-            .collect()
-    });
+pub fn cdc_iter(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<PyBoundaryIterator> {
+    let boundaries = if let Ok(bytes) = obj.cast::<PyBytes>() {
+        let immutable = PyBackedBytes::from(bytes.to_owned());
+        py.detach(move || scan_boundaries(&immutable))
+    } else {
+        let owned = contiguous_buffer_snapshot(py, obj)?;
+        py.detach(|| scan_boundaries(&owned))
+    };
     Ok(PyBoundaryIterator {
         boundaries: boundaries.into_iter(),
     })
@@ -153,19 +133,18 @@ pub fn cdc_iter(py: Python<'_>, buf: PyBuffer<u8>) -> PyResult<PyBoundaryIterato
 /// Equivalent to `blake3.hash(buf).digest()` but exposed via the engine's
 /// canonical entry point. Zero-copy; see [`cdc_iter`] safety note.
 #[pyfunction]
-pub fn chunk_address_raw<'py>(py: Python<'py>, buf: PyBuffer<u8>) -> PyResult<Bound<'py, PyBytes>> {
-    if !buf.is_c_contiguous() {
-        return Err(PyValueError::new_err("buffer must be C-contiguous"));
-    }
-    let len = buf.item_count();
-    // SAFETY: see cdc_iter — PyBuffer pin extends past allow_threads.
-    let bytes: &[u8] = if len == 0 {
-        &[]
+pub fn chunk_address_raw<'py>(
+    py: Python<'py>,
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let addr = if let Ok(bytes) = obj.cast::<PyBytes>() {
+        let immutable = PyBackedBytes::from(bytes.to_owned());
+        py.detach(move || blake3_wrap::chunk_address_raw(&immutable))
     } else {
-        unsafe { std::slice::from_raw_parts(buf.buf_ptr().cast::<u8>(), len) }
+        let owned = contiguous_buffer_snapshot(py, obj)?;
+        py.detach(|| blake3_wrap::chunk_address_raw(&owned))
     };
-    let addr = py.allow_threads(|| blake3_wrap::chunk_address_raw(bytes));
-    Ok(PyBytes::new_bound(py, &addr))
+    Ok(PyBytes::new(py, &addr))
 }
 
 /// Compute the convergent BLAKE3-256 chunk address for a buffer.
@@ -175,20 +154,37 @@ pub fn chunk_address_raw<'py>(py: Python<'py>, buf: PyBuffer<u8>) -> PyResult<Bo
 #[pyfunction]
 pub fn chunk_address_convergent<'py>(
     py: Python<'py>,
-    buf: PyBuffer<u8>,
+    obj: &Bound<'_, PyAny>,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    if !buf.is_c_contiguous() {
-        return Err(PyValueError::new_err("buffer must be C-contiguous"));
-    }
-    let len = buf.item_count();
-    // SAFETY: see cdc_iter.
-    let bytes: &[u8] = if len == 0 {
-        &[]
+    let addr = if let Ok(bytes) = obj.cast::<PyBytes>() {
+        let immutable = PyBackedBytes::from(bytes.to_owned());
+        py.detach(move || blake3_wrap::chunk_address_convergent(&immutable))
     } else {
-        unsafe { std::slice::from_raw_parts(buf.buf_ptr().cast::<u8>(), len) }
+        let owned = contiguous_buffer_snapshot(py, obj)?;
+        py.detach(|| blake3_wrap::chunk_address_convergent(&owned))
     };
-    let addr = py.allow_threads(|| blake3_wrap::chunk_address_convergent(bytes));
-    Ok(PyBytes::new_bound(py, &addr))
+    Ok(PyBytes::new(py, &addr))
+}
+
+fn contiguous_buffer_snapshot(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    let buf = PyBuffer::<u8>::get(obj)?;
+    if !buf.is_c_contiguous() {
+        return Err(PyValueError::new_err(
+            "buffer must be C-contiguous (got fortran-order or non-contiguous)",
+        ));
+    }
+    buf.to_vec(py)
+}
+
+fn scan_boundaries(bytes: &[u8]) -> Vec<PyBoundary> {
+    scan_to_vec_parallel(bytes)
+        .into_iter()
+        .map(|b| PyBoundary {
+            start: b.start,
+            end: b.end,
+            raw_address: b.raw_address,
+        })
+        .collect()
 }
 
 /// Derive a per-chunk AEAD key from a ratchet chain key + chunk address
@@ -213,10 +209,12 @@ pub fn derive_aead_key<'py>(
             chunk_id_full.len(),
         )));
     }
-    let chain: [u8; 32] = ratchet_chain_key.try_into().expect("checked above");
-    let chunk: [u8; 32] = chunk_id_full.try_into().expect("checked above");
+    let mut chain = [0u8; 32];
+    chain.copy_from_slice(ratchet_chain_key);
+    let mut chunk = [0u8; 32];
+    chunk.copy_from_slice(chunk_id_full);
     let key = blake3_wrap::derive_aead_key(&chain, &chunk);
-    Ok(PyBytes::new_bound(py, &key))
+    Ok(PyBytes::new(py, &key))
 }
 
 /// Derive the 16-byte `ratchet_key_id` for a chunk per
@@ -239,10 +237,12 @@ pub fn derive_ratchet_key_id<'py>(
             chunk_id_full.len(),
         )));
     }
-    let chain: [u8; 32] = ratchet_chain_key.try_into().expect("checked above");
-    let chunk: [u8; 32] = chunk_id_full.try_into().expect("checked above");
+    let mut chain = [0u8; 32];
+    chain.copy_from_slice(ratchet_chain_key);
+    let mut chunk = [0u8; 32];
+    chunk.copy_from_slice(chunk_id_full);
     let id = blake3_wrap::derive_ratchet_key_id(&chain, &chunk);
-    Ok(PyBytes::new_bound(py, &id))
+    Ok(PyBytes::new(py, &id))
 }
 
 /// Derive the stripe seed and within-stripe position for a chunk per
@@ -262,7 +262,8 @@ pub fn derive_stripe_seed(chunk_id_full: &[u8], stripe_k: u8) -> PyResult<(u64, 
     if stripe_k == 0 {
         return Err(PyValueError::new_err("stripe_k must be ≥ 1"));
     }
-    let chunk: [u8; 32] = chunk_id_full.try_into().expect("checked above");
+    let mut chunk = [0u8; 32];
+    chunk.copy_from_slice(chunk_id_full);
     Ok(blake3_wrap::derive_stripe_seed(&chunk, stripe_k))
 }
 

@@ -1,10 +1,9 @@
-"""Tests for the Row 10 attestation gate.
+"""Tests for native attestation controls and browser identity gating.
 
-When ``daemon.require_attested_peers`` is True, the peer-RTC
-manager drops app-layer DC messages from peers that haven't
-completed the attestation handshake. Control-plane messages
-(ping/pong, attest_challenge, attest_response) bypass the gate so
-the handshake itself can run.
+The legacy ``ONE_LINK_REQUIRE_ATTESTED_PEERS`` knob now truthfully aliases a
+browser-feasible, channel-bound proof of the enrolled Ed25519 key. The native
+hybrid attestation handshake remains independently exercised here, but it is
+not misrepresented as browser hardware/platform attestation.
 """
 
 from __future__ import annotations
@@ -30,6 +29,17 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_gate_tests_from_roster_authority(monkeypatch):
+    """This module tests the gate after admission, not roster enrollment."""
+
+    monkeypatch.setattr(
+        BrowserPeerManager,
+        "peer_authorization_is_live",
+        lambda _manager, _peer: True,
+    )
+
+
 class _StubDC:
     def __init__(self) -> None:
         self.readyState = "open"
@@ -47,6 +57,7 @@ def _make_daemon(
     # (audit C1 May 2026 — SDP-binding into the attestation transcript).
     me = SimpleNamespace(public_bytes=bytes([0x99] * 32))
     return SimpleNamespace(
+        require_browser_identity_possession=require_attested,
         require_attested_peers=require_attested,
         sealed_master=sealed_master,
         _gate_drop_count=0,
@@ -54,13 +65,19 @@ def _make_daemon(
     )
 
 
-def _make_peer(attested: bool = False) -> BrowserPeer:
+def _make_peer(
+    attested: bool = False,
+    identity_verified: bool = False,
+) -> BrowserPeer:
     p = BrowserPeer(fingerprint="sha256:test", pubkey_bytes=bytes(32))
     p.control_dc = _StubDC()
     p.bulk_dc = _StubDC()
     if attested:
         p.attested_ms = 1
         p.peer_master_vk = bytes(1984)
+    if identity_verified:
+        p.identity_verified_ms = 1
+        p.identity_verified_dc_id = id(p.control_dc)
     return p
 
 
@@ -91,26 +108,50 @@ def test_daemon_attestation_gate_defaults_off(monkeypatch):
     from one_link.daemon import Daemon
 
     monkeypatch.delenv("ONE_LINK_REQUIRE_ATTESTED_PEERS", raising=False)
+    monkeypatch.delenv(
+        "ONE_LINK_REQUIRE_BROWSER_IDENTITY_POSSESSION", raising=False,
+    )
     d = Daemon(_identity("gate-default"))
     assert d.require_attested_peers is False
-    assert d._control_status()["peer_rtc_attestation"] == {
-        "require_attested_peers": False,
+    assert d._control_status()["browser_identity_possession"] == {
+        "required": False,
         "gate_drop_count": 0,
         "scope": "webrtc-dc",
+        "proof": "enrolled-ed25519-key-on-current-datachannel",
+        "hardware_attestation": False,
+        "legacy_env_alias": "ONE_LINK_REQUIRE_ATTESTED_PEERS",
     }
 
 
-def test_daemon_attestation_gate_env_enables(monkeypatch):
+@pytest.mark.parametrize(
+    "env_name",
+    [
+        "ONE_LINK_REQUIRE_BROWSER_IDENTITY_POSSESSION",
+        "ONE_LINK_REQUIRE_ATTESTED_PEERS",
+    ],
+)
+def test_daemon_identity_possession_env_and_legacy_alias_enable(
+    monkeypatch,
+    env_name,
+):
     from one_link.daemon import Daemon
 
-    monkeypatch.setenv("ONE_LINK_REQUIRE_ATTESTED_PEERS", "required")
+    monkeypatch.delenv("ONE_LINK_REQUIRE_ATTESTED_PEERS", raising=False)
+    monkeypatch.delenv(
+        "ONE_LINK_REQUIRE_BROWSER_IDENTITY_POSSESSION", raising=False,
+    )
+    monkeypatch.setenv(env_name, "required")
     d = Daemon(_identity("gate-required"))
     d._gate_drop_count = 7
     assert d.require_attested_peers is True
-    assert d._control_status()["peer_rtc_attestation"] == {
-        "require_attested_peers": True,
+    assert d.require_browser_identity_possession is True
+    assert d._control_status()["browser_identity_possession"] == {
+        "required": True,
         "gate_drop_count": 7,
         "scope": "webrtc-dc",
+        "proof": "enrolled-ed25519-key-on-current-datachannel",
+        "hardware_attestation": False,
+        "legacy_env_alias": "ONE_LINK_REQUIRE_ATTESTED_PEERS",
     }
 
 
@@ -157,10 +198,10 @@ async def test_gate_on_blocks_unattested_app_message():
 
 
 @pytest.mark.asyncio
-async def test_gate_on_lets_attested_app_message_through():
+async def test_gate_on_lets_channel_identity_verified_message_through():
     daemon = _make_daemon(require_attested=True)
     mgr = BrowserPeerManager(daemon)
-    peer = _make_peer(attested=True)
+    peer = _make_peer(attested=True, identity_verified=True)
     fan_out_received = []
 
     async def listener(p, kind, msg_t, env):

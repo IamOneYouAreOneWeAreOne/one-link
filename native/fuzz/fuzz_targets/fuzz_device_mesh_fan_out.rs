@@ -5,22 +5,16 @@ use libfuzzer_sys::fuzz_target;
 use ol_device_mesh::distributed_fs::{
     ChunkHash, ChunkPlacement, ErasurePolicy, FileManifest, FILE_ID_LEN,
 };
-use ol_device_mesh::fan_out::{
-    fan_out_plan, sign_fetch_request, SourceCapacity, FETCH_NONCE_LEN,
-};
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::fan_out::{fan_out_plan, sign_fetch_request, SourceCapacity, FETCH_NONCE_LEN};
+use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 fuzz_target!(|data: &[u8]| {
     let mut rng = ChaCha20Rng::from_seed([0xA5u8; 32]);
     let master = MasterIdentity::generate(&mut rng);
-    let (sk, att_l1) = mint_subkey(
-        &master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk, att_l1) =
+        mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
     let vk = ol_pqsig::HybridVerifyingKey::from_bytes(&att_l1.subkey_vk_bytes).unwrap();
 
     // 1. Sign-then-verify a fetch request derived from fuzz bytes.
@@ -52,11 +46,8 @@ fuzz_target!(|data: &[u8]| {
     let m = data.get(1).copied().unwrap_or(1) % 8;
     if let Ok(policy) = ErasurePolicy::new(k, m, 1) {
         let stripe = policy.total_shards() as usize;
-        let chunk_count =
-            ((data.get(2).copied().unwrap_or(1) as usize) % 4 + 1) * stripe;
-        let manifest_chunks: Vec<ChunkHash> = (0..chunk_count)
-            .map(|i| [(i as u8); 32])
-            .collect();
+        let chunk_count = ((data.get(2).copied().unwrap_or(1) as usize) % 4 + 1) * stripe;
+        let manifest_chunks: Vec<ChunkHash> = (0..chunk_count).map(|i| [(i as u8); 32]).collect();
         let manifest = FileManifest {
             file_size: 1,
             chunk_size: 256,
@@ -82,8 +73,8 @@ fuzz_target!(|data: &[u8]| {
         let sources: Vec<SourceCapacity> = (1u8..=4)
             .map(|i| SourceCapacity {
                 device_id: [i; DEVICE_ID_LEN],
-                estimated_bps: u64::from(data.get(i as usize).copied().unwrap_or(1))
-                    .max(1) * 1_000_000,
+                estimated_bps: u64::from(data.get(i as usize).copied().unwrap_or(1)).max(1)
+                    * 1_000_000,
                 current_load_bytes: 0,
             })
             .collect();

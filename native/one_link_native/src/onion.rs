@@ -6,7 +6,7 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyList, PyTuple};
 
 use rand_core_06::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -20,11 +20,22 @@ use ol_onion::{
 };
 
 fn map_err(e: OnionError) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    PyValueError::new_err(crate::errors::owned_error_message(e))
 }
 
-fn parse_hop(hop: (Vec<u8>, Vec<u8>)) -> PyResult<HopDescriptor> {
-    let (id_bytes, pk_bytes) = hop;
+fn parse_hop(hop: &Bound<'_, PyAny>) -> PyResult<HopDescriptor> {
+    let tuple = hop
+        .cast::<PyTuple>()
+        .map_err(|_| PyValueError::new_err("each circuit hop must be a 2-tuple"))?;
+    if tuple.len() != 2 {
+        return Err(PyValueError::new_err(
+            "each circuit hop must contain exactly (hop_id, public_key)",
+        ));
+    }
+    let id_item = tuple.get_item(0)?;
+    let pk_item = tuple.get_item(1)?;
+    let id_bytes = id_item.extract::<&[u8]>()?;
+    let pk_bytes = pk_item.extract::<&[u8]>()?;
     if id_bytes.len() != HOP_ID_LEN {
         return Err(PyValueError::new_err(format!(
             "hop id must be {HOP_ID_LEN} bytes, got {}",
@@ -38,26 +49,38 @@ fn parse_hop(hop: (Vec<u8>, Vec<u8>)) -> PyResult<HopDescriptor> {
         )));
     }
     let mut id_arr = [0u8; HOP_ID_LEN];
-    id_arr.copy_from_slice(&id_bytes);
+    id_arr.copy_from_slice(id_bytes);
     let mut pk_arr = [0u8; 32];
-    pk_arr.copy_from_slice(&pk_bytes);
+    pk_arr.copy_from_slice(pk_bytes);
     Ok(HopDescriptor::new(id_arr, pk_arr))
 }
 
+fn parse_circuit(circuit: &Bound<'_, PyList>) -> PyResult<Circuit> {
+    if circuit.is_empty() || circuit.len() > MAX_HOPS {
+        return Err(PyValueError::new_err(format!(
+            "circuit must contain 1..={MAX_HOPS} hops, got {}",
+            circuit.len()
+        )));
+    }
+    let hops = circuit
+        .iter()
+        .map(|item| parse_hop(&item))
+        .collect::<PyResult<Vec<_>>>()?;
+    Circuit::new(hops).map_err(map_err)
+}
+
 /// Build an onion packet for a circuit. `circuit` is a list of
-/// (hop_id_32_bytes, hop_pubkey_32_bytes) tuples in order from
+/// (`hop_id_32_bytes`, `hop_pubkey_32_bytes`) tuples in order from
 /// first hop to destination.
 #[pyfunction]
 fn build_onion<'py>(
     py: Python<'py>,
-    circuit: Vec<(Vec<u8>, Vec<u8>)>,
+    circuit: &Bound<'py, PyList>,
     payload: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let hops: Result<Vec<HopDescriptor>, PyErr> = circuit.into_iter().map(parse_hop).collect();
-    let hops = hops?;
-    let c = Circuit::new(hops).map_err(map_err)?;
+    let c = parse_circuit(circuit)?;
     let packet = core_build_onion(&c, payload, &mut OsRng).map_err(map_err)?;
-    Ok(PyBytes::new_bound(py, &packet.encode()))
+    Ok(PyBytes::new(py, &packet.encode()))
 }
 
 /// Peel one layer of an onion packet at this relay.
@@ -88,13 +111,13 @@ fn peel_one_layer<'py>(
             inner_packet_bytes,
         } => Ok((
             "forward".to_string(),
-            PyBytes::new_bound(py, next_hop.as_bytes()),
-            PyBytes::new_bound(py, &inner_packet_bytes),
+            PyBytes::new(py, next_hop.as_bytes()),
+            PyBytes::new(py, &inner_packet_bytes),
         )),
         PeelOutcome::Deliver { payload } => Ok((
             "deliver".to_string(),
-            PyBytes::new_bound(py, &[]),
-            PyBytes::new_bound(py, &payload),
+            PyBytes::new(py, &[]),
+            PyBytes::new(py, &payload),
         )),
     }
 }
@@ -113,10 +136,10 @@ fn derive_pubkey<'py>(py: Python<'py>, static_sk_bytes: &[u8]) -> PyResult<Bound
     sk_bytes.copy_from_slice(static_sk_bytes);
     let sk = StaticSecret::from(sk_bytes);
     let pk = PublicKey::from(&sk);
-    Ok(PyBytes::new_bound(py, pk.as_bytes()))
+    Ok(PyBytes::new(py, pk.as_bytes()))
 }
 
-/// Pad a wire-encoded onion packet to TRANSPORT_PAD_HINT bytes.
+/// Pad a wire-encoded onion packet to `TRANSPORT_PAD_HINT` bytes.
 /// Trailing pad bytes are key-derived from `pad_seed` (must be 32
 /// bytes; pass a fresh value per packet).
 #[pyfunction]
@@ -134,7 +157,7 @@ fn pad_to_transport<'py>(
     let mut seed = [0u8; 32];
     seed.copy_from_slice(pad_seed);
     let out = pad_packet_to_transport(packet_bytes, &seed).map_err(map_err)?;
-    Ok(PyBytes::new_bound(py, &out))
+    Ok(PyBytes::new(py, &out))
 }
 
 /// Strip transport padding from a TRANSPORT_PAD_HINT-byte input,
@@ -145,7 +168,7 @@ fn unpad_from_transport<'py>(
     padded_bytes: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
     let out = unpad_packet_from_transport(padded_bytes).map_err(map_err)?;
-    Ok(PyBytes::new_bound(py, &out))
+    Ok(PyBytes::new(py, &out))
 }
 
 /// D05 — Build a cover-traffic onion packet for `circuit`. Returns
@@ -158,30 +181,28 @@ fn unpad_from_transport<'py>(
 #[pyo3(signature = (circuit, body_len = 0))]
 fn build_cover_packet<'py>(
     py: Python<'py>,
-    circuit: Vec<(Vec<u8>, Vec<u8>)>,
+    circuit: &Bound<'py, PyList>,
     body_len: usize,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let hops: Result<Vec<HopDescriptor>, PyErr> = circuit.into_iter().map(parse_hop).collect();
-    let hops = hops?;
-    let c = Circuit::new(hops).map_err(map_err)?;
+    let c = parse_circuit(circuit)?;
     let body = if body_len == 0 {
         DEFAULT_COVER_BODY_LEN
     } else {
         body_len
     };
     let packet = core_build_cover_packet(&c, body, &mut OsRng).map_err(map_err)?;
-    Ok(PyBytes::new_bound(py, &packet.encode()))
+    Ok(PyBytes::new(py, &packet.encode()))
 }
 
 /// D05 — Check whether a decrypted innermost payload is a cover
-/// packet (starts with COVER_MAGIC). Destinations call this and
+/// packet (starts with `COVER_MAGIC`). Destinations call this and
 /// silently drop cover packets before any application processing.
 #[pyfunction]
 fn is_cover_payload(payload: &[u8]) -> bool {
     core_is_cover_payload(payload)
 }
 
-pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_onion, m)?)?;
     m.add_function(wrap_pyfunction!(peel_one_layer, m)?)?;
     m.add_function(wrap_pyfunction!(derive_pubkey, m)?)?;
@@ -194,6 +215,6 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("HOP_ID_LEN", HOP_ID_LEN)?;
     m.add("TRANSPORT_PAD_HINT", TRANSPORT_PAD_HINT)?;
     m.add("DEFAULT_COVER_BODY_LEN", DEFAULT_COVER_BODY_LEN)?;
-    m.add("COVER_MAGIC", PyBytes::new_bound(_py, &COVER_MAGIC))?;
+    m.add("COVER_MAGIC", PyBytes::new(py, &COVER_MAGIC))?;
     Ok(())
 }

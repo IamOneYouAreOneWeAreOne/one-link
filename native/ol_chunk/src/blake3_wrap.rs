@@ -26,11 +26,11 @@ pub enum DerivationContext {
     ChunkAddrConvergent,
     /// Per-chunk AEAD key.
     ChunkAeadKey,
-    /// Per-chunk ratchet-key-id (16 bytes stored in chunk_log header).
+    /// Per-chunk ratchet-key-id (16 bytes stored in `chunk_log` header).
     ChunkRatchetId,
     /// Stripe seed for content-addressed RS stripe assignment.
     StripeSeed,
-    /// Cohort_id mixing for Reed-Solomon parity derivation.
+    /// `Cohort_id` mixing for Reed-Solomon parity derivation.
     StripeCohortMix,
     /// Manifest content-address.
     ManifestId,
@@ -40,13 +40,13 @@ pub enum DerivationContext {
     RevocationLeaf,
     /// Merkle revocation log internal-node hash.
     RevocationInternal,
-    /// CRDT actor_id derivation from peer fingerprint.
+    /// CRDT `actor_id` derivation from peer fingerprint.
     FolderCrdtActor,
     /// Share-link fingerprint.
     ShareLinkId,
     /// Bloom filter hash-function seed (Phase B; reserved here).
     BloomInitKey,
-    /// RaptorQ encoded-symbol identifier (Phase B; reserved).
+    /// `RaptorQ` encoded-symbol identifier (Phase B; reserved).
     FountainSymbolId,
     /// XOR network-coding combined-symbol identifier (Phase B; reserved).
     NetworkCodingId,
@@ -61,7 +61,7 @@ impl DerivationContext {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ChunkAddrConvergent => "ol-chunk-addr-convergent-v1",
-            Self::ChunkAeadKey => "ol-chunk-aead-key-v1",
+            Self::ChunkAeadKey => "ol-chunk-aead-key-v1", // gitleaks:allow - domain label
             Self::ChunkRatchetId => "ol-chunk-ratchet-id-v1",
             Self::StripeSeed => "ol-stripe-seed-v1",
             Self::StripeCohortMix => "ol-stripe-cohort-mix-v1",
@@ -93,7 +93,7 @@ pub fn derive_key32(context: DerivationContext, key_material: &[u8]) -> [u8; 32]
 /// Derive a 16-byte key for a registered domain context.
 ///
 /// Used by [`derive_ratchet_key_id`] to produce the `ratchet_key_id` field
-/// stored in the chunk_log header. BLAKE3 supports arbitrary output length;
+/// stored in the `chunk_log` header. BLAKE3 supports arbitrary output length;
 /// we truncate to 16 bytes via XOF mode.
 #[must_use]
 pub fn derive_key16(context: DerivationContext, key_material: &[u8]) -> [u8; 16] {
@@ -144,7 +144,7 @@ pub fn derive_aead_key(ratchet_chain_key: &[u8; 32], chunk_id_full: &[u8; 32]) -
     derive_key32(DerivationContext::ChunkAeadKey, &material)
 }
 
-/// Derive the 16-byte `ratchet_key_id` stored in the chunk_log header
+/// Derive the 16-byte `ratchet_key_id` stored in the `chunk_log` header
 /// per [ADR-0006](../../../docs/decisions/0006-blake3-derive-scheme.md) Rule 4 and [ADR-0003](../../../docs/decisions/0003-on-disk-format.md).
 ///
 /// This identifier lets recovery look up which ratchet generation a
@@ -250,9 +250,8 @@ mod tests {
     #[test]
     fn stripe_position_within_k_range() {
         let mut chunk = [0u8; 32];
-        for i in 0..200 {
-            chunk[0] = i as u8;
-            chunk[1] = (i >> 8) as u8;
+        for i in 0u16..200 {
+            chunk[..2].copy_from_slice(&i.to_le_bytes());
             let (_seed, pos) = derive_stripe_seed(&chunk, 10);
             assert!(pos < 10, "position {pos} must be < k=10");
         }

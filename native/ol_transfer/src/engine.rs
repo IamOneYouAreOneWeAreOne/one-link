@@ -1,4 +1,4 @@
-//! The [`TransferEngine`] type — owner of chunk_store + QUIC endpoint +
+//! The [`TransferEngine`] type — owner of `chunk_store` + QUIC endpoint +
 //! peer registry. Implements [ADR-0013](../../../docs/decisions/0013-transfer-engine.md).
 
 use std::collections::HashMap;
@@ -20,6 +20,13 @@ use crate::error::{hex_prefix_8, TransferError};
 use crate::outcome::FetchOutcome;
 use crate::peer::PeerEntry;
 use crate::wire;
+
+/// Maximum peers retained by one engine registry.
+pub const MAX_REGISTERED_PEERS: usize = 16_384;
+/// Maximum chunk fetch tasks created by one batch call.
+pub const MAX_FETCH_MANY_CHUNKS: usize = 8_192;
+/// CPU ceiling for the legacy full-scope Bloom handshake.
+pub const MAX_BLOOM_INPUT_CHUNKS: usize = 1_000_000;
 
 /// The integrated transfer engine. One per daemon identity.
 ///
@@ -64,6 +71,7 @@ impl TransferEngine {
         endpoint: Arc<Endpoint>,
         config: TransferConfig,
     ) -> Arc<Self> {
+        let config = config.normalized();
         Arc::new(Self {
             store,
             endpoint,
@@ -87,6 +95,13 @@ impl TransferEngine {
         if let Some(entry) = peers.get(&fingerprint) {
             *entry.addr.lock().await = addr;
         } else {
+            if peers.len() >= MAX_REGISTERED_PEERS {
+                return Err(TransferError::ResourceLimit {
+                    resource: "registered peers",
+                    got: peers.len().saturating_add(1),
+                    max: MAX_REGISTERED_PEERS,
+                });
+            }
             peers.insert(fingerprint, Arc::new(PeerEntry::new(addr, &self.config)));
         }
         Ok(())
@@ -115,7 +130,13 @@ impl TransferEngine {
     /// Snapshot of chunk-store stats (cheap; counters only).
     #[must_use]
     pub fn store_stats(&self) -> ol_chunk_store::StoreStats {
-        self.store.read().expect("store rwlock poisoned").stats()
+        // Diagnostics remain available after a poisoned lock, but all
+        // data-path reads and writes below fail closed.  Taking the inner
+        // read guard is memory-safe and this method only snapshots counters.
+        self.store
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stats()
     }
 
     /// Snapshot of the engine's endpoint local address (diagnostic).
@@ -170,7 +191,7 @@ impl TransferEngine {
         chunk_id: &[u8; 32],
         flush_on_write: bool,
     ) -> Result<ChunkRecord, TransferError> {
-        if let Some(rec) = self.read_local(chunk_id) {
+        if let Some(rec) = self.read_local(chunk_id)? {
             return Ok(rec);
         }
 
@@ -180,7 +201,7 @@ impl TransferEngine {
             .clone()
             .acquire_owned()
             .await
-            .expect("semaphore not closed");
+            .map_err(|_| TransferError::Closed)?;
 
         let connection = self.connection_for(peer, &entry).await?;
 
@@ -231,7 +252,7 @@ impl TransferEngine {
 
     /// Fetch many chunks from a peer with per-peer bounded concurrency.
     ///
-    /// Returns one [`FetchOutcome`] per requested chunk_id, in the same
+    /// Returns one [`FetchOutcome`] per requested `chunk_id`, in the same
     /// order as the input vector.
     ///
     /// Per-peer bandwidth is bounded by
@@ -248,6 +269,13 @@ impl TransferEngine {
         peer: &PeerFingerprint,
         chunk_ids: Vec<[u8; 32]>,
     ) -> Result<Vec<FetchOutcome>, TransferError> {
+        if chunk_ids.len() > MAX_FETCH_MANY_CHUNKS {
+            return Err(TransferError::ResourceLimit {
+                resource: "fetch_many chunk ids",
+                got: chunk_ids.len(),
+                max: MAX_FETCH_MANY_CHUNKS,
+            });
+        }
         let entry = self.peer_entry(peer).await?;
         // Eager connection setup so unreachable peers fail fast.
         let _ = self.connection_for(peer, &entry).await?;
@@ -308,9 +336,9 @@ impl TransferEngine {
 
     /// Bloom-init handshake per ADR-0011 + ADR-0013.
     ///
-    /// We build a Bloom filter from `local_chunk_ids` (the chunk_ids we
+    /// We build a Bloom filter from `local_chunk_ids` (the `chunk_ids` we
     /// already have for the manifest scope), send it to the peer, and
-    /// receive back the list of chunk_ids the peer thinks we still need.
+    /// receive back the list of `chunk_ids` the peer thinks we still need.
     ///
     /// # Errors
     ///
@@ -325,6 +353,13 @@ impl TransferEngine {
         peer: &PeerFingerprint,
         local_chunk_ids: &[[u8; 32]],
     ) -> Result<Vec<[u8; 32]>, TransferError> {
+        if local_chunk_ids.len() > MAX_BLOOM_INPUT_CHUNKS {
+            return Err(TransferError::ResourceLimit {
+                resource: "Bloom input chunk ids",
+                got: local_chunk_ids.len(),
+                max: MAX_BLOOM_INPUT_CHUNKS,
+            });
+        }
         let entry = self.peer_entry(peer).await?;
         let connection = self.connection_for(peer, &entry).await?;
 
@@ -351,7 +386,7 @@ impl TransferEngine {
     /// Fetch a chunk via LT-fountain delivery per ADR-0015.
     ///
     /// Opens a fresh bi-directional stream, sends a `FountainRequest`
-    /// frame carrying the chunk_id, then ingests the inbound stream of
+    /// frame carrying the `chunk_id`, then ingests the inbound stream of
     /// `FountainBurst` frames until the LT decoder reconstructs the
     /// chunk plaintext. Sends `FountainAck` to tell the sender to stop
     /// emitting once decode succeeds.
@@ -364,7 +399,7 @@ impl TransferEngine {
     ///
     /// - [`TransferError::ChunkNotFound`] if the server has no such chunk.
     /// - [`TransferError::ChunkIdMismatch`] if the decoded bytes hash to
-    ///   a different chunk_id than requested (catches buggy / malicious peer).
+    ///   a different `chunk_id` than requested (catches buggy / malicious peer).
     /// - [`TransferError::Timeout`] if the full decode exceeds the
     ///   chunk request timeout.
     /// - [`TransferError::Transport`] for QUIC stream errors.
@@ -373,7 +408,7 @@ impl TransferEngine {
         peer: &PeerFingerprint,
         chunk_id: &[u8; 32],
     ) -> Result<ChunkRecord, TransferError> {
-        if let Some(rec) = self.read_local(chunk_id) {
+        if let Some(rec) = self.read_local(chunk_id)? {
             return Ok(rec);
         }
         let entry = self.peer_entry(peer).await?;
@@ -382,7 +417,7 @@ impl TransferEngine {
             .clone()
             .acquire_owned()
             .await
-            .expect("semaphore not closed");
+            .map_err(|_| TransferError::Closed)?;
 
         let connection = self.connection_for(peer, &entry).await?;
         let (mut send, mut recv) = connection
@@ -400,7 +435,7 @@ impl TransferEngine {
         let deadline = tokio::time::Instant::now()
             + Duration::from_millis(self.config.chunk_request_timeout_ms);
         let mut decoder: Option<LtDecoder> = None;
-        let mut chunk_source_len: u32 = 0;
+        let mut fountain_shape: Option<(u32, usize, u32)> = None;
 
         loop {
             let read_future = read_frame(&mut recv);
@@ -415,19 +450,12 @@ impl TransferEngine {
             };
             match frame.kind {
                 FrameKind::FountainBurst => {
-                    let pkt = FountainPacket::decode(&frame.payload)?;
-                    if &pkt.chunk_id != chunk_id {
-                        return Err(TransferError::ChunkIdMismatch {
-                            requested_hex_prefix: hex_prefix_8(chunk_id),
-                            got_hex_prefix: hex_prefix_8(&pkt.chunk_id),
-                        });
-                    }
-                    let dec = decoder.get_or_insert_with(|| {
-                        chunk_source_len = pkt.source_length;
-                        LtDecoder::new(pkt.k, pkt.payload.len(), pkt.source_length as usize)
-                            .expect("packet parameters valid")
-                    });
-                    if dec.ingest(pkt.symbol_id, &pkt.payload)? {
+                    if Self::ingest_fountain_burst(
+                        chunk_id,
+                        &frame.payload,
+                        &mut decoder,
+                        &mut fountain_shape,
+                    )? {
                         // Decode complete; tell sender to stop.
                         let ack = Frame::new(FrameKind::FountainAck, chunk_id.to_vec())?;
                         write_frame(&mut send, &ack)
@@ -451,7 +479,10 @@ impl TransferEngine {
             }
         }
 
-        let dec = decoder.expect("decoder created on first FountainBurst");
+        let dec = decoder.ok_or(TransferError::MalformedPayload {
+            kind: FrameKind::FountainBurst,
+            reason: "fountain stream completed without decoder state",
+        })?;
         let source_bytes = dec.finish()?;
         // Parse `(kind, flags, payload)` back into a ChunkRecord.
         if source_bytes.len() < 2 {
@@ -469,14 +500,57 @@ impl TransferEngine {
         }
         // Persist durably.
         self.write_local(&record)?;
-        let _ = chunk_source_len; // silence unused-mut warning on early-decode path
         Ok(record)
+    }
+
+    fn ingest_fountain_burst(
+        expected_chunk_id: &[u8; 32],
+        payload: &[u8],
+        decoder: &mut Option<LtDecoder>,
+        fountain_shape: &mut Option<(u32, usize, u32)>,
+    ) -> Result<bool, TransferError> {
+        let packet = FountainPacket::decode(payload)?;
+        if &packet.chunk_id != expected_chunk_id {
+            return Err(TransferError::ChunkIdMismatch {
+                requested_hex_prefix: hex_prefix_8(expected_chunk_id),
+                got_hex_prefix: hex_prefix_8(&packet.chunk_id),
+            });
+        }
+
+        let packet_shape = (packet.k, packet.payload.len(), packet.source_length);
+        if let Some(expected) = *fountain_shape {
+            if packet_shape != expected {
+                return Err(TransferError::MalformedPayload {
+                    kind: FrameKind::FountainBurst,
+                    reason: "fountain packet parameters changed within burst",
+                });
+            }
+        } else {
+            let source_length = usize::try_from(packet.source_length).map_err(|_| {
+                TransferError::MalformedPayload {
+                    kind: FrameKind::FountainBurst,
+                    reason: "fountain source length does not fit this platform",
+                }
+            })?;
+            *decoder = Some(LtDecoder::new(
+                packet.k,
+                packet.payload.len(),
+                source_length,
+            )?);
+            *fountain_shape = Some(packet_shape);
+        }
+
+        let decoder = decoder.as_mut().ok_or(TransferError::MalformedPayload {
+            kind: FrameKind::FountainBurst,
+            reason: "fountain decoder was not initialized",
+        })?;
+        Ok(decoder.ingest(packet.symbol_id, &packet.payload)?)
     }
 
     /// Scoped bloom-init handshake per ADR-0011 v2.
     ///
     /// Sends both a Bloom of `already_have` AND an explicit `want_list`
-    /// of chunk_ids the client cares about. Server walks `want_list`
+    /// of `chunk_ids` the client cares about. Server walks `want_list`
     /// against the bloom and returns the missing subset — avoiding the
     /// full memtable scan that [`Self::bloom_handshake`] triggers on
     /// large servers.
@@ -500,6 +574,20 @@ impl TransferEngine {
         already_have: &[[u8; 32]],
         want_list: &[[u8; 32]],
     ) -> Result<Vec<[u8; 32]>, TransferError> {
+        if already_have.len() > MAX_BLOOM_INPUT_CHUNKS {
+            return Err(TransferError::ResourceLimit {
+                resource: "scoped Bloom input chunk ids",
+                got: already_have.len(),
+                max: MAX_BLOOM_INPUT_CHUNKS,
+            });
+        }
+        if want_list.len() > wire::MAX_CHUNK_IDS_PER_MESSAGE {
+            return Err(TransferError::ResourceLimit {
+                resource: "scoped Bloom want ids",
+                got: want_list.len(),
+                max: wire::MAX_CHUNK_IDS_PER_MESSAGE,
+            });
+        }
         let entry = self.peer_entry(peer).await?;
         let connection = self.connection_for(peer, &entry).await?;
 
@@ -509,7 +597,7 @@ impl TransferEngine {
             bloom.insert(cid);
         }
         let bloom_bytes = bloom.encode()?;
-        let payload = wire::encode_scoped_bloom(want_list, &bloom_bytes);
+        let payload = wire::encode_scoped_bloom(want_list, &bloom_bytes)?;
         let request = Frame::new(FrameKind::ScopedBloomFilter, payload)?;
         let reply = self
             .send_request_with_timeout(&connection, request, self.config.bloom_handshake_timeout_ms)
@@ -553,18 +641,24 @@ impl TransferEngine {
 
     // ─────────────────────────── internals ─────────────────────────────
 
-    fn read_local(&self, chunk_id: &[u8; 32]) -> Option<ChunkRecord> {
-        let store = self.store.read().expect("store rwlock poisoned");
+    fn read_local(&self, chunk_id: &[u8; 32]) -> Result<Option<ChunkRecord>, TransferError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| TransferError::StoreLockPoisoned)?;
         if !store.has_chunk(chunk_id) {
-            return None;
+            return Ok(None);
         }
-        store.read_chunk(chunk_id).ok()
+        Ok(Some(store.read_chunk(chunk_id)?))
     }
 
     /// Persist a received chunk record durably (append + flush). Used
     /// by `fetch_chunk` for single-chunk fetches.
     pub(crate) fn write_local(&self, record: &ChunkRecord) -> Result<(), TransferError> {
-        let mut store = self.store.write().expect("store rwlock poisoned");
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| TransferError::StoreLockPoisoned)?;
         store.append_chunk(record)?;
         store.flush()?;
         Ok(())
@@ -578,12 +672,15 @@ impl TransferEngine {
     /// call but is **not** guaranteed to survive a crash. Caller MUST
     /// invoke `commit()` before treating the chunk as durable.
     pub(crate) fn write_local_no_flush(&self, record: &ChunkRecord) -> Result<(), TransferError> {
-        let mut store = self.store.write().expect("store rwlock poisoned");
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| TransferError::StoreLockPoisoned)?;
         store.append_chunk(record)?;
         Ok(())
     }
 
-    /// Flush both chunk_log and manifest_log to durable storage. After
+    /// Flush both `chunk_log` and `manifest_log` to durable storage. After
     /// this returns, all chunks previously appended via the
     /// `write_local_no_flush` path are durable.
     ///
@@ -591,7 +688,10 @@ impl TransferEngine {
     ///
     /// Returns [`TransferError::Store`] on I/O failure during fsync.
     pub fn commit(&self) -> Result<(), TransferError> {
-        let mut store = self.store.write().expect("store rwlock poisoned");
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| TransferError::StoreLockPoisoned)?;
         store.flush()?;
         Ok(())
     }

@@ -1,8 +1,8 @@
 """HTTP + WebSocket UI server.
 
 Exposes a local HTTP API and WebSocket event stream that the frontend
-(`web/index.html`) consumes. Bound to 127.0.0.1 only — never reachable
-from the network.
+(`web/index.html`) consumes. It binds to 127.0.0.1 by default and is reachable
+from the LAN only after an explicit ``--lan`` opt-in.
 
 Endpoints:
     GET  /                       index.html
@@ -16,9 +16,11 @@ Endpoints:
     GET  /api/files/<name>       download an inbox file
     WS   /api/events             live event stream
 
-Auth: bound to loopback only and gated by a process-local secret token
+Auth: gated by a process-local secret token
 (written next to control.port; the frontend reads it from a cookie set on
-first GET /). Token is rotated each daemon restart.
+first GET /). The listener is loopback-only by default; explicit ``--lan``
+exposure keeps owner credentials restricted to loopback HTTP or actual TLS.
+The token is rotated each daemon restart.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ import asyncio
 import base64
 from collections import deque
 import contextlib
+from functools import wraps
 import hashlib
 import heapq
 import hmac
@@ -35,13 +38,16 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import secrets
 import socket
+import stat
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 from one_link.platform_guard import install_windows_platform_fastpath
 
@@ -49,11 +55,47 @@ install_windows_platform_fastpath()
 
 from aiohttp import WSMsgType, web
 
+from one_link import control_ipc
 from one_link.build_identity import runtime_build_identity
+from one_link.device_relogin import (
+    DeviceReloginChallengeCapacityError,
+    DeviceReloginChallengeError,
+    DeviceReloginChallengeStore,
+    RELOGIN_CERT_MAX_BYTES,
+    RELOGIN_SIGNATURE_BYTES,
+    decode_b64u_strict,
+    encode_b64u,
+)
+from one_link.fault_observability import report_best_effort_failure
+from one_link.local_stun import LocalStunService
 from one_link.paths import data_dir, inbox_dir
 from one_link._coerce import to_int
+from one_link.process_security import (
+    hidden_creationflags,
+    launch_system_opener,
+    resolve_argv,
+    trusted_process_env,
+)
+from one_link.state import (
+    MAX_TEXT_BODY_BYTES,
+    MessageIdConflict,
+    MessageQuotaExceeded,
+)
 from one_link.transfer_doctor import enrich_transfer_event
-from one_link.transfer_safety import classify_file_risk
+from one_link.transfer_safety import (
+    InboundTransferReservationLedger,
+    TransferAdmissionPolicy,
+    classify_file_risk,
+    is_active_content_file,
+    same_storage_volume,
+)
+from one_link.ui_delivery_idempotency import (
+    UIDeliveryBinding,
+    UIDeliveryContract,
+    UIDeliveryContractConflict,
+    UIDeliveryIdempotencyStore,
+    UIDeliveryStoreUnavailable,
+)
 
 if TYPE_CHECKING:
     from one_link.daemon import Daemon
@@ -70,6 +112,463 @@ COURIER_LEDGER_MAX_EVENTS = 512
 COURIER_FILE_MAX_BYTES = 768 * 1024 * 1024
 HIDDEN_INBOX_FILES_SETTING = "hidden_inbox_files_json"
 WIPE_LOCAL_TRACES_CONFIRM = "wipe local traces"
+DISPLAY_NAME_MAX_LENGTH = 128
+
+
+class CourierLedgerUnavailable(RuntimeError):
+    """The durable courier replay authority cannot be trusted."""
+
+
+class _SettingsUpdateRejected(ValueError):
+    """A settings request failed validation before any state was changed."""
+
+    def __init__(self, message: str, *, status: int = 400) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class _SettingsResponseRollback(Exception):
+    """Carry an HTTP rejection out of the SQLite transaction context."""
+
+    def __init__(self, response: web.StreamResponse) -> None:
+        super().__init__(f"settings request rejected with HTTP {response.status}")
+        self.response = response
+
+
+def _atomic_settings_update(handler):
+    """Make a multi-control settings request one durable commit boundary."""
+
+    @wraps(handler)
+    async def wrapped(self, request: web.Request) -> web.StreamResponse:
+        state = getattr(self.daemon, "state", None)
+        transaction = getattr(state, "durable_write_transaction", None)
+        if state is None or not callable(transaction):
+            return await handler(self, request)
+        try:
+            with transaction():
+                response = await handler(self, request)
+                if response.status >= 400:
+                    raise _SettingsResponseRollback(response)
+            return response
+        except _SettingsResponseRollback as rollback:
+            return rollback.response
+
+    return wrapped
+
+
+def _constant_time_token_equal(supplied: Any, expected: str) -> bool:
+    """Compare attacker-controlled HTTP text without Unicode type errors."""
+
+    if not isinstance(supplied, str) or len(supplied) != len(expected):
+        return False
+    try:
+        supplied_bytes = supplied.encode("ascii")
+        expected_bytes = expected.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return hmac.compare_digest(supplied_bytes, expected_bytes)
+
+
+_WINDOWS_RESERVED_LEAF_STEMS = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "CLOCK$",
+    "CONIN$",
+    "CONOUT$",
+    *(f"COM{i}" for i in range(10)),
+    *(f"LPT{i}" for i in range(10)),
+    *(f"COM{i}" for i in "¹²³"),
+    *(f"LPT{i}" for i in "¹²³"),
+}
+
+
+def _safe_untrusted_folder_leaf(value: Any) -> str:
+    """Validate a peer-supplied folder name as one portable path leaf.
+
+    Folder offers cross operating-system boundaries, so this deliberately
+    applies the strict Windows filename rules on every platform.  That keeps a
+    name accepted on Linux from becoming a separator, device path, alternate
+    data stream, or ambiguous trailing-dot alias when the same offer reaches a
+    Windows device.
+    """
+
+    if not isinstance(value, str):
+        raise ValueError("folder name must be text")
+    name = value
+    if not name or name != name.strip() or len(name) > 255:
+        raise ValueError("folder name is not a safe path leaf")
+    if name in {".", ".."} or name.endswith((".", " ")):
+        raise ValueError("folder name is not a safe path leaf")
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
+        raise ValueError("folder name contains a control character")
+    if any(c in '<>:"/\\|?*' for c in name):
+        raise ValueError("folder name contains a path or device character")
+    stem = name.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED_LEAF_STEMS:
+        raise ValueError("folder name is reserved by the operating system")
+    # Defense in depth for any platform-specific syntax not covered above.
+    if Path(name).name != name or Path(name).is_absolute():
+        raise ValueError("folder name is not a safe path leaf")
+    return name
+
+
+def _contained_leaf_path(root: Path, leaf: str) -> Path:
+    """Resolve ``root / leaf`` and prove it remains below ``root``.
+
+    Resolving the prospective child is important: an attacker-controlled name
+    may collide with a pre-existing symlink/junction in the writable fallback
+    root.  A lexical ``root / leaf`` check alone would then write elsewhere.
+    """
+
+    safe_leaf = _safe_untrusted_folder_leaf(leaf)
+    resolved_root = Path(root).expanduser().resolve(strict=True)
+    if not resolved_root.is_dir():
+        raise ValueError("folder fallback root is not a directory")
+    candidate = (resolved_root / safe_leaf).resolve(strict=False)
+    try:
+        candidate.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError("folder fallback path escapes its root") from exc
+    if candidate == resolved_root:
+        raise ValueError("folder fallback path must be below its root")
+    return candidate
+
+
+def _path_is_link_or_reparse(path: Path, stat_result: Any | None = None) -> bool:
+    """Detect Unix symlinks and Windows junction/reparse-point entries."""
+
+    import stat as stat_mod
+
+    info = stat_result if stat_result is not None else os.lstat(path)
+    if stat_mod.S_ISLNK(info.st_mode):
+        return True
+    reparse_flag = getattr(stat_mod, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if int(getattr(info, "st_file_attributes", 0)) & int(reparse_flag):
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction):
+        try:
+            return bool(is_junction())
+        except OSError:
+            return True
+    return False
+
+
+def _sync_private_directory(directory: Path) -> None:
+    """Durably publish a private directory entry on supporting platforms."""
+
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0))
+    for candidate in (directory, directory.parent):
+        fd = os.open(str(candidate), flags)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+_UI_TRANSFER_NAME_MAX_BYTES = 240
+_UI_FILENAME_BIDI_CONTROLS = frozenset(
+    "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+)
+
+
+def _normalize_ui_transfer_name(daemon: Any, value: Any) -> str:
+    """Return one portable, bounded display name for staging and wire intent.
+
+    The production daemon owns the canonical filename policy, but focused
+    embedders and old test doubles may not expose it.  Reapplying the critical
+    portable invariants here keeps the HTTP and phone ingress boundaries safe
+    on every platform: both slash spellings, NTFS ADS, device basenames,
+    controls, trailing-dot aliases, and filesystem component limits.
+    """
+
+    if not isinstance(value, str):
+        raise ValueError("file name must be text")
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeError as exc:
+        raise ValueError("file name contains an invalid Unicode scalar") from exc
+    raw = (
+        unicodedata.normalize(
+            "NFC",
+            str(value or "upload.bin"),
+        )
+        .replace("\\", "/")
+        .rsplit("/", 1)[-1]
+    )
+    normalizer = getattr(daemon, "_safe_transfer_name", None)
+    if callable(normalizer):
+        raw = str(normalizer(raw))
+    clean = unicodedata.normalize("NFC", raw)
+    clean = clean.replace("\\", "/").rsplit("/", 1)[-1]
+    clean = "".join(
+        "_" if char in '<>:"/\\|?*' else char
+        for char in clean
+        if (ord(char) > 0x1F and ord(char) != 0x7F and char not in _UI_FILENAME_BIDI_CONTROLS)
+    ).rstrip(". ")
+    if not clean or clean in {".", ".."}:
+        clean = "upload.bin"
+    # Windows reserves the device stem before the *first* dot, including
+    # uncommon aliases such as COM0, CLOCK$, and the superscript-digit COM/LPT
+    # names.  ``Path(clean).stem`` only removes the final suffix and therefore
+    # misses values such as ``CON.backup.txt``.
+    if clean.split(".", 1)[0].rstrip(" ").upper() in _WINDOWS_RESERVED_LEAF_STEMS:
+        clean = "_" + clean
+    encoded = clean.encode("utf-8")
+    if len(encoded) <= _UI_TRANSFER_NAME_MAX_BYTES:
+        return clean
+    suffix = Path(clean).suffix.encode("utf-8")
+    if 0 < len(suffix) < _UI_TRANSFER_NAME_MAX_BYTES // 2:
+        prefix_budget = _UI_TRANSFER_NAME_MAX_BYTES - len(suffix)
+        clipped = encoded[:prefix_budget].decode("utf-8", errors="ignore").rstrip() + suffix.decode(
+            "utf-8", errors="ignore"
+        )
+    else:
+        clipped = (
+            encoded[:_UI_TRANSFER_NAME_MAX_BYTES]
+            .decode(
+                "utf-8",
+                errors="ignore",
+            )
+            .rstrip(". ")
+        )
+    return clipped or "upload.bin"
+
+
+def _open_private_ui_upload(
+    directory: Path,
+    path: Path,
+    *,
+    buffering: int = 0,
+) -> Any:
+    """Create one non-following, user-private browser staging inode."""
+
+    directory = Path(directory)
+    path = Path(path)
+    if isinstance(buffering, bool) or not isinstance(buffering, int) or buffering < 0:
+        raise ValueError("UI upload buffering must be a non-negative integer")
+    if path.parent != directory:
+        raise OSError("UI upload path escaped its staging directory")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory_stat = os.lstat(directory)
+    if _path_is_link_or_reparse(directory, directory_stat) or not stat.S_ISDIR(
+        directory_stat.st_mode
+    ):
+        raise OSError("UI upload staging directory is not a private directory")
+    if os.name != "nt":
+        os.chmod(directory, 0o700)
+    else:
+        from one_link.identity import _restrict_windows_acl
+
+        _restrict_windows_acl(directory)
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    flags |= int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_CLOEXEC", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError("UI upload staging inode is not a regular file")
+        if os.name != "nt":
+            fchmod = getattr(os, "fchmod", None)
+            if not callable(fchmod):
+                raise OSError("platform cannot restrict UI upload permissions")
+            fchmod(fd, 0o600)
+        else:
+            from one_link.identity import _restrict_windows_acl
+
+            _restrict_windows_acl(path)
+        return os.fdopen(fd, "w+b", buffering=buffering)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+        raise
+
+
+def _durably_flush_ui_upload(handle: Any, path: Path) -> None:
+    handle.flush()
+    os.fsync(handle.fileno())
+    _sync_private_directory(Path(path).parent)
+
+
+def _close_and_unlink_ui_upload(handle: Any, path: Path | None) -> None:
+    """Dispose an uncommitted upload without blocking the event loop."""
+
+    try:
+        if handle is not None:
+            handle.close()
+    finally:
+        if path is not None:
+            Path(path).unlink(missing_ok=True)
+
+
+async def _blocking_file_io(function: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run one serialized file operation off-loop, even across cancellation."""
+
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancelled:
+        # Never close/reuse a handle while its worker thread may still touch it.
+        # A task can be cancelled more than once (for example, a disconnected
+        # HTTP client followed by server shutdown).  Keep shielding until the
+        # worker really exits; a second cancellation must not punch through
+        # this ownership barrier and race staging cleanup against the thread.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            task.result()
+        raise cancelled
+
+
+async def _read_bounded_multipart_text(
+    part: Any,
+    *,
+    field: str,
+    max_bytes: int,
+) -> str:
+    """Stream a small UTF-8 form field under an exact allocation ceiling.
+
+    ``BodyPartReader.text()`` buffers the complete part.  This endpoint accepts
+    GiB-scale file bodies, so calling it for attacker-controlled metadata would
+    let an authenticated local/LAN caller disguise a huge allocation as a
+    ``peer`` or ``rel_path`` field.  Production readers are streamed to a hard
+    limit.  Duck-typed test readers retain their historical ``text()`` method,
+    with the same limit enforced immediately after encoding.
+    """
+
+    if max_bytes <= 0:
+        raise ValueError(f"multipart {field} limit is invalid")
+
+    from aiohttp.multipart import BodyPartReader
+
+    if not isinstance(part, BodyPartReader):
+        text_reader = getattr(part, "text", None)
+        if not callable(text_reader):
+            raise ValueError(f"multipart {field} part is unreadable")
+        value = await asyncio.wait_for(
+            text_reader(),
+            timeout=UI_UPLOAD_IDLE_TIMEOUT_SECONDS,
+        )
+        if not isinstance(value, str):
+            raise ValueError(f"multipart {field} must be text")
+        try:
+            encoded = value.encode("utf-8", "strict")
+        except UnicodeError as exc:
+            raise ValueError(f"multipart {field} is not valid UTF-8") from exc
+        if len(encoded) > max_bytes:
+            raise ValueError(f"multipart {field} exceeds its metadata limit")
+        return value
+
+    headers = part.headers
+    content_encoding = str(headers.get("Content-Encoding", "")).strip().lower()
+    if content_encoding not in ("", "identity"):
+        # Refuse compressed metadata: a bounded compressed value can still
+        # expand catastrophically during decoding.
+        raise ValueError(f"multipart {field} must not be content-encoded")
+    transfer_encoding = str(headers.get("Content-Transfer-Encoding", "")).strip().lower()
+    if transfer_encoding not in ("", "binary", "7bit", "8bit"):
+        raise ValueError(f"multipart {field} uses an unsupported transfer encoding")
+
+    chunks = bytearray()
+    while True:
+        chunk = await asyncio.wait_for(
+            # aiohttp requires the requested chunk size to be at least the
+            # multipart boundary length plus two.  Keep a fixed small read
+            # buffer so legitimate tiny fields (for example the one-byte
+            # intent marker) still work with ordinary browser boundaries;
+            # the accumulated field remains capped by ``max_bytes`` below.
+            part.read_chunk(size=8192),
+            timeout=UI_UPLOAD_IDLE_TIMEOUT_SECONDS,
+        )
+        if not chunk:
+            break
+        if len(chunks) + len(chunk) > max_bytes:
+            raise ValueError(f"multipart {field} exceeds its metadata limit")
+        chunks.extend(chunk)
+    try:
+        return bytes(chunks).decode("utf-8", "strict")
+    except UnicodeError as exc:
+        raise ValueError(f"multipart {field} is not valid UTF-8") from exc
+
+
+def _safe_content_disposition(name: Any, *, disposition: str = "attachment") -> str:
+    """Build an injection-safe RFC 6266/RFC 5987 disposition value."""
+
+    from urllib.parse import quote
+
+    raw = str(name or "download").replace("\\", "/").rsplit("/", 1)[-1]
+    raw = raw[:240] or "download"
+    ascii_name = (
+        "".join(c if 0x20 <= ord(c) < 0x7F and c not in '<>:"/\\|?*;' else "_" for c in raw)
+        or "download"
+    )
+    return f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(raw, safe='')}"
+
+
+def _untrusted_file_headers(
+    *,
+    name: str,
+    mime_type: str | None,
+    force_download: bool = False,
+    download_name: str | None = None,
+) -> dict[str, str]:
+    """Return headers that cannot turn transferred bytes into same-origin UI.
+
+    Ordinary media stays inline-previewable.  Executable/scriptable files and
+    active browser documents are downgraded to an attachment with an
+    octet-stream MIME, ``nosniff``, and a CSP sandbox.  The latter is a second
+    boundary for user agents that mishandle ``Content-Disposition``.
+    """
+
+    mime = str(mime_type or "application/octet-stream")
+    risk = classify_file_risk(name)
+    active = is_active_content_file(name, mime)
+    blocked_inline = active or risk.get("open_policy") in {
+        "download_only",
+        "reveal_only",
+    }
+    must_download = bool(force_download or blocked_inline)
+    headers = {
+        "Content-Type": "application/octet-stream" if blocked_inline else mime,
+        "X-Content-Type-Options": "nosniff",
+        "Cross-Origin-Resource-Policy": "same-origin",
+    }
+    if blocked_inline:
+        headers.update(
+            {
+                "X-Frame-Options": "DENY",
+                "Content-Security-Policy": (
+                    "sandbox; default-src 'none'; base-uri 'none'; "
+                    "form-action 'none'; frame-ancestors 'none'"
+                ),
+                "Cache-Control": "private, no-store",
+            }
+        )
+    else:
+        headers.update(
+            {
+                "X-Frame-Options": "SAMEORIGIN",
+                "Content-Security-Policy": "frame-ancestors 'self'",
+            }
+        )
+    if must_download:
+        headers["Content-Disposition"] = _safe_content_disposition(
+            download_name or name,
+        )
+    return headers
 
 
 def _route_hint_for_host(host: str) -> tuple[str, str]:
@@ -98,144 +597,216 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 
 def _enumerate_sovereign_primitives() -> list[dict]:
-    """Return the catalog of sovereignty / privacy primitives this
-    binary ships. Surfaced via /api/audit so an inspecting user can
-    see the full surface without grepping the source.
+    """Return the catalog of sovereignty / privacy modules importable by this
+    build. Surfaced via /api/audit so an inspecting user can distinguish a
+    tested primitive from a daemon-integrated path.
 
     Each entry is { module, name, status, summary, audit_ref }.
-    ``status`` is "primitive" (cryptographic + tested but not yet
-    wired into a live data path) or "live" (active in the daemon's
-    request flow). When a primitive lights up live, bump its status
-    here so the audit endpoint reflects reality.
+    ``status`` is "primitive" (a locally tested component or scaffold that is
+    not wired into a live data path) or "live" (active in the daemon's request
+    flow). A primitive label is not a cryptographic-strength, integration, or
+    deployment claim. When a primitive lights up live, bump its status here so
+    the audit endpoint reflects reality.
 
     Probe each module via importlib so a missing primitive (e.g.
     optional install) cleanly degrades to "unavailable" instead of
     raising on /api/audit."""
     import importlib
 
+    try:
+        from one_link.capabilities import (
+            PQ_HYBRID_HANDSHAKE_V1,
+            advertised_capabilities,
+        )
+
+        pq_channel_live = PQ_HYBRID_HANDSHAKE_V1 in set(advertised_capabilities())
+    except Exception:
+        # The audit surface must remain available even when an optional native
+        # module is broken.  A probe failure can only remove a live claim.
+        pq_channel_live = False
+
     catalog = [
         ("one_link.threshold", "Shamir SSS",
-         "primitive", "Threshold secret sharing over GF(256) for "
-                      "split-key recovery", "Bundle 22"),
+         "primitive",
+            "Threshold secret sharing over GF(256) for split-key recovery", "Bundle 22",
+        ),
         ("one_link.master_seed", "Master seed + BIP-39 24-word recovery",
          "live", "Single recoverable secret; HKDF-domain-separated "
                  "derivation of identity / DRK / cluster / backup keys",
-         "Bundle 23"),
+         "Bundle 23",
+        ),
         ("one_link.mnemonic", "BIP-39 mnemonic encoding",
-         "live", "24-word phrase encodes 32-byte seed", "Bundle 23"),
+         "live", "24-word phrase encodes 32-byte seed", "Bundle 23",
+        ),
         ("one_link.backup_bundle", ".olbak encrypted backup",
-         "live", "AES-GCM-256 sealed daemon-state archive; key "
-                 "derived from master seed via HKDF",
-         "Bundle 24 (audit H23)"),
+         "live",
+            "AES-GCM-256 sealed daemon-state archive; key derived from master seed via HKDF",
+         "Bundle 24 (audit H23)",
+        ),
         ("one_link.path_pii", "Deterministic AES-SIV path encryption",
          "live", "Same path → same ciphertext (RFC 5297) so SQLite "
                  "indexes still work; opaque without seed",
-         "Bundle 33 (audit M30)"),
+         "Bundle 33 (audit M30)",
+        ),
         ("one_link.social_recovery", "Social recovery (3-of-5 trusted contacts)",
-         "primitive", "Shamir shares wrapped to contact Ed25519 "
-                      "identities via Ed25519↔X25519 birational map",
-         "Bundle 35"),
+         "primitive",
+            "Shamir shares wrapped to contact Ed25519 identities via Ed25519↔X25519 birational map",
+         "Bundle 35",
+        ),
         ("one_link.dht", "Kademlia DHT primitive",
-         "primitive", "256-bit NodeID, XOR distance, k-buckets, "
-                      "iterative O(log N) lookup",
-         "Bundle 36"),
-        ("one_link.pq_hybrid", "Post-quantum hybrid KEM",
-         "primitive", "X25519+NullKEM today; ML-KEM-768 slot "
-                      "pre-allocated in wire format. HKDF-combine "
-                      "binds KEM names + transcript",
-         "Bundle 37"),
+         "primitive",
+            "256-bit NodeID, XOR distance, k-buckets, iterative O(log N) lookup",
+         "Bundle 36",
+        ),
+        ("one_link.pq_hybrid",
+            "Hybrid X25519 + ML-KEM-768 channel",
+            "live" if pq_channel_live else "primitive",
+            (
+                "Live signed suite offer/selection, independent X25519 and "
+                "FIPS-203 ML-KEM-768 secrets, transcript binding, mutual key "
+                "confirmation, and default downgrade refusal"
+                if pq_channel_live
+                else "The live protocol is implemented but this process failed the "
+                "native ML-KEM ABI self-test, so it advertises no PQ channel"
+            ),
+         "Bundle 37",
+        ),
         ("one_link.mls_treekem", "MLS TreeKEM (RFC 9420 §7)",
-         "primitive", "Left-balanced binary tree, O(log N) group "
-                      "ratchet, HKDF-derived path secrets",
-         "Bundle 38"),
+         "primitive",
+            "Left-balanced binary tree, O(log N) group ratchet, HKDF-derived path secrets",
+         "Bundle 38",
+        ),
         ("one_link.sealed_sender", "Sealed Sender",
-         "primitive", "Signal-style sender-identity hiding via "
-                      "ECIES envelope + Ed25519 sig inside",
-         "Bundle 39"),
-        ("one_link.onion", "Onion routing",
-         "primitive", "Layered ECIES so no single relay sees both "
-                      "endpoints; Sphinx-inspired",
-         "Bundle 40"),
+            "live",
+            "The v2 native relay path uses the recipient-sealed "
+            "envelope for both identity-bearing channel first flights; "
+            "this hides identity keys on that relay wire, not endpoint "
+            "IP/timing/size metadata or the social graph from correlation",
+         "Bundle 39",
+        ),
+        ("one_link.onion",
+            "Onion-routing primitive",
+         "primitive",
+            "Local Sphinx-inspired layered-ECIES construction; "
+            "cover-frame experiments exercise the primitive, but "
+            "no live message/file route uses it and it is not an "
+            "anonymity guarantee",
+         "Bundle 40",
+        ),
         ("one_link.traffic_shaper", "Traffic shaping",
-         "primitive", "Cover frames + fixed size to defeat timing/"
-                      "size correlation analysis",
-         "Bundle 41"),
-        ("one_link.deletion_chain", "Provably-deletable messages",
-         "primitive", "Forward-secret chain + signed deletion proofs",
-         "Bundle 42"),
+         "primitive",
+            "A runtime-gated Poisson scheduler can emit bounded "
+            "cover frames to capable paired daemon/browser peers. "
+            "Real traffic is not shape-matched to those frames, "
+            "native-relay coverage is incomplete, and this is not "
+            "proven against timing or size correlation",
+         "Bundle 41",
+        ),
+        ("one_link.deletion_chain",
+            "Deletion-chain receipts",
+         "primitive",
+            "Forward-secret chain + signed deletion receipts; this "
+            "does not prove that every remote copy was erased",
+         "Bundle 42",
+        ),
         ("one_link.rdz_blind", "Rendezvous blinding",
          "live", "HKDF-rotated lookup tokens per epoch — "
                  "rendezvous_server.py /api/v2/lookup_token serves "
                  "blinded queries; raw pubkey never appears on the "
                  "lookup wire",
-         "Bundle 43+51"),
+         "Bundle 43+51",
+        ),
         ("one_link.caps_grants", "Signed capability grants",
-         "live", "Fine-grained authority with auto-expiry — "
-                 "offline-resilient revocation. Wired into "
-                 "Daemon._capability_allowed via cap_store.CapStore",
-         "Bundle 44+56"),
+         "live",
+            "Fine-grained authority with auto-expiry and durable local "
+            "revocation state. Wired into "
+            "Daemon._capability_allowed via cap_store.CapStore",
+         "Bundle 44+56",
+        ),
         ("one_link.cap_store", "Capability-grant store (active grants)",
          "live", "Per-daemon CapStore: verify-on-accept + replay "
                  "defense + auto-expiry on read + revoke-by-(granter|"
                  "subject)",
-         "Bundle 56"),
+         "Bundle 56",
+        ),
         ("one_link.identity_dag", "Identity DAG (multi-device)",
-         "primitive", "Root keypair signs device certs; per-device "
-                      "Ed25519 priv never leaves the device",
-         "Bundle 45"),
+         "primitive",
+            "Root keypair signs device certs; per-device Ed25519 priv never leaves the device",
+         "Bundle 45",
+        ),
         ("one_link.personal_device_mesh", "Personal Device Mesh core",
          "primitive", "Revocation-aware self-device presence planner "
                       "and signed remote-instruct commands for "
                       "phone-to-laptop style self traffic",
-         "Phase F5 foundation"),
+         "Phase F5 foundation",
+        ),
         ("one_link.self_mesh_enrollment", "Personal Device Mesh enrollment",
-         "live", "Root create/import, local device cert minting, device "
-                 "enroll/revoke ceremony helpers",
-         "Phase F5"),
+         "live",
+            "Root create/import, local device cert minting, device enroll/revoke ceremony helpers",
+         "Phase F5",
+        ),
         ("one_link.vrf", "Verifiable Random Function (VRF)",
-         "primitive", "Unbiased pseudorandom output with publicly-"
-                      "verifiable proof; defeats eclipse attacks "
-                      "in DHT routing. Secret-scalar mults via "
-                      "_point_mul_ct (best-effort constant-time, "
+         "primitive",
+            "Pseudorandom output with a public verification proof; "
+            "intended to make DHT node preselection harder, not a "
+            "whole-network eclipse-resistance guarantee. Secret-scalar mults via "
+            "_point_mul_ct (best-effort constant-time, "
                       "Bundle 57)",
-         "Bundle 47+57"),
-        ("one_link.ring_sig", "Ring signatures (anonymous group creds)",
-         "primitive", "AOS construction on Ed25519. Signer's secret "
-                      "scalar + nonce mults via _point_mul_ct so "
-                      "per-position timing doesn't leak signer index",
-         "Bundle 48+57"),
+         "Bundle 47+57",
+        ),
+        ("one_link.ring_sig",
+            "Ring-signature group credential primitive",
+         "primitive",
+            "AOS construction on Ed25519 using the module's "
+            "best-effort constant-time scalar path; primitive tests "
+            "are not a system-level anonymity or side-channel proof",
+         "Bundle 48+57",
+        ),
         ("one_link.psi", "Private Set Intersection",
          "primitive", "DH-OPRF based. All five secret-scalar mults "
                       "(server K, client blind, unblind) via "
                       "_point_mul_ct (Bundle 57)",
-         "Bundle 49+57"),
+         "Bundle 49+57",
+        ),
         ("one_link.beacon", "Coherence Beacon (cross-LAN discovery)",
          "primitive", "IPv6 link-local multicast for peer discovery "
                       "across VLAN trunk ports where mDNS sandboxes",
-         "Bundle 50"),
+         "Bundle 50",
+        ),
         ("one_link.beacon_listener", "Beacon UDP listener + emitter",
-         "primitive", "asyncio DatagramProtocol on the multicast "
-                      "group, periodic 1-Hz emit; daemon plumbs in",
-         "Bundle 54"),
-        ("one_link.dht_vrf_routing", "VRF-routed DHT (eclipse-resistant)",
+         "primitive",
+            "asyncio DatagramProtocol on the multicast group, periodic 1-Hz emit; daemon plumbs in",
+         "Bundle 54",
+        ),
+        ("one_link.dht_vrf_routing",
+            "VRF-ranked DHT primitive",
          "primitive", "Lookup ranks candidates by VRF score instead "
-                      "of raw XOR distance; attacker can't pre-bias "
-                      "node IDs against a specific target",
-         "Bundle 53"),
-        ("one_link.sealed_relay", "Sealed sender + capability grant (relay path)",
-         "primitive", "Combines Bundle 39 sealed-sender with Bundle 44 "
-                      "capability grants. Relay sees opaque envelope; "
-                      "recipient gets sender identity + auto-verified "
-                      "auto-expiring grant atomically",
-         "Bundle 52"),
+            "of raw XOR distance; no daemon integration or blanket "
+            "eclipse-resistance claim",
+         "Bundle 53",
+        ),
+        ("one_link.sealed_relay",
+            "Pairwise-blinded native relay",
+            "live",
+            "The default v2 daemon relay derives rotating pairwise route "
+            "tags and recipient-seals both channel identity first flights. "
+            "The explicit legacy migration route exposes identity keys; "
+            "every single relay still observes sockets, timing, sizes, "
+            "counts, and route-tag linkage",
+         "Bundle 52",
+        ),
         ("one_link.double_ratchet", "Double Ratchet",
-         "primitive", "Forward secrecy + post-compromise security "
-                      "(daemon path; channel.py wires it on CAPS)",
-         "Bundle 11+"),
+            "live",
+            "Mutually capable current daemons activate it after CAPS; "
+            "legacy peers remain on per-session AEAD and do not inherit "
+            "the forward-secrecy or post-compromise-security claim",
+         "Bundle 11+",
+        ),
         ("one_link.lockbox", "At-rest secret wrap",
          "live", "AES-GCM wrap of chain_keys + UI token via DPAPI "
                  "(Windows) or scrypt-from-passphrase (POSIX)",
-         "Bundle 11"),
+         "Bundle 11",
+        ),
     ]
 
     out = []
@@ -253,6 +824,557 @@ def _enumerate_sovereign_primitives() -> list[dict]:
             "audit_ref": audit_ref,
         })
     return out
+
+
+def _feature_truth_matrix(daemon_instance: Any | None = None) -> list[dict[str, Any]]:
+    """Return the source + runtime-backed feature truth shown in About.
+
+    The four axes deliberately answer different questions. ``proven`` means a
+    concrete implementation and automated gate exist in this checkout;
+    ``partial`` means useful substrate exists but the named boundary is not
+    closed; ``absent`` means the product must not claim that axis.  Physical
+    multi-platform qualification is never inferred from unit, simulated, or
+    single-browser evidence.
+    """
+
+    from one_link.capabilities import (
+        BLOOM_INIT_EXACT_V2,
+        NATIVE_TRANSFER_INDEXED_V1,
+        PQ_HYBRID_HANDSHAKE_V1,
+        QUIC_TRANSPORT_V1,
+        advertised_capabilities,
+    )
+
+    runtime_caps = set(advertised_capabilities())
+    try:
+        from one_link import hwkey_native
+
+        hardware_key_runtime = bool(hwkey_native.HAS_NATIVE)
+    except Exception:
+        hardware_key_runtime = False
+
+    filesystem_runtime: dict[str, Any] = {
+        "status": "not_observed",
+        "platform": "unknown",
+        "ready": False,
+        "backend": "none",
+        "reason": "runtime_not_observed",
+    }
+    try:
+        if daemon_instance is not None and callable(
+            getattr(daemon_instance, "fuse_capabilities", None)
+        ):
+            filesystem_observed = daemon_instance.fuse_capabilities()
+        else:
+            from one_link import fuse_native
+
+            filesystem_observed = fuse_native.capabilities()
+    except Exception:
+        filesystem_runtime["status"] = "probe_failed_closed"
+    else:
+        if not isinstance(filesystem_observed, dict):
+            filesystem_runtime["status"] = "invalid_report_failed_closed"
+        else:
+            ready = filesystem_observed.get("ready")
+            backend = filesystem_observed.get("backend")
+            reason = filesystem_observed.get("reason")
+            platform_name = filesystem_observed.get("platform")
+            if (
+                not isinstance(ready, bool)
+                or not isinstance(backend, str)
+                or not isinstance(reason, str)
+                or not isinstance(platform_name, str)
+            ):
+                filesystem_runtime["status"] = "invalid_report_failed_closed"
+            else:
+                filesystem_runtime.update(
+                    {
+                        "status": "linux_fuse_ready" if ready else "unavailable",
+                        "platform": platform_name,
+                        "ready": ready,
+                        "backend": backend,
+                        "reason": reason,
+                    }
+                )
+                if ready and (backend != "fuse" or reason != "ready"):
+                    filesystem_runtime.update(
+                        {
+                            "status": "inconsistent_report_failed_closed",
+                            "ready": False,
+                        }
+                    )
+
+    # Relay privacy is an activation property, not something module import can
+    # prove.  The no-daemon/error state deliberately remains partial.  Only an
+    # internally consistent live report for the pairwise-blinded route earns a
+    # green daemon-wiring axis; an active legacy listener always wins and
+    # prevents that promotion.
+    relay_runtime: dict[str, Any] = {
+        "status": "not_observed",
+        "pairwise_blinded_active": False,
+        "legacy_identity_route_active": False,
+        "destination_identity_exposure": "runtime_not_observed",
+        "identity_bearing_channel_first_flight": "runtime_not_observed",
+    }
+    if daemon_instance is not None:
+        probe = getattr(daemon_instance, "relay_routing_runtime_truth", None)
+        if callable(probe):
+            try:
+                observed = probe()
+            except Exception:
+                relay_runtime["status"] = "probe_failed_closed"
+            else:
+                if isinstance(observed, dict):
+                    blinded = observed.get("pairwise_blinded_active") is True
+                    legacy = observed.get("legacy_identity_route_active") is True
+                    exposure = str(observed.get("destination_identity_exposure", ""))
+                    first_flight = str(observed.get("identity_bearing_channel_first_flight", ""))
+                    relay_runtime.update(
+                        {
+                            "pairwise_blinded_active": blinded,
+                            "legacy_identity_route_active": legacy,
+                            "destination_identity_exposure": exposure or "unknown",
+                            "identity_bearing_channel_first_flight": (first_flight or "unknown"),
+                            "legacy_migration_override_enabled": (
+                                observed.get("legacy_migration_override_enabled") is True
+                            ),
+                        }
+                    )
+                    if legacy:
+                        relay_runtime["status"] = "legacy_identity_exposure_active"
+                    elif (
+                        blinded
+                        and exposure == "no_identity_public_key_on_relay_wire"
+                        and first_flight == "sealed_recipient_only_v1"
+                    ):
+                        relay_runtime["status"] = "pairwise_blinded_v2_active"
+                    elif blinded:
+                        relay_runtime["status"] = "inconsistent_report_failed_closed"
+                    elif (
+                        exposure == "relay_not_registered"
+                        and first_flight == "relay_not_registered"
+                    ):
+                        relay_runtime["status"] = "relay_not_registered"
+                    else:
+                        relay_runtime["status"] = "unrecognized_report_failed_closed"
+                else:
+                    relay_runtime["status"] = "invalid_report_failed_closed"
+
+    relay_privacy_active = relay_runtime["status"] == "pairwise_blinded_v2_active"
+    relay_daemon_state = "proven" if relay_privacy_active else "partial"
+    if relay_privacy_active:
+        relay_evidence = (
+            "This process has an active v2 relay listener using rotating "
+            "pairwise route tags and recipient-sealed HELLO/REPLY first flights; "
+            "the live runtime report says neither identity public key is on the "
+            "relay wire."
+        )
+    elif relay_runtime["status"] == "legacy_identity_exposure_active":
+        relay_evidence = (
+            "Relay wiring and v2 privacy tests exist, but this process currently "
+            "has the explicit legacy identity-bearing relay route active."
+        )
+    else:
+        relay_evidence = (
+            "The default v2 daemon relay has live two-daemon tests for rotating "
+            "pairwise tags and sealed channel first flights; this process has not "
+            "reported an active, internally consistent blinded listener."
+        )
+
+    cover_runtime: dict[str, Any] = {
+        "status": "not_observed",
+        "available": False,
+        "running": False,
+        "packets_sent": 0,
+        "packets_received": 0,
+    }
+    if daemon_instance is not None:
+        cover_probe = getattr(daemon_instance, "cover_traffic_stats", None)
+        if callable(cover_probe):
+            try:
+                cover_observed = cover_probe()
+            except Exception:
+                cover_runtime["status"] = "probe_failed_closed"
+            else:
+                if isinstance(cover_observed, dict):
+                    available_raw = cover_observed.get("available")
+                    running_raw = cover_observed.get("running")
+                    packets_sent_raw = cover_observed.get("packets_sent")
+                    packets_received_raw = cover_observed.get("packets_received")
+                    if not (
+                        isinstance(available_raw, bool)
+                        and isinstance(running_raw, bool)
+                        and isinstance(packets_sent_raw, int)
+                        and not isinstance(packets_sent_raw, bool)
+                        and isinstance(packets_received_raw, int)
+                        and not isinstance(packets_received_raw, bool)
+                    ):
+                        cover_runtime["status"] = "invalid_report_failed_closed"
+                    elif packets_sent_raw < 0 or packets_received_raw < 0:
+                        cover_runtime["status"] = "invalid_report_failed_closed"
+                    else:
+                        cover_runtime.update(
+                            {
+                                "available": available_raw,
+                                "running": running_raw,
+                                "packets_sent": packets_sent_raw,
+                                "packets_received": packets_received_raw,
+                            }
+                        )
+                        if packets_sent_raw > 0:
+                            cover_runtime["status"] = "wire_frames_emitted"
+                        elif packets_received_raw > 0:
+                            cover_runtime["status"] = "wire_frames_received_only"
+                        elif running_raw:
+                            cover_runtime["status"] = "scheduler_running_no_wire_frame_observed"
+                        elif available_raw:
+                            cover_runtime["status"] = "available_inactive"
+                        else:
+                            cover_runtime["status"] = "native_unavailable"
+                else:
+                    cover_runtime["status"] = "invalid_report_failed_closed"
+    cover_daemon_state = "proven" if cover_runtime["status"] == "wire_frames_emitted" else "partial"
+
+    def row(
+        feature_id: str,
+        name: str,
+        primitive: str,
+        daemon: str,
+        ui: str,
+        soak: str,
+        evidence: str,
+        limitation: str,
+        runtime: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        states = {"proven", "partial", "absent"}
+        axes = {
+            "primitive_proven": primitive,
+            "daemon_wired": daemon,
+            "ui_exposed": ui,
+            "soak_proven": soak,
+        }
+        if any(value not in states for value in axes.values()):
+            raise ValueError("invalid feature-truth state")
+        result = {
+            "id": feature_id,
+            "name": name,
+            **axes,
+            "qualified": all(value == "proven" for value in axes.values()),
+            "evidence": evidence,
+            "limitation": limitation,
+        }
+        if runtime is not None:
+            result["runtime"] = runtime
+        return result
+
+    return [
+        row(
+            "chat_1to1",
+            "1:1 chat",
+            "proven",
+            "proven",
+            "proven",
+            "partial",
+            "Encrypted daemon and browser E2E, durable outbox/receipt, replay and chaos tests.",
+            "No archived 24-hour cross-platform physical-device release run.",
+        ),
+        row(
+            "file_transfer",
+            "Resumable file transfer",
+            "proven",
+            "proven",
+            "proven",
+            "partial",
+            "BLAKE3 CDC, exact receiver wants, durable commit receipts, crash resume and fault tests.",
+            "Physical sleep/wake, disk-full and multi-OS long-run qualification remains external.",
+        ),
+        row(
+            "native_transfer",
+            "Native indexed transfer",
+            "proven" if NATIVE_TRANSFER_INDEXED_V1 in runtime_caps else "partial",
+            "proven" if NATIVE_TRANSFER_INDEXED_V1 in runtime_caps else "absent",
+            "partial",
+            "partial",
+            "Runtime CAPS is emitted only when the authenticated native ABI is available.",
+            "The UI does not promise native mode when the runtime falls back.",
+        ),
+        row(
+            "bloom_delta",
+            "Lossless Bloom delta transfer",
+            "proven" if BLOOM_INIT_EXACT_V2 in runtime_caps else "partial",
+            "proven" if BLOOM_INIT_EXACT_V2 in runtime_caps else "absent",
+            "partial",
+            "partial",
+            "Manifest-bound Bloom plus exact false-positive corrections reconstructs FILE_WANTS.",
+            "Honor mode is operator-gated; runtime diagnostics expose activation and savings.",
+        ),
+        row(
+            "voice_call",
+            "Voice call",
+            "proven",
+            "proven",
+            "proven",
+            "partial",
+            "Real Chromium WSS/WebRTC identity-possession and revoke E2E plus media soak harness.",
+            "Firefox has direct-transport, identity, and ICE-candidate coverage, "
+            "but WebKit and long physical two-device call qualification are not archived.",
+        ),
+        row(
+            "video_call",
+            "Video call",
+            "proven",
+            "proven",
+            "proven",
+            "partial",
+            "Signed browser signaling, live media path, consent and adversarial lifecycle tests.",
+            "Long physical camera/network degradation qualification remains outstanding.",
+        ),
+        row(
+            "browser_peer",
+            "Direct browser peer",
+            "proven",
+            "proven",
+            "proven",
+            "partial",
+            "Independent Chromium and Firefox profiles complete signed WebRTC "
+            "offer/answer, open direct DataChannels, exchange probes, and exercise "
+            "the durable browser outbox with public STUN disabled.",
+            "No archived WebKit/iOS, two-machine NAT/TURN, cellular-handoff, or "
+            "long physical-device qualification exists.",
+        ),
+        row(
+            "group_chat",
+            "Group chat",
+            "proven",
+            "proven",
+            "proven",
+            "partial",
+            "Atomic ratchet/history/action/fanout state, ordered delivery and replay tests.",
+            "No archived multi-day physical group soak.",
+        ),
+        row(
+            "group_call",
+            "Group call",
+            "partial",
+            "partial",
+            "absent",
+            "absent",
+            "Call-session research substrate exists.",
+            "No complete multiparty media plane or group-call UI is shipped.",
+        ),
+        row(
+            "pair_qr",
+            "Pair by QR",
+            "proven",
+            "proven",
+            "proven",
+            "partial",
+            "Single-use expiring invitations, signed identity possession, and "
+            "independently derived transcript-bound five-word confirmation across "
+            "daemon and direct-browser ceremonies.",
+            "Physical mobile/browser matrix remains a release gate.",
+        ),
+        row(
+            "recovery",
+            "Phrase, threshold and social recovery",
+            "proven",
+            "proven",
+            "proven",
+            "partial",
+            "Checked fallback/native threshold surfaces, singleton journal, stable-DEK rebind, "
+            "no-predelete restore and crash-boundary replay tests.",
+            "Native acceleration is optional; offline multi-device drills remain external.",
+        ),
+        row(
+            "identity_rotation",
+            "Transactional identity rotation",
+            "proven",
+            "proven",
+            "proven",
+            "partial",
+            "Seed, certificate, peer snapshot and State update use staged replayable transactions.",
+            "Cross-platform power-loss qualification is not archived as release evidence.",
+        ),
+        row(
+            "frame_provenance",
+            "Device-signed content provenance",
+            "proven",
+            "proven",
+            "proven",
+            "partial",
+            "FILE_OFFER BLAKE3 binding, Ed25519 signature, replay rejection and UI provenance state.",
+            "It proves which identity signed exact bytes; it does not prove a physical scene was truthful.",
+        ),
+        row(
+            "double_ratchet",
+            "Double Ratchet (mutually capable peers)",
+            "proven",
+            "proven",
+            "partial",
+            "partial",
+            "Current daemon peers have transcript-bound negotiation, forward-ratchet activation and replay/regression tests.",
+            "Legacy daemon peers remain on per-session AEAD; the UI does not attest each channel mode, "
+            "and the standalone browser dr.js primitive is self-test-only rather than imported by peer.html/index.html.",
+        ),
+        row(
+            "quic",
+            "Native QUIC file lanes",
+            "proven" if QUIC_TRANSPORT_V1 in runtime_caps else "partial",
+            "proven" if QUIC_TRANSPORT_V1 in runtime_caps else "absent",
+            "partial",
+            "partial",
+            "Runtime advertisement requires the current identity-bound native QUIC ABI.",
+            "This does not replace the daemon control/message channel or browser "
+            "WebRTC; cross-network migration and physical soak are not established.",
+        ),
+        row(
+            "self_mesh",
+            "Personal device mesh",
+            "proven",
+            "proven",
+            "proven",
+            "partial",
+            "Signed device certificates, scoped instructions, replay defense and daemon E2E tests.",
+            "Long-run cross-platform device handoff evidence remains outstanding.",
+        ),
+        row(
+            "at_rest",
+            "At-rest secret and message encryption",
+            "proven",
+            "proven",
+            "partial",
+            "partial",
+            "LockBox AES-GCM with DPAPI or memory-hard passphrase authority and encrypted State fields.",
+            "Availability depends on a usable platform/passphrase authority; startup reports fail-open test mode explicitly.",
+        ),
+        row(
+            "mobile_https",
+            "Constrained mobile HTTPS trust",
+            "proven",
+            "proven",
+            "proven",
+            "partial",
+            "Protected P-256 CA, critical endpoint NameConstraints and verified TLS 1.3 handshake tests.",
+            "Manual iOS/Android installation and address-change rotation require physical-device qualification.",
+        ),
+        row(
+            "sealed_sender",
+            "Pairwise-blinded relay first flights",
+            "proven",
+            relay_daemon_state,
+            "absent",
+            "partial",
+            relay_evidence,
+            "This is recipient/identity-key blinding on the native v2 relay path, "
+            "not sender anonymity or traffic-analysis resistance. A relay still "
+            "sees IPs, sockets, timing, sizes, counts, and rotating-tag linkage; "
+            "there is no independent multi-hop anonymity set.",
+            runtime=relay_runtime,
+        ),
+        row(
+            "cover_frames",
+            "Cover-frame emission (not traffic shaping)",
+            "proven",
+            cover_daemon_state,
+            "partial",
+            "absent",
+            "The daemon has a native Sphinx cover-frame scheduler, capable-peer "
+            "dispatch, receive/drop handling, rate controls, and runtime counters. "
+            f"This process reports {cover_runtime['status']}.",
+            "Cover frames are not proof of an anonymity system: ordinary traffic "
+            "is not globally padded/scheduled into an indistinguishable stream, "
+            "normal native-relay paths are not covered, and timing/size correlation "
+            "has not been defeated.",
+            runtime=cover_runtime,
+        ),
+        row(
+            "onion",
+            "Onion/Sphinx routing",
+            "proven",
+            "absent",
+            "absent",
+            "absent",
+            "A tested packet-construction primitive is present.",
+            "No daemon route uses it; One Link must not claim onion anonymity.",
+        ),
+        row(
+            "pq_kem",
+            "Hybrid post-quantum peer channel",
+            "proven" if PQ_HYBRID_HANDSHAKE_V1 in runtime_caps else "partial",
+            "proven" if PQ_HYBRID_HANDSHAKE_V1 in runtime_caps else "absent",
+            "partial",
+            "partial",
+            (
+                "The live v3 peer handshake signs suite offer/selection, combines "
+                "independent X25519 and FIPS-203 ML-KEM-768 secrets, binds the "
+                "transcript, mutually confirms the derived key, and refuses "
+                "legacy/classical downgrade by default. Runtime CAPS requires "
+                "the native ABI self-test."
+            ),
+            (
+                "The About dashboard reports build-wide availability, but each "
+                "chat does not yet display its negotiated suite; packaged "
+                "cross-platform native and long physical-network qualification "
+                "remain release gates."
+            ),
+        ),
+        row(
+            "mls",
+            "MLS groups",
+            "partial",
+            "absent",
+            "absent",
+            "absent",
+            "TreeKEM research substrate exists.",
+            "No interoperable daemon MLS group protocol is shipped.",
+        ),
+        row(
+            "hardware_keys",
+            "Hardware-backed keys",
+            "proven" if hardware_key_runtime else "partial",
+            "partial",
+            "absent",
+            "absent",
+            "The runtime reports whether the current native hardware-key ABI is available.",
+            "TPM/Secure Enclave use is not a universal identity-storage guarantee.",
+        ),
+        row(
+            "updates",
+            "Authenticated one-click transactional updates",
+            "proven",
+            "proven",
+            "proven",
+            "partial",
+            "Exact-release planning and an explicit owner-confirmed external A/B "
+            "helper handoff are live. Availability is reported dynamically and only "
+            "after the complete local frozen bundle, its SHA-256 tree, and the fixed "
+            "external helper validate; the helper independently authenticates the "
+            "release, activates it, health-checks it, and rolls back on failure.",
+            "Unattended/background automatic installation remains disabled. "
+            "Source, pip, development, incomplete, moved, or modified installs fail "
+            "closed; no verified public stable tagged release or complete physical "
+            "packaged-platform qualification is evidenced here.",
+        ),
+        row(
+            "filesystem_mount",
+            "Filesystem mount adapters",
+            "proven",
+            "proven" if filesystem_runtime["status"] == "linux_fuse_ready" else "partial",
+            "partial",
+            "partial",
+            "Linux release wheels expose a callback-backed fuser mount through "
+            "one_link_native.fuse; the daemon supplies a strictly validated "
+            "manifest and verified bounded CAS reader, owns the mount session, "
+            "and exposes runtime readiness diagnostics.",
+            "The current owner UI exposes readiness but no mount action. Strict "
+            "packaged /dev/fuse and 24-hour fsx qualification remain release "
+            "gates; Windows WinFsp/Dokan and macOS FSKit adapters are not "
+            "implemented, and read-write mounts are refused.",
+            runtime=filesystem_runtime,
+        ),
+    ]
+
+
 COOKIE_NAME = "ol_ui"
 # v0.21.x persistent UI session. The legacy ol_ui cookie carries the
 # CURRENT daemon's UI token, which rotates whenever the on-disk token
@@ -266,6 +1388,14 @@ COOKIE_NAME = "ol_ui"
 SESSION_COOKIE_NAME = "ol_session"
 SESSION_PRESENT_MARKER_COOKIE = "ol_session_present"
 SESSION_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30  # 30 days
+SESSION_ABSOLUTE_MAX_AGE_SECONDS = SESSION_COOKIE_MAX_AGE_SECONDS
+SESSION_TOUCH_INTERVAL_MS = 60 * 1000
+# Browser WebSocket APIs cannot set an Authorization header.  The owner event
+# stream therefore carries its bearer as a second WebSocket subprotocol item
+# while the server selects only this constant, non-secret protocol.  Keeping
+# the credential out of the URL avoids access-log, history, and referrer leaks.
+OWNER_WS_PROTOCOL = "one-link.owner.v1"
+OWNER_WS_BEARER_PROTOCOL_PREFIX = "one-link.bearer."
 # v0.21.x user-controllable toggles. Defaults match shipped behavior
 # (persistence ON for "just works" UX; labels ON for readable
 # Settings list). User can flip either via Privacy pane — turning
@@ -281,7 +1411,29 @@ MAX_JSON_REQUEST_BYTES = 256 * 1024
 MAX_REQUEST_TARGET_BYTES = 8 * 1024
 RATE_LIMIT_WINDOW_SECONDS = 60.0
 MAX_FAILED_AUTH_ATTEMPTS = 32
+MAX_DISCOVER_INVITES = 256
+MAX_PUBLIC_INVITE_PREVIEWS = 24
 MAX_SIGNALING_ATTEMPTS = 24
+MAX_PENDING_SIGNALING_GLOBAL = 32
+MAX_PENDING_SIGNALING_PER_CLIENT = 4
+SIGNALING_AUTH_TIMEOUT_SECONDS = 10.0
+SIGNALING_SESSION_TIMEOUT_SECONDS = 120.0
+JSON_REQUEST_BODY_TIMEOUT_SECONDS = 30.0
+# Browser MediaRecorder emits small opaque container fragments.  Keep each
+# fragment below the control-plane JSON ceiling so one authenticated browser
+# cannot turn the local UI listener into an unbounded binary upload surface.
+CAPSULE_CAPTURE_CHUNK_MAX_BYTES = 256 * 1024
+CAPSULE_CAPTURE_CHUNK_TIMEOUT_SECONDS = 10.0
+CAPSULE_CAPTURE_MAX_CHUNKS = 8192
+CAPSULE_CAPTURE_RECENT_SEQUENCE_WINDOW = 64
+CAPSULE_CAPTURE_STATE_TTL_MS = 15 * 60 * 1000
+RECOVERY_BUNDLE_MAX_BYTES = 256 * 1024 * 1024
+RECOVERY_BUNDLE_BASE64_MAX_BYTES = RECOVERY_BUNDLE_MAX_BYTES * 4 // 3 + 64
+
+
+class _RecoveryBundleTooLarge(ValueError):
+    """Internal sentinel mapped to HTTP 413 by recovery handlers."""
+
 
 # Stable UI port. When the daemon restarts, the browser tab at this URL
 # stays alive. We fall through to 7118..7132 if the port is taken (other
@@ -357,8 +1509,9 @@ _CONNECT_LANDING_HTML_IOS = """<!doctype html>
 
   <div class="step">
     <h2><span class="step-num">1</span><span>Tap to download</span></h2>
-    <p>This gives your iPhone permission to talk securely to this one
-    specific computer. Nothing else changes on your phone.</p>
+    <p>This installs a removable, endpoint-constrained certificate authority
+    for this computer's One Link names and current local addresses. It cannot
+    authenticate arbitrary public websites.</p>
     <a class="btn" href="{mobileconfig_url}">Get permission file</a>
     <p class="hint">Safari will pop up: <strong>"This website is trying to download a configuration profile."</strong> Tap <strong>Allow</strong>, then tap <strong>Close</strong>.</p>
     <details style="margin-top:10px;">
@@ -396,7 +1549,7 @@ _CONNECT_LANDING_HTML_IOS = """<!doctype html>
     </ol>
     <details style="margin-top:10px;">
       <summary class="hint" style="cursor:pointer;">Why this extra step?</summary>
-      <p class="hint" style="margin-top:8px;">iOS plays it safe by default - installing the profile gets you partway, but the trust switch is what tells iPhone it's actually OK to use it for secure connections. It's a one-time switch per computer; you won't see this screen again unless you pair another laptop.</p>
+      <p class="hint" style="margin-top:8px;">iOS plays it safe by default - installing the profile gets you partway, but the trust switch is what tells iPhone it's OK to use this constrained authority for secure One Link connections. If this computer's network address changes, One Link generates a new constrained profile and you repeat these steps.</p>
     </details>
   </div>
 
@@ -408,7 +1561,7 @@ _CONNECT_LANDING_HTML_IOS = """<!doctype html>
     <a class="btn btn-secondary" href="{pair_url}">Continue to pair</a>
     <details style="margin-top:10px;">
       <summary class="hint" style="cursor:pointer;">I still see "Not Private" or "Connection failed"</summary>
-      <p class="hint" style="margin-top:8px;">Go back to step 3 and double-check the switch is on. The most-missed step is the trust switch - the profile is installed but iOS isn't using it yet.</p>
+      <p class="hint" style="margin-top:8px;">Double-check the step 3 trust switch. If this computer changed network addresses, download and install the new profile from step 1 before continuing.</p>
     </details>
   </div>
 </body>
@@ -506,6 +1659,39 @@ PHONE_UPLOAD_CHUNK_SIZE = 16 * 1024
 PHONE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
 PHONE_UPLOAD_IDLE_TIMEOUT_MS = 60 * 1000
 PHONE_UPLOAD_MAX_PER_PEER = 4
+PHONE_UPLOAD_SWEEP_INTERVAL_SECONDS = 15.0
+PHONE_UPLOAD_ORPHAN_GRACE_MS = 5 * 60 * 1000
+PHONE_UPLOAD_RECEIPT_MAX_CHUNKS = 32
+PHONE_UPLOAD_RECEIPT_MAX_BYTES = 512 * 1024
+PHONE_DC_MAX_INFLIGHT_PER_PEER = 64
+PHONE_DC_MAX_INFLIGHT_GLOBAL = 256
+UI_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
+# Multipart framing must not make an exactly-at-limit file impossible to send.
+# Metadata is bounded independently, so this remains a small, explicit request
+# allowance instead of expanding aiohttp's parser budget without limit.
+UI_UPLOAD_MULTIPART_OVERHEAD_MAX_BYTES = 256 * 1024
+UI_UPLOAD_REQUEST_MAX_BYTES = UI_UPLOAD_MAX_BYTES + UI_UPLOAD_MULTIPART_OVERHEAD_MAX_BYTES
+UI_UPLOAD_MULTIPART_MAX_PARTS = 16
+UI_UPLOAD_METADATA_LIMITS = {
+    "peer": 512,
+    "rel_path": 8 * 1024,
+    "chat_inline": 16,
+    "client_delivery_id": 64,
+    "file_size": 32,
+    "intent_metadata_complete": 8,
+}
+try:
+    UI_UPLOAD_IDLE_TIMEOUT_SECONDS = min(
+        300.0,
+        max(
+            1.0,
+            float(os.environ.get("ONE_LINK_UI_UPLOAD_IDLE_TIMEOUT_SECONDS", "30")),
+        ),
+    )
+except (TypeError, ValueError):
+    UI_UPLOAD_IDLE_TIMEOUT_SECONDS = 30.0
+UPLOAD_MAX_ACTIVE_GLOBAL = 16
+UPLOAD_MAX_ACTIVE_BYTES_GLOBAL = 4 * UI_UPLOAD_MAX_BYTES
 
 
 # v0.11.6 helpers for Storage + data settings.
@@ -684,8 +1870,7 @@ def _pick_win_ifiledialog(title: str):
         # only register the broker variant; retry with that.
         if hr == -2147221164 or (hr != S_OK and not ppv.value):
             log.debug(
-                "classic FileOpenDialog not registered (0x%08X); "
-                "trying broker CLSID",
+                "classic FileOpenDialog not registered (0x%08X); trying broker CLSID",
                 hr & 0xFFFFFFFF,
             )
             ppv = c_void_p()
@@ -910,10 +2095,11 @@ def _pick_win_powershell(title: str) -> Optional[str]:
         exit code 0 with empty output = user cancelled, anything else
         = dialog failed (caller falls back to tkinter).
     """
-    safe_title = title.replace("'", "''")
+    safe_title = " ".join(str(title).split())[:256]
     script = (
         "$ErrorActionPreference = 'Stop'\n"
         "try {\n"
+        "  $dialogTitle = [Console]::In.ReadToEnd()\n"
         "  Add-Type -AssemblyName System.Windows.Forms | Out-Null\n"
         "  $owner = New-Object System.Windows.Forms.Form\n"
         "  $owner.TopMost = $true\n"
@@ -922,7 +2108,7 @@ def _pick_win_powershell(title: str) -> Optional[str]:
         "  $owner.Opacity = 0\n"
         "  $owner.Show() | Out-Null\n"
         "  $d = New-Object System.Windows.Forms.FolderBrowserDialog\n"
-        f"  $d.Description = '{safe_title}'\n"
+        "  $d.Description = $dialogTitle\n"
         "  $d.ShowNewFolderButton = $true\n"
         "  $d.RootFolder = [System.Environment+SpecialFolder]::Desktop\n"
         "  $result = $d.ShowDialog($owner)\n"
@@ -938,11 +2124,22 @@ def _pick_win_powershell(title: str) -> Optional[str]:
         "}\n"
     )
     try:
-        proc = subprocess.run(
+        argv = resolve_argv(
             ["powershell.exe", "-NoProfile", "-NonInteractive",
-             "-STA", "-Command", script],
+             "-STA", "-Command", script,
+            ],
+            system_tool=True,
+            platform_name="windows",
+        )
+        proc = subprocess.run(
+            argv,
+            input=safe_title,
             capture_output=True, text=True, timeout=_PICK_TIMEOUT_S,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            creationflags=hidden_creationflags(),
+            cwd=str(Path(argv[0]).parent),
+            env=trusted_process_env(platform_name="windows"),
+            check=False,
+            shell=False,
         )
     except Exception as e:
         log.debug("powershell folder picker failed: %s", e)
@@ -959,12 +2156,28 @@ def _pick_win_powershell(title: str) -> Optional[str]:
 
 def _pick_mac_osascript(title: str) -> Optional[str]:
     """Native macOS folder picker via osascript. Returns POSIX path."""
-    safe = title.replace('"', '\\"')
+    safe = " ".join(str(title).split())[:256]
+    if safe.startswith("-"):
+        safe = " " + safe
+    script = (
+        "on run argv\n"
+        "  set promptText to item 1 of argv\n"
+        "  return POSIX path of (choose folder with prompt promptText)\n"
+        "end run"
+    )
     try:
+        argv = resolve_argv(
+            ["osascript", "-e", script, safe],
+            system_tool=True,
+            platform_name="darwin",
+        )
         proc = subprocess.run(
-            ["osascript", "-e",
-             f'POSIX path of (choose folder with prompt "{safe}")'],
+            argv,
             capture_output=True, text=True, timeout=_PICK_TIMEOUT_S,
+            cwd=str(Path(argv[0]).parent),
+            env=trusted_process_env(platform_name="darwin"),
+            check=False,
+            shell=False,
         )
     except Exception as e:
         log.debug("osascript folder picker failed: %s", e)
@@ -978,14 +2191,22 @@ def _pick_mac_osascript(title: str) -> Optional[str]:
 def _pick_linux(title: str) -> Optional[str]:
     """Linux folder picker. Tries zenity (GNOME) then kdialog (KDE)."""
     home = os.path.expanduser("~")
+    safe_title = " ".join(str(title).split())[:256] or "Choose a folder"
+    if safe_title.startswith("-"):
+        safe_title = " " + safe_title
     attempts = (
-        ["zenity", "--file-selection", "--directory", f"--title={title}"],
-        ["kdialog", "--getexistingdirectory", "--title", title, home],
+        ["zenity", "--file-selection", "--directory", f"--title={safe_title}"],
+        ["kdialog", "--getexistingdirectory", "--title", safe_title, home],
     )
     for cmd in attempts:
         try:
+            argv = resolve_argv(cmd, system_tool=True, platform_name="posix")
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=_PICK_TIMEOUT_S,
+                argv, capture_output=True, text=True, timeout=_PICK_TIMEOUT_S,
+                cwd=str(Path(argv[0]).parent),
+                env=trusted_process_env(platform_name="posix"),
+                check=False,
+                shell=False,
             )
         except FileNotFoundError:
             continue
@@ -1083,8 +2304,21 @@ def _record_translated_error(translated: dict, exc: BaseException, source: str, 
             suggestion=str(translated.get("hint") or ""),
             traceback_str=None,
         )
-    except Exception:
-        pass
+    except Exception as record_exc:
+        report_best_effort_failure(
+            log,
+            "translated_error_debug_record",
+            record_exc,
+            level=logging.DEBUG,
+        )
+
+
+def _valid_chat_message_id(value: object, *, min_chars: int = 8) -> bool:
+    return (
+        isinstance(value, str)
+        and min_chars <= len(value) <= 128
+        and all(c.isascii() and (c.isalnum() or c in "_-") for c in value)
+    )
 
 
 def _translate_send_error(exc: BaseException) -> dict:
@@ -1096,6 +2330,20 @@ def _translate_send_error(exc: BaseException) -> dict:
     Returns a dict with at least: {status, code, error, hint}.
     Status is the HTTP status the caller should set.
     """
+    if isinstance(exc, MessageIdConflict):
+        return {
+            "status": 409,
+            "code": "message_id_conflict",
+            "error": "That message id already belongs to different content.",
+            "hint": "Generate a new id for a new message; retry only the exact original payload.",
+        }
+    if isinstance(exc, MessageQuotaExceeded):
+        return {
+            "status": 507,
+            "code": "text_storage_quota",
+            "error": "This conversation's local history quota is full.",
+            "hint": "Clear unneeded local history before sending more messages.",
+        }
     # asyncio.TimeoutError → empty str(exc) on some Pythons, so we
     # need an explicit isinstance check before the substring match
     # below (which works for ConnectionTimeoutError / "timed out"
@@ -1117,8 +2365,13 @@ def _translate_send_error(exc: BaseException) -> dict:
     try:
         from cryptography.exceptions import InvalidTag as _InvalidTag
         InvalidTag = _InvalidTag
-    except Exception:  # pragma: no cover
-        pass
+    except (AttributeError, ImportError) as import_exc:  # pragma: no cover
+        report_best_effort_failure(
+            log,
+            "invalid_tag_type_import",
+            import_exc,
+            level=logging.DEBUG,
+        )
     if isinstance(exc, InvalidTag):
         return {
             "status": 502,
@@ -1275,6 +2528,31 @@ def _server_port_path() -> Path:
     return data_dir() / SERVER_PORT_FILE
 
 
+def _remove_stale_runtime_publication(path: Path, *, label: str) -> None:
+    """Remove a prior process's readiness file without following links.
+
+    Runtime token/port files are publications, not durable configuration.  A
+    replacement daemon must never let their mere pre-existence masquerade as
+    readiness.  ``Path.unlink`` removes a symlink itself; a directory or an
+    undeletable filesystem object is rejected so startup fails closed instead
+    of serving behind stale credentials.
+    """
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError(f"stale {label} could not be inspected") from exc
+    if stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError(f"stale {label} is a directory")
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise RuntimeError(f"stale {label} could not be invalidated") from exc
+    if path.exists() or path.is_symlink():
+        raise RuntimeError(f"stale {label} survived invalidation")
+
+
 def _detect_lan_ip() -> str:
     """v0.15.4 — best-effort LAN IPv4. UDP-connect-to-public-DNS
     trick: the OS picks the egress interface but no packet is
@@ -1311,8 +2589,18 @@ def _probe_writable(parent: Path) -> bool:
         return False
     try:
         probe.rmdir()
-    except OSError:
-        pass
+    except OSError as exc:
+        # A successful mkdir is not sufficient evidence that this location is
+        # safe to use.  If the exact empty probe cannot be removed, selecting
+        # the candidate would both misreport writability and leak one probe
+        # directory on every startup.  Do not recurse here: another process
+        # could have raced a child into the directory after creation.
+        log.warning(
+            "Writable-directory probe cleanup failed for %s (%s); rejecting candidate",
+            parent,
+            type(exc).__name__,
+        )
+        return False
     return True
 
 
@@ -1321,8 +2609,9 @@ def _pick_writable_share_root() -> Path:
     share root, walked in priority order. Documents is preferred
     when it works (matches Windows convention + what most users
     expect), but we fall back through Home → Desktop → ONE_LINK_HOME
-    → temp so the daemon ALWAYS hands the UI a path it can actually
-    write to."""
+    → data directory → temp → the current directory. Every returned
+    path has completed a create/remove probe; if none can do so, fail closed
+    instead of presenting an unverified path to the UI."""
     candidates: list[Path] = []
     with contextlib.suppress(Exception):
         candidates.append(Path.home() / "Documents" / "One Link")
@@ -1339,12 +2628,16 @@ def _pick_writable_share_root() -> Path:
     import tempfile as _tempfile
     with contextlib.suppress(Exception):
         candidates.append(Path(_tempfile.gettempdir()) / "One Link")
-    for c in candidates:
+    with contextlib.suppress(Exception):
+        candidates.append(Path.cwd() / "One Link")
+    # Environment overrides and platform APIs can resolve to the same path.
+    # Probe each distinct candidate at most once so one failed cleanup does
+    # not produce repeated artifacts or warnings during a single request.
+    for c in dict.fromkeys(candidates):
         if _probe_writable(c):
             return c
-    # Final hard fallback - cwd is always writable by the process
-    # that's already reading/writing the daemon DB.
-    return Path.cwd() / "One Link"
+    log.error("No writable One Link share-root candidate is available")
+    raise OSError("no writable One Link share-root directory is available")
 
 
 def _render_install_landing(
@@ -1366,36 +2659,36 @@ def _render_install_landing(
             f'<div class="code-box"><span class="code-label">Pair code</span>'
             f'<span class="code">{_html.escape(code)}</span></div>'
             f'<p class="code-hint">This code expires in 5 minutes. '
-            f'Open One Link on this device and enter the code, or '
-            f'install One Link first using the link below.</p>'
+            f"If an audited One Link build is already installed on this "
+            f"device, open it and enter the code. The source link below is "
+            f"not an installer.</p>"
         )
     else:
         headline = "This invite has expired"
         code_block = (
             '<p class="code-hint expired">Ask the person who sent '
-            'you the link to send a fresh one. Invite codes expire '
-            'after 5 minutes for safety.</p>'
+            "you the link to send a fresh one. Invite codes expire "
+            "after 5 minutes for safety.</p>"
         )
     os_blurb = {
-        "ios":
-            "On iPhone or iPad, install One Link from the App Store "
-            "or scan the next QR with your camera.",
-        "android":
-            "On Android, install One Link from the Play Store or "
-            "scan the next QR with your camera.",
-        "macos":
-            "On Mac, download the latest installer and run it. "
-            "Then open One Link and enter the pair code above.",
-        "windows":
-            "On Windows, download the installer and run it. Then "
-            "open One Link and enter the pair code above.",
-        "linux":
-            "On Linux, install One Link from your distro's repo "
-            "or pull the source. Then open One Link and enter the "
-            "pair code above.",
-        "other":
-            "Open the One Link project page below and pick the "
-            "install path for your device.",
+        "ios": "There is no verified App Store build yet. If this device already "
+        "has an audited One Link build, open it and enter the pair code. "
+        "Otherwise, do not install an unverified build from this invite.",
+        "android": "There is no verified Play Store build yet. If this device already "
+        "has an audited One Link build, open it and enter the pair code. "
+        "Otherwise, do not install an unverified build from this invite.",
+        "macos": "No signed, verified public Mac installer is available yet. If One "
+        "Link is already installed from an audited build, open it and enter "
+        "the pair code above.",
+        "windows": "No signed, verified public Windows installer is available yet. If "
+        "One Link is already installed from an audited build, open it and "
+        "enter the pair code above.",
+        "linux": "No verified distro package is available yet. If One Link is "
+        "already installed from an audited build, open it and enter the "
+        "pair code above.",
+        "other": "No verified public installer is available for this device yet. "
+        "Use the project page below only to inspect source and current "
+        "release status; it is not an installer.",
     }[os_kind]
     return f"""<!doctype html>
 <html lang="en">
@@ -1465,12 +2758,13 @@ def _render_install_landing(
       <p style="margin-top:6px;">{_html.escape(os_blurb)}</p>
     </div>
     <a class="btn" href="{project_url}" target="_blank" rel="noopener">
-      Get One Link
+      View source and release status
     </a>
     <p class="footer">
-      One Link is a peer-to-peer app. No accounts, no tracking,
-      no cloud. The invite code above lives only on the device
-      that sent it, for 5 minutes.
+      One Link needs no account or central message store. Optional discovery
+      and encrypted relay infrastructure can assist when devices cannot connect
+      directly. The invite code above lives only on the sending device for
+      5 minutes.
     </p>
   </div>
 </body>
@@ -1482,19 +2776,15 @@ class UIServer:
 
     def __init__(self, daemon: "Daemon"):
         self.daemon = daemon
-        # Persistent token: load from disk if a previous daemon left one,
-        # so any open browser tab keeps working across restarts. New
-        # install → fresh token. Token is never embedded in any wire
-        # protocol; it's purely for the local UI surface.
-        # v0.20.7: load via the daemon-aware path so a lockbox-wrapped
-        # token round-trips correctly. Daemon.state may not yet have a
-        # lockbox at the moment UIServer is constructed (depends on
-        # init order); the loader handles that case by rotating to a
-        # fresh cleartext token, which then gets re-wrapped on the
-        # next ``write_text`` flush.
+        # Process-scoped owner bootstrap token. It is intentionally rotated on
+        # every daemon start: older releases copied this value into a
+        # port-agnostic plaintext loopback cookie, so retaining it would make a
+        # bearer captured by an unrelated local HTTP port useful forever.
+        # Cross-restart browser continuity uses independently revocable session
+        # bearers whose database stores only a one-way record key.
         self.token = self._load_or_create_token(daemon)
         self.app = web.Application(
-            client_max_size=1024 * 1024 * 1024,  # 1 GiB upload
+            client_max_size=UI_UPLOAD_REQUEST_MAX_BYTES,
             middlewares=[self._security_middleware],
         )
         self.runner: Optional[web.AppRunner] = None
@@ -1507,17 +2797,46 @@ class UIServer:
         # surface this so the launcher knows whether LAN mode is on.
         self.bind_host: str = "127.0.0.1"
         self._ws_clients: set[web.WebSocketResponse] = set()
+        # Public browser-peer signaling is authenticated by its first signed
+        # frame, not by an HTTP bearer. Bound the unauthenticated reservation
+        # window so silent sockets cannot consume the listener indefinitely.
+        self._pending_signaling_total = 0
+        self._pending_signaling_by_client: dict[str, int] = {}
         self._rate_buckets: dict[tuple[str, str], deque[float]] = {}
+        self._update_install_lock = asyncio.Lock()
+        self._update_capability_lock = asyncio.Lock()
+        self._update_handoff_committed = False
+        self._update_capability_cache: tuple[float, Any] | None = None
+        # Legacy discovery/install invitations are listener-local. A class
+        # dictionary leaked valid codes across embedded UIServer instances and
+        # grew without a hard ceiling when an authenticated tab minted them in
+        # a loop. Keep the ephemeral store isolated and capacity-bounded.
+        self._invite_store: dict[str, dict[str, Any]] = {}
         self._courier_seen_bundle_ids: set[str] = set()
         self._courier_events: list[dict] = []
+        self._courier_ledger_error: str | None = None
         self._load_courier_ledger()
         self._courier_monitor_task: asyncio.Task | None = None
+        self._ui_delivery_tasks: set[asyncio.Task] = set()
+        self._peer_dc_tasks: set[asyncio.Task] = set()
+        self._peer_dc_task_counts: dict[str, int] = {}
+        self._phone_upload_sweeper_task: asyncio.Task | None = None
+        self._closing = False
         self._courier_monitor_interval_s = 2.0
         self._courier_drop_signature: tuple[str, ...] = ()
         self._courier_outbox_signature: tuple[str, ...] = ()
         self._courier_monitor_last_ms = 0
         self._courier_monitor_events = 0
         self._setup_device_invites: dict[str, dict[str, Any]] = {}
+        self._setup_device_invites_lock = asyncio.Lock()
+        self._device_relogin_challenges = DeviceReloginChallengeStore()
+        # Per-call browser capsule sequencing.  MediaRecorder callbacks can be
+        # retried by the browser after a transient loopback failure; binding a
+        # sequence number to its BLAKE3 digest makes those retries idempotent
+        # while rejecting reordering and same-sequence content substitution.
+        # The finalized output is retained briefly so a failed response can
+        # safely retry the daemon persistence/delivery side effect.
+        self._capsule_ingest_state: dict[str, dict[str, Any]] = {}
         # 2026-05-23: in-progress phone file uploads. Keyed by
         # upload_id (server-minted UUID hex). Value:
         #   {"peer_fp": str, "filename": str, "mime": str,
@@ -1527,6 +2846,81 @@ class UIServer:
         #    "created_ms": int, "last_chunk_ms": int}
         # Cleaned up by _sweep_phone_uploads on every init/chunk.
         self._phone_uploads: dict[str, dict[str, Any]] = {}
+        # Stable phone client IDs claim exactly one live staging session. A
+        # Future marks an init whose private inode is still opening; a string
+        # points at the established upload_id. Event-loop map operations are
+        # atomic because no await occurs between check and publication.
+        self._phone_upload_intents: dict[
+            str,
+            str | asyncio.Future[str | None],
+        ] = {}
+        self._phone_finalizing_uploads: dict[str, dict[str, Any]] = {}
+        upload_dir = data_dir() / "uploads"
+        self._upload_reservations_shared = False
+        daemon_ledger_factory = getattr(daemon, "_cache_reservation_ledger", None)
+        if not callable(daemon_ledger_factory):
+            daemon_ledger_factory = getattr(
+                daemon,
+                "_transfer_reservation_ledger",
+                None,
+            )
+        daemon_ledger = None
+        if callable(daemon_ledger_factory):
+            with contextlib.suppress(Exception):
+                daemon_ledger = daemon_ledger_factory()
+        if isinstance(daemon_ledger, InboundTransferReservationLedger) and same_storage_volume(
+            upload_dir, daemon_ledger.incoming_dir
+        ):
+            # Inbox receives and browser staging compete for the same free
+            # extents. One ledger makes their promises globally atomic.
+            self._upload_reservations = daemon_ledger
+            self._upload_reservations_shared = True
+        else:
+            self._upload_reservations = InboundTransferReservationLedger(upload_dir)
+        # Browser retries are a separate durability boundary from the transfer
+        # activity ledger.  Bind each client_delivery_id under FULL SQLite
+        # synchronization before queue_file_transfer/send_file can emit an
+        # offer, and keep the map across daemon/server reconstruction.
+        from one_link.cap_root_key import load_or_create_cap_root_key
+
+        delivery_root = getattr(daemon, "_cap_root_key", None)
+        if not isinstance(delivery_root, bytes) or len(delivery_root) != 32:
+            # Tests/embedders can construct UIServer without running the full
+            # daemon startup sequence.  Use the same independently persisted,
+            # DPAPI/0600-protected root as production; never fall back to the
+            # rotatable UI bearer, daemon identity seed, or process entropy.
+            delivery_root, _created = load_or_create_cap_root_key(data_dir())
+        delivery_contract_key = hmac.new(
+            delivery_root,
+            b"OL/ui-delivery-idempotency/store/v2\0",
+            hashlib.sha256,
+        ).digest()
+        self._ui_delivery_idempotency = UIDeliveryIdempotencyStore(
+            data_dir() / "ui_delivery_idempotency.sqlite3",
+            contract_key=delivery_contract_key,
+        )
+        daemon_policy = getattr(daemon, "_transfer_admission_policy", None)
+        self._upload_admission_policy = TransferAdmissionPolicy(
+            max_declared_bytes=UI_UPLOAD_MAX_BYTES,
+            min_free_reserve_bytes=int(
+                getattr(
+                    daemon_policy,
+                    "min_free_reserve_bytes",
+                    TransferAdmissionPolicy().min_free_reserve_bytes,
+                )
+            ),
+            free_reserve_ratio=float(
+                getattr(
+                    daemon_policy,
+                    "free_reserve_ratio",
+                    TransferAdmissionPolicy().free_reserve_ratio,
+                )
+            ),
+            max_active_inbound_transfers_per_peer=PHONE_UPLOAD_MAX_PER_PEER,
+            max_active_inbound_bytes_per_peer=UI_UPLOAD_MAX_BYTES,
+            max_active_inbound_transfers=UPLOAD_MAX_ACTIVE_GLOBAL,
+            max_active_inbound_bytes=UPLOAD_MAX_ACTIVE_BYTES_GLOBAL,
+        )
         self._removable_event_detector: Optional[RemovableEventDetector] = None
         self._removable_monitor_last_ms = 0
         self._removable_monitor_events = 0
@@ -1542,6 +2936,11 @@ class UIServer:
         # values populated by _start_https_listener().
         self.https_site: Optional[web.BaseSite] = None
         self.https_port: Optional[int] = None
+        # Local-only RFC 8489 Binding responder. Firefox can otherwise expose
+        # only unresolvable mDNS host candidates in strict no-public-STUN
+        # modes. This service never relays traffic and is advertised only to
+        # loopback/directly-connected HTTP clients.
+        self._local_stun: LocalStunService | None = None
         self.https_cert_fp_sha256: Optional[str] = None
         # v0.20.2: hook the data-bridge listener so browser-peers
         # can fetch peer rosters + recent messages from the daemon
@@ -1553,8 +2952,13 @@ class UIServer:
         try:
             from one_link.debug_log import get_debug_log
             get_debug_log().attach_broadcast(self._on_debug_entry)
-        except Exception:
-            pass
+        except Exception as attach_exc:
+            report_best_effort_failure(
+                log,
+                "debug_log_broadcast_attach",
+                attach_exc,
+                level=logging.DEBUG,
+            )
 
     def _on_debug_entry(self, entry: dict) -> None:
         """Bridges debug_log entries to WS clients as `debug_event`."""
@@ -1575,9 +2979,34 @@ class UIServer:
         any handler calls request.json().
         """
 
+        def _finish(response: web.StreamResponse) -> web.StreamResponse:
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            response.headers.setdefault("X-Frame-Options", "DENY")
+            response.headers.setdefault(
+                "Cross-Origin-Resource-Policy",
+                "same-origin",
+            )
+            response.headers.setdefault("Referrer-Policy", "no-referrer")
+            response.headers.setdefault(
+                "Permissions-Policy",
+                "camera=(self), microphone=(self), display-capture=(self), "
+                "on-device-speech-recognition=(self), "
+                "geolocation=(), payment=(), usb=(), serial=(), bluetooth=(), "
+                "browsing-topics=()",
+            )
+            # aiohttp otherwise emits exact Python/aiohttp versions.
+            response.headers["Server"] = "one-link"
+            return response
+
         target = request.raw_path or request.path_qs or request.path
         if len(target.encode("utf-8", errors="ignore")) > MAX_REQUEST_TARGET_BYTES:
-            return web.json_response({"error": "request target too large"}, status=414)
+            return _finish(
+                web.json_response(
+                    {"error": "request target too large"},
+                    status=414,
+                    headers={"Cache-Control": "no-store"},
+                )
+            )
         # v0.20.7 (security audit H10): defeat DNS-rebinding + cross-
         # origin WebSocket hijacking on the loopback-bound UI. A user
         # who visits attacker.com can be served a page whose DNS A
@@ -1590,48 +3019,149 @@ class UIServer:
         # default); --lan / 0.0.0.0 mode is an explicit user opt-in to
         # LAN exposure where we can't enumerate the legit Host values.
         if not self._accept_request_host(request):
-            return web.json_response(
-                {"error": "host header rejected"}, status=421
+            return _finish(
+                web.json_response(
+                    {"error": "host header rejected"},
+                    status=421,
+                    headers={"Cache-Control": "no-store"},
+                )
             )
         if not self._accept_request_origin(request):
-            return web.json_response(
-                {"error": "cross-origin request rejected"}, status=403
+            return _finish(
+                web.json_response(
+                    {"error": "cross-origin request rejected"},
+                    status=403,
+                    headers={"Cache-Control": "no-store"},
+                )
             )
         content_type = (request.content_type or "").lower()
-        large_json_paths = {"/api/courier/import"}
-        if request.method in ("POST", "PUT", "PATCH", "DELETE") and request.path not in large_json_paths:
-            is_json_like = (
+        streaming_multipart_paths = {
+            "/api/send-file",
+            "/api/v1/recovery/bundle/test",
+            "/api/v1/recovery/restore/bundle",
+        }
+        path_parts = request.path.split("/")
+        is_capsule_chunk_path = (
+            request.method == "POST"
+            and len(path_parts) == 7
+            and path_parts[1:4] == ["api", "v1", "calls"]
+            and bool(path_parts[4])
+            and path_parts[5:] == ["capsule", "chunk"]
+        )
+        large_json_limits = {
+            # Legacy clients encode these binary artifacts in base64 JSON.
+            # New recovery UI uses multipart, but the compatibility path is
+            # still explicitly bounded rather than bypassing middleware.
+            "/api/courier/import": min(
+                UI_UPLOAD_REQUEST_MAX_BYTES,
+                COURIER_FILE_MAX_BYTES * 4 // 3 + 1024 * 1024,
+            ),
+            "/api/v1/recovery/" + "bundle/test": RECOVERY_BUNDLE_BASE64_MAX_BYTES,
+            "/api/v1/recovery/" + "restore/bundle": RECOVERY_BUNDLE_BASE64_MAX_BYTES,
+        }
+        mutating = request.method in ("POST", "PUT", "PATCH", "DELETE")
+        is_json_like = (
+            mutating
+            and (
                 content_type == "application/json"
                 or content_type.endswith("+json")
-                or request.path not in ("/api/send-file",)
+                or request.path not in streaming_multipart_paths
             )
-        else:
-            is_json_like = False
+            and not is_capsule_chunk_path
+        )
         if is_json_like:
+            limit = int(large_json_limits.get(request.path, MAX_JSON_REQUEST_BYTES))
             size = request.content_length
-            if size is not None and size > MAX_JSON_REQUEST_BYTES:
-                return web.json_response({"error": "json body too large"}, status=413)
-        resp = await handler(request)
-        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-        resp.headers.setdefault("X-Frame-Options", "DENY")
-        resp.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
-        resp.headers.setdefault("Referrer-Policy", "no-referrer")
-        # v0.20.7 (security audit M15): aiohttp emits "Server: Python/x.y
-        # aiohttp/z.z.z" by default, which hands an attacker the exact
-        # version of the request handler to scan for known CVEs. Replace
-        # with a generic identifier; the daemon's actual version still
-        # ships via /api/connect-info to authenticated clients.
-        resp.headers["Server"] = "one-link"
-        return resp
+            if size is not None and size > limit:
+                return _finish(
+                    web.json_response(
+                        {"error": "json body too large"},
+                        status=413,
+                        headers={"Cache-Control": "no-store"},
+                    )
+                )
 
-    # v0.20.7 (security audit H10): DNS-rebinding + CSWSH defenses.
-    # Both helpers return True when the request is acceptable. They
-    # return False (caller answers 421/403) only when the daemon is
-    # on a loopback bind AND the request's Host or Origin would point
-    # at a foreign origin. A --lan / 0.0.0.0 bind is an explicit user
-    # opt-in to LAN exposure where we can't enumerate the legit Host
-    # values browsers might present.
-    _LOOPBACK_BIND_HOSTS = ("127.0.0.1", "localhost", "::1", "::")
+            # Content-Length is optional for HTTP/1.1 chunked bodies. Merely
+            # checking the header let an attacker stream up to aiohttp's 1 GiB
+            # upload allowance into any nominally 256 KiB JSON endpoint. Read
+            # and cache the body through a hard byte/time budget before a
+            # handler calls request.json(); aiohttp reuses _read_bytes on that
+            # later parse, so this does not consume the stream twice.
+            cached = getattr(request, "_read_bytes", None)
+            if cached is None:
+                chunks: list[bytes] = []
+                total = 0
+                try:
+                    async with asyncio.timeout(JSON_REQUEST_BODY_TIMEOUT_SECONDS):
+                        while not request.content.at_eof():
+                            remaining = limit + 1 - total
+                            if remaining <= 0:
+                                return _finish(
+                                    web.json_response(
+                                        {"error": "json body too large"},
+                                        status=413,
+                                        headers={"Cache-Control": "no-store"},
+                                    )
+                                )
+                            chunk = await request.content.read(min(64 * 1024, remaining))
+                            if not chunk:
+                                break
+                            chunks.append(chunk)
+                            total += len(chunk)
+                            if total > limit:
+                                return _finish(
+                                    web.json_response(
+                                        {"error": "json body too large"},
+                                        status=413,
+                                        headers={"Cache-Control": "no-store"},
+                                    )
+                                )
+                except TimeoutError:
+                    return _finish(
+                        web.json_response(
+                            {"error": "request body timed out"},
+                            status=408,
+                            headers={"Cache-Control": "no-store"},
+                        )
+                    )
+                request._read_bytes = b"".join(chunks)  # type: ignore[attr-defined]
+        try:
+            resp = await handler(request)
+        except asyncio.CancelledError:
+            raise
+        except web.HTTPException as exc:
+            # HTTPException is itself a StreamResponse, so secure its headers
+            # and re-raise it for aiohttp's exception dispatcher. Returning the
+            # exception object is deprecated and will be removed by aiohttp.
+            _finish(exc)
+            raise
+        except Exception:
+            incident = secrets.token_hex(6)
+            log.exception(
+                "ui request failed incident=%s method=%s path=%s",
+                incident,
+                request.method,
+                request.path,
+            )
+            if request.path.startswith("/api/"):
+                resp = web.json_response(
+                    {"error": "internal server error", "incident": incident},
+                    status=500,
+                )
+            else:
+                resp = web.Response(
+                    text=f"Internal server error ({incident})",
+                    status=500,
+                    content_type="text/plain",
+                )
+            resp.headers["Cache-Control"] = "no-store"
+        return _finish(resp)
+
+    # DNS-rebinding + cross-origin WebSocket-hijacking defenses.  ``::`` is
+    # deliberately absent: it is the IPv6 wildcard, not loopback.  Treating it
+    # as local would silently apply the weaker loopback trust model to remote
+    # IPv6 clients.
+    _LOOPBACK_BIND_HOSTS = ("127.0.0.1", "localhost", "::1")
     _LOOPBACK_VALID_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
     def _is_loopback_bound(self) -> bool:
@@ -1644,15 +3174,10 @@ class UIServer:
     # local browser as a "could be anyone" request and refused to
     # recover, sending the user to the ACCESS DENIED help page.
     #
-    # `_request_from_loopback` looks at the SOURCE of the request
-    # instead. A request whose peer IP is 127.0.0.1 / ::1 came from
-    # a process on the SAME machine as the daemon. That process can
-    # already read `ui.token` from disk (same uid context), so
-    # trusting it for silent recovery adds no attack surface — same
-    # local-process-trust model Jupyter / Docker Desktop / VSCode
-    # tunnel rely on. LAN requests (peer IP != loopback) stay on the
-    # strict token gate; nothing about the cross-machine path
-    # changes.
+    # `_request_from_loopback` proves only the network route. TCP does not
+    # authenticate an OS uid: another local account or sandboxed process may
+    # also connect. This helper may select loopback transport behavior, but it
+    # must never mint/authorize an owner credential by itself.
     _LOOPBACK_SOURCE_IPS = frozenset({"127.0.0.1", "::1", "localhost"})
 
     def _request_from_loopback(self, request: web.Request) -> bool:
@@ -1672,38 +3197,153 @@ class UIServer:
             peer_ip = peer_ip[len("::ffff:"):]
         return peer_ip in self._LOOPBACK_SOURCE_IPS
 
+    @staticmethod
+    def _request_listener_port(request: web.Request) -> int | None:
+        """Return the actual local socket port, never a forwarded value."""
+
+        transport = getattr(request, "transport", None)
+        if transport is None:
+            return None
+        sockname = transport.get_extra_info("sockname")
+        if not isinstance(sockname, tuple) or len(sockname) < 2:
+            return None
+        port = sockname[1]
+        if isinstance(port, bool) or not isinstance(port, int):
+            return None
+        return port if 1 <= port <= 65535 else None
+
+    @staticmethod
+    def _parse_host_authority(authority: str) -> tuple[str, int | None] | None:
+        """Parse one canonical HTTP Host authority without accepting smuggling.
+
+        ``str.split(':', 1)`` accepts malformed values such as
+        ``127.0.0.1:7117:evil`` and bracket suffixes.  URL parsing gives us
+        strict IPv6 handling, after an explicit rejection of characters that
+        have no place in a Host field.
+        """
+
+        from urllib.parse import urlsplit
+
+        if not authority or authority != authority.strip():
+            return None
+        # An explicit delimiter with no port is not the same thing as an
+        # omitted port.  ``urlsplit`` normalizes both to ``None``; reject the
+        # malformed spelling before parsing so ``localhost:`` cannot become a
+        # second serialization of a default-port authority.
+        if authority.endswith(":"):
+            return None
+        if any(ord(char) <= 0x20 or ord(char) == 0x7F for char in authority):
+            return None
+        if any(char in authority for char in ",/@\\?#"):
+            return None
+        try:
+            parsed = urlsplit("//" + authority, allow_fragments=False)
+            hostname = parsed.hostname
+            port = parsed.port
+        except (TypeError, ValueError):
+            return None
+        if (
+            not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+        # The only accepted loopback names are ASCII literals below.  Refuse a
+        # trailing-dot alias rather than letting two serialized authorities map
+        # to one cookie/site identity.
+        if not hostname.isascii() or hostname.endswith("."):
+            return None
+        return hostname.lower(), port
+
     def _accept_request_host(self, request: web.Request) -> bool:
         if not self._is_loopback_bound():
             return True
-        host_header = (request.host or "").strip().lower()
-        if not host_header:
-            return False
-        # Handle bracketed IPv6 ([::1]:port).
-        if host_header.startswith("["):
-            if "]" not in host_header:
-                return False
-            host_only = host_header[1:host_header.index("]")]
-        elif ":" in host_header:
-            host_only = host_header.split(":", 1)[0]
+        headers = request.headers
+        getall = getattr(headers, "getall", None)
+        if callable(getall):
+            host_values = list(getall("Host", []))
         else:
-            host_only = host_header
-        return host_only in self._LOOPBACK_VALID_HOSTS
+            raw_host = headers.get("Host")
+            host_values = [] if raw_host is None else [raw_host]
+        if len(host_values) != 1:
+            return False
+        parsed = self._parse_host_authority(str(host_values[0]))
+        if parsed is None:
+            return False
+        host_only, supplied_port = parsed
+        if host_only not in self._LOOPBACK_VALID_HOSTS:
+            return False
+        expected_port = self._request_listener_port(request)
+        if expected_port is None:
+            expected_port = self.port if 1 <= int(self.port or 0) <= 65535 else None
+        if expected_port is None:
+            return False
+        if supplied_port is None:
+            default_port = 443 if self._request_uses_tls(request) else 80
+            return expected_port == default_port
+        return supplied_port == expected_port
 
     def _accept_request_origin(self, request: web.Request) -> bool:
-        # No Origin = direct fetch / same-origin nav. Browsers add
-        # Origin on cross-origin requests + every WebSocket upgrade.
-        origin = (request.headers.get("Origin") or "").strip()
-        if not origin:
-            return True
-        if not self._is_loopback_bound():
-            return True
+        # Origin is present on CORS/fetch/WebSocket requests; Referer covers
+        # many navigation and subresource cases where Origin is omitted.  If a
+        # user agent supplies either signal it must agree exactly, including
+        # port.  Requiring *both* when both are present closes inconsistent
+        # proxy/header interpretations.
+        for header in ("Origin", "Referer"):
+            value = (request.headers.get(header) or "").strip()
+            if value and not self._origin_matches_request(request, value):
+                return False
+
+        # SameSite cookies do not distinguish ports.  Browser Fetch Metadata
+        # does: a page on 127.0.0.1:attacker reaches this port as ``same-site``,
+        # not ``same-origin``.  Reject it before auth. ``none`` is reserved for
+        # user-initiated top-level navigations; non-browser clients omit the
+        # header and continue to authenticate with an explicit bearer.
+        fetch_site = (request.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if self._is_loopback_bound() and fetch_site not in {
+            "",
+            "none",
+            "same-origin",
+        }:
+            return False
+        return True
+
+    @staticmethod
+    def _origin_matches_request(request: web.Request, value: str) -> bool:
+        """Require exact browser origin equality, including the port.
+
+        Loopback ports are separate origins. Trusting any localhost port lets
+        an unrelated local web app ride One Link's cookies and submit state
+        changes. Host-only checks therefore are not a CSRF boundary.
+        """
         try:
             from urllib.parse import urlparse
-            parsed = urlparse(origin)
-            host = (parsed.hostname or "").lower()
-        except Exception:
+
+            supplied = urlparse(value)
+            expected = urlparse(
+                f"{'https' if UIServer._request_uses_tls(request) else 'http'}://{request.host}"
+            )
+            if supplied.username is not None or supplied.password is not None:
+                return False
+            if supplied.scheme not in {"http", "https"}:
+                return False
+
+            def effective_port(scheme: str, port: int | None) -> int | None:
+                if port is not None:
+                    return port
+                return 443 if scheme == "https" else 80 if scheme == "http" else None
+
+            return (
+                supplied.scheme == expected.scheme
+                and (supplied.hostname or "").lower() == (expected.hostname or "").lower()
+                and effective_port(supplied.scheme, supplied.port)
+                == effective_port(expected.scheme, expected.port)
+            )
+        except (TypeError, ValueError):
             return False
-        return host in self._LOOPBACK_VALID_HOSTS
 
     @staticmethod
     def _bind_exclusive_socket(host: str, port: int) -> Optional[socket.socket]:
@@ -1755,7 +3395,13 @@ class UIServer:
         different token. Before publishing server.port, verify the endpoint
         answers our own token-gated status request.
         """
-        host = "127.0.0.1" if bind_host in ("0.0.0.0", "127.0.0.1") else bind_host  # nosec B104
+        # Never present the owner bearer to a custom/non-loopback HTTP
+        # authority. Wildcard IPv4 includes loopback, so it can be probed via
+        # 127.0.0.1; a listener bound only to another interface has no safe
+        # plaintext owner-probe path and must fail closed.
+        if bind_host not in ("0.0.0.0", "127.0.0.1", "localhost"):
+            return False
+        host = "127.0.0.1"
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port),
@@ -1793,46 +3439,10 @@ class UIServer:
 
     @staticmethod
     def _load_or_create_token(daemon: "Daemon | None" = None) -> str:
-        import base64 as _b64
-        p = _token_path()
-        try:
-            raw = p.read_text(encoding="utf-8").strip()
-            if raw.startswith(UIServer._TOKEN_WRAPPED_PREFIX):
-                # Wrapped path — needs the daemon's lockbox to unwrap.
-                lb = None
-                if daemon is not None and daemon.state is not None:
-                    lb = getattr(daemon.state, "_lockbox", None)
-                if lb is None:
-                    log.warning(
-                        "UI token file is wrapped but lockbox is not "
-                        "configured; rotating to a fresh cleartext token"
-                    )
-                else:
-                    try:
-                        blob = _b64.urlsafe_b64decode(
-                            raw[len(UIServer._TOKEN_WRAPPED_PREFIX):].encode("ascii")
-                        )
-                        plain = lb.unwrap(blob).decode("ascii")
-                        if len(plain) >= 32 and all(
-                            c.isalnum() or c in "-_" for c in plain
-                        ):
-                            return plain
-                    except Exception as e:
-                        log.warning(
-                            "UI token unwrap failed (%s); rotating to "
-                            "a fresh token", e,
-                        )
-            else:
-                # Tokens we generate are 43 base64url chars (32 raw
-                # bytes). Be lenient on length but enforce at least
-                # 32 chars so a corrupted file can't turn into an
-                # unsafe short token.
-                if len(raw) >= 32 and all(
-                    c.isalnum() or c in "-_" for c in raw
-                ):
-                    return raw
-        except (OSError, UnicodeDecodeError):
-            pass
+        # Keep the historical method name for embedders/tests.  ``daemon`` is
+        # accepted for API compatibility but deliberately unused: no at-rest
+        # value is an authority for the next process.
+        del daemon
         return secrets.token_urlsafe(32)
 
     def _courier_ledger_path(self) -> Path:
@@ -1852,24 +3462,65 @@ class UIServer:
     def _load_courier_ledger(self) -> None:
         path = self._courier_ledger_path()
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            info = path.lstat()
+        except FileNotFoundError:
             self._courier_seen_bundle_ids = set()
             self._courier_events = []
+            self._courier_ledger_error = None
             return
-        seen = raw.get("seen_bundle_ids", []) if isinstance(raw, dict) else []
-        events = raw.get("events", []) if isinstance(raw, dict) else []
+        except OSError as exc:
+            self._courier_seen_bundle_ids = set()
+            self._courier_events = []
+            self._courier_ledger_error = "unreadable"
+            log.error("courier replay ledger metadata is unreadable: %s", exc)
+            return
+
+        try:
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 8 * 1024 * 1024:
+                raise CourierLedgerUnavailable("ledger is not a bounded regular file")
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or set(raw) != {
+                "version",
+                "seen_bundle_ids",
+                "events",
+            }:
+                raise CourierLedgerUnavailable("ledger schema is invalid")
+            if raw.get("version") != 1:
+                raise CourierLedgerUnavailable("ledger version is unsupported")
+            seen = raw.get("seen_bundle_ids")
+            events = raw.get("events")
+            if not isinstance(seen, list) or not isinstance(events, list):
+                raise CourierLedgerUnavailable("ledger collections are invalid")
+            if len(events) > COURIER_LEDGER_MAX_EVENTS:
+                raise CourierLedgerUnavailable("ledger event count exceeds its bound")
+            if any(not self._valid_courier_bundle_id(value) for value in seen):
+                raise CourierLedgerUnavailable("ledger contains an invalid replay id")
+            if any(
+                not isinstance(event, dict)
+                or not self._valid_courier_bundle_id(event.get("bundle_id"))
+                for event in events
+            ):
+                raise CourierLedgerUnavailable("ledger contains an invalid event")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError,
+            CourierLedgerUnavailable,
+        ) as exc:
+            self._courier_seen_bundle_ids = set()
+            self._courier_events = []
+            self._courier_ledger_error = "invalid_or_unreadable"
+            log.error("courier replay ledger cannot be trusted: %s", exc)
+            return
+
         self._courier_seen_bundle_ids = {
-            str(x).strip().lower()
-            for x in seen
-            if self._valid_courier_bundle_id(x)
-        }
-        self._courier_events = [
-            e for e in events[-COURIER_LEDGER_MAX_EVENTS:]
-            if isinstance(e, dict) and self._valid_courier_bundle_id(e.get("bundle_id"))
-        ]
+            str(value).strip().lower()
+            for value in seen}
+        self._courier_events = list(events)
+        self._courier_ledger_error = None
 
     def _save_courier_ledger(self) -> None:
+        if self._courier_ledger_error is not None:
+            raise CourierLedgerUnavailable(
+                "refusing to overwrite an unreadable courier replay ledger"
+            )
         path = self._courier_ledger_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -1877,12 +3528,52 @@ class UIServer:
             "seen_bundle_ids": sorted(self._courier_seen_bundle_ids),
             "events": self._courier_events[-COURIER_LEDGER_MAX_EVENTS:],
         }
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
         tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
-        tmp.write_text(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-            encoding="utf-8",
-        )
-        os.replace(tmp, path)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(tmp, flags, 0o600)
+            view = memoryview(encoded)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("short write while persisting courier ledger")
+                view = view[written:]
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = None
+            if os.name == "nt":
+                from one_link.identity import _restrict_windows_acl
+
+                _restrict_windows_acl(tmp)
+            else:
+                os.chmod(tmp, 0o600)
+            if tmp.read_bytes() != encoded:
+                raise OSError("courier ledger read-back mismatch")
+            from one_link.namespace_durability import replace_path
+
+            replace_path(tmp, path)
+            if os.name != "nt":
+                directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            if path.read_bytes() != encoded:
+                raise OSError("published courier ledger read-back mismatch")
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            with contextlib.suppress(FileNotFoundError):
+                tmp.unlink()
 
     def _record_courier_event(
         self,
@@ -2033,7 +3724,8 @@ class UIServer:
                 resolved = path.resolve()
                 if not resolved.is_file() or resolved.parent != root:
                     continue
-                if resolved.suffix.lower() not in {".json", ".olcb"} and not resolved.name.lower().endswith(".olcb.json"):
+                if resolved.suffix.lower() not in {".json", ".olcb",
+                } and not resolved.name.lower().endswith(".olcb.json"):
                     continue
                 st = resolved.stat()
                 if st.st_size <= 0 or st.st_size > COURIER_FILE_MAX_BYTES:
@@ -2130,6 +3822,9 @@ class UIServer:
     def _setup_routes(self) -> None:
         r = self.app.router
         r.add_get("/", self._index)
+        # Loopback-source-only proof used by the desktop launcher to
+        # authenticate this exact HTTP listener before sending an owner bearer.
+        r.add_get("/api/local-instance-proof", self._local_instance_proof)
         # Static assets (logo, favicon). NOT token-gated: these are
         # required to render the page itself before the cookie is set.
         assets_dir = WEB_DIR / "assets"
@@ -2154,10 +3849,25 @@ class UIServer:
         # browser is its own peer; the daemon is unrelated.
         r.add_get("/peer", self._peer_shell)
         r.add_get("/peer/", self._peer_shell)
-        # v0.20.7 (security audit H7): JS port of the Double Ratchet
-        # for browser-as-peer DataChannel transport. Standalone ESM
-        # module + a self-test page that exercises the round-trip
-        # in-browser (open /dr_test in any tab to see the suite).
+        # Browser identity KDF assets are integrity-pinned by the worker and
+        # deliberately bypass the generic static cache.  A stale worker/WASM
+        # pair can otherwise make a newly written identity impossible to
+        # unlock after an upgrade.
+        r.add_get(
+            "/browser-crypto/argon2id-worker.js",
+            self._browser_argon2_worker,
+        )
+        r.add_get(
+            "/browser-crypto/argon2id-v1.wasm",
+            self._browser_argon2_wasm,
+        )
+        r.add_get(
+            "/browser-crypto/ed25519-v1.wasm",
+            self._browser_ed25519_wasm,
+        )
+        # Standalone JS Double Ratchet primitive + self-test page. The product
+        # browser shells do not import this module yet, so serving these routes
+        # is development evidence rather than browser-transport activation.
         r.add_get("/dr.js", self._dr_module)
         r.add_get("/dr_test", self._dr_test_page)
         r.add_get("/dr_test.html", self._dr_test_page)
@@ -2167,11 +3877,10 @@ class UIServer:
         # offer envelope (signed_offer.signature verified against
         # signed_offer.pubkey before we accept the peer connection).
         r.add_get("/api/v1/peer-rtc", self._peer_rtc_signaling)
-        # v0.20.1: pair-by-QR token mint. Auth-gated (token holder
-        # is the desktop user). Returns a fresh one-shot pairing
-        # token that the browser-peer presents during signaling so
-        # the daemon trusts it as a paired device with no manual
-        # SAS confirm.
+        # Browser reconnect handoff mint. Auth-gated and restricted to one
+        # already root-certified, currently trusted device key. New-device
+        # authority is created only by the setup invite + operator-confirmed
+        # SAS ceremony; this one-shot token never creates trust by itself.
         r.add_post("/api/v1/peer-rtc/mint-pairing", self._guarded(self.api_mint_pairing))
         # v0.20.1: render the most-recently-minted pairing token's
         # LAN URL as an SVG QR. Hits the desktop UI's "Pair a phone"
@@ -2197,9 +3906,9 @@ class UIServer:
         r.add_get("/connect", self._connect_landing)
         r.add_get("/connect/", self._connect_landing)
         # May 15 2026 — sovereignty endpoint. Both index.html and
-        # peer.html start with an empty ICE-server list (no calls
-        # to third-party STUN by default) and ask this endpoint
-        # for the user-configured set. Empty response = LAN-only.
+        # peer.html ask this endpoint for the policy-resolved ICE set. The
+        # bundled local Binding responder may be present without any outside
+        # call; public STUN/TURN remains sovereignty-controlled.
         r.add_get(
             "/api/peer-rtc/ice-config",
             self._guarded(self.api_peer_rtc_ice_config),
@@ -2287,7 +3996,7 @@ class UIServer:
             self._guarded(self.api_revoke_all_ui_sessions),
         )
         r.add_post(
-            r"/api/auth/sessions/{session_uuid}/revoke",
+            r"/api/auth/sessions/{session_ref}/revoke",
             self._guarded(self.api_revoke_ui_session),
         )
         r.add_get(
@@ -2358,10 +4067,14 @@ class UIServer:
         # without needing a WebSocket back to this daemon.
         r.add_get("/api/setup/device-invite/status", self.api_setup_device_invite_status)
         # 2026-05-23: /relogin is the phone's cert-authenticated
-        # reconnect path. Public (auth is the cert itself + a
-        # signed nonce). Lets a phone with a valid cert restore
+        # reconnect path. Public (auth is the cert plus a one-time,
+        # daemon-issued challenge). Lets a phone with a valid cert restore
         # a live WebRTC session after a daemon restart / tab
         # close without scanning a fresh pair QR.
+        r.add_post(
+            "/api/setup/device-invite/relogin/challenge",
+            self.api_setup_device_invite_relogin_challenge,
+        )
         r.add_post("/api/setup/device-invite/relogin", self.api_setup_device_invite_relogin)
         r.add_post("/api/setup/device-invite/confirm", self._guarded(self.api_setup_device_invite_confirm))
         r.add_post("/api/setup/device-invite/reject", self._guarded(self.api_setup_device_invite_reject))
@@ -2401,7 +4114,8 @@ class UIServer:
         # v0.21.x social-share recovery ship 2: unwrap a held share
         # using the guardian's identity private key, return the raw
         # (idx, share_bytes) for manual delivery back to the owner.
-        r.add_post("/api/v1/recovery/shares/{share_id}/unwrap", self._guarded(self.api_recovery_shares_unwrap))
+        r.add_post("/api/v1/recovery/shares/{share_id}/unwrap", self._guarded(self.api_recovery_shares_unwrap),
+        )
         r.add_get("/api/v1/recovery/backup/export", self._guarded(self.api_recovery_backup_export))
         r.add_get("/api/v1/recovery/social/candidates", self._guarded(self.api_recovery_social_candidates))
         r.add_post("/api/v1/recovery/social/issue", self._guarded(self.api_recovery_social_issue))
@@ -2414,25 +4128,27 @@ class UIServer:
         # v0.21.x: scoped reset of just the per-track recovery state
         # so a user who tested the wizard during onboarding can clear
         # and re-run with real intent. Does NOT touch the master seed
-        # or any peer state - only wipes the per-track 'configured'
-        # flags + the rotation announcement queue.
+        # or any peer/rotation state - only wipes per-track 'configured' flags.
         r.add_post("/api/v1/recovery/reset", self._guarded(self.api_recovery_reset))
         r.add_get("/api/v1/recovery/restore/preflight", self._guarded(self.api_recovery_restore_preflight))
         r.add_post("/api/v1/recovery/restore/phrase", self._guarded(self.api_recovery_restore_phrase))
         # v0.21.x restore-from-bundle: phrase + .olbak file together.
-        # The bundle key derives from the seed, so the same 24 words
-        # that restore identity also unlock the chat history +
-        # settings stored in the bundle.
+        # The outer bundle key derives from the seed. Current exports also
+        # carry authenticated seed wraps for independent application keys;
+        # unmigrated legacy passphrase data reports its extra factor.
         r.add_post("/api/v1/recovery/restore/bundle", self._guarded(self.api_recovery_restore_bundle))
         # v0.21.x social-share recovery ship 3: combine K guardian-
         # delivered shares to restore the original master seed.
         # The third restore path; mirrors restore/phrase + restore/bundle.
         r.add_post("/api/v1/recovery/restore/shares", self._guarded(self.api_recovery_restore_shares))
-        # v0.21.x identity rotation: mint a fresh identity + sign a
-        # rotation certificate with the OLD key, queue per-peer
-        # announcements for delivery on next start. Peer-side
-        # acceptance + outbound delivery wire in subsequent commits.
+        # Identity rotation signs and journals a fresh seed/certificate plus
+        # exact peer snapshot. Boot installs authority and atomically commits
+        # the announcement queue before serving.
         r.add_post("/api/v1/recovery/rotate", self._guarded(self.api_recovery_rotate))
+        r.add_post(
+            "/api/v1/recovery/rotate/pending-phrase",
+            self._guarded(self.api_recovery_rotate_pending_phrase),
+        )
         r.add_get("/api/v1/recovery/rotate/status", self._guarded(self.api_recovery_rotate_status))
         # v0.21.x: graceful in-app daemon shutdown so post-recovery
         # "Restart One Link to take effect" can be a button instead
@@ -2451,6 +4167,14 @@ class UIServer:
         r.add_post("/api/v1/calls", self._guarded(self.api_call_action))
         r.add_get("/api/v1/calls", self._guarded(self.api_calls_list))
         r.add_get("/api/v1/calls/{call_id}/trace", self._guarded(self.api_call_trace))
+        r.add_post(
+            "/api/v1/calls/{call_id}/capsule/chunk",
+            self._guarded(self.api_call_capsule_chunk),
+        )
+        r.add_post(
+            "/api/v1/calls/{call_id}/capsule/finalize",
+            self._guarded(self.api_call_capsule_finalize),
+        )
         r.add_get("/api/v1/calls/{call_id}", self._guarded(self.api_call_state))
         # Row 10 — peer-handshake attestation API.
         r.add_post("/api/v1/attestation/challenge", self._guarded(self.api_attestation_challenge))
@@ -2477,9 +4201,12 @@ class UIServer:
         r.add_post("/api/self-mesh/devices/safety", self._guarded(self.api_self_mesh_device_safety))
         r.add_post("/api/self-mesh/remote-instruct", self._guarded(self.api_self_mesh_remote_instruct))
         r.add_post("/api/self-mesh/enrollment-invite", self._guarded(self.api_self_mesh_enrollment_invite))
-        r.add_get("/api/self-mesh/enrollment-invite/preview", self._guarded(self.api_self_mesh_enrollment_invite_preview))
-        r.add_post("/api/self-mesh/enrollment-invite/claim", self._guarded(self.api_self_mesh_enrollment_invite_claim))
-        r.add_get("/api/self-mesh/enrollment-invite/qr.svg", self._guarded(self.api_self_mesh_enrollment_invite_qr))
+        r.add_get("/api/self-mesh/enrollment-invite/preview", self._guarded(self.api_self_mesh_enrollment_invite_preview),
+        )
+        r.add_post("/api/self-mesh/enrollment-invite/claim", self._guarded(self.api_self_mesh_enrollment_invite_claim),
+        )
+        r.add_get("/api/self-mesh/enrollment-invite/qr.svg", self._guarded(self.api_self_mesh_enrollment_invite_qr),
+        )
         r.add_get("/api/self-mesh/performance", self._guarded(self.api_self_mesh_performance))
         r.add_get("/api/self-mesh/allowed-roots", self._guarded(self.api_self_mesh_allowed_roots))
         r.add_post("/api/self-mesh/allowed-roots", self._guarded(self.api_set_self_mesh_allowed_roots))
@@ -2538,16 +4265,19 @@ class UIServer:
         r.add_post(r"/api/folders/{name}/reveal", self._guarded(self.api_folder_reveal))
         # v0.21.x file browser — per-file preview / raw stream / reveal
         r.add_get(r"/api/folders/{name}/file/{path:.+}/preview",
-                  self._guarded(self.api_folder_file_preview))
+                  self._guarded(self.api_folder_file_preview),
+        )
         r.add_get(r"/api/folders/{name}/file/{path:.+}/raw",
                   self._guarded(self.api_folder_file_raw))
         r.add_post(r"/api/folders/{name}/file/{path:.+}/reveal",
                    self._guarded(self.api_folder_file_reveal))
         # v0.21.x Ship 5: per-file version history + restore.
         r.add_get(r"/api/folders/{name}/file/{path:.+}/history",
-                  self._guarded(self.api_folder_file_history))
+                  self._guarded(self.api_folder_file_history),
+        )
         r.add_post(r"/api/folders/{name}/file/{path:.+}/restore",
-                   self._guarded(self.api_folder_file_restore))
+                   self._guarded(self.api_folder_file_restore),
+        )
         # v0.21.x Ship 3: blob preview for side-by-side conflict
         # resolution. Content-addressed; hash validation prevents
         # path-traversal abuse.
@@ -2627,7 +4357,10 @@ class UIServer:
         # v0.7.8 key-change events.
         r.add_get("/api/key-change-events", self._guarded(self.api_list_key_change_events))
         r.add_post(r"/api/key-change-events/{event_id}/ack", self._guarded(self.api_ack_key_change_event))
-        r.add_post(r"/api/peers/{fp}/key-change-events/ack-all", self._guarded(self.api_ack_peer_key_change_events))
+        r.add_post(
+            r"/api/peers/{fp}/key-change-events/ack-all",
+            self._guarded(self.api_ack_peer_key_change_events),
+        )
         r.add_get(r"/api/peers/{fp}/key-history", self._guarded(self.api_get_peer_key_history))
         # v0.8.6 trust history (merged audit timeline for one peer).
         r.add_get(r"/api/peers/{fp}/trust-history", self._guarded(self.api_get_peer_trust_history))
@@ -2642,7 +4375,8 @@ class UIServer:
         # v0.8.9 folder-sync conflicts (concurrent divergent edits).
         r.add_get("/api/folder-conflicts", self._guarded(self.api_list_folder_conflicts))
         r.add_post(r"/api/folder-conflicts/{conflict_id}/resolve",
-                   self._guarded(self.api_resolve_folder_conflict))
+                   self._guarded(self.api_resolve_folder_conflict),
+        )
         r.add_get("/api/capability-audit", self._guarded(self.api_capability_audit))
         r.add_get("/api/rendezvous", self._guarded(self.api_get_rendezvous))
         r.add_post("/api/rendezvous", self._guarded(self.api_set_rendezvous))
@@ -2665,6 +4399,10 @@ class UIServer:
         r.add_post(r"/api/groups/{gid}/rename", self._guarded(self.api_rename_group))
         r.add_get(r"/api/groups/{gid}/messages", self._guarded(self.api_group_messages))
         r.add_post(r"/api/groups/{gid}/send", self._guarded(self.api_send_group))
+        r.add_post(
+            r"/api/groups/{gid}/typing",
+            self._guarded(self.api_set_group_typing),
+        )
         r.add_post(
             r"/api/groups/{gid}/messages/{msg_id}/react",
             self._guarded(self.api_react_group_message),
@@ -2771,6 +4509,114 @@ class UIServer:
         r.add_get("/api/events", self._guarded_ws(self.ws_events))
 
     # ─── auth helpers ─────────────────────────────────────────────────
+    @staticmethod
+    def _request_uses_tls(request: web.Request) -> bool:
+        """Prove TLS from the live transport instead of trusting URL metadata.
+
+        aiohttp derives ``request.scheme`` from the transport today, but proxy
+        middleware and cloned requests can override it.  Owner credentials on a
+        LAN must be gated by an actual SSL object, not a client-controlled
+        ``Forwarded``/scheme value.
+        """
+
+        import ssl
+
+        # Request-shaped objects used by recovery tools may have no transport.
+        # Missing live socket evidence is plaintext, never an implicit TLS
+        # success.
+        transport = getattr(request, "transport", None)
+        if transport is None:
+            return False
+        ssl_object = transport.get_extra_info("ssl_object")
+        return isinstance(ssl_object, (ssl.SSLObject, ssl.SSLSocket))
+
+    def _owner_auth_transport_ok(self, request: web.Request) -> bool:
+        """Accept owner credentials only over local HTTP or actual TLS.
+
+        A bearer or persistent session presented by another machine over plain
+        HTTP has already crossed the LAN in cleartext. Reject it regardless of
+        correctness. Public phone-pairing routes retain their independent,
+        short-lived credential model.
+        """
+
+        return self._request_from_loopback(request) or self._request_uses_tls(request)
+
+    @staticmethod
+    def _authorization_bearer(request: web.Request) -> str:
+        """Return one canonical bearer value or ``""`` on ambiguity."""
+
+        headers = request.headers
+        getall = getattr(headers, "getall", None)
+        if callable(getall):
+            values = list(getall("Authorization", []))
+        else:
+            value = headers.get("Authorization")
+            values = [] if value is None else [value]
+        if len(values) != 1:
+            return ""
+        raw = str(values[0])
+        if not raw.startswith("Bearer ") or raw.count(" ") != 1:
+            return ""
+        token = raw[7:]
+        if not 1 <= len(token) <= 256 or not token.isascii():
+            return ""
+        return token
+
+    @staticmethod
+    def _websocket_bearer(request: web.Request) -> str:
+        """Extract a URL-free browser WebSocket bearer subprotocol."""
+
+        if (request.headers.get("Upgrade") or "").strip().lower() != "websocket":
+            return ""
+        raw = request.headers.get("Sec-WebSocket-Protocol") or ""
+        if len(raw) > 1024:
+            return ""
+        found: list[str] = []
+        for item in raw.split(","):
+            protocol = item.strip()
+            if protocol.startswith(OWNER_WS_BEARER_PROTOCOL_PREFIX):
+                found.append(protocol.removeprefix(OWNER_WS_BEARER_PROTOCOL_PREFIX))
+        if len(found) != 1:
+            return ""
+        token = found[0]
+        if not 1 <= len(token) <= 256 or not token.isascii():
+            return ""
+        return token
+
+    def _check_session_token(self, session_token: str) -> bool:
+        """Validate and rate-limit writes for a raw revocable session bearer."""
+
+        if self.daemon is None or self.daemon.state is None:
+            return False
+        state = self.daemon.state
+        if state.ui_session_token_id(session_token) is None:
+            return False
+        try:
+            row = state.lookup_ui_session(session_token)
+            if row is None:
+                return False
+            now_ms = int(time.time() * 1000)
+            created_ms = int(row.get("created_ms") or 0)
+            if created_ms <= 0 or now_ms - created_ms >= SESSION_ABSOLUTE_MAX_AGE_SECONDS * 1000:
+                with contextlib.suppress(Exception):
+                    state.revoke_ui_session(session_token)
+                return False
+            last_seen_ms = int(row.get("last_seen_ms") or 0)
+            if now_ms - last_seen_ms >= SESSION_TOUCH_INTERVAL_MS:
+                return state.touch_ui_session(session_token)
+            return True
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("session touch failed: %s", exc)
+            return False
+
+    def _check_explicit_bearer(self, request: web.Request) -> bool:
+        presented = self._authorization_bearer(request)
+        if not presented:
+            return False
+        return _constant_time_token_equal(presented, self.token) or (
+            self._check_session_token(presented)
+        )
+
     def _check_token(self, request: web.Request) -> bool:
         # Accept token from cookie or Authorization header. Query tokens
         # are intentionally limited to GET / bootstrap in _index so they
@@ -2780,14 +4626,25 @@ class UIServer:
         # extract token bytes one byte at a time. Token is 256 bits +
         # rate-limited at the _guarded layer, so brute-force is already
         # infeasible; this closes the primitive even so.
-        cookie_token = request.cookies.get(COOKIE_NAME, "")
-        if cookie_token and hmac.compare_digest(cookie_token, self.token):
+        if not self._owner_auth_transport_ok(request):
+            return False
+        if self._check_explicit_bearer(request):
             return True
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            presented = auth[7:]
-            if presented and hmac.compare_digest(presented, self.token):
-                return True
+        ws_bearer = self._websocket_bearer(request)
+        if ws_bearer and (
+            _constant_time_token_equal(ws_bearer, self.token)
+            or self._check_session_token(ws_bearer)
+        ):
+            return True
+        # HTTP cookies are host-scoped, not port-scoped. A different local web
+        # server on 127.0.0.1 could receive and replay them, so cookie auth is
+        # accepted only over an actual TLS transport. Plain loopback HTTP uses
+        # an origin-scoped browser bearer attached by fetch/the service worker.
+        if not self._request_uses_tls(request):
+            return False
+        cookie_token = request.cookies.get(COOKIE_NAME, "")
+        if cookie_token and _constant_time_token_equal(cookie_token, self.token):
+            return True
         # v0.21.x persistent session cookie. ol_session carries a uuid
         # that's stored in the ui_sessions table (state.db, survives
         # daemon restarts). When the legacy ol_ui cookie / URL token
@@ -2802,20 +4659,103 @@ class UIServer:
         carries a uuid that's currently active in ui_sessions. Touches
         last_seen_ms as a side effect so we can prune forgotten
         sessions later + show 'last used 3m ago' in the UI."""
-        if self.daemon is None or self.daemon.state is None:
-            return False
         sid = request.cookies.get(SESSION_COOKIE_NAME, "")
-        if not sid or len(sid) < 32:
-            return False
-        # Length-bounded plus alphanumeric — defense in depth against
-        # a corrupted cookie value with weird bytes hitting the SQL.
-        if not all(c in "0123456789abcdefABCDEF" for c in sid):
-            return False
-        try:
-            return self.daemon.state.touch_ui_session(sid)
-        except Exception as e:  # pragma: no cover - defensive
-            log.warning("session touch failed: %s", e)
-            return False
+        return self._check_session_token(sid)
+
+    def _request_ui_session_token(self, request: web.Request) -> str:
+        """Return the caller's active session bearer for session-management UI.
+
+        Plain loopback HTTP presents the origin-scoped session in an
+        Authorization header. HTTPS retains the HttpOnly-cookie compatibility
+        path. The process owner token is never mistaken for a session token.
+        """
+
+        state = getattr(self.daemon, "state", None)
+        if state is None:
+            return ""
+        explicit = self._authorization_bearer(request)
+        if (
+            state.ui_session_token_id(explicit) is not None
+            and state.lookup_ui_session(explicit) is not None
+        ):
+            return explicit
+        if self._request_uses_tls(request):
+            cookie = request.cookies.get(SESSION_COOKIE_NAME, "")
+            if (
+                state.ui_session_token_id(cookie) is not None
+                and state.lookup_ui_session(cookie) is not None
+            ):
+                return cookie
+        return ""
+
+    def _ui_delivery_principal_scope(self, request: web.Request) -> str:
+        """Return the stable authenticated principal for UI idempotency.
+
+        Persistent browser sessions are isolated from each other.  Legacy
+        bearer/cookie authentication is scoped to the persisted UI token.  A
+        direct in-process caller (used by internal tests and embedders) falls
+        back to this daemon identity, never to a process-random value, so a
+        reconstructed ``UIServer`` can still replay its durable result.
+        """
+
+        cookies = getattr(request, "cookies", {}) or {}
+        state = getattr(self.daemon, "state", None)
+        explicit = self._authorization_bearer(request)
+        cookie_owner = ""
+        cookie_session = ""
+        if self._request_uses_tls(request):
+            cookie_owner = str(cookies.get(COOKIE_NAME, "") or "")
+            cookie_session = str(cookies.get(SESSION_COOKIE_NAME, "") or "")
+        presented = (
+            explicit
+            if _constant_time_token_equal(
+                explicit,
+                self.token,
+            )
+            else cookie_owner
+        )
+        token_authenticated = bool(presented and _constant_time_token_equal(presented, self.token))
+        session_token = ""
+        if state is not None and state.ui_session_token_id(explicit) is not None:
+            session_token = explicit
+        elif cookie_session:
+            session_token = cookie_session
+        if state is not None and session_token:
+            try:
+                session_row = state.lookup_ui_session(session_token)
+            except Exception as exc:
+                # Authentication may already have accepted this request through
+                # the session cookie. Falling back to the daemon/token namespace
+                # after a transient state failure would let one browser retry a
+                # delivery under a second idempotency principal.
+                raise UIDeliveryStoreUnavailable(
+                    "authenticated UI session could not be durably scoped"
+                ) from exc
+            if session_row is not None:
+                record_key = state.ui_session_token_id(session_token)
+                if not record_key:
+                    raise UIDeliveryStoreUnavailable(
+                        "authenticated UI session has no durable token identity"
+                    )
+                return f"session:{record_key}"
+            if not token_authenticated:
+                # The guard may have accepted this session immediately before
+                # another tab revoked it.  Falling through to the daemon-wide
+                # embedder scope would move one browser intent into a second
+                # namespace.  A simultaneously valid bearer remains an
+                # explicit, independently authenticated principal.
+                raise UIDeliveryStoreUnavailable("authenticated UI session is no longer active")
+
+        if token_authenticated:
+            digest = hashlib.sha256(
+                b"OL/ui-delivery-principal/v1\0" + presented.encode("utf-8")
+            ).hexdigest()
+            return f"token:{digest}"
+
+        own_fp = str(getattr(getattr(self.daemon, "me", None), "fingerprint", "") or "")
+        if len(own_fp) == 64 and all(c in "0123456789abcdef" for c in own_fp):
+            return f"daemon:{own_fp}"
+        raise UIDeliveryStoreUnavailable("authenticated UI principal could not be durably scoped")
 
     def _client_rate_key(self, request: web.Request) -> str:
         peer = request.transport.get_extra_info("peername") if request.transport else None
@@ -2859,36 +4799,17 @@ class UIServer:
         Bearer and pass; same-origin browser requests carry Origin
         equal to the daemon's bind URL and pass; everything else is
         rejected."""
-        # Bearer tokens can't be auto-attached by a victim's browser
-        # against an attacker page, so their presence is sufficient.
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
+        # A *valid* bearer cannot be auto-attached by an attacker origin.  An
+        # arbitrary ``Authorization: Bearer garbage`` must not let a request
+        # authenticated through a cookie bypass the Origin gate.
+        if self._check_explicit_bearer(request):
             return True
         origin = request.headers.get("Origin") or request.headers.get("Referer") or ""
         if not origin:
             # Same-origin browser POSTs typically include Origin;
             # absence is suspicious. Reject defensively.
             return False
-        # Compare scheme://host:port prefix. self.bind_host /
-        # self.bind_port carry the running daemon's listen address.
-        try:
-            from urllib.parse import urlparse
-            o = urlparse(origin)
-            allowed_hosts = {"127.0.0.1", "localhost", "::1"}
-            # If we're bound to a LAN address, also allow that exact
-            # host. Loopback variants are always allowed.
-            bind_host = getattr(self, "bind_host", None)
-            if bind_host:
-                allowed_hosts.add(bind_host)
-            return (
-                o.hostname in allowed_hosts
-                # Port can be None on Origin if standard; we accept
-                # any port to stay flexible across LAN/loopback bind
-                # changes. The Bearer-token escape hatch above means
-                # the strict-port path is only hit by browsers.
-            )
-        except Exception:
-            return False
+        return self._origin_matches_request(request, origin)
 
     def _guarded(self, handler):
         async def wrap(request: web.Request) -> web.StreamResponse:
@@ -2903,13 +4824,21 @@ class UIServer:
                         status=429,
                     )
                 return web.json_response({"error": "unauthorized"}, status=401)
-            if (
-                request.method in self._CSRF_MUTATING_METHODS
-                and not self._csrf_origin_ok(request)
-            ):
+            if request.method in self._CSRF_MUTATING_METHODS and not self._csrf_origin_ok(request):
                 return web.json_response(
                     {"error": "cross-origin request blocked"},
                     status=403,
+                )
+            if request.method in self._CSRF_MUTATING_METHODS and getattr(
+                self.daemon, "_update_handoff_draining", False
+            ):
+                return web.json_response(
+                    {
+                        "error": "One Link is draining for an authenticated update",
+                        "code": "authenticated_update_handoff",
+                    },
+                    status=503,
+                    headers={"Retry-After": "30"},
                 )
             return await handler(request)
         return wrap
@@ -2926,7 +4855,7 @@ class UIServer:
                         status=429,
                         text="too many authentication attempts",
                     )
-                ws = web.WebSocketResponse()
+                ws = web.WebSocketResponse(protocols=(OWNER_WS_PROTOCOL,))
                 if ws.can_prepare(request).ok:
                     await ws.prepare(request)
                     await ws.close(code=4401, message=b"unauthorized")
@@ -2983,12 +4912,22 @@ class UIServer:
         # must-revalidate, even those paths force a conditional GET
         # that returns 304 for unchanged content and 200 + fresh
         # body when the file changed (every code ship).
-        import hashlib
         etag = '"' + hashlib.sha256(body.encode("utf-8")).hexdigest()[:16] + '"'
+        csp = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
+            "worker-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "connect-src 'self' wss: https:; "
+            "frame-ancestors 'none'; "
+            "object-src 'none'; base-uri 'none'"
+        )
         if request.headers.get("If-None-Match") == etag:
             resp = web.Response(status=304)
             resp.headers["ETag"] = etag
             resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+            resp.headers["Content-Security-Policy"] = csp
             return resp
         resp = web.Response(text=body, content_type="text/html", charset="utf-8")
         # Tight CSP for the peer shell. We allow only same-origin
@@ -2996,14 +4935,7 @@ class UIServer:
         # third-party JS), inline styles (CSS lives in the same
         # document), and connections to wss/https (rendezvous +
         # WebRTC signaling). data: images are needed for QR rendering.
-        resp.headers["Content-Security-Policy"] = (
-            "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: blob:; "
-            "connect-src 'self' wss: https:; "
-            "frame-ancestors 'none'"
-        )
+        resp.headers["Content-Security-Policy"] = csp
         # no-cache forces revalidation; must-revalidate refuses to
         # serve stale from disk on any path. Combined with the
         # content-hash ETag, every code change ships to every browser
@@ -3013,9 +4945,12 @@ class UIServer:
         return resp
 
     async def _dr_module(self, request: web.Request) -> web.StreamResponse:
-        """v0.20.7 (audit H7): JS Double Ratchet module. Standalone
-        ESM file the peer shell imports for forward-secrecy + post-
-        compromise security on the browser-as-peer DataChannel."""
+        """Serve the standalone JS Double Ratchet development primitive.
+
+        The self-test imports this ESM file; the active peer shells do not.
+        Route availability therefore does not establish browser-channel
+        forward secrecy or post-compromise security.
+        """
         p = WEB_DIR / "dr.js"
         if not p.is_file():
             return web.Response(status=404, text="dr.js not bundled")
@@ -3056,6 +4991,98 @@ class UIServer:
         return web.Response(status=404)
 
     # ─── HTML index ───────────────────────────────────────────────────
+    async def _local_instance_proof(self, request: web.Request) -> web.Response:
+        """Prove this loopback HTTP port belongs to the control daemon."""
+
+        if not self._request_from_loopback(request):
+            return web.json_response(
+                {"error": "not found"},
+                status=404,
+                headers={"Cache-Control": "no-store"},
+            )
+        if self._rate_limited(
+            "local_instance_proof",
+            self._client_rate_key(request),
+            limit=120,
+        ):
+            return web.json_response(
+                {"error": "too many requests"},
+                status=429,
+                headers={"Cache-Control": "no-store"},
+            )
+        challenge = str(request.query.get("challenge") or "")
+        secret = getattr(self.daemon, "_control_secret", None)
+        instance_id = str(getattr(self.daemon, "_control_instance_id", "") or "")
+        if not isinstance(secret, str) or not secret or not instance_id or self.port <= 0:
+            return web.json_response(
+                {"error": "not ready"},
+                status=503,
+                headers={"Cache-Control": "no-store"},
+            )
+        build = runtime_build_identity()
+        try:
+            proof = control_ipc.make_ui_instance_proof(
+                secret,
+                challenge=challenge,
+                instance_id=instance_id,
+                pid=os.getpid(),
+                port=self.port,
+                source_fingerprint=build["source_fingerprint"],
+            )
+        except (control_ipc.ControlProtocolError, ValueError, TypeError):
+            return web.json_response(
+                {"error": "invalid challenge"},
+                status=400,
+                headers={"Cache-Control": "no-store"},
+            )
+        return web.json_response(
+            {
+                "ok": True,
+                "daemon_instance_id": instance_id,
+                "pid": os.getpid(),
+                "ui_server_port": self.port,
+                "source_fingerprint": build["source_fingerprint"],
+                "proof": proof,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    def _bootstrap_browser_bearer(
+        self,
+        request: web.Request,
+    ) -> tuple[str, bool, str | None]:
+        """Mint/reuse the least-privileged browser bearer for a valid launch.
+
+        The launcher URL proves possession of the process owner token, but the
+        browser does not retain that high-value token.  When persistent browser
+        sessions are enabled, the page receives a revocable 256-bit session
+        bearer whose database record stores only a domain-separated hash.  In
+        off-grid/no-state modes the owner token remains tab-scoped and is never
+        written to persistent browser storage.
+
+        Returns ``(browser_bearer, persist_in_origin_storage, session_token)``.
+        """
+
+        state = getattr(self.daemon, "state", None)
+        if state is None or not self._is_session_persistence_enabled():
+            return self.token, False, None
+        existing = self._request_ui_session_token(request)
+        if existing and self._check_session_token(existing):
+            return existing, True, existing
+        user_agent = (
+            request.headers.get("User-Agent") if self._is_session_labels_enabled() else None
+        )
+        try:
+            session = state.create_ui_session(
+                user_agent=user_agent,
+                remote=self._client_rate_key(request),
+            )
+            token = str(session["session_uuid"])
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("create_ui_session failed: %s", exc)
+            return self.token, False, None
+        return token, True, token
+
     async def _index(self, request: web.Request) -> web.Response:
         # 2026-05-22 audit O: constant-time compare on the bootstrap
         # token path. The non-bootstrap ``_check_token`` already uses
@@ -3064,56 +5091,55 @@ class UIServer:
         # oracle on the index handler. ``hmac.compare_digest`` accepts
         # ``str`` inputs.
         _q_tok = request.query.get("t") or ""
-        bootstrap_ok = bool(_q_tok) and hmac.compare_digest(_q_tok, self.token)
+        owner_transport_ok = self._owner_auth_transport_ok(request)
+        bootstrap_ok = (
+            owner_transport_ok and bool(_q_tok) and _constant_time_token_equal(_q_tok, self.token)
+        )
         if request.query.get("t") and not bootstrap_ok:
-            # A stale desktop tab commonly keeps an old bootstrap token in
-            # its URL after the daemon restarts. Treat top-level loopback
-            # document navigations as recoverable, but keep API/subresource
-            # requests locked down so the token gate remains meaningful.
-            if not self._is_local_document_navigation(request):
-                # Browser-friendly help instead of plain 'unauthorized'
-                # when this looks at all like a browser navigation
-                # (Accept includes text/html). Strict API callers (no
-                # text/html in Accept) still get the bare 401 text so
-                # automated tools see a clear failure.
-                accept_html = (
-                    "text/html" in (request.headers.get("Accept") or "").lower()
+            # Loopback plus browser-controlled navigation headers do not prove
+            # user identity. A stale bootstrap may recover only when an
+            # independently valid owner/session credential already exists.
+            if self._check_token(request):
+                html = self._stale_session_recovery_page()
+                resp = web.Response(
+                    text=html,
+                    content_type="text/html",
+                    charset="utf-8",
                 )
-                if accept_html:
-                    page = self._auth_failed_help_page(reason="stale_token")
-                    resp = web.Response(text=page, status=401, content_type="text/html", charset="utf-8")
-                    resp.headers["Cache-Control"] = "no-store"
-                    resp.headers["Referrer-Policy"] = "no-referrer"
-                    # v0.21.x: inline script needed for the
-                    # cookie-detect self-heal — strict default-src
-                    # 'none' still blocks every external fetch +
-                    # frame. The script reads only the marker cookie
-                    # (no secret) + does a same-origin location
-                    # replace; no DOM XSS surface.
-                    resp.headers["Content-Security-Policy"] = (
-                        "default-src 'none'; "
-                        "script-src 'unsafe-inline'; "
-                        "style-src 'unsafe-inline'; "
-                        "base-uri 'none'; "
-                        "frame-ancestors 'none'; "
-                        "form-action 'none'"
-                    )
-                    return resp
-                return web.Response(status=401, text="unauthorized")
-            html = self._stale_session_recovery_page()
-            resp = web.Response(text=html, content_type="text/html", charset="utf-8")
-            self._set_ui_cookie(request, resp)
-            resp.headers["Cache-Control"] = "no-store"
-            resp.headers["Referrer-Policy"] = "no-referrer"
-            resp.headers["Content-Security-Policy"] = (
-                "default-src 'none'; "
-                "script-src 'unsafe-inline'; "
-                "style-src 'unsafe-inline'; "
-                "base-uri 'none'; "
-                "frame-ancestors 'none'; "
-                "form-action 'none'"
-            )
-            return resp
+                resp.headers["Cache-Control"] = "no-store"
+                resp.headers["Referrer-Policy"] = "no-referrer"
+                resp.headers["Content-Security-Policy"] = (
+                    "default-src 'none'; "
+                    "script-src 'unsafe-inline'; "
+                    "style-src 'unsafe-inline'; "
+                    "base-uri 'none'; "
+                    "frame-ancestors 'none'; "
+                    "form-action 'none'"
+                )
+                return resp
+            # Browser-friendly help instead of bare text for document
+            # navigation. It never sets an auth/session cookie.
+            accept_html = "text/html" in (request.headers.get("Accept") or "").lower()
+            if accept_html:
+                page = self._auth_failed_help_page(reason="stale_token")
+                resp = web.Response(
+                    text=page,
+                    status=401,
+                    content_type="text/html",
+                    charset="utf-8",
+                )
+                resp.headers["Cache-Control"] = "no-store"
+                resp.headers["Referrer-Policy"] = "no-referrer"
+                resp.headers["Content-Security-Policy"] = (
+                    "default-src 'none'; "
+                    "script-src 'unsafe-inline'; "
+                    "style-src 'unsafe-inline'; "
+                    "base-uri 'none'; "
+                    "frame-ancestors 'none'; "
+                    "form-action 'none'"
+                )
+                return resp
+            return web.Response(status=401, text="unauthorized")
         try:
             html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -3123,10 +5149,24 @@ class UIServer:
                 "__ONE_LINK_SOURCE_FINGERPRINT__",
                 runtime_build_identity()["source_fingerprint"],
             )
+        bootstrap_session_token: str | None = None
         if bootstrap_ok:
+            (
+                browser_bearer,
+                persist_browser_bearer,
+                bootstrap_session_token,
+            ) = self._bootstrap_browser_bearer(request)
+            bearer_json = json.dumps(browser_bearer)
+            persist_json = "true" if persist_browser_bearer else "false"
             scrub = (
                 "<script>"
-                "try{if(location.search){history.replaceState(null,'',location.pathname+location.hash)}}"
+                f"try{{const b={bearer_json};const persist={persist_json};"
+                "sessionStorage.setItem('ol_session_token',b);"
+                "if(persist){localStorage.setItem('ol_persistent_session_token',b)}"
+                "else{localStorage.removeItem('ol_persistent_session_token')}"
+                "const p=new URLSearchParams(location.search||'');p.delete('t');"
+                "const q=p.toString();"
+                "history.replaceState(null,'',location.pathname+(q?'?'+q:'')+location.hash)}"
                 "catch(e){}"
                 "</script>"
             )
@@ -3185,7 +5225,13 @@ class UIServer:
             "base-uri 'self'; "
             "form-action 'none'"
         )
-        if request.headers.get("If-None-Match") == etag:
+        # A bootstrap URL carries an owner bearer and is also the boundary that
+        # mints browser credentials. It must never be satisfied by a cached
+        # 304: that would omit the body scrub and, on some user agents, drop
+        # Set-Cookie processing, leaving a fresh browser in an unauthenticated
+        # retry loop. Authenticated bootstrap responses are therefore always
+        # a full, non-stored 200. Ordinary clean-URL reloads retain ETag/304.
+        if not bootstrap_ok and request.headers.get("If-None-Match") == etag:
             resp = web.Response(status=304)
             resp.headers["ETag"] = etag
             resp.headers["Cache-Control"] = "no-cache, must-revalidate"
@@ -3194,55 +5240,104 @@ class UIServer:
             resp.headers["Content-Security-Policy"] = csp
             return resp
         resp = web.Response(text=html, content_type="text/html", charset="utf-8")
+        if not bootstrap_ok:
+            # The owner UI is a deliberately self-contained HTML application.
+            # Compress clean-URL reloads to avoid retransmitting ~1 MiB over
+            # LAN/mobile links. Bootstrap responses embed a fresh bearer and
+            # remain uncompressed so secrets never share a compression context.
+            resp.enable_compression()
         resp.headers["ETag"] = etag
-        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        resp.headers["Cache-Control"] = "no-store" if bootstrap_ok else "no-cache, must-revalidate"
         resp.headers["Referrer-Policy"] = "no-referrer"
         resp.headers["Content-Security-Policy"] = csp
-        # Desktop/app-mode recovery: a user can reopen One Link from a
-        # cached browser tab, taskbar entry, or our own "fresh" helper
-        # URL without the ``?t=`` bootstrap token. On loopback, a
-        # top-level HTML document navigation is already local to this
-        # machine and cannot expose API data cross-origin (CORS is not
-        # enabled, mutating routes also require same-origin/Bearer CSRF
-        # checks). Refresh the HttpOnly UI cookie here so reopening the
-        # desktop app lands in a usable UI instead of a half-loaded
-        # "Sign-in needed" shell. Keep subresources and LAN-bound UI on
-        # the stricter token path.
-        local_document_reopen = (
-            not request.query.get("t")
-            and not hmac.compare_digest(
+        if not self._request_uses_tls(request):
+            # Migration cleanup: historical releases planted host-wide bearer
+            # cookies on plaintext loopback. Expire them on the first page load
+            # after upgrade; auth above never trusts them on HTTP.
+            resp.del_cookie(COOKIE_NAME, path="/")
+            resp.del_cookie(SESSION_COOKIE_NAME, path="/")
+            resp.del_cookie(SESSION_PRESENT_MARKER_COOKIE, path="/")
+        elif owner_transport_ok and (
+            bootstrap_ok
+            or _constant_time_token_equal(
                 request.cookies.get(COOKIE_NAME, ""),
                 self.token,
             )
-            and self._is_local_document_navigation(request)
-        )
-        if (
-            bootstrap_ok
-            or request.cookies.get(COOKIE_NAME) == self.token
-            or local_document_reopen
         ):
-            self._set_ui_cookie(request, resp)
+            self._set_ui_cookie(request, resp,
+                session_token=bootstrap_session_token,
+            )
         return resp
 
-    def _is_local_document_navigation(self, request: web.Request) -> bool:
-        # v0.21.x: trust either bind config (existing) OR request
-        # source IP. A LAN-bound daemon must still recover for tabs
-        # opened on the same machine — those are loopback-sourced
-        # even when the listener is 0.0.0.0. See _request_from_loopback
-        # for the local-process-trust justification.
-        loopback_listener = (
-            self._is_loopback_bound() and self._accept_request_host(request)
-        )
-        loopback_source = self._request_from_loopback(request)
-        if not (loopback_listener or loopback_source):
-            return False
-        dest = (request.headers.get("Sec-Fetch-Dest") or "").lower()
-        if dest:
-            return dest == "document"
-        accept = (request.headers.get("Accept") or "").lower()
-        return "text/html" in accept
+    async def _browser_crypto_asset(
+        self,
+        request: web.Request,
+        *,
+        filename: str,
+        content_type: str,
+    ) -> web.StreamResponse:
+        """Serve an exact first-party browser-crypto artifact fail closed.
 
-    def _set_ui_cookie(self, request: web.Request, resp: web.Response) -> None:
+        These public files contain no user data.  They are kept on
+        dedicated routes so browsers cannot reuse the generic static asset
+        cache across a worker/WASM ABI or digest change.
+        """
+        del request
+        allowed = {
+            "argon2id-worker.js": ("application/javascript", 256 * 1024),
+            "argon2id-v1.wasm": ("application/wasm", 128 * 1024),
+            "ed25519-v1.wasm": ("application/wasm", 256 * 1024),
+        }
+        expected = allowed.get(filename)
+        if expected is None or expected[0] != content_type:
+            return web.Response(status=404, text="browser crypto asset not found")
+        asset = WEB_DIR / "assets" / filename
+        try:
+            resolved = asset.resolve(strict=True)
+            assets_root = (WEB_DIR / "assets").resolve(strict=True)
+            if resolved.parent != assets_root or not resolved.is_file():
+                raise FileNotFoundError(filename)
+            size = resolved.stat().st_size
+            if size <= 0 or size > expected[1]:
+                raise ValueError("browser crypto asset size is outside its contract")
+            body = resolved.read_bytes()
+            if len(body) != size:
+                raise OSError("browser crypto asset changed while being read")
+        except (FileNotFoundError, OSError, ValueError):
+            return web.Response(status=404, text="browser crypto asset not bundled")
+
+        digest = hashlib.sha256(body).hexdigest()
+        response = web.Response(body=body, content_type=content_type)
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["ETag"] = f'"sha256-{digest}"'
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        return response
+
+    async def _browser_argon2_worker(self, request: web.Request) -> web.StreamResponse:
+        return await self._browser_crypto_asset(request,
+            filename="argon2id-worker.js",
+            content_type="application/javascript",
+        )
+
+    async def _browser_argon2_wasm(self, request: web.Request) -> web.StreamResponse:
+        return await self._browser_crypto_asset(request,
+            filename="argon2id-v1.wasm",
+            content_type="application/wasm",
+        )
+
+    async def _browser_ed25519_wasm(self, request: web.Request) -> web.StreamResponse:
+        return await self._browser_crypto_asset(
+            request,
+            filename="ed25519-v1.wasm",
+            content_type="application/wasm",
+        )
+
+    def _set_ui_cookie(self, request: web.Request, resp: web.Response,
+        *,
+        session_token: str | None = None,
+    ) -> None:
         # v0.20.7 (security audit M13): mark Secure when this very
         # request was served over HTTPS so the cookie can never be
         # echoed back over plain HTTP. We can't unconditionally set
@@ -3251,13 +5346,14 @@ class UIServer:
         # response makes the browser drop the cookie. Tying it to
         # request.scheme keeps loopback working while making LAN-HTTPS
         # leak-proof.
-        secure = (request.scheme == "https")
+        if not self._owner_auth_transport_ok(request) or not self._request_uses_tls(request):
+            return
         resp.set_cookie(
             COOKIE_NAME,
             self.token,
             httponly=True,
             samesite="Strict",
-            secure=secure,
+            secure=True,
             max_age=86400,
             path="/",
         )
@@ -3275,36 +5371,18 @@ class UIServer:
             and self.daemon.state is not None
             and self._is_session_persistence_enabled()
         ):
-            existing = request.cookies.get(SESSION_COOKIE_NAME, "")
-            session_uuid: Optional[str] = None
-            if existing and len(existing) >= 32:
-                try:
-                    if self.daemon.state.touch_ui_session(existing):
-                        session_uuid = existing
-                except Exception:  # pragma: no cover - defensive
-                    pass
-            if session_uuid is None:
-                # Pass UA only when the labels toggle is on.
-                ua = (
-                    request.headers.get("User-Agent")
-                    if self._is_session_labels_enabled() else None
-                )
-                try:
-                    sess = self.daemon.state.create_ui_session(
-                        user_agent=ua,
-                        remote=self._client_rate_key(request),
-                    )
-                    session_uuid = sess["session_uuid"]
-                except Exception as e:  # pragma: no cover - defensive
-                    log.warning("create_ui_session failed: %s", e)
-                    session_uuid = None
+            session_uuid: str | None = (
+                session_token or self._request_ui_session_token(request) or None
+            )
+            if not session_uuid:
+                _bearer, _persist, session_uuid = self._bootstrap_browser_bearer(request)
             if session_uuid:
                 resp.set_cookie(
                     SESSION_COOKIE_NAME,
                     session_uuid,
                     httponly=True,
                     samesite="Strict",
-                    secure=secure,
+                    secure=True,
                     max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
                     path="/",
                 )
@@ -3318,16 +5396,16 @@ class UIServer:
                     "1",
                     httponly=False,
                     samesite="Strict",
-                    secure=secure,
+                    secure=True,
                     max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
                     path="/",
                 )
 
     def _is_session_persistence_enabled(self) -> bool:
         """v0.21.x: resolved through the sovereignty preset layer.
-        Explicit user setting (Privacy panel feature row) overrides
-        the preset; otherwise the active preset's default applies.
-        just_works + quiet → ON; off_grid → OFF."""
+        A user setting may turn a permitted feature off but cannot loosen the
+        preset ceiling. just_works + quiet → permitted; off_grid → forbidden.
+        """
         if self.daemon is None or self.daemon.state is None:
             return True  # in-memory daemons (tests) default-on
         from one_link.sovereignty import (
@@ -3484,7 +5562,15 @@ class UIServer:
     def _connect_info(self) -> dict:
         """Return the dict the connect-info endpoint serializes. Pulled
         out so the QR endpoint can reuse the same URL string and not
-        diverge on a refactor."""
+        diverge on a refactor.
+
+        This is a legacy compatibility surface.  It may expose the owner token
+        only in a loopback URL.  A LAN-bound daemon must never encode that
+        bearer into an HTTP URL/QR: even though the destination now rejects
+        owner authentication over remote plaintext, the request itself would
+        already have disclosed the credential on the network.  Current device
+        onboarding uses the short-lived setup-invite endpoints instead.
+        """
         lan_ip = _detect_lan_ip()
         # If the daemon's loopback-bound, the LAN URL we'd encode
         # would be useless on a phone (127.0.0.1 from a phone hits
@@ -3494,28 +5580,33 @@ class UIServer:
             and lan_ip != "127.0.0.1"
         )
         host_for_url = lan_ip if lan_bound else "127.0.0.1"
-        url = f"http://{host_for_url}:{self.port}/?t={self.token}"
+        if lan_bound:
+            url = f"http://{host_for_url}:{self.port}/connect"
+            exported_token: str | None = None
+        else:
+            url = f"http://{host_for_url}:{self.port}/?t={self.token}"
+            exported_token = self.token
         return {
             "lan_ip": lan_ip,
             "port": self.port,
-            "token": self.token,
+            "token": exported_token,
             "bind_host": self.bind_host,
             "lan_bound": lan_bound,
             "lan_url": url,
+            "requires_short_lived_invite": lan_bound,
         }
 
     async def api_connect_info(self, request: web.Request) -> web.Response:
-        """v0.15.4: returns the URL + token + LAN binding state so the
-        UI can render the "connect another device" affordance. Auth
-        gated — this exposes the token; only the already-authenticated
-        UI should see it."""
+        """Return legacy connection metadata without exporting LAN credentials.
+
+        The endpoint remains owner-auth gated for compatibility.  In LAN mode
+        it deliberately omits the owner token and directs callers to mint a
+        short-lived device invite through ``/api/setup/device-invite``.
+        """
         return web.json_response(self._connect_info())
 
     async def api_connect_info_qr(self, request: web.Request) -> web.Response:
-        """v0.15.4: returns an SVG QR code encoding the LAN URL. Auth
-        gated for the same reason as the JSON variant. SVG is chosen
-        over PNG because it scales crisply on phone retina displays
-        and doesn't need Pillow."""
+        """Return only safe legacy QR data; never encode an owner LAN bearer."""
         info = self._connect_info()
         if not info["lan_bound"]:
             # Don't render a QR for the loopback URL; it's useless on
@@ -3531,6 +5622,18 @@ class UIServer:
                     ),
                 },
                 status=409,
+            )
+        if info["requires_short_lived_invite"]:
+            return web.json_response(
+                {
+                    "error": "short_lived_invite_required",
+                    "hint": (
+                        "Mint a short-lived device invite from the Pair a phone "
+                        "surface; owner credentials are never placed in LAN HTTP URLs."
+                    ),
+                },
+                status=409,
+                headers={"Cache-Control": "no-store"},
             )
         try:
             import qrcode  # types-qrcode stub package supplies the type info
@@ -3555,9 +5658,13 @@ class UIServer:
 
     # ─── /api/v1/peer-rtc — browser-as-peer WebRTC signaling + pair ──
     async def api_mint_pairing(self, request: web.Request) -> web.Response:
-        """v0.20.1: mint a fresh single-use pairing token + return
-        the laptop's connection info. The desktop UI will encode
-        this into a QR for the user to scan with their phone.
+        """Mint a handoff for one already-enrolled browser device.
+
+        The historical endpoint minted an unbound owner bearer.  Those peers
+        had no persistent authorization row and therefore could not be revoked.
+        New-device enrollment belongs to the setup-device invite + SAS
+        ceremony; this compatibility endpoint only reconnects an existing,
+        trusted self-mesh device key.
 
         Returns: {token, ttl_ms, lan_url, daemon_pubkey_b64u,
                   daemon_fingerprint, ws_signaling_url}
@@ -3567,7 +5674,30 @@ class UIServer:
         pairing token + daemon fingerprint embedded as query
         params (so the QR is one-scan magic)."""
         from one_link.peer_rtc import _b64u as _peer_b64u
-        pp = self.peer_rtc.mint_pairing_token()
+
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("request body must be an object")
+            device_pub = decode_b64u_strict(
+                body.get("device_pub_b64"),
+                field="device_pub_b64",
+                exact_bytes=32,
+                max_bytes=32,
+            )
+            pp = self.peer_rtc.mint_pairing_token(device_pub=device_pub)
+        except (ValueError, PermissionError) as exc:
+            return web.json_response(
+                {
+                    "error": "rostered_device_required",
+                    "hint": (
+                        "Use Add a phone or laptop for a new device; this "
+                        f"handoff only accepts a currently trusted device key ({exc})."
+                    ),
+                },
+                status=409,
+                headers={"Cache-Control": "no-store"},
+            )
         # Daemon's own identity surface for the browser to pin.
         daemon_pub = self.daemon.me.public_bytes
         daemon_pub_b64u = _peer_b64u(daemon_pub)
@@ -3604,10 +5734,7 @@ class UIServer:
             ws_scheme = "ws"
             ws_port = self.port
         ws_url = f"{ws_scheme}://{host}:{ws_port}/api/v1/peer-rtc"
-        lan_url = (
-            f"{base}/peer?pair={pp.token}&fp={daemon_fp}"
-            f"&ws={ws_url}"
-        )
+        lan_url = f"{base}/peer?pair={pp.token}&fp={daemon_fp}&ws={ws_url}"
         if self.https_cert_fp_sha256:
             # Embed the cert fingerprint so a future-ship phone-side
             # check can verify "this is the same cert my laptop
@@ -3627,8 +5754,8 @@ class UIServer:
             # v0.20.6 — iOS users need to install a Configuration
             # Profile FIRST so iOS trusts the self-signed cert.
             # We give the desktop UI two URLs to render as separate
-            # QRs: one for the profile install (HTTP, always works),
-            # one for the actual pair flow (HTTPS, only works after
+                # QRs: one for the profile-install attempt over HTTP,
+                # one for the actual pair flow (HTTPS, only works after
             # profile is installed + trust toggled).
             "ios_profile_url": (
                 f"http://{host}:{self.port}/api/v1/peer-rtc/profile.mobileconfig"
@@ -3638,11 +5765,11 @@ class UIServer:
     def _resolved_stun_servers(self) -> list[str]:
         """Resolve STUN servers through the sovereignty preset layer.
 
-        Read order:
-          1. Explicit ``state.settings.stun_servers`` (empty string =
-             explicit opt-out of even the preset default).
-          2. Env var ``ONE_LINK_STUN_SERVERS`` (same shape).
-          3. The active preset's default list.
+        The active preset is a hard ceiling: Quiet and Off-grid always
+        resolve to an empty list.  When Just Works permits STUN, an explicit
+        ``state.settings.stun_servers`` value (or, secondarily, the
+        ``ONE_LINK_STUN_SERVERS`` environment value) may replace or empty the
+        preset default, but can never loosen a restrictive preset.
 
         Returns the list. WebRTC degrades to host-only ICE
         (LAN-only pairing) when this is empty.
@@ -3657,14 +5784,25 @@ class UIServer:
                 raw = self.daemon.state.get_setting("stun_servers")
                 if raw is not None:
                     state_setting = raw
-            except Exception:
-                pass
+            except Exception as exc:
+                # A failed sovereignty preference read must not fall through
+                # to a preset that contacts third-party STUN servers. Host-
+                # only ICE is slower but preserves the user's privacy choice.
+                log.warning(
+                    "STUN disabled because local sovereignty settings could not be read: %s",
+                    exc,
+                )
+                return []
             try:
                 preset_name = self.daemon.state.get_setting(
                     "sovereignty_preset"
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning(
+                    "STUN disabled because the sovereignty preset could not be read: %s",
+                    exc,
+                )
+                return []
         env_val = os.environ.get("ONE_LINK_STUN_SERVERS")
         return list(_sov.resolve_stun_servers(
             state_setting=state_setting,
@@ -3741,18 +5879,20 @@ class UIServer:
         except ValueError:
             ttl_s = 3600
 
-        urls: list[str] = []
-        seen: set[str] = set()
-        for u in str(raw_urls or "").split(","):
-            u = u.strip()
-            if not u or u in seen:
-                continue
-            if not (u.lower().startswith("turn:") or u.lower().startswith("turns:")):
-                continue
-            urls.append(u)
-            seen.add(u)
+        urls = list(
+            _sov.parse_ice_server_list(
+                str(raw_urls or ""),
+                allowed_schemes={"turn", "turns"},
+            )
+        )
         username = (username or "").strip()
         credential = (credential or "").strip()
+        if len(username) > 512:
+            username = ""
+        if len(credential) > 2048:
+            credential = ""
+        if shared_secret is not None and len(str(shared_secret)) > 4096:
+            shared_secret = None
         credential_type = "password" if credential else ""
         issued_at_s = int(time.time())
         expires_at_s = None
@@ -3822,13 +5962,24 @@ class UIServer:
                     found = fn(url)
                     if isinstance(found, dict):
                         return found
-            except Exception:
-                pass
+            except Exception as metrics_exc:
+                report_best_effort_failure(
+                    log,
+                    "relay_metrics_lookup",
+                    metrics_exc,
+                    level=logging.DEBUG,
+                )
             try:
                 store = getattr(self.daemon, "_relay_metrics", None)
                 found = store.get(url) if isinstance(store, dict) else None
                 return found if isinstance(found, dict) else None
-            except Exception:
+            except Exception as store_exc:
+                report_best_effort_failure(
+                    log,
+                    "relay_metrics_store_lookup",
+                    store_exc,
+                    level=logging.DEBUG,
+                )
                 return None
 
         out: list[dict] = []
@@ -3874,9 +6025,13 @@ class UIServer:
 
     @staticmethod
     def _parse_turn_probe_target(url: str) -> dict | None:
-        text = str(url or "").strip()
-        lower = text.lower()
-        if not (lower.startswith("turn:") or lower.startswith("turns:")):
+        from one_link import sovereignty as _sov
+
+        text = _sov.canonicalize_ice_server_url(
+            str(url or ""),
+            allowed_schemes=frozenset({"turn", "turns"}),
+        )
+        if text is None:
             return None
         scheme, rest = text.split(":", 1)
         rest = rest.lstrip("/")
@@ -3963,8 +6118,8 @@ class UIServer:
             if callable(fn):
                 fn(url, rtt_ms=rtt_ms, success=bool(result.get("ok")))
                 return
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("relay probe observation failed for %s: %s", url, exc)
         store = getattr(self.daemon, "_relay_metrics", None)
         if isinstance(store, dict):
             now_ms = int(time.time() * 1000)
@@ -3999,6 +6154,30 @@ class UIServer:
                 entry["credentialType"] = "password"
             servers.append(entry)
         return servers
+
+    def _with_local_stun_for_request(
+        self,
+        request: web.Request,
+        servers: list[dict],
+    ) -> tuple[list[dict], bool, list[str]]:
+        """Prepend the same-device/LAN STUN assist when it is in scope.
+
+        The local responder is not a sovereignty escape hatch: it is hosted
+        by this daemon, returns only the address already visible to this
+        daemon, never relays bytes, and refuses non-local request sources.
+        Configured public STUN/TURN entries retain their existing policy.
+        """
+
+        service = self._local_stun
+        if service is None or not service.running:
+            return list(servers), False, []
+        url = service.url_for_request(request)
+        candidate_addresses = service.candidate_addresses_for_request(request)
+        if url is None:
+            return list(servers), False, []
+        if any(entry.get("urls") == url for entry in servers if isinstance(entry, dict)):
+            return list(servers), True, candidate_addresses
+        return [{"urls": url}, *servers], True, candidate_addresses
 
     def _resolved_webrtc_route_policy(self, *, call_id: str | None = None) -> dict:
         turn = self._resolved_turn_config(call_id=call_id)
@@ -4085,12 +6264,7 @@ class UIServer:
                 rec = self.daemon.state.get_peer(peer_fp) if self.daemon.state is not None else None
                 if rec is None or getattr(rec, "trust", None) != "pinned":
                     continue
-                display = (
-                    rec.local_alias
-                    or rec.display_name
-                    or rec.hostname
-                    or peer_fp[:8]
-                )
+                display = rec.local_alias or rec.display_name or rec.hostname or peer_fp[:8]
             except Exception:
                 display = peer_fp[:8]
             per_peer.append({"peer": display, "version": ver})
@@ -4106,10 +6280,7 @@ class UIServer:
             if compare_versions(newest_ver, v) == "newer":
                 newest_ver, newest_peer = v, entry["peer"]
 
-        newer = (
-            newest_ver is not None
-            and compare_versions(_local_ver, newest_ver) == "newer"
-        )
+        newer = newest_ver is not None and compare_versions(_local_ver, newest_ver) == "newer"
 
         return {
             "newer_available": bool(newer),
@@ -4124,11 +6295,11 @@ class UIServer:
     ) -> web.Response:
         """Return the live sovereignty configuration:
 
-          - active preset name + label + description
-          - per-feature resolved state (update_check, stun_servers,
-            mdns, rendezvous), with the source of each value
-            (preset / setting / env var)
-          - outbound-log session start time + total entries
+        - active preset name + label + description
+        - per-feature resolved state (update_check, stun_servers,
+          mdns, rendezvous), with the source of each value
+          (preset / setting / env var)
+        - outbound-log session start time + total entries
         """
         from one_link import sovereignty as _sov
 
@@ -4138,14 +6309,24 @@ class UIServer:
         preset = _sov.get_preset(preset_name)
 
         # Resolved values + their source.
-        def _source(setting_key: str, env_key: str | None = None) -> str:
+        def _source(setting_key: str, env_key: str | None = None,
+            *,
+            preset_permits: bool = True,
+        ) -> str:
+            if not preset_permits:
+                return "preset"
             if self.daemon and self.daemon.state is not None:
                 try:
                     raw = self.daemon.state.get_setting(setting_key)
                     if raw is not None and str(raw).strip() != "":
                         return "setting"
-                except Exception:
-                    pass
+                except Exception as source_exc:
+                    report_best_effort_failure(
+                        log,
+                        "sovereignty_setting_source",
+                        source_exc,
+                        level=logging.DEBUG,
+                    )
             if env_key and os.environ.get(env_key, "").strip():
                 return "env"
             return "preset"
@@ -4162,6 +6343,29 @@ class UIServer:
             env_var=os.environ.get("ONE_LINK_UPDATE_CHECK"),
             preset_name=preset_name,
         )
+
+        # A preset's rendezvous/TURN booleans are policy permits, not
+        # infrastructure. Report configuration and runtime activation
+        # separately so the Privacy panel cannot turn a stock Just Works
+        # permit into a false "cross-network ready" claim.
+        rendezvous_setting = None
+        rendezvous_urls: list[str] = []
+        if self.daemon and self.daemon.state is not None:
+            with contextlib.suppress(Exception):
+                rendezvous_setting = self.daemon.state.get_setting("rendezvous_enabled")
+            with contextlib.suppress(Exception):
+                rendezvous_urls = list(self.daemon.state.get_rendezvous_urls() or [])
+        rendezvous_policy_on = _sov.resolve_rendezvous_enabled(
+            state_setting=rendezvous_setting,
+            preset_name=preset_name,
+        )
+        rendezvous_active = bool(
+            rendezvous_policy_on
+            and rendezvous_urls
+            and getattr(self.daemon, "rendezvous", None) is not None
+        )
+        turn_config = self._resolved_turn_config()
+        turn_urls = list(turn_config.get("urls") or [])
 
         outbound_log = list(getattr(self.daemon, "_outbound_log", []) or [])
         outbound_started_ms = int(getattr(
@@ -4189,30 +6393,31 @@ class UIServer:
                     "enabled": update_check_on,
                     "source": _source(
                         "update_check_enabled", "ONE_LINK_UPDATE_CHECK",
-                    ),
+                            preset_permits=preset.update_check_enabled,
+                        ),
                 },
                 "stun_servers": {
                     "list": self._resolved_stun_servers(),
                     "source": _source(
                         "stun_servers", "ONE_LINK_STUN_SERVERS",
-                    ),
+                            preset_permits=bool(preset.stun_servers),
+                        ),
                 },
                 "turn_relay": {
-                    "enabled": bool(self._resolved_turn_config().get("urls")),
-                    "urls": list(self._resolved_turn_config().get("urls") or []),
+                    "enabled": bool(turn_urls),
+                        "configured": bool(turn_urls),
+                    "urls": turn_urls,
                     "source": _source(
                         "turn_servers", "ONE_LINK_TURN_SERVERS",
-                    ),
-                    "credential_configured": bool(
-                        self._resolved_turn_config().get("credential")
+                            preset_permits=preset.turn_relay_enabled,
+                        ),
+                    "credential_configured": bool(turn_config.get("credential")
                     ),
                 },
-                # v0.21.x: these were previously read directly off
-                # the preset dataclass (no resolver, no setting
-                # override). Now they go through the resolvers so
-                # the user's per-feature override wins + the source
-                # field tells the user WHY a thing is on/off.
-                "mdns_discovery": {
+                    # Resolvers enforce the preset ceiling, then allow a setting
+                    # to make the feature stricter. The source remains useful for
+                    # explaining a user-requested opt-out.
+                    "mdns_discovery": {
                     "enabled": _sov.resolve_mdns_discovery_enabled(
                         state_setting=(
                             self.daemon.state.get_setting(
@@ -4221,18 +6426,20 @@ class UIServer:
                         ),
                         preset_name=preset_name,
                     ),
-                    "source": _source("mdns_discovery_enabled"),
+                    "source": _source("mdns_discovery_enabled",
+                            preset_permits=preset.mdns_discovery_enabled,
+                        ),
                 },
                 "rendezvous": {
-                    "enabled": _sov.resolve_rendezvous_enabled(
-                        state_setting=(
-                            self.daemon.state.get_setting(
-                                "rendezvous_enabled",
-                            ) if self.daemon and self.daemon.state else None
+                        # ``enabled`` retains the public policy-gate field for
+                        # compatibility. Only ``active`` is runtime readiness.
+                        "enabled": rendezvous_policy_on,
+                        "configured": bool(rendezvous_urls),
+                        "configured_url_count": len(rendezvous_urls),
+                        "active": rendezvous_active,
+                        "source": _source("rendezvous_enabled",
+                            preset_permits=preset.rendezvous_enabled,
                         ),
-                        preset_name=preset_name,
-                    ),
-                    "source": _source("rendezvous_enabled"),
                 },
                 "turn_relay_preset": {
                     "enabled": _sov.resolve_turn_relay_enabled(
@@ -4243,7 +6450,9 @@ class UIServer:
                         ),
                         preset_name=preset_name,
                     ),
-                    "source": _source("turn_relay_enabled"),
+                    "source": _source("turn_relay_enabled",
+                            preset_permits=preset.turn_relay_enabled,
+                        ),
                 },
                 "inherit_rendezvous_from_mdns": {
                     "enabled":
@@ -4255,19 +6464,22 @@ class UIServer:
                             ),
                             preset_name=preset_name,
                         ),
-                    "source": _source("inherit_rendezvous_from_mdns_preset"),
+                    "source": _source("inherit_rendezvous_from_mdns_preset",
+                            preset_permits=(preset.inherit_rendezvous_from_mdns_enabled),
+                        ),
                 },
-                # v0.21.x persistent UI sessions. Resolver consults
-                # explicit setting > preset default; the source
-                # field surfaces which one won so the user sees
-                # WHY a thing is on or off.
-                "ui_session_persistence": {
+                    # Persistent UI sessions use the same ceiling semantics.
+                    "ui_session_persistence": {
                     "enabled": self._is_session_persistence_enabled(),
-                    "source": _source(SESSION_PERSISTENCE_SETTING),
+                    "source": _source(SESSION_PERSISTENCE_SETTING,
+                            preset_permits=preset.ui_session_persistence_enabled,
+                        ),
                 },
                 "ui_session_labels": {
                     "enabled": self._is_session_labels_enabled(),
-                    "source": _source(SESSION_LABELS_SETTING),
+                    "source": _source(SESSION_LABELS_SETTING,
+                            preset_permits=preset.ui_session_labels_enabled,
+                        ),
                 },
             },
             "outbound": {
@@ -4319,9 +6531,7 @@ class UIServer:
         self, request: web.Request,
     ) -> web.Response:
         """POST { "name": "just_works" | "quiet" | "off_grid" }
-        — flip the active preset. Stored in
-        state.settings.sovereignty_preset. Restart not required —
-        subsystems re-read the value at runtime."""
+        — atomically converge the running daemon and persist the preset."""
         from one_link import sovereignty as _sov
 
         try:
@@ -4343,20 +6553,34 @@ class UIServer:
             return web.json_response(
                 {"error": "state not available"}, status=503,
             )
+        apply = getattr(self.daemon, "apply_sovereignty_preset", None)
+        if not callable(apply):
+            return web.json_response(
+                {"error": "live sovereignty transition is unavailable"},
+                status=503,
+            )
         try:
-            self.daemon.state.set_setting("sovereignty_preset", name)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
-        return web.json_response({
-            "ok": True,
-            "preset": name,
-        })
+            result = await apply(name)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except Exception as exc:
+            log.exception("live sovereignty transition failed")
+            return web.json_response(
+                {
+                    "error": "live sovereignty transition failed",
+                    "detail": str(exc)[:512],
+                },
+                status=503,
+            )
+        return web.json_response(result)
 
     async def api_sovereignty_outbound_log(
         self, request: web.Request,
     ) -> web.Response:
-        """Return the recent outbound-call audit log. The Privacy
-        panel uses this to surface "what is this device talking to."
+        """Return the recent instrumented outbound-event log.
+
+        This in-memory log is a best-effort diagnostic subset, not a socket
+        monitor or proof that no other process/library/OS traffic occurred.
 
         Query param ``limit=<N>`` caps the response size (default 50,
         max 200 — same as the daemon's ring-buffer cap)."""
@@ -4376,19 +6600,18 @@ class UIServer:
             "session_started_ms": int(
                 getattr(self.daemon, "_outbound_log_started_ms", 0) or 0
             ),
-            "promise": (
-                "If this list is empty, your device has made no "
-                "connections outside your local Wi-Fi since it "
-                "started. We track this in memory as the connections "
-                "happen, so this isn't a marketing claim."
-            ),
-        })
+                "scope": (
+                    "Best-effort instrumented daemon events only; an empty list "
+                    "does not prove that no outside connection occurred."
+                ),
+                "complete_network_monitor": False,
+            })
 
     # ── Multi-modal LAN discovery (May 16 2026) ──────────────────
     #
-    # The user said "we need to make this extremely smart" — find
-    # every device on the local network, identify it, and offer to
-    # invite it whether or not it has One Link.
+    # Fuse bounded local discovery signals into best-effort device candidates;
+    # isolation, permissions, sleeping/non-advertising hosts, and heuristic
+    # identification mean this cannot enumerate or identify every LAN device.
     #
     # Three sections returned:
     #   ready_to_pair  — already running One Link (existing mDNS hit)
@@ -4400,10 +6623,45 @@ class UIServer:
     # Plus a network_health block that tells the user *why* a scan
     # might be empty (AP isolation, captive portal, etc.).
 
+    def _active_lan_discovery_allowed(self) -> bool:
+        policy = getattr(self.daemon, "lan_discovery_policy_enabled", None)
+        if callable(policy):
+            try:
+                return bool(policy())
+            except Exception:
+                return False
+        from one_link import sovereignty as _sov
+
+        state = getattr(self.daemon, "state", None)
+        setting: str | None = None
+        preset = _sov.current_preset_name(state)
+        if state is not None:
+            try:
+                setting = state.get_setting("mdns_discovery_enabled")
+            except Exception:
+                return False
+        return _sov.resolve_mdns_discovery_enabled(
+            state_setting=setting,
+            preset_name=preset,
+        )
+
+    @staticmethod
+    def _lan_discovery_denied_response() -> web.Response:
+        return web.json_response(
+            {
+                "error": "active LAN discovery is disabled by sovereignty policy",
+                "code": "lan_discovery_disabled",
+            },
+            status=403,
+        )
+
     async def api_discover_all(
         self, request: web.Request,
     ) -> web.Response:
         from one_link import lan_discovery as _lan
+
+        if not self._active_lan_discovery_allowed():
+            return self._lan_discovery_denied_response()
         # Pull our existing One-Link-specific peer list so we can
         # cross-flag discovered devices as already-paired.
         one_link_peers: list[dict] = []
@@ -4415,8 +6673,8 @@ class UIServer:
                         "short_id": p.short_id,
                         "hostname": p.hostname,
                     })
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("discover-all peer registry snapshot failed: %s", exc)
         timeout_s = 6.0
         try:
             timeout_s = max(2.0, min(15.0, float(
@@ -4424,9 +6682,21 @@ class UIServer:
             )))
         except ValueError:
             timeout_s = 6.0
-        devices = await _lan.full_scan(
-            timeout_s=timeout_s, one_link_peers=one_link_peers,
-        )
+        lock_factory = getattr(self.daemon, "get_lan_discovery_network_lock", None)
+        if callable(lock_factory):
+            async with lock_factory():
+                # Close the check/use race with a concurrent Off-grid switch.
+                if not self._active_lan_discovery_allowed():
+                    return self._lan_discovery_denied_response()
+                devices = await _lan.full_scan(
+                    timeout_s=timeout_s,
+                    one_link_peers=one_link_peers,
+                )
+        else:
+            devices = await _lan.full_scan(
+                timeout_s=timeout_s,
+                one_link_peers=one_link_peers,
+            )
         # Backstop: if a fresh scan returned NOTHING (AP isolation
         # flipped on, captive portal, scanner failure) re-surface
         # what we've seen in the last 24h from the persistent
@@ -4478,25 +6748,43 @@ class UIServer:
         })
 
     # In-memory invite store. Maps short_code -> {created_ms,
-    # expires_ms, target_label}. Restart wipes (intentional — the
-    # invite is one-shot + ephemeral).
-    _invite_store: dict[str, dict] = {}
+    # expires_ms, target_label}. Restart wipes it intentionally.
     _INVITE_TTL_MS = 5 * 60 * 1000   # 5 minutes
     _INVITE_CODE_LEN = 6
+    _INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+    def _valid_discover_invite_code(self, value: object) -> str:
+        if not isinstance(value, str):
+            return ""
+        code = value.strip().upper()
+        if len(code) not in {self._INVITE_CODE_LEN, self._INVITE_CODE_LEN + 2}:
+            return ""
+        if any(ch not in self._INVITE_ALPHABET for ch in code):
+            return ""
+        return code
+
+    def _prune_discover_invites(self, now_ms: int) -> None:
+        for code, entry in list(self._invite_store.items()):
+            if int(entry.get("expires_ms", 0)) < now_ms:
+                self._invite_store.pop(code, None)
 
     def _mint_invite_code(self) -> str:
         import secrets
-        import string
-        alphabet = string.ascii_uppercase + string.digits
-        # Avoid easily-confused chars.
-        alphabet = "".join(c for c in alphabet if c not in "O0I1")
-        # 6-character invite, random.
-        for _ in range(20):
-            code = "".join(secrets.choice(alphabet) for _ in range(self._INVITE_CODE_LEN))
+
+        # 6-character invite, random, with no visually-confusable symbols.
+        for _ in range(64):
+            code = "".join(secrets.choice(self._INVITE_ALPHABET) for _ in range(self._INVITE_CODE_LEN))
             if code not in self._invite_store:
                 return code
-        # Astronomically unlikely; fallback to longer.
-        return "".join(secrets.choice(alphabet) for _ in range(self._INVITE_CODE_LEN + 2))
+        # Preserve availability even under an astronomically unlikely run of
+        # short-code collisions while retaining strict input grammar.
+        for _ in range(64):
+            code = "".join(
+                secrets.choice(self._INVITE_ALPHABET) for _ in range(self._INVITE_CODE_LEN + 2)
+            )
+            if code not in self._invite_store:
+                return code
+        raise RuntimeError("invite namespace temporarily exhausted")
 
     async def api_discover_invite(
         self, request: web.Request,
@@ -4515,9 +6803,13 @@ class UIServer:
         label = str(body.get("target_label", "") or "").strip()[:80]
         # Prune expired entries opportunistically.
         now_ms = int(_time.time() * 1000)
-        for c, e in list(self._invite_store.items()):
-            if e.get("expires_ms", 0) < now_ms:
-                self._invite_store.pop(c, None)
+        self._prune_discover_invites(now_ms)
+        if len(self._invite_store) >= MAX_DISCOVER_INVITES:
+            return web.json_response(
+                {"error": "too_many_active_invites"},
+                status=429,
+                headers={"Retry-After": str(self._INVITE_TTL_MS // 1000)},
+            )
         code = self._mint_invite_code()
         self._invite_store[code] = {
             "created_ms": now_ms,
@@ -4549,7 +6841,7 @@ class UIServer:
         `code` in the in-memory invite store so we don't accept
         arbitrary URLs; reject expired codes with 404."""
         import time as _time
-        code = (request.query.get("code") or "").strip().upper()
+        code = self._valid_discover_invite_code(request.query.get("code"))
         invite = self._invite_store.get(code) if code else None
         now_ms = int(_time.time() * 1000)
         if invite is None or invite.get("expires_ms", 0) < now_ms:
@@ -4595,12 +6887,12 @@ class UIServer:
         self, request: web.Request,
     ) -> web.Response:
         """Public landing page handed to a device that may or may
-        not have One Link installed. UA-sniffs the device, offers
-        the right install path + the pair code.
+        not have One Link installed. UA-sniffs the device, reports the
+        truthful distribution status, and shows the pair code.
 
         Query: ?code=ABC123
         """
-        code = (request.query.get("code") or "").strip().upper()
+        code = self._valid_discover_invite_code(request.query.get("code"))
         ua = request.headers.get("User-Agent", "")
         # Validate the code without leaking which codes exist.
         invite = self._invite_store.get(code) if code else None
@@ -4623,9 +6915,9 @@ class UIServer:
             os_kind = "linux"
         else:
             os_kind = "other"
-        # Per-OS installer hint. We do NOT link to App Store /
-        # Play Store yet (no public listings); instead we point at
-        # the project's GitHub Releases.
+        # Per-OS status only. There are no verified public store listings or
+        # installer artifacts yet, so the source-repository link is never
+        # presented as an install action.
         os_label = {
             "ios": "iPhone or iPad",
             "android": "Android phone or tablet",
@@ -4652,16 +6944,29 @@ class UIServer:
     ) -> web.Response:
         """Auth-gated ICE-config endpoint for index.html. Returns a
         JSON object ``{"iceServers": [...]}`` shaped exactly the way
-        WebRTC's RTCPeerConnection setConfiguration() expects. Empty
-        list = sovereignty default (LAN-only pairing)."""
+        WebRTC's RTCPeerConnection setConfiguration() expects. The local-only
+        responder does not count as outside STUN/TURN egress."""
         call_id = request.query.get("call_id") if hasattr(request, "query") else None
-        servers = self._resolved_webrtc_ice_servers(call_id=call_id)
+        configured_servers = self._resolved_webrtc_ice_servers(call_id=call_id)
+        servers, local_assist, candidate_addresses = self._with_local_stun_for_request(
+            request,
+            configured_servers,
+        )
         route_policy = self._resolved_webrtc_route_policy(call_id=call_id)
         return web.json_response({
             "iceServers": servers,
             "routePolicy": route_policy,
-            "sovereignty_default": len(servers) == 0,
-        })
+                # This field continues to describe outside STUN/TURN use. A local
+                # responder does not turn a Quiet/Off-grid request into egress.
+                "sovereignty_default": len(configured_servers) == 0,
+                "local_address_discovery": {
+                    "enabled": local_assist,
+                    "external": False,
+                    "scope": "same-device-or-lan",
+                    "candidate_address": candidate_addresses[0] if candidate_addresses else None,
+                    "candidate_addresses": candidate_addresses,
+                },
+            })
 
     async def api_peer_rtc_relay_probe(
         self, request: web.Request,
@@ -4717,7 +7022,11 @@ class UIServer:
         an auth token. Keep this STUN-only: TURN credentials are
         secrets and are only returned through the guarded endpoint."""
         urls = self._resolved_stun_servers()
-        servers = [{"urls": u} for u in urls]
+        configured_servers = [{"urls": u} for u in urls]
+        servers, local_assist, candidate_addresses = self._with_local_stun_for_request(
+            request,
+            configured_servers,
+        )
         return web.json_response({
             "iceServers": servers,
             "routePolicy": {
@@ -4726,8 +7035,17 @@ class UIServer:
                 "direct_first": True,
                 "force_relay_on_repair": False,
             },
-            "sovereignty_default": len(servers) == 0,
-        })
+            "sovereignty_default": len(configured_servers) == 0,
+                "local_address_discovery": {
+                    "enabled": local_assist,
+                    "external": False,
+                    "scope": "same-device-or-lan",
+                    "candidate_address": candidate_addresses[0] if candidate_addresses else None,
+                    "candidate_addresses": candidate_addresses,
+                },
+            },
+            headers={"Cache-Control": "no-store"},
+        )
 
     async def _connect_landing(self, request: web.Request) -> web.StreamResponse:
         """2026-05-22 UX — phone-friendly onboarding landing page.
@@ -4754,39 +7072,46 @@ class UIServer:
         token = request.query.get("token") or request.query.get(
             "setup_device_invite", ""
         )
+        # The token is reflected into two href attributes below. Keep the
+        # accepted grammar identical to token_urlsafe output and URL-encode it
+        # before interpolation; raw quotes/ampersands previously produced a
+        # reflected-XSS primitive on this public LAN landing page.
+        if token and not (
+            20 <= len(token) <= 128 and all(ch.isalnum() or ch in "-_" for ch in token)
+        ):
+            return web.Response(status=400, text="invalid setup token")
+        from urllib.parse import urlencode
+
         # Build the HTTPS pair URL we want the phone to land on.
         # ``_lan_peer_base_url`` already encodes the LAN IP when the
         # daemon is LAN-bound, so this works without manual config.
         peer_base = self._lan_peer_base_url(request)
         pair_url = (
-            f"{peer_base}/peer?setup_device_invite={token}"
+            f"{peer_base}/peer?{urlencode({'setup_device_invite': token})}"
             if token else f"{peer_base}/peer"
         )
         # Build the HTTP URL to the mobileconfig on THIS daemon (use
         # the request's host:port so the phone hits the same address
         # it just succeeded with).
-        mobileconfig_url = (
-            f"{request.scheme}://{request.host}"
-            "/api/v1/peer-rtc/profile.mobileconfig"
-        )
+        mobileconfig_url = f"{request.scheme}://{request.host}/api/v1/peer-rtc/profile.mobileconfig"
         # User-agent sniff — iOS Safari is the only one that needs
         # the mobileconfig dance; everything else can fall through.
         ua = (request.headers.get("User-Agent") or "").lower()
-        is_ios = (
-            "iphone" in ua or "ipad" in ua or "ipod" in ua
-            or ("mac" in ua and "mobile" in ua)
-        )
+        is_ios = "iphone" in ua or "ipad" in ua or "ipod" in ua or ("mac" in ua and "mobile" in ua)
         if not is_ios:
             # Android / desktop — redirect immediately to the HTTPS
             # pair URL. The browser handles the self-signed warning.
             return web.Response(status=302, headers={"Location": pair_url})
 
         # iOS Safari — render the install-trust-then-pair landing.
-        html = _CONNECT_LANDING_HTML_IOS.format(
-            mobileconfig_url=mobileconfig_url,
-            pair_url=pair_url,
+        import html as _html
+
+        rendered_html = _CONNECT_LANDING_HTML_IOS.format(
+            mobileconfig_url=_html.escape(mobileconfig_url, quote=True),
+            pair_url=_html.escape(pair_url, quote=True),
         )
-        resp = web.Response(text=html, content_type="text/html", charset="utf-8")
+        resp = web.Response(text=rendered_html, content_type="text/html", charset="utf-8",
+        )
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
@@ -4815,16 +7140,15 @@ class UIServer:
             payload = build_mobileconfig(data_dir())
         except Exception as e:
             log.warning("peer-https: mobileconfig build failed: %s", e)
-            return web.Response(status=500, text=f"mobileconfig: {e}")
+            return web.Response(status=500, text="mobile configuration is temporarily unavailable",
+            )
         resp = web.Response(
             body=payload,
             content_type="application/x-apple-aspen-config",
         )
         resp.headers["Cache-Control"] = "no-store"
         # Suggested file name when downloaded outside Safari.
-        resp.headers["Content-Disposition"] = (
-            'attachment; filename="one-link-trust.mobileconfig"'
-        )
+        resp.headers["Content-Disposition"] = 'attachment; filename="one-link-trust.mobileconfig"'
         return resp
 
     async def api_pair_qr(self, request: web.Request) -> web.StreamResponse:
@@ -4880,11 +7204,11 @@ class UIServer:
         starts — a malicious client can't make us spend CPU on SDP
         negotiation without proving control of a real keypair.
 
-        Trust: if the offer envelope carries a valid pair_token, we
-        consume the token and trust this pubkey as a freshly-paired
-        device. Otherwise we check our roster of previously-paired
-        pubkeys; if the pubkey is recognized, we accept. Unknown
-        pubkey + no token → 4030 close.
+        Trust: a pair_token is only a single-use handoff bound to one
+        already-certified self-mesh device key and Guardian epoch. With or
+        without that handoff, the signed-offer key must resolve to exactly one
+        currently trusted roster row. A bearer never creates authority;
+        unknown, revoked, ambiguous, or uncertified keys close with 4030.
         """
         # aiortc imports are lazy so this module loads even on
         # daemons without aiortc. If we get here, we need it.
@@ -4906,18 +7230,52 @@ class UIServer:
             PEER_RTC_PROTOCOL_VERSION,
         )
 
+        client_key = self._client_rate_key(request)
         if self._rate_limited(
             "peer_rtc_signaling",
-            self._client_rate_key(request),
+            client_key,
             limit=MAX_SIGNALING_ATTEMPTS,
         ):
             return web.Response(status=429, text="too many signaling attempts")
 
-        ws = web.WebSocketResponse(heartbeat=20.0)
-        await ws.prepare(request)
+        client_pending = int(self._pending_signaling_by_client.get(client_key, 0))
+        if client_pending >= MAX_PENDING_SIGNALING_PER_CLIENT:
+            return web.Response(status=429, text="too many pending signaling sessions")
+        if self._pending_signaling_total >= MAX_PENDING_SIGNALING_GLOBAL:
+            return web.Response(status=503, text="signaling capacity reached")
+        # No await between the capacity check and reservation: this update is
+        # atomic with respect to other asyncio handlers on the event loop.
+        self._pending_signaling_total += 1
+        self._pending_signaling_by_client[client_key] = client_pending + 1
+        signaling_slot_released = False
+
+        def _release_signaling_slot() -> None:
+            nonlocal signaling_slot_released
+            if signaling_slot_released:
+                return
+            signaling_slot_released = True
+            self._pending_signaling_total = max(0, self._pending_signaling_total - 1)
+            remaining = int(self._pending_signaling_by_client.get(client_key, 1)) - 1
+            if remaining <= 0:
+                self._pending_signaling_by_client.pop(client_key, None)
+            else:
+                self._pending_signaling_by_client[client_key] = remaining
+
+        ws = web.WebSocketResponse(heartbeat=20.0,
+            max_msg_size=MAX_SIGNALING_TEXT_BYTES,
+        )
+        try:
+            await ws.prepare(request)
+        except BaseException:
+            _release_signaling_slot()
+            raise
 
         peer: Optional[BrowserPeer] = None
         pc = None
+        offer_processed = False
+        loop = asyncio.get_running_loop()
+        auth_deadline = loop.time() + SIGNALING_AUTH_TIMEOUT_SECONDS
+        session_deadline = loop.time() + SIGNALING_SESSION_TIMEOUT_SECONDS
 
         async def _send(msg: dict) -> None:
             with contextlib.suppress(Exception):
@@ -4942,44 +7300,44 @@ class UIServer:
         # a corp server" is still "data flows to a corp server,"
         # which violates One Link's sovereignty floor.
         #
-        # Decision:
-        #   - DEFAULT: empty ICE-server list. WebRTC pairing works on
-        #     same-LAN networks (host candidates only, no public-IP
-        #     lookup needed). Cross-NAT pairing requires explicit
-        #     opt-in.
-        #   - OPT-IN: env var ONE_LINK_STUN_SERVERS="stun:host:port,
-        #     stun:host:port,..." lets the user supply their OWN
-        #     servers (their employer's, a community-run server,
-        #     or — if they consciously accept the corp dependency —
-        #     Google/Cloudflare).
-        #   - SETTING: state.get_setting("stun_servers") same shape.
-        #
-        # Same-LAN pairing (the dominant One Link use case) is
-        # unaffected; cross-network pairing degrades gracefully to
-        # "needs configuration" instead of silently calling corp
-        # servers.
-        stun_urls: list[str] = []
-        env_stun = os.environ.get("ONE_LINK_STUN_SERVERS", "").strip()
-        if env_stun:
-            stun_urls.extend(
-                u.strip() for u in env_stun.split(",") if u.strip()
-            )
-        if self.daemon is not None and self.daemon.state is not None:
-            try:
-                setting = (self.daemon.state.get_setting(
-                    "stun_servers"
-                ) or "").strip()
-                if setting:
-                    stun_urls.extend(
-                        u.strip() for u in setting.split(",") if u.strip()
-                    )
-            except Exception:
-                pass
+        # The shared resolver enforces the active preset ceiling, accepts only
+        # stricter setting/env choices, and rejects malformed/ambiguous URLs.
+        # quiet/off_grid therefore stay host-only while just_works can
+        # gather server-reflexive candidates after a separate signaling path
+        # has been supplied. STUN itself is neither signaling nor a relay.
+        stun_urls = self._resolved_stun_servers()
         stun_servers = [RTCIceServer(urls=u) for u in stun_urls]
         config = RTCConfiguration(iceServers=stun_servers)
 
         try:
-            async for msg in ws:
+            while not ws.closed:
+                deadline = session_deadline if offer_processed else auth_deadline
+                remaining_s = deadline - loop.time()
+                if remaining_s <= 0:
+                    code = 1001 if offer_processed else 4408
+                    reason = (
+                        b"signaling session expired" if offer_processed else b"signed offer timeout"
+                    )
+                    await ws.close(code=code, message=reason)
+                    return ws
+                try:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=remaining_s)
+                except TimeoutError:
+                    code = 1001 if offer_processed else 4408
+                    reason = (
+                        b"signaling session expired" if offer_processed else b"signed offer timeout"
+                    )
+                    await ws.close(code=code, message=reason)
+                    return ws
+                if msg.type in (
+                    WSMsgType.CLOSE,
+                    WSMsgType.CLOSED,
+                    WSMsgType.CLOSING,
+                ):
+                    break
+                if msg.type == WSMsgType.ERROR:
+                    log.info("peer-rtc: signaling websocket error: %s", ws.exception())
+                    break
                 if msg.type != WSMsgType.TEXT:
                     continue
                 if len(msg.data.encode("utf-8", errors="ignore")) > MAX_SIGNALING_TEXT_BYTES:
@@ -4999,15 +7357,25 @@ class UIServer:
                     continue
                 t = envelope.get("t")
                 if t == "offer":
+                    if offer_processed:
+                        await _send_error(
+                            "duplicate_offer",
+                            "one signaling WebSocket accepts exactly one offer",
+                        )
+                        await ws.close(code=4009, message=b"duplicate offer")
+                        return ws
                     # First-and-only offer per WS — verify signature.
                     try:
-                        pubkey, fingerprint = (
-                            self.peer_rtc.verify_offer_envelope(envelope)
-                        )
+                        pubkey, fingerprint = self.peer_rtc.verify_offer_envelope(envelope)
                     except ValueError as e:
                         await _send_error("bad_offer", str(e))
                         await ws.close(code=4001, message=b"bad offer")
                         return ws
+                    if not self.peer_rtc.accept_verified_offer_once(envelope):
+                        await _send_error("replayed_offer", "offer was already used")
+                        await ws.close(code=4009, message=b"replayed offer")
+                        return ws
+                    offer_processed = True
                     # Audit C1 defense-in-depth: record + cross-check
                     # the DTLS-SRTP fingerprint inside the SDP against
                     # the per-pubkey history. The envelope-signature
@@ -5032,19 +7400,36 @@ class UIServer:
                                     existing_peer.attested_ms = None
                                 with contextlib.suppress(Exception):
                                     self.peer_rtc._close_peer(existing_peer)
-                    # Trust check: pair_token OR known pubkey.
+                    # Trust check: a valid device-bound handoff OR direct
+                    # proof from a currently trusted self-mesh roster key.
+                    # There is no process-local parallel authority cache.
                     pair_token = envelope.get("pair_token") or ""
-                    redeemed = self.peer_rtc.redeem_pairing_token(pair_token) if pair_token else None
-                    is_known = self.peer_rtc.is_paired(fingerprint)
+                    redeemed = (
+                        self.peer_rtc.redeem_pairing_token(
+                            pair_token,
+                            fingerprint=fingerprint,
+                        )
+                        if pair_token
+                        else None
+                    )
+                    authorization = self.peer_rtc.authorization_for_pubkey(pubkey)
+                    is_known = authorization is not None and self.peer_rtc.is_paired(fingerprint,
+                        pubkey_bytes=pubkey,
+                    )
                     if not redeemed and not is_known:
                         await _send_error(
                             "no_trust",
-                            "no valid pairing token + pubkey not in roster",
+                            "browser key is not a live certified roster device",
                         )
                         await ws.close(code=4030, message=b"unpaired peer")
                         return ws
-                    if redeemed:
-                        self.peer_rtc.mark_paired(fingerprint)
+                    if authorization is None:
+                        await _send_error(
+                            "authority_lost",
+                            "browser device is no longer trusted",
+                        )
+                        await ws.close(code=4030, message=b"revoked peer")
+                        return ws
                     # Set up the RTCPeerConnection.
                     pc = RTCPeerConnection(configuration=config)
                     peer = BrowserPeer(
@@ -5052,6 +7437,9 @@ class UIServer:
                         pubkey_bytes=pubkey,
                         pc=pc,
                         paired_ms=int(time.time() * 1000) if redeemed or is_known else None,
+                        authorized_root_pub=bytes(authorization["root_pub"]),
+                        authorized_device_pub=bytes(authorization["device_pub"]),
+                        authorized_guardian_epoch=int(authorization.get("guardian_epoch") or 0),
                     )
 
                     # Hook DataChannels created by the browser side.
@@ -5062,21 +7450,51 @@ class UIServer:
                             return
                         label = channel.label
                         if label == DAEMON_CONTROL_LABEL:
+                            if peer.control_dc is not None and peer.control_dc is not channel:
+                                log.warning(
+                                    "peer-rtc: rejecting duplicate control channel for %s",
+                                    peer.fingerprint,
+                                )
+                                with contextlib.suppress(Exception):
+                                    channel.close()
+                                return
                             peer.control_dc = channel
                         elif label == DAEMON_BULK_LABEL:
+                            if peer.bulk_dc is not None and peer.bulk_dc is not channel:
+                                log.warning(
+                                    "peer-rtc: rejecting duplicate bulk channel for %s",
+                                    peer.fingerprint,
+                                )
+                                with contextlib.suppress(Exception):
+                                    channel.close()
+                                return
                             peer.bulk_dc = channel
+                        else:
+                            log.warning(
+                                "peer-rtc: rejecting unknown DataChannel label %r for %s",
+                                label,
+                                peer.fingerprint,
+                            )
+                            with contextlib.suppress(Exception):
+                                channel.close()
+                            return
 
                         @channel.on("message")
                         def _on_message(message):
                             kind = "control" if label == DAEMON_CONTROL_LABEL else "bulk"
-                            asyncio.create_task(
-                                self.peer_rtc._dispatch_dc(peer, kind, message)
-                            )
+                            self._schedule_peer_dc_dispatch(peer, kind, message)
+
+                        open_handled = False
 
                         @channel.on("open")
                         def _on_open():
-                            # Row 10 — kick off attestation the
-                            # moment the control DC opens.
+                            nonlocal open_handled
+                            if open_handled:
+                                return
+                            open_handled = True
+                            # Prove possession of the enrolled browser key on
+                            # this exact control channel. This is intentionally
+                            # not called hardware/platform attestation.
                             # Row 6/7 — announce our Sphinx onion
                             # pubkey so the peer can bind real cover
                             # packets to our identity. Both sides
@@ -5086,21 +7504,36 @@ class UIServer:
                             # and sends a real wire-level packet.
                             if label == DAEMON_CONTROL_LABEL and peer is not None:
                                 try:
-                                    self.peer_rtc.init_attestation(peer)
+                                    started = self.peer_rtc.init_identity_possession(peer)
+                                    if not started:
+                                        raise RuntimeError(
+                                            "identity-possession challenge was not queued"
+                                        )
                                 except Exception as e:
-                                    log.info(
-                                        "peer-rtc: init_attestation "
-                                        "failed for %s: %s",
+                                    log.warning(
+                                        "peer-rtc: identity-possession init failed for %s: %s",
                                         peer.fingerprint, e,
                                     )
+                                    self.peer_rtc._close_peer(peer)
+                                    return
                                 try:
                                     self.peer_rtc.init_onion_announce(peer)
                                 except Exception as e:
                                     log.info(
-                                        "peer-rtc: init_onion_announce "
-                                        "failed for %s: %s",
+                                        "peer-rtc: init_onion_announce failed for %s: %s",
                                         peer.fingerprint, e,
                                     )
+
+                        # aiortc emits the remote ``datachannel`` event while
+                        # processing the DCEP OPEN frame. Depending on its
+                        # version/event ordering, the channel may already be
+                        # open before application code can attach an ``open``
+                        # listener. Missing that edge leaves the browser
+                        # waiting forever for its identity challenge. Handle
+                        # the observed state as well as the future event; the
+                        # local guard makes the two paths exactly-once.
+                        if getattr(channel, "readyState", "") == "open":
+                            _on_open()
 
                         @channel.on("close")
                         def _on_close():
@@ -5183,13 +7616,68 @@ class UIServer:
         except Exception as e:
             log.warning("peer-rtc: signaling error: %s", e)
         finally:
+            # SDP setup can fail after a PC exists but before register_peer()
+            # publishes it. Close that staged PC deterministically. Identity-
+            # safe `_close_peer` only removes the registry entry when this is
+            # the exact current object, so a failed replacement cannot evict a
+            # healthy older connection for the same device key.
+            if (
+                peer is not None
+                and self.peer_rtc.get_peer(peer.fingerprint) is not peer
+                and not peer.closed
+            ):
+                with contextlib.suppress(Exception):
+                    self.peer_rtc._close_peer(peer)
             # Once the WS closes, the WebRTC peer-connection lives on
             # independently — DataChannel is the live transport.
             with contextlib.suppress(Exception):
                 await ws.close()
+            _release_signaling_slot()
         return ws
 
     # ─── v0.20.2: browser-peer ↔ daemon data bridge ───────────────────
+    def _schedule_peer_dc_dispatch(
+        self,
+        peer: Any,
+        channel_kind: str,
+        message: Any,
+    ) -> None:
+        """Bound and own every fire-and-forget DataChannel dispatch task."""
+
+        if self._closing:
+            return
+        fingerprint = str(getattr(peer, "fingerprint", "") or "unknown")
+        peer_count = int(self._peer_dc_task_counts.get(fingerprint, 0))
+        if (
+            peer_count >= PHONE_DC_MAX_INFLIGHT_PER_PEER
+            or len(self._peer_dc_tasks) >= PHONE_DC_MAX_INFLIGHT_GLOBAL
+        ):
+            log.warning(
+                "peer-rtc: closing %s after bounded dispatch queue exhaustion",
+                fingerprint,
+            )
+            with contextlib.suppress(Exception):
+                self.peer_rtc._close_peer(peer)
+            return
+        task = asyncio.create_task(self.peer_rtc._dispatch_dc(peer, channel_kind, message))
+        self._peer_dc_tasks.add(task)
+        dispatch_tasks = getattr(peer, "_dispatch_tasks", None)
+        if isinstance(dispatch_tasks, set):
+            dispatch_tasks.add(task)
+        self._peer_dc_task_counts[fingerprint] = peer_count + 1
+
+        def _settled(done: asyncio.Task) -> None:
+            self._peer_dc_tasks.discard(done)
+            if isinstance(dispatch_tasks, set):
+                dispatch_tasks.discard(done)
+            remaining = int(self._peer_dc_task_counts.get(fingerprint, 1)) - 1
+            if remaining <= 0:
+                self._peer_dc_task_counts.pop(fingerprint, None)
+            else:
+                self._peer_dc_task_counts[fingerprint] = remaining
+
+        task.add_done_callback(_settled)
+
     async def _handle_browser_peer_request(
         self, peer: Any, channel_kind: str, msg_t: str, envelope: dict,
     ) -> None:
@@ -5219,6 +7707,8 @@ class UIServer:
         rid → drop. Failures (state unavailable, peer_fp not in
         roster) come back as `error` envelopes.
         """
+        if self._closing:
+            return
         from one_link.peer_rtc import PEER_DC_PROTOCOL_VERSION
 
         rid = envelope.get("rid", "")
@@ -5236,6 +7726,10 @@ class UIServer:
         if state is None:
             _err("no_state", "daemon state unavailable")
             return
+        # Any authenticated control traffic advances idle-upload cleanup; a
+        # crashed tab therefore cannot keep a file handle and disk promise
+        # alive until the next upload attempt.
+        await self._sweep_phone_uploads()
 
         if msg_t == "global_search":
             query = str(envelope.get("query") or "").strip()
@@ -5291,8 +7785,13 @@ class UIServer:
             try:
                 for pr in state.list_peers():
                     peer_lookup[pr.fingerprint] = pr.display_name
-            except Exception:
-                pass
+            except Exception as peer_exc:
+                report_best_effort_failure(
+                    log,
+                    "phone_search_peer_labels",
+                    peer_exc,
+                    level=logging.DEBUG,
+                )
             messages = list(hits.get("messages") or [])
             for m in messages:
                 if isinstance(m, dict):
@@ -5649,11 +8148,7 @@ class UIServer:
                 _err("body_too_large", "max 64 KiB UTF-8")
                 return
             reply_to_raw = envelope.get("reply_to")
-            reply_to = (
-                str(reply_to_raw)
-                if isinstance(reply_to_raw, str) and reply_to_raw
-                else None
-            )
+            reply_to = str(reply_to_raw) if isinstance(reply_to_raw, str) and reply_to_raw else None
             try:
                 result = await asyncio.wait_for(
                     self.daemon.send_group_message(
@@ -5850,9 +8345,7 @@ class UIServer:
                 if mt in ("FILE", "FILE_DONE", "FILE_OFFER"):
                     name = meta.get("name") or meta.get("filename") or ""
                     size = meta.get("size") or meta.get("bytes") or 0
-                    blob_hash = (
-                        meta.get("blob_hash") or meta.get("hash") or ""
-                    )
+                    blob_hash = meta.get("blob_hash") or meta.get("hash") or ""
                     mime = meta.get("mime") or meta.get("content_type") or ""
                     row["file"] = {
                         "name": str(name),
@@ -5891,7 +8384,7 @@ class UIServer:
                 limit = 50
             try:
                 # v0.21.x: rely on search_messages's built-in
-                # prefix-match normalizer (each token -> token*)
+                # parser-safe prefix normalizer (each token -> "token"*)
                 # so the phone's per-conversation search behaves
                 # the same as the desktop: typing 'k' finds 'kjg',
                 # 'kanye', etc. - not just messages with the
@@ -6125,7 +8618,7 @@ class UIServer:
             if not isinstance(blob_hash, str) or len(blob_hash) != 64:
                 _err("bad_blob_hash", "blob_hash must be 64 hex chars")
                 return
-            if not isinstance(offset, int) or offset < 0:
+            if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
                 _err("bad_offset", "offset must be a non-negative int")
                 return
             if not isinstance(length, int) or length <= 0 or length > PHONE_UPLOAD_CHUNK_SIZE:
@@ -6207,35 +8700,46 @@ class UIServer:
             # reply-to threads, outbox-on-offline, etc.) are identical
             # — the phone is a first-class send surface, not a parallel
             # half-implementation.
+            allowed_send_fields = {
+                "v",
+                "t",
+                "rid",
+                "peer_fp",
+                "body",
+                "reply_to",
+                "client_msg_id",
+            }
+            if set(envelope) - allowed_send_fields:
+                _err("bad_schema", "unsupported send_message fields")
+                return
             peer_fp = envelope.get("peer_fp", "")
             body = envelope.get("body")
-            if not isinstance(peer_fp, str) or not peer_fp:
+            if not isinstance(peer_fp, str) or not peer_fp.strip() or len(peer_fp) > 256:
                 _err("bad_peer_fp", "peer_fp required")
                 return
-            if not isinstance(body, str) or not body:
+            peer_fp = peer_fp.strip()
+            if not isinstance(body, str) or not body.strip():
                 _err("bad_body", "body required")
                 return
             # Size cap matches the desktop send path's de facto cap
             # (64 KiB plain text). Reject larger bodies at the wire
             # so a malicious / buggy phone can't drown the daemon in
             # a single oversized frame.
-            if len(body.encode("utf-8")) > 65536:
+            if len(body.encode("utf-8")) > MAX_TEXT_BODY_BYTES:
                 _err("body_too_large", "max 64 KiB UTF-8")
                 return
             reply_to_raw = envelope.get("reply_to")
-            reply_to = (
-                str(reply_to_raw)
-                if isinstance(reply_to_raw, str) and reply_to_raw
-                else None
-            )
+            if reply_to_raw is not None and not _valid_chat_message_id(reply_to_raw):
+                _err("bad_reply_to", "invalid reply_to")
+                return
+            reply_to = str(reply_to_raw) if reply_to_raw is not None else None
             client_msg_id_raw = envelope.get("client_msg_id")
             client_msg_id = None
-            if isinstance(client_msg_id_raw, str):
-                stripped = client_msg_id_raw.strip()
-                if 8 <= len(stripped) <= 64 and all(
-                    c in "0123456789abcdefABCDEF-" for c in stripped
-                ):
-                    client_msg_id = stripped
+            if client_msg_id_raw is not None:
+                if not _valid_chat_message_id(client_msg_id_raw):
+                    _err("bad_client_msg_id", "invalid client_msg_id")
+                    return
+                client_msg_id = str(client_msg_id_raw)
             try:
                 target_peer = await self.daemon.resolve_for_send(peer_fp)
                 if target_peer is None:
@@ -6244,6 +8748,7 @@ class UIServer:
                     try:
                         entry = self.daemon.enqueue_text_outbox(
                             peer_fp, body, client_msg_id=client_msg_id,
+                            **({"reply_to": reply_to} if reply_to is not None else {}),
                         )
                         _send({
                             "t": "send_message_result",
@@ -6357,16 +8862,16 @@ class UIServer:
             #   daemon → phone: {v, t:"send_file_init_ack", rid,
             #                    upload_id, chunk_size}
             #            OR     {v, t:"error", rid, code, message}
-            self._sweep_phone_uploads()
             peer_fp = envelope.get("peer_fp", "")
-            filename = envelope.get("filename") or "upload.bin"
+            filename_raw = envelope.get("filename")
+            filename = "upload.bin" if filename_raw is None or filename_raw == "" else filename_raw
             mime = envelope.get("mime") or "application/octet-stream"
             size_bytes = envelope.get("size_bytes")
             client_msg_id_raw = envelope.get("client_msg_id")
             if not isinstance(peer_fp, str) or not peer_fp:
                 _err("bad_peer_fp", "peer_fp required")
                 return
-            if not isinstance(size_bytes, int) or size_bytes < 0:
+            if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes < 0:
                 _err("bad_size", "size_bytes must be a non-negative int")
                 return
             if size_bytes > PHONE_UPLOAD_MAX_BYTES:
@@ -6375,61 +8880,333 @@ class UIServer:
                     f"max {PHONE_UPLOAD_MAX_BYTES} bytes",
                 )
                 return
-            # Per-peer concurrent-upload cap so a buggy / runaway
-            # phone can't flood data_dir/uploads.
-            in_flight = sum(
-                1 for u in self._phone_uploads.values()
-                if u.get("peer_fp") == peer_fp
-            )
-            if in_flight >= PHONE_UPLOAD_MAX_PER_PEER:
+            client_msg_id = None
+            legacy_client_msg_id = None
+            canonical_client_msg_id = None
+            if client_msg_id_raw is not None:
+                if not isinstance(client_msg_id_raw, str):
+                    _err(
+                        "bad_client_msg_id",
+                        "client_msg_id must be a stable hexadecimal identifier",
+                    )
+                    return
+                stripped = client_msg_id_raw.strip()
+                hex_count = sum(char in "0123456789abcdefABCDEF" for char in stripped)
+                if not (
+                    8 <= len(stripped) <= 64
+                    and hex_count >= 8
+                    and all(char in "0123456789abcdefABCDEF-" for char in stripped)
+                ):
+                    _err(
+                        "bad_client_msg_id",
+                        "client_msg_id must be a stable hexadecimal identifier",
+                    )
+                    return
+                legacy_client_msg_id = stripped
+                canonical_client_msg_id = stripped.lower()
+                client_msg_id = stripped
+            try:
+                safe_name = _normalize_ui_transfer_name(self.daemon, filename)
+            except (TypeError, ValueError, UnicodeError):
+                _err("bad_filename", "filename must be valid Unicode text")
+                return
+            source_fp = str(getattr(peer, "fingerprint", "") or "")
+            if not source_fp:
+                _err("bad_source_identity", "authenticated browser identity missing")
+                return
+            canonical_peer_fp = peer_fp
+            if (
+                client_msg_id is not None
+                and legacy_client_msg_id is not None
+                and canonical_client_msg_id is not None
+            ):
+                target_fp = await _blocking_file_io(
+                    self._resolve_pinned_fp,
+                    peer_fp,
+                    None,
+                )
+                if not target_fp:
+                    _err(
+                        "peer_not_pinned",
+                        "file delivery requires a paired device fingerprint",
+                    )
+                    return
+                canonical_peer_fp = target_fp
+                try:
+                    _mapped_id, prior = await self._phone_delivery_key_and_prior(
+                        source_fp=source_fp,
+                        legacy_client_msg_id=legacy_client_msg_id,
+                        canonical_client_msg_id=canonical_client_msg_id,
+                    )
+                except Exception as exc:
+                    log.exception(
+                        "phone delivery replay probe failed before upload: %s",
+                        exc,
+                    )
+                    _err(
+                        "delivery_accounting_unavailable",
+                        "No file bytes were read because durable accounting failed.",
+                    )
+                    return
+                if prior is not None:
+                    expected = prior.contract
+                    if (
+                        expected.peer_fp != target_fp
+                        or expected.size != size_bytes
+                        or expected.display_name != safe_name
+                        or expected.rel_path != ""
+                        or expected.chat_inline is not False
+                    ):
+                        _err(
+                            "client_delivery_contract_conflict",
+                            ("client_msg_id was already used for another file delivery"),
+                        )
+                        return
+                    # Filename + size are not a content identity.  A completed
+                    # key therefore cannot be replayed safely at init: an
+                    # authenticated client could reuse the key for different
+                    # same-sized bytes and be told that the old file was sent.
+                    # Re-stage completed retries and compare the authoritative
+                    # BLAKE3 contract at completion.  This may repeat only the
+                    # local browser upload after a lost final ACK; it can never
+                    # enqueue or send a second wire delivery.
+                    if not prior.is_replay and (
+                        not prior.recoverable_after_restart
+                        and not prior.reclaimable_before_dispatch
+                    ):
+                        if prior.phase == "queued":
+                            with contextlib.suppress(Exception):
+                                self._schedule_ui_delivery_background(prior.contract.peer_fp)
+                        _send(
+                            {
+                                "t": "send_file_result",
+                                "ok": True,
+                                "in_progress": True,
+                                "outcome_unknown": prior.is_outcome_ambiguous,
+                                "client_msg_id": client_msg_id,
+                                "transfer_id": prior.transfer_id,
+                                "delivery_id": prior.delivery_id,
+                            }
+                        )
+                        return
+            intent_key = ""
+            init_claim: asyncio.Future[str | None] | None = None
+            if canonical_client_msg_id is not None:
+                intent_key = source_fp + "\0" + canonical_client_msg_id
+                try:
+                    (
+                        claim_state,
+                        init_claim,
+                        existing_upload,
+                    ) = await self._claim_phone_upload_intent(
+                        intent_key=intent_key,
+                        peer_fp=canonical_peer_fp,
+                        filename=safe_name,
+                        size=size_bytes,
+                    )
+                except UIDeliveryContractConflict:
+                    _err(
+                        "client_delivery_contract_conflict",
+                        "client_msg_id was already used for another file upload",
+                    )
+                    return
+                if existing_upload is not None:
+                    existing_id = str(existing_upload.get("upload_id") or "")
+                    if claim_state == "open":
+                        _send(
+                            {
+                                "t": "send_file_init_ack",
+                                "upload_id": existing_id,
+                                "chunk_size": PHONE_UPLOAD_CHUNK_SIZE,
+                                "received_size": int(existing_upload.get("received_size") or 0),
+                                "resumed": True,
+                            }
+                        )
+                    else:
+                        _send(
+                            {
+                                "t": "send_file_result",
+                                "ok": True,
+                                "in_progress": True,
+                                "finalizing": claim_state == "finalizing",
+                                "client_msg_id": client_msg_id,
+                            }
+                        )
+                    return
+            staging = data_dir() / "uploads"
+            upload_id = secrets.token_hex(16)
+            reservation_id = f"phone:{upload_id}"
+            # Quotas bind to the authenticated browser-peer connection, not
+            # the caller-controlled destination ``peer_fp`` field. Otherwise
+            # one phone can rotate target fingerprints to evade every
+            # per-peer counter while filling local staging storage.
+            reservation_peer = f"phone:{source_fp}"
+            try:
+                admission = self._upload_reservations.reserve(
+                    reservation_id=reservation_id,
+                    name=safe_name,
+                    size=size_bytes,
+                    peer_fp=reservation_peer,
+                    policy=self._upload_admission_policy,
+                )
+            except Exception as exc:
+                if intent_key and init_claim is not None:
+                    self._publish_phone_upload_intent(
+                        intent_key=intent_key,
+                        claim=init_claim,
+                        upload_id=None,
+                    )
+                _err("upload_admission_failed", f"upload admission failed: {exc}")
+                return
+            if not admission.ok:
+                if intent_key and init_claim is not None:
+                    self._publish_phone_upload_intent(
+                        intent_key=intent_key,
+                        claim=init_claim,
+                        upload_id=None,
+                    )
                 _err(
-                    "too_many_uploads",
-                    f"max {PHONE_UPLOAD_MAX_PER_PEER} concurrent uploads per peer",
+                    f"upload_admission_{admission.wire_reason()}",
+                    admission.user_message or "upload could not be admitted safely",
                 )
                 return
-            client_msg_id = None
-            if isinstance(client_msg_id_raw, str):
-                stripped = client_msg_id_raw.strip()
-                if 8 <= len(stripped) <= 64 and all(
-                    c in "0123456789abcdefABCDEF-" for c in stripped
-                ):
-                    client_msg_id = stripped
-            safe_name = Path(str(filename)).name or "upload.bin"
-            if safe_name in (".", "..") or not safe_name:
-                safe_name = "upload.bin"
-            staging = data_dir() / "uploads"
+            path = staging / f"{int(time.time() * 1000)}_{secrets.token_hex(16)}.upload"
+            opened_handles: list[Any] = []
+
+            def _open_phone_upload() -> Any:
+                opened = _open_private_ui_upload(
+                    staging,
+                    path,
+                    buffering=1024 * 1024,
+                )
+                opened_handles.append(opened)
+                return opened
+
             try:
-                staging.mkdir(parents=True, exist_ok=True)
+                # Phone chunks are small and sequential.  A private buffered
+                # handle keeps each DataChannel ack off the physical-disk
+                # latency path; completion below performs the authoritative
+                # flush/fsync before any delivery admission.
+                fh = await _blocking_file_io(
+                    _open_phone_upload,
+                )
+            except asyncio.CancelledError:
+                self._upload_reservations.release(
+                    reservation_id,
+                    peer_fp=reservation_peer,
+                )
+                if intent_key and init_claim is not None:
+                    self._publish_phone_upload_intent(
+                        intent_key=intent_key,
+                        claim=init_claim,
+                        upload_id=None,
+                    )
+                if opened_handles:
+                    with contextlib.suppress(Exception, asyncio.CancelledError):
+                        await _blocking_file_io(
+                            _close_and_unlink_ui_upload,
+                            opened_handles[0],
+                            path,
+                        )
+                else:
+                    with contextlib.suppress(OSError):
+                        path.unlink(missing_ok=True)
+                raise
             except Exception as e:
-                _err("staging_unavailable", f"cannot create uploads dir: {e}")
-                return
-            upload_id = secrets.token_hex(16)
-            path = staging / (
-                f"{int(time.time() * 1000)}_{secrets.token_hex(8)}_{safe_name}"
-            )
-            try:
-                fh = open(path, "wb")
-            except Exception as e:
+                self._upload_reservations.release(
+                    reservation_id,
+                    peer_fp=reservation_peer,
+                )
+                if intent_key and init_claim is not None:
+                    self._publish_phone_upload_intent(
+                        intent_key=intent_key,
+                        claim=init_claim,
+                        upload_id=None,
+                    )
                 _err("staging_open_failed", f"cannot open staging file: {e}")
                 return
             now_ms = int(time.time() * 1000)
             self._phone_uploads[upload_id] = {
-                "peer_fp": peer_fp,
+                "upload_id": upload_id,
+                "intent_key": intent_key,
+                "peer_fp": canonical_peer_fp,
                 "filename": safe_name,
                 "mime": str(mime)[:200],
                 "expected_size": size_bytes,
                 "received_size": 0,
+                # DataChannel messages are dispatched as independent asyncio
+                # tasks.  Serialize chunk/complete/cancel/sweep ownership so a
+                # close or fsync can never race an in-flight worker write.
+                "lock": asyncio.Lock(),
+                "state": "open",
+                "last_chunk_offset": None,
+                "last_chunk_size": 0,
+                "last_chunk_digest": None,
+                "chunk_receipts": {},
+                "chunk_receipt_bytes": 0,
                 "path": path,
                 "fh": fh,
                 "client_msg_id": client_msg_id,
+                "legacy_client_msg_id": legacy_client_msg_id,
+                "canonical_client_msg_id": canonical_client_msg_id,
                 "created_ms": now_ms,
                 "last_chunk_ms": now_ms,
+                "reservation_id": reservation_id,
+                "reservation_peer": reservation_peer,
             }
+            if intent_key and init_claim is not None:
+                self._publish_phone_upload_intent(
+                    intent_key=intent_key,
+                    claim=init_claim,
+                    upload_id=upload_id,
+                )
             _send({
                 "t": "send_file_init_ack",
                 "upload_id": upload_id,
                 "chunk_size": PHONE_UPLOAD_CHUNK_SIZE,
-            })
+                    "received_size": 0,
+                }
+            )
+            return
+
+        if msg_t == "send_file_cancel":
+            upload_id = envelope.get("upload_id", "")
+            if not isinstance(upload_id, str):
+                _err("unknown_upload", "upload_id not found (init first / expired)")
+                return
+            upload_rec = self._phone_uploads.get(upload_id)
+            finalizing = self._phone_finalizing_uploads.get(upload_id)
+            if upload_rec is None and finalizing is not None:
+                source_fp = str(getattr(peer, "fingerprint", "") or "")
+                if finalizing.get("reservation_peer") != f"phone:{source_fp}":
+                    _err("unknown_upload", "upload_id does not belong to this device")
+                    return
+                _send(
+                    {
+                        "t": "error",
+                        "code": "upload_finalizing",
+                        "message": "upload is already finalizing and cannot be cancelled",
+                        "too_late": True,
+                        "upload_id": upload_id,
+                    }
+                )
+                return
+            if upload_rec is None:
+                _err("unknown_upload", "upload_id not found (init first / expired)")
+                return
+            source_fp = str(getattr(peer, "fingerprint", "") or "")
+            if upload_rec.get("reservation_peer") != f"phone:{source_fp}":
+                _err("unknown_upload", "upload_id does not belong to this device")
+                return
+            if not await self._discard_phone_upload(upload_id):
+                _err("unknown_upload", "upload_id not found (init first / expired)")
+                return
+            _send(
+                {
+                    "t": "send_file_cancel_result",
+                    "ok": True,
+                    "upload_id": upload_id,
+                })
             return
 
         if msg_t == "send_file_chunk":
@@ -6440,22 +9217,42 @@ class UIServer:
             upload_id = envelope.get("upload_id", "")
             offset = envelope.get("offset")
             data_b64 = envelope.get("data_b64")
-            if not isinstance(upload_id, str) or upload_id not in self._phone_uploads:
+            if not isinstance(upload_id, str):
                 _err("unknown_upload", "upload_id not found (init first / expired)")
                 return
-            if not isinstance(offset, int) or offset < 0:
+            candidate_upload = self._phone_uploads.get(upload_id)
+            if candidate_upload is None:
+                finalizing = self._phone_finalizing_uploads.get(upload_id)
+                if finalizing is not None:
+                    source_fp = str(getattr(peer, "fingerprint", "") or "")
+                    if finalizing.get("reservation_peer") == f"phone:{source_fp}":
+                        _err("upload_finalizing", "upload is already finalizing")
+                        return
+                _err("unknown_upload", "upload_id not found (init first / expired)")
+                return
+            upload_rec = candidate_upload
+            assert upload_rec is not None
+            source_fp = str(getattr(peer, "fingerprint", "") or "")
+            if upload_rec.get("reservation_peer") != f"phone:{source_fp}":
+                _err("unknown_upload", "upload_id does not belong to this device")
+                return
+            if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
                 _err("bad_offset", "offset must be a non-negative int")
                 return
             if not isinstance(data_b64, str) or not data_b64:
                 _err("bad_chunk", "data_b64 required")
                 return
-            upload_rec = self._phone_uploads[upload_id]
             try:
-                chunk = base64.urlsafe_b64decode(
-                    data_b64 + "=" * (-len(data_b64) % 4)
+                chunk = base64.b64decode(
+                    data_b64 + "=" * (-len(data_b64) % 4),
+                    altchars=b"-_",
+                    validate=True,
                 )
             except Exception:
                 _err("bad_b64", "data_b64 is not valid base64url")
+                return
+            if not chunk:
+                _err("bad_chunk", "decoded chunk must not be empty")
                 return
             if len(chunk) > PHONE_UPLOAD_CHUNK_SIZE:
                 _err(
@@ -6463,30 +9260,152 @@ class UIServer:
                     f"chunk exceeds {PHONE_UPLOAD_CHUNK_SIZE} bytes",
                 )
                 return
-            if offset != upload_rec["received_size"]:
-                _err(
-                    "offset_mismatch",
-                    f"expected offset {upload_rec['received_size']}, got {offset}",
-                )
+            chunk_digest = hashlib.sha256(chunk).digest()
+            cleanup_after_write = False
+            write_error: Exception | None = None
+            write_cancelled: asyncio.CancelledError | None = None
+            received_size = 0
+            lock = upload_rec.get("lock")
+            if not isinstance(lock, asyncio.Lock):
+                _err("staging_state_invalid", "upload serialization state is missing")
                 return
-            if upload_rec["received_size"] + len(chunk) > upload_rec["expected_size"]:
-                _err(
-                    "size_overflow",
-                    "chunk would exceed declared size_bytes",
-                )
+            async with lock:
+                if (
+                    self._phone_uploads.get(upload_id) is not upload_rec
+                    or upload_rec.get("state") != "open"
+                ):
+                    _err("unknown_upload", "upload_id not found (init first / expired)")
+                    return
+                if upload_rec.get("reservation_peer") != f"phone:{source_fp}":
+                    _err("unknown_upload", "upload_id does not belong to this device")
+                    return
+                received_size = int(upload_rec["received_size"])
+                if offset != received_size:
+                    receipts = upload_rec.get("chunk_receipts")
+                    receipt = receipts.get(offset) if isinstance(receipts, dict) else None
+                    # DataChannel ACKs are lossy and a bounded client window
+                    # may advance past the missing response. Replaying any
+                    # recently committed range with identical bytes is safe
+                    # and must never append it a second time.
+                    if (
+                        isinstance(receipt, tuple)
+                        and len(receipt) == 3
+                        and len(chunk) == receipt[0]
+                        and isinstance(receipt[1], bytes)
+                        and hmac.compare_digest(
+                            chunk_digest,
+                            receipt[1],
+                        )
+                    ):
+                        upload_rec["last_chunk_ms"] = int(time.time() * 1000)
+                        _send(
+                            {
+                                "t": "send_file_chunk_ack",
+                                "upload_id": upload_id,
+                                "offset": offset,
+                                "received_size": received_size,
+                                "replayed": True,
+                            }
+                        )
+                        return
+                    _send(
+                        {
+                            "t": "error",
+                            "code": "offset_mismatch",
+                            "message": f"expected offset {received_size}, got {offset}",
+                            "expected_offset": received_size,
+                            "upload_id": upload_id,
+                        }
+                    )
+                    return
+                if received_size + len(chunk) > upload_rec["expected_size"]:
+                    _err(
+                        "size_overflow",
+                        "chunk would exceed declared size_bytes",
+                    )
+                    return
+
+                write_completed: list[int] = []
+                chunk_record: dict[str, Any] = upload_rec
+
+                def _write_chunk() -> int:
+                    written = chunk_record["fh"].write(chunk)
+                    if written != len(chunk):
+                        raise OSError(f"short upload write: {written} of {len(chunk)}")
+                    write_completed.append(written)
+                    return written
+
+                def _account_committed_chunk() -> None:
+                    self._upload_reservations.consume(
+                        str(chunk_record.get("reservation_id") or ""),
+                        len(chunk),
+                    )
+                    chunk_record["received_size"] = received_size + len(chunk)
+                    chunk_record["last_chunk_offset"] = offset
+                    chunk_record["last_chunk_size"] = len(chunk)
+                    chunk_record["last_chunk_digest"] = chunk_digest
+                    chunk_record["last_chunk_ms"] = int(time.time() * 1000)
+                    receipts = chunk_record.get("chunk_receipts")
+                    if not isinstance(receipts, dict):
+                        receipts = {}
+                        chunk_record["chunk_receipts"] = receipts
+                    receipts[offset] = (
+                        len(chunk),
+                        chunk_digest,
+                        received_size + len(chunk),
+                    )
+                    chunk_record["chunk_receipt_bytes"] = int(
+                        chunk_record.get("chunk_receipt_bytes") or 0
+                    ) + len(chunk)
+                    while receipts and (
+                        len(receipts) > PHONE_UPLOAD_RECEIPT_MAX_CHUNKS
+                        or int(chunk_record["chunk_receipt_bytes"]) > PHONE_UPLOAD_RECEIPT_MAX_BYTES
+                    ):
+                        oldest_offset = next(iter(receipts))
+                        oldest_size = int(receipts[oldest_offset][0])
+                        receipts.pop(oldest_offset, None)
+                        chunk_record["chunk_receipt_bytes"] = max(
+                            0,
+                            int(chunk_record["chunk_receipt_bytes"]) - oldest_size,
+                        )
+
+                try:
+                    await _blocking_file_io(_write_chunk)
+                    _account_committed_chunk()
+                except asyncio.CancelledError as exc:
+                    write_cancelled = exc
+                    if write_completed:
+                        try:
+                            _account_committed_chunk()
+                        except Exception as account_exc:
+                            write_error = account_exc
+                            cleanup_after_write = True
+                    else:
+                        cleanup_after_write = True
+                except Exception as exc:
+                    write_error = exc
+                    cleanup_after_write = True
+
+                if cleanup_after_write:
+                    upload_rec["state"] = "discarding"
+                    if self._phone_uploads.get(upload_id) is upload_rec:
+                        self._phone_uploads.pop(upload_id, None)
+                else:
+                    received_size = int(upload_rec["received_size"])
+
+            if cleanup_after_write:
+                await self._cleanup_phone_upload_record(upload_rec)
+            if write_cancelled is not None:
+                raise write_cancelled
+            if write_error is not None:
+                _err("staging_write_failed", f"cannot write chunk: {write_error}")
                 return
-            try:
-                upload_rec["fh"].write(chunk)
-            except Exception as e:
-                _err("staging_write_failed", f"cannot write chunk: {e}")
-                return
-            upload_rec["received_size"] += len(chunk)
-            upload_rec["last_chunk_ms"] = int(time.time() * 1000)
-            _send({
-                "t": "send_file_chunk_ack",
-                "upload_id": upload_id,
-                "offset": offset,
-                "received_size": upload_rec["received_size"],
+            _send(
+                {
+                    "t": "send_file_chunk_ack",
+                    "upload_id": upload_id,
+                    "offset": offset,
+                    "received_size": received_size,
             })
             return
 
@@ -6496,17 +9415,81 @@ class UIServer:
             #                  transfer_id, msg, queued?, paused?}
             #          OR     {v, t:"error", rid, code, message}
             upload_id = envelope.get("upload_id", "")
-            if not isinstance(upload_id, str) or upload_id not in self._phone_uploads:
+            if not isinstance(upload_id, str):
                 _err("unknown_upload", "upload_id not found (init first / expired)")
                 return
-            upload_rec = self._phone_uploads.pop(upload_id)
+            pending_upload = self._phone_uploads.get(upload_id)
+            if pending_upload is None:
+                finalizing = self._phone_finalizing_uploads.get(upload_id)
+                if finalizing is not None:
+                    source_fp = str(getattr(peer, "fingerprint", "") or "")
+                    if finalizing.get("reservation_peer") == f"phone:{source_fp}":
+                        _err("upload_finalizing", "upload is already finalizing")
+                        return
+                _err("unknown_upload", "upload_id not found (init first / expired)")
+                return
+            source_fp = str(getattr(peer, "fingerprint", "") or "")
+            if pending_upload.get("reservation_peer") != f"phone:{source_fp}":
+                _err("unknown_upload", "upload_id does not belong to this device")
+                return
+            lock = pending_upload.get("lock")
+            if not isinstance(lock, asyncio.Lock):
+                _err("staging_state_invalid", "upload serialization state is missing")
+                return
+            async with lock:
+                if (
+                    self._phone_uploads.get(upload_id) is not pending_upload
+                    or pending_upload.get("state") != "open"
+                ):
+                    _err("unknown_upload", "upload_id not found (init first / expired)")
+                    return
+                if pending_upload.get("reservation_peer") != f"phone:{source_fp}":
+                    _err("unknown_upload", "upload_id does not belong to this device")
+                    return
+                if pending_upload["received_size"] != pending_upload["expected_size"]:
+                    pending_upload["last_chunk_ms"] = int(time.time() * 1000)
+                    _err(
+                        "size_mismatch",
+                        (
+                            f"got {pending_upload['received_size']} of "
+                            f"{pending_upload['expected_size']} bytes"
+                        ),
+                    )
+                    return
+                pending_upload["state"] = "finalizing"
+                upload_rec = self._phone_uploads.pop(upload_id)
+                self._phone_finalizing_uploads[upload_id] = upload_rec
+            sync_error: Exception | None = None
+            sync_cancelled: asyncio.CancelledError | None = None
             try:
-                upload_rec["fh"].close()
-            except Exception:
-                pass
+                await _blocking_file_io(
+                    _durably_flush_ui_upload,
+                    upload_rec["fh"],
+                    Path(upload_rec["path"]),
+                )
+            except asyncio.CancelledError as exc:
+                sync_cancelled = exc
+            except Exception as e:
+                sync_error = e
+            finally:
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await _blocking_file_io(upload_rec["fh"].close)
+            self._release_upload_reservation(upload_rec)
+            if sync_cancelled is not None:
+                with contextlib.suppress(OSError):
+                    Path(upload_rec["path"]).unlink(missing_ok=True)
+                self._finish_phone_upload_session(upload_rec)
+                raise sync_cancelled
+            if sync_error is not None:
+                with contextlib.suppress(OSError):
+                    Path(upload_rec["path"]).unlink(missing_ok=True)
+                self._finish_phone_upload_session(upload_rec)
+                _err("staging_sync_failed", f"cannot commit staged upload: {sync_error}")
+                return
             if upload_rec["received_size"] != upload_rec["expected_size"]:
                 with contextlib.suppress(OSError):
                     Path(upload_rec["path"]).unlink(missing_ok=True)
+                self._finish_phone_upload_session(upload_rec)
                 _err(
                     "size_mismatch",
                     f"got {upload_rec['received_size']} of {upload_rec['expected_size']} bytes",
@@ -6515,71 +9498,710 @@ class UIServer:
             # Now drive the same daemon machinery /api/send-file uses.
             peer_fp = upload_rec["peer_fp"]
             upload_path = Path(upload_rec["path"])
+            phone_binding: UIDeliveryBinding | None = None
+            durable_transfer_id: str | None = None
+            keep_phone_upload = False
+            cancellation_release_done = False
+
+            async def _phone_record_and_send(
+                reply: dict[str, Any],
+                *,
+                reconciled_after_restart: bool = False,
+            ) -> bool:
+                """Commit a phone result before its lossy DataChannel reply."""
+
+                nonlocal phone_binding
+                if phone_binding is None:
+                    _send(reply)
+                    return True
+                completed: list[UIDeliveryBinding] = []
+
+                def _record() -> UIDeliveryBinding:
+                    assert phone_binding is not None
+                    recorder = (
+                        self._ui_delivery_idempotency.record_reconciled_response
+                        if reconciled_after_restart
+                        else self._ui_delivery_idempotency.record_response
+                    )
+                    recorded_binding = recorder(
+                        phone_binding,
+                        status=200,
+                        body=reply,
+                    )
+                    completed.append(recorded_binding)
+                    return recorded_binding
+
+                try:
+                    recorded = await _blocking_file_io(_record)
+                except asyncio.CancelledError:
+                    # If FULL sync committed before cancellation reached this
+                    # coroutine, retain the authenticated result phase so the
+                    # outer cleanup never mistakes it for releasable admission.
+                    if completed:
+                        phone_binding = completed[0]
+                    raise
+                except Exception as exc:
+                    log.critical(
+                        "phone file result could not be durably committed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    _send(
+                        {
+                            "t": "error",
+                            "code": "delivery_outcome_unknown",
+                            "message": (
+                                "Delivery accounting is being reconciled; "
+                                "do not send this file again."
+                            ),
+                            "outcome_unknown": True,
+                            "client_msg_id": upload_rec.get("client_msg_id"),
+                            "transfer_id": phone_binding.transfer_id,
+                            "delivery_id": phone_binding.delivery_id,
+                        }
+                    )
+                    return False
+                assert recorded.response_body is not None
+                _send(dict(recorded.response_body))
+                return True
+
+            async def _phone_release_before_wire() -> None:
+                nonlocal cancellation_release_done
+                if phone_binding is None or phone_binding.phase not in {"bound", "queued"}:
+                    return
+                try:
+                    await _blocking_file_io(
+                        self._ui_delivery_idempotency.release_before_dispatch,
+                        phone_binding,
+                    )
+                    cancellation_release_done = True
+                except Exception:
+                    log.exception("could not release phone pre-wire delivery admission")
+
+            async def _phone_predispatch_call(
+                function: Any,
+                *args: Any,
+                **kwargs: Any,
+            ) -> UIDeliveryBinding:
+                """FULL-sync a phone admission transition off the event loop."""
+
+                nonlocal phone_binding, cancellation_release_done
+                completed: list[UIDeliveryBinding] = []
+
+                def _run() -> UIDeliveryBinding:
+                    binding = function(*args, **kwargs)
+                    completed.append(binding)
+                    return binding
+
+                try:
+                    return await _blocking_file_io(_run)
+                except asyncio.CancelledError:
+                    if completed:
+                        binding = completed[0]
+                        phone_binding = binding
+                        if (
+                            binding.owns_attempt
+                            and binding.phase in {"bound", "queued"}
+                            and not binding.is_replay
+                        ):
+                            try:
+                                await _blocking_file_io(
+                                    self._ui_delivery_idempotency.release_before_dispatch,
+                                    binding,
+                                )
+                                cancellation_release_done = True
+                            except Exception:
+                                log.exception(
+                                    "could not release cancelled phone delivery admission"
+                                )
+                    raise
+
+            def _phone_adopt_durable_source(rec: Any) -> None:
+                """Remove a retry copy when the ledger owns verified bytes."""
+
+                nonlocal upload_path
+                if phone_binding is None:
+                    return
+                raw = str((getattr(rec, "metadata", None) or {}).get("path") or "")
+                if not raw:
+                    return
+                authoritative = Path(raw)
+                try:
+                    retry_resolved = upload_path.resolve(strict=True)
+                    authoritative_resolved = authoritative.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    return
+                if retry_resolved == authoritative_resolved:
+                    return
+                if not authoritative.is_file() or authoritative.is_symlink():
+                    raise RuntimeError(
+                        "durable transfer ledger returned an unsafe phone source path"
+                    )
+                duplicate = upload_path
+                upload_path = authoritative
+                with contextlib.suppress(OSError):
+                    duplicate.unlink(missing_ok=True)
+
+            async def _phone_queue_file_transfer(**kwargs: Any) -> Any:
+                """Queue off-loop and retain/adopt the committed ledger source."""
+
+                nonlocal durable_transfer_id, keep_phone_upload
+                completed: list[Any] = []
+
+                def _queue() -> Any:
+                    rec = self.daemon.queue_file_transfer(**kwargs)
+                    completed.append(rec)
+                    return rec
+
+                def _claim(rec: Any) -> None:
+                    nonlocal durable_transfer_id, keep_phone_upload
+                    record_id = getattr(rec, "id", None)
+                    if isinstance(record_id, str) and record_id:
+                        durable_transfer_id = record_id
+                        keep_phone_upload = True
+                    _phone_adopt_durable_source(rec)
+
+                try:
+                    queued = await _blocking_file_io(_queue)
+                except asyncio.CancelledError:
+                    if completed:
+                        try:
+                            _claim(completed[0])
+                        except Exception:
+                            # The ledger row may already own the original path.
+                            # Retain the retry inode on uncertainty; storage GC
+                            # can prove and collect it without risking data loss.
+                            keep_phone_upload = True
+                            log.exception("could not adopt phone queue source during cancellation")
+                    raise
+                _claim(queued)
+                return queued
+
+            def _phone_schedule_background(peer_fingerprint: str) -> None:
+                """Nudge the durable queue without extending the phone RPC."""
+
+                self._schedule_ui_delivery_background(peer_fingerprint)
+
             try:
                 target_peer = await self.daemon.resolve_for_send(peer_fp)
+                client_msg_id = upload_rec.get("client_msg_id")
+                if client_msg_id:
+                    target_fp = await _blocking_file_io(
+                        self._resolve_pinned_fp,
+                        peer_fp,
+                        target_peer,
+                    )
+                    if not target_fp:
+                        with contextlib.suppress(OSError):
+                            upload_path.unlink(missing_ok=True)
+                        _err(
+                            "peer_not_pinned",
+                            "file delivery requires a paired device fingerprint",
+                        )
+                        return
+                    try:
+                        prepare = getattr(
+                            self.daemon,
+                            "prepare_file_for_transfer",
+                            None,
+                        )
+                        if callable(prepare):
+                            prepared = await _blocking_file_io(
+                                prepare,
+                                upload_path,
+                                peer_fp=target_fp,
+                            )
+                            content_hash = str(prepared.file_index.blob_hash)
+                        else:
+                            from one_link.cdc import hash_path
+
+                            content_hash = await _blocking_file_io(
+                                hash_path,
+                                upload_path,
+                            )
+                        phone_principal = f"phone:{source_fp}"
+                        mapped_client_id, _prior = await self._phone_delivery_key_and_prior(
+                            source_fp=source_fp,
+                            legacy_client_msg_id=str(
+                                upload_rec.get("legacy_client_msg_id") or client_msg_id
+                            ),
+                            canonical_client_msg_id=str(
+                                upload_rec.get("canonical_client_msg_id") or client_msg_id
+                            ),
+                        )
+                        phone_binding = await _phone_predispatch_call(
+                            self._ui_delivery_idempotency.bind,
+                            principal_scope=phone_principal,
+                            client_delivery_id=mapped_client_id,
+                            contract=UIDeliveryContract(
+                                peer_fp=target_fp,
+                                blob_hash=content_hash,
+                                size=int(upload_rec["received_size"]),
+                                display_name=str(upload_rec["filename"]),
+                                rel_path="",
+                                chat_inline=False,
+                            ),
+                        )
+                    except UIDeliveryContractConflict:
+                        with contextlib.suppress(OSError):
+                            upload_path.unlink(missing_ok=True)
+                        _err(
+                            "client_delivery_contract_conflict",
+                            "client_msg_id was already used for another file delivery",
+                        )
+                        return
+                    except Exception as exc:
+                        with contextlib.suppress(OSError):
+                            upload_path.unlink(missing_ok=True)
+                        log.exception("phone file idempotency binding failed: %s", exc)
+                        _err(
+                            "delivery_accounting_unavailable",
+                            "No file offer was sent because durable accounting failed.",
+                        )
+                        return
+
+                    if phone_binding.is_replay:
+                        with contextlib.suppress(OSError):
+                            upload_path.unlink(missing_ok=True)
+                        assert phone_binding.response_body is not None
+                        replay_body = dict(phone_binding.response_body)
+                        _send(replay_body)
+                        if replay_body.get("queued"):
+                            with contextlib.suppress(Exception):
+                                _phone_schedule_background(phone_binding.contract.peer_fp)
+                        return
+                    if not phone_binding.owns_attempt:
+                        if not phone_binding.recoverable_after_restart:
+                            with contextlib.suppress(OSError):
+                                upload_path.unlink(missing_ok=True)
+                            _send(
+                                {
+                                    "t": "send_file_result",
+                                    "ok": True,
+                                    "in_progress": True,
+                                    "outcome_unknown": (phone_binding.is_outcome_ambiguous),
+                                    "client_msg_id": client_msg_id,
+                                    "transfer_id": phone_binding.transfer_id,
+                                    "delivery_id": phone_binding.delivery_id,
+                                }
+                            )
+                            return
+                        try:
+                            recovery_rec = await _blocking_file_io(
+                                state.get_transfer,
+                                phone_binding.transfer_id,
+                            )
+                        except asyncio.CancelledError:
+                            with contextlib.suppress(OSError):
+                                upload_path.unlink(missing_ok=True)
+                            raise
+                        except Exception as exc:
+                            with contextlib.suppress(OSError):
+                                upload_path.unlink(missing_ok=True)
+                            log.exception(
+                                "phone delivery ledger reconciliation failed: %s",
+                                exc,
+                            )
+                            _send(
+                                {
+                                    "t": "error",
+                                    "code": "delivery_outcome_unknown",
+                                    "message": (
+                                        "Delivery accounting is being reconciled; "
+                                        "no duplicate offer was sent."
+                                    ),
+                                    "outcome_unknown": True,
+                                    "client_msg_id": client_msg_id,
+                                    "transfer_id": phone_binding.transfer_id,
+                                    "delivery_id": phone_binding.delivery_id,
+                                }
+                            )
+                            return
+                        if (
+                            recovery_rec is not None
+                            and not self._ui_delivery_ledger_contract_matches(
+                                phone_binding,
+                                recovery_rec,
+                            )
+                        ):
+                            with contextlib.suppress(OSError):
+                                upload_path.unlink(missing_ok=True)
+                            _err(
+                                "delivery_ledger_contract_conflict",
+                                (
+                                    "The durable transfer ledger disagrees with "
+                                    "the original phone delivery contract."
+                                ),
+                            )
+                            return
+                        recovery_metadata = (
+                            dict(getattr(recovery_rec, "metadata", None) or {})
+                            if recovery_rec is not None
+                            else {}
+                        )
+                        if (
+                            recovery_rec is not None
+                            and getattr(recovery_rec, "status", None) == "complete"
+                            and recovery_metadata.get("delivery_state") == "done"
+                            and recovery_metadata.get("commit_confirmed") is True
+                            and int(getattr(recovery_rec, "progress_bytes", -1))
+                            == phone_binding.contract.size
+                            and self._ui_delivery_has_exact_commit_receipt(
+                                phone_binding,
+                                recovery_rec,
+                            )
+                        ):
+                            with contextlib.suppress(OSError):
+                                upload_path.unlink(missing_ok=True)
+                            recovered_result = {
+                                "transfer_id": phone_binding.transfer_id,
+                                "delivery_id": phone_binding.delivery_id,
+                                "blob": phone_binding.contract.blob_hash,
+                                "size": phone_binding.contract.size,
+                                "confirmed": True,
+                                "status": "done",
+                                "recovered_from_ledger": True,
+                            }
+                            await _phone_record_and_send(
+                                {
+                                    "t": "send_file_result",
+                                    "ok": True,
+                                    "transfer_id": phone_binding.transfer_id,
+                                    "delivery_id": phone_binding.delivery_id,
+                                    "client_msg_id": client_msg_id,
+                                    "filename": upload_rec["filename"],
+                                    "result": recovered_result,
+                                },
+                                reconciled_after_restart=True,
+                            )
+                            return
+                        if (
+                            recovery_rec is not None
+                            and getattr(recovery_rec, "status", None) == "failed"
+                            and recovery_metadata.get("delivery_state") == "sent_unconfirmed"
+                            and recovery_metadata.get("commit_confirmed") is False
+                            and int(getattr(recovery_rec, "progress_bytes", -1))
+                            == phone_binding.contract.size
+                        ):
+                            with contextlib.suppress(OSError):
+                                upload_path.unlink(missing_ok=True)
+                            recovered_result = {
+                                "transfer_id": phone_binding.transfer_id,
+                                "delivery_id": phone_binding.delivery_id,
+                                "blob": phone_binding.contract.blob_hash,
+                                "size": phone_binding.contract.size,
+                                "confirmed": False,
+                                "status": "sent_unconfirmed",
+                                "recovered_from_ledger": True,
+                            }
+                            await _phone_record_and_send(
+                                {
+                                    "t": "send_file_result",
+                                    "ok": True,
+                                    "transfer_id": phone_binding.transfer_id,
+                                    "delivery_id": phone_binding.delivery_id,
+                                    "client_msg_id": client_msg_id,
+                                    "filename": upload_rec["filename"],
+                                    "result": recovered_result,
+                                },
+                                reconciled_after_restart=True,
+                            )
+                            return
+                        if recovery_rec is not None and self._ui_delivery_pristine_preoffer(
+                            phone_binding,
+                            recovery_rec,
+                        ):
+                            authoritative = Path(str(recovery_metadata.get("path") or ""))
+                            if authoritative.is_file() and not authoritative.is_symlink():
+                                try:
+                                    phone_binding = await _phone_predispatch_call(
+                                        self._ui_delivery_idempotency.reclaim_dispatching_before_wire,
+                                        phone_binding,
+                                    )
+                                    _phone_adopt_durable_source(recovery_rec)
+                                    keep_phone_upload = True
+                                    durable_transfer_id = phone_binding.transfer_id
+                                except asyncio.CancelledError:
+                                    with contextlib.suppress(OSError):
+                                        upload_path.unlink(missing_ok=True)
+                                    raise
+                                except Exception as exc:
+                                    log.exception(
+                                        "could not reclaim pristine phone delivery: %s",
+                                        exc,
+                                    )
+                        if not phone_binding.owns_attempt:
+                            with contextlib.suppress(OSError):
+                                upload_path.unlink(missing_ok=True)
+                            if (
+                                recovery_rec is not None
+                                and getattr(recovery_rec, "status", None) == "paused"
+                            ):
+                                await _phone_record_and_send(
+                                    {
+                                        "t": "send_file_result",
+                                        "ok": True,
+                                        "queued": True,
+                                        "paused": True,
+                                        "outcome_unknown": True,
+                                        "client_msg_id": client_msg_id,
+                                        "transfer_id": phone_binding.transfer_id,
+                                        "delivery_id": phone_binding.delivery_id,
+                                        "filename": upload_rec["filename"],
+                                        "reason": recovery_metadata.get("user_message")
+                                        or recovery_metadata.get("error")
+                                        or "waiting for durable queue recovery",
+                                        "recovered_from_ledger": True,
+                                    },
+                                    reconciled_after_restart=True,
+                                )
+                                return
+                            if (
+                                recovery_rec is not None
+                                and getattr(recovery_rec, "status", None) == "failed"
+                            ):
+                                await _phone_record_and_send(
+                                    {
+                                        "t": "send_file_result",
+                                        "ok": False,
+                                        "client_msg_id": client_msg_id,
+                                        "transfer_id": phone_binding.transfer_id,
+                                        "delivery_id": phone_binding.delivery_id,
+                                        "filename": upload_rec["filename"],
+                                        "code": "delivery_failed_reconciled",
+                                        "reason": recovery_metadata.get("user_message")
+                                        or recovery_metadata.get("error")
+                                        or "durable delivery failed",
+                                        "recovered_from_ledger": True,
+                                    },
+                                    reconciled_after_restart=True,
+                                )
+                                return
+                            _send(
+                                {
+                                    "t": "send_file_result",
+                                    "ok": True,
+                                    "in_progress": True,
+                                    "outcome_unknown": True,
+                                    "client_msg_id": client_msg_id,
+                                    "transfer_id": phone_binding.transfer_id,
+                                    "delivery_id": phone_binding.delivery_id,
+                                }
+                            )
+                            return
                 if target_peer is None:
                     # Try durable queue (offline peer) — keeps the
                     # bytes for auto-resume just like /api/send-file.
                     try:
-                        durable = self.daemon.queue_file_transfer(
-                            peer_fp=peer_fp,
-                            path=upload_path,
-                            reason="waiting for device",
-                        )
-                        _send({
+                        if phone_binding is not None:
+                            durable = await _phone_queue_file_transfer(
+                                peer_fp=phone_binding.contract.peer_fp,
+                                path=upload_path,
+                                reason="waiting for device",
+                                schedule_resume=False,
+                                display_name=phone_binding.contract.display_name,
+                                chat_inline=phone_binding.contract.chat_inline,
+                                transfer_id=phone_binding.transfer_id,
+                            )
+                            delivery_id = str(
+                                (getattr(durable, "metadata", None) or {}).get("delivery_id") or ""
+                            )
+                            if not (
+                                len(delivery_id) == 32
+                                and all(c in "0123456789abcdef" for c in delivery_id)
+                            ):
+                                raise RuntimeError(
+                                    "transfer ledger returned no wire delivery identity"
+                                )
+                            phone_binding = await _phone_predispatch_call(
+                                self._ui_delivery_idempotency.mark_queued,
+                                phone_binding,
+                                delivery_id=delivery_id,
+                            )
+                        else:
+                            durable = await _phone_queue_file_transfer(
+                                peer_fp=peer_fp,
+                                path=upload_path,
+                                reason="waiting for device",
+                                schedule_resume=False,
+                            )
+                        response_committed = await _phone_record_and_send({
                             "t": "send_file_result",
                             "ok": True,
                             "queued": True,
                             "paused": True,
                             "transfer_id": getattr(durable, "id", None),
-                            "filename": upload_rec["filename"],
+                                "delivery_id": (
+                                    phone_binding.delivery_id if phone_binding else None
+                                ),
+                                "client_msg_id": upload_rec.get("client_msg_id"),
+                                "filename": upload_rec["filename"],
                             "reason": "peer_offline",
                         })
+                        schedule_fp = (
+                            phone_binding.contract.peer_fp
+                            if phone_binding is not None
+                            else await _blocking_file_io(
+                                self._resolve_pinned_fp,
+                                peer_fp,
+                                None,
+                            )
+                        )
+                        if response_committed and schedule_fp:
+                            with contextlib.suppress(Exception):
+                                _phone_schedule_background(schedule_fp)
                         return
                     except Exception as e:
-                        with contextlib.suppress(OSError):
-                            upload_path.unlink(missing_ok=True)
+                        await _phone_release_before_wire()
+                        if not keep_phone_upload:
+                            with contextlib.suppress(OSError):
+                                upload_path.unlink(missing_ok=True)
                         _err(
                             "peer_offline_queue_failed",
                             f"could not queue file: {e}",
                         )
                         return
-                durable_transfer_id = None
                 try:
-                    durable = self.daemon.queue_file_transfer(
-                        peer_fp=peer_fp,
-                        path=upload_path,
-                        reason="sending",
-                        schedule_resume=False,
-                    )
-                    durable_transfer_id = getattr(durable, "id", None)
-                except TypeError:
-                    durable = self.daemon.queue_file_transfer(
-                        peer_fp=peer_fp,
-                        path=upload_path,
-                        reason="sending",
-                    )
+                    if phone_binding is not None:
+                        durable = await _phone_queue_file_transfer(
+                            peer_fp=phone_binding.contract.peer_fp,
+                            path=upload_path,
+                            reason="sending",
+                            schedule_resume=False,
+                            display_name=phone_binding.contract.display_name,
+                            chat_inline=phone_binding.contract.chat_inline,
+                            transfer_id=phone_binding.transfer_id,
+                        )
+                    else:
+                        try:
+                            durable = await _phone_queue_file_transfer(
+                                peer_fp=peer_fp,
+                                path=upload_path,
+                                reason="sending",
+                                schedule_resume=False,
+                            )
+                        except TypeError:
+                            durable = await _phone_queue_file_transfer(
+                                peer_fp=peer_fp,
+                                path=upload_path,
+                                reason="sending",
+                            )
                     durable_transfer_id = getattr(durable, "id", None)
                 except Exception as e:
-                    log.warning(
-                        "phone send_file: pre-queue failed, continuing direct: %s",
+                    await _phone_release_before_wire()
+                    log.exception(
+                        "phone send_file: pre-queue failed; live send refused: %s",
                         e,
                     )
-                result = await self.daemon.send_file(
-                    target_peer,
-                    upload_path,
-                    transfer_id=durable_transfer_id,
-                )
-                _send({
+                    _err(
+                        "transfer_ledger_unavailable",
+                        (
+                            "No file bytes were sent because the transfer ledger "
+                            "is unavailable; the staged upload was retained."
+                        ),
+                    )
+                    return
+                if durable_transfer_id is None:
+                    await _phone_release_before_wire()
+                    _err(
+                        "transfer_ledger_unavailable",
+                        (
+                            "No file bytes were sent because the transfer ledger "
+                            "returned no durable row; the staged upload was retained."
+                        ),
+                    )
+                    return
+                if phone_binding is not None:
+                    delivery_id = str(
+                        (getattr(durable, "metadata", None) or {}).get("delivery_id") or ""
+                    )
+                    if not (
+                        durable_transfer_id == phone_binding.transfer_id
+                        and len(delivery_id) == 32
+                        and all(c in "0123456789abcdef" for c in delivery_id)
+                    ):
+                        await _phone_release_before_wire()
+                        _err(
+                            "transfer_ledger_unavailable",
+                            "The transfer ledger changed the bound delivery identity.",
+                        )
+                        return
+                    phone_binding = await _phone_predispatch_call(
+                        self._ui_delivery_idempotency.mark_queued,
+                        phone_binding,
+                        delivery_id=delivery_id,
+                    )
+                    # A phone request, like the desktop multipart request,
+                    # ends at FULL-synced local admission. Holding a lossy
+                    # DataChannel RPC open for a 100 MiB remote transfer made
+                    # healthy sends look frozen and invited retries. Persist
+                    # the exact replayable acknowledgement first, then let the
+                    # daemon's durable queue pump send/resume in background.
+                    admitted = await _phone_record_and_send(
+                        {
+                            "t": "send_file_result",
+                            "ok": True,
+                            "accepted": True,
+                            "queued": True,
+                            "background": True,
+                            "transfer_id": durable_transfer_id,
+                            "delivery_id": phone_binding.delivery_id,
+                            "client_msg_id": upload_rec.get("client_msg_id"),
+                            "filename": upload_rec["filename"],
+                            "status": "scheduled",
+                        }
+                    )
+                    if admitted:
+                        with contextlib.suppress(Exception):
+                            _phone_schedule_background(phone_binding.contract.peer_fp)
+                    return
+                else:
+                    result = await self.daemon.send_file(
+                        target_peer,
+                        upload_path,
+                        transfer_id=durable_transfer_id,
+                    )
+                await _phone_record_and_send({
                     "t": "send_file_result",
                     "ok": True,
                     "transfer_id": durable_transfer_id,
-                    "filename": upload_rec["filename"],
+                        "delivery_id": (phone_binding.delivery_id if phone_binding else None),
+                        "client_msg_id": upload_rec.get("client_msg_id"),
+                        "filename": upload_rec["filename"],
                     "result": result if isinstance(result, dict) else {"result": str(result)},
                 })
+            except asyncio.CancelledError:
+                if not cancellation_release_done:
+                    await _phone_release_before_wire()
+                if not keep_phone_upload:
+                    with contextlib.suppress(OSError):
+                        upload_path.unlink(missing_ok=True)
+                raise
             except Exception as e:
                 log.exception("phone send_file_complete failed: %s", e)
-                _err("send_file_failed", f"send_file: {e}")
+                if phone_binding is not None and phone_binding.phase == "dispatching":
+                    await _phone_record_and_send(
+                        {
+                            "t": "send_file_result",
+                            "ok": True,
+                            "queued": True,
+                            "paused": True,
+                            "outcome_unknown": True,
+                            "client_msg_id": upload_rec.get("client_msg_id"),
+                            "transfer_id": phone_binding.transfer_id,
+                            "delivery_id": phone_binding.delivery_id,
+                            "filename": upload_rec["filename"],
+                            "reason": str(e)[:240],
+                        }
+                    )
+                else:
+                    await _phone_release_before_wire()
+                    if not keep_phone_upload:
+                        with contextlib.suppress(OSError):
+                            upload_path.unlink(missing_ok=True)
+                    _err("send_file_failed", f"send_file: {e}")
+            finally:
+                self._finish_phone_upload_session(upload_rec)
             return
 
         # Unknown wire kind — silently ignore. v0.19.2's chat protocol
@@ -6645,7 +10267,8 @@ class UIServer:
                 status=400,
             )
 
-        action_name = (body.get("action") or "").lower()
+        raw_action = body.get("action")
+        action_name = raw_action.strip().lower() if isinstance(raw_action, str) else ""
 
         # Media-layer actions — bypass CallManager.
         if action_name in {
@@ -6679,6 +10302,34 @@ class UIServer:
         if action_name == "mark_handoff_prewarmed":
             return self._handle_mark_handoff_prewarmed_action(body)
 
+        if action_name == "initiate":
+            from one_link.call_manager import normalize_call_kind
+
+            try:
+                call_kind = normalize_call_kind(body.get("kind"))
+            except ValueError:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "user_message": "Choose a voice or video call.",
+                    },
+                    status=400,
+                )
+            peer_fp = body.get("peer_master_vk_hex")
+            if not isinstance(peer_fp, str) or not self.daemon._call_capability_allowed(
+                peer_fp, call_kind
+            ):
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "call_kind": call_kind,
+                        "user_message": ("That contact is not allowed to use this call type."),
+                    },
+                    status=403,
+                )
+            body = dict(body)
+            body["kind"] = call_kind
+
         api = self._call_api()
         result = api.handle_json(body)
         # Flush the response so outbound wire messages actually reach
@@ -6688,17 +10339,13 @@ class UIServer:
             delivered = tuple(await self.daemon.flush_call_api_response(result))
         except Exception as exc:
             log.warning("flush_call_api_response failed: %s", exc)
-        if (
-            action_name == "initiate"
-            and result.ok
-            and result.outbound
-            and not delivered
-        ):
+        if action_name == "initiate" and result.ok and result.outbound and not delivered:
             peer_label = str(body.get("peer_label") or "That device").strip()
             return web.json_response({
                 "ok": False,
                 "call_id": result.call_id,
-                "phase": result.phase,
+                    "call_kind": result.call_kind,
+                    "phase": result.phase,
                 "consent_phase": result.consent_phase,
                 "user_message": (
                     f"{peer_label} is not reachable right now. "
@@ -6717,7 +10364,8 @@ class UIServer:
         return web.json_response({
             "ok": result.ok,
             "call_id": result.call_id,
-            "phase": result.phase,
+                "call_kind": result.call_kind,
+                "phase": result.phase,
             "consent_phase": result.consent_phase,
             "user_message": result.user_message,
             "call_complete": result.call_complete,
@@ -6727,6 +10375,429 @@ class UIServer:
             ],
             "delivered": list(delivered),
         })
+
+    def _capsule_ingest_states(self) -> dict[str, dict[str, Any]]:
+        """Return the bounded per-server capsule retry registry.
+
+        A few focused tests construct ``UIServer`` through ``__new__``.  The
+        lazy fallback keeps those embeddings safe without weakening the
+        production constructor's explicit ownership of the state.
+        """
+
+        states = getattr(self, "_capsule_ingest_state", None)
+        if not isinstance(states, dict):
+            states = {}
+            self._capsule_ingest_state = states
+        now_ms = int(time.time() * 1000)
+        stale = [
+            call_id
+            for call_id, state in states.items()
+            if now_ms - int(state.get("updated_ms", 0)) > CAPSULE_CAPTURE_STATE_TTL_MS
+        ]
+        for call_id in stale:
+            states.pop(call_id, None)
+        return states
+
+    @staticmethod
+    def _parse_capsule_sequence(raw: object) -> int | None:
+        if not isinstance(raw, str) or not raw or len(raw) > 4:
+            return None
+        if raw != "0" and raw.startswith("0"):
+            return None
+        if not raw.isascii() or not raw.isdecimal():
+            return None
+        value = int(raw)
+        if not (0 <= value < CAPSULE_CAPTURE_MAX_CHUNKS):
+            return None
+        return value
+
+    @staticmethod
+    def _capsule_codec_for_content_type(content_type: str) -> str | None:
+        return {
+            "audio/webm": "webm-opus",
+            "audio/ogg": "ogg-opus",
+            "audio/mp4": "mp4-audio",
+            "application/octet-stream": "opus",
+        }.get(content_type.lower())
+
+    async def _read_capsule_chunk(self, request: web.Request) -> bytes:
+        declared = request.content_length
+        if declared is not None and (declared < 0 or declared > CAPSULE_CAPTURE_CHUNK_MAX_BYTES):
+            raise web.HTTPRequestEntityTooLarge(
+                max_size=CAPSULE_CAPTURE_CHUNK_MAX_BYTES,
+                actual_size=max(0, declared),
+            )
+        data = bytearray()
+        try:
+            async with asyncio.timeout(CAPSULE_CAPTURE_CHUNK_TIMEOUT_SECONDS):
+                while not request.content.at_eof():
+                    remaining = CAPSULE_CAPTURE_CHUNK_MAX_BYTES + 1 - len(data)
+                    if remaining <= 0:
+                        raise web.HTTPRequestEntityTooLarge(
+                            max_size=CAPSULE_CAPTURE_CHUNK_MAX_BYTES,
+                            actual_size=len(data) + 1,
+                        )
+                    chunk = await request.content.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                    if len(data) > CAPSULE_CAPTURE_CHUNK_MAX_BYTES:
+                        raise web.HTTPRequestEntityTooLarge(
+                            max_size=CAPSULE_CAPTURE_CHUNK_MAX_BYTES,
+                            actual_size=len(data),
+                        )
+        except TimeoutError as exc:
+            raise web.HTTPRequestTimeout(text="capsule chunk timed out") from exc
+        if declared is not None and len(data) != declared:
+            raise web.HTTPBadRequest(text="capsule chunk was truncated")
+        return bytes(data)
+
+    async def api_call_capsule_chunk(self, request: web.Request) -> web.Response:
+        """Ingest one authenticated, ordered MediaRecorder fragment.
+
+        Binary fragments use a dedicated bounded route instead of base64 JSON.
+        This avoids the 4/3 expansion and the multiple full-body copies that
+        made the earlier comment-only capsule bridge unsuitable for real use.
+        """
+
+        from one_link.async_capsule import MAX_CAPSULE_BYTES
+        from one_link.call_manager import (
+            ManagerEvent,
+            ManagerEventKind,
+            validate_call_id,
+        )
+        from one_link.frame_provenance import (
+            FrameKind,
+            PathClass,
+            make_segment_hash,
+            sign_provenance,
+        )
+
+        headers = {"Cache-Control": "no-store"}
+        try:
+            call_id = validate_call_id(request.match_info.get("call_id"))
+        except ValueError:
+            return web.json_response(
+                {"ok": False, "user_message": "This call is no longer active."},
+                status=404,
+                headers=headers,
+            )
+        sequence = self._parse_capsule_sequence(request.headers.get("X-One-Link-Capsule-Sequence"))
+        if sequence is None:
+            return web.json_response(
+                {"ok": False, "user_message": "That capsule segment was out of order."},
+                status=400,
+                headers=headers,
+            )
+        codec = self._capsule_codec_for_content_type((request.content_type or "").lower())
+        if codec is None:
+            return web.json_response(
+                {"ok": False, "user_message": "That audio format is not supported."},
+                status=415,
+                headers=headers,
+            )
+        try:
+            payload = await self._read_capsule_chunk(request)
+        except web.HTTPRequestEntityTooLarge:
+            return web.json_response(
+                {"ok": False, "user_message": "That capsule segment is too large."},
+                status=413,
+                headers=headers,
+            )
+        except web.HTTPRequestTimeout:
+            return web.json_response(
+                {"ok": False, "user_message": "That capsule segment took too long."},
+                status=408,
+                headers=headers,
+            )
+        except web.HTTPBadRequest:
+            return web.json_response(
+                {"ok": False, "user_message": "That capsule segment was incomplete."},
+                status=400,
+                headers=headers,
+            )
+        if not payload:
+            return web.json_response(
+                {"ok": False, "user_message": "That capsule segment was empty."},
+                status=400,
+                headers=headers,
+            )
+
+        mgr = self.daemon._call_registry.get(call_id)
+        if mgr is None:
+            return web.json_response(
+                {"ok": False, "user_message": "This call is no longer active."},
+                status=404,
+                headers=headers,
+            )
+        digest = make_segment_hash(payload).hex()
+        states = self._capsule_ingest_states()
+        state = states.get(call_id)
+        if state is None:
+            state = {
+                "next_sequence": 0,
+                "recent": {},
+                "codec": codec,
+                "updated_ms": int(time.time() * 1000),
+                "finalize_lock": asyncio.Lock(),
+                "finalized_output": None,
+                "flush_complete": False,
+            }
+            states[call_id] = state
+        expected = int(state.get("next_sequence", 0))
+        recent = state.get("recent")
+        if not isinstance(recent, dict):
+            recent = {}
+            state["recent"] = recent
+        if sequence < expected:
+            if hmac.compare_digest(str(recent.get(sequence, "")), digest):
+                state["updated_ms"] = int(time.time() * 1000)
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "call_id": call_id,
+                        "sequence": sequence,
+                        "next_sequence": expected,
+                        "duplicate": True,
+                    },
+                    headers=headers,
+                )
+            return web.json_response(
+                {
+                    "ok": False,
+                    "expected_sequence": expected,
+                    "user_message": "That capsule segment conflicts with one already received.",
+                },
+                status=409,
+                headers=headers,
+            )
+        if sequence != expected:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "expected_sequence": expected,
+                    "user_message": "Waiting for an earlier capsule segment.",
+                },
+                status=409,
+                headers=headers,
+            )
+        if state.get("codec") != codec:
+            return web.json_response(
+                {"ok": False, "user_message": "The capsule audio format changed mid-stream."},
+                status=409,
+                headers=headers,
+            )
+        if not mgr.is_capturing:
+            return web.json_response(
+                {"ok": False, "user_message": "Capsule capture is no longer open."},
+                status=409,
+                headers=headers,
+            )
+        builder = mgr.state.capsule_builder
+        if builder is None:
+            return web.json_response(
+                {"ok": False, "user_message": "Capsule capture is not ready yet."},
+                status=409,
+                headers=headers,
+            )
+        before_bytes = builder.total_bytes()
+        if before_bytes + len(payload) > MAX_CAPSULE_BYTES:
+            return web.json_response(
+                {"ok": False, "user_message": "This capsule has reached its size limit."},
+                status=413,
+                headers=headers,
+            )
+        occurred_at_ms = max(
+            int(time.time() * 1000),
+            int(builder.started_at_ms),
+        )
+        provenance = sign_provenance(
+            segment_hash=bytes.fromhex(digest),
+            device_id=self.daemon.me.short_id,
+            frame_kind=FrameKind.REAL,
+            path_class=PathClass.LOCAL,
+            recording_state=mgr.current_recording_state,
+            timestamp_us=occurred_at_ms * 1000,
+            produce_confidence=1.0,
+            signing_key=self.daemon.me.private,
+        )
+        try:
+            mgr.handle(
+                ManagerEvent(
+                    kind=ManagerEventKind.CAPTURE_AUDIO_SEGMENT,
+                    occurred_at_ms=occurred_at_ms,
+                    data={"chunk": payload, "provenance": provenance},
+                )
+            )
+        except ValueError:
+            return web.json_response(
+                {"ok": False, "user_message": "That capsule segment could not be accepted."},
+                status=422,
+                headers=headers,
+            )
+        builder_after = mgr.state.capsule_builder
+        total_bytes = builder_after.total_bytes() if builder_after is not None else before_bytes
+        if total_bytes != before_bytes + len(payload):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "user_message": "Capsule capture closed before that segment arrived.",
+                },
+                status=409,
+                headers=headers,
+            )
+        recent[sequence] = digest
+        while len(recent) > CAPSULE_CAPTURE_RECENT_SEQUENCE_WINDOW:
+            recent.pop(next(iter(recent)))
+        state["next_sequence"] = expected + 1
+        state["updated_ms"] = int(time.time() * 1000)
+        return web.json_response(
+            {
+                "ok": True,
+                "call_id": call_id,
+                "sequence": sequence,
+                "next_sequence": expected + 1,
+                "total_bytes": total_bytes,
+                "duplicate": False,
+            },
+            headers=headers,
+        )
+
+    async def api_call_capsule_finalize(self, request: web.Request) -> web.Response:
+        """Atomically seal, persist, and dispatch an uploaded capsule."""
+
+        from one_link.call_manager import (
+            ManagerEvent,
+            ManagerEventKind,
+            validate_call_id,
+        )
+
+        headers = {"Cache-Control": "no-store"}
+        try:
+            call_id = validate_call_id(request.match_info.get("call_id"))
+        except ValueError:
+            return web.json_response(
+                {"ok": False, "user_message": "This call is no longer active."},
+                status=404,
+                headers=headers,
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if not isinstance(body, dict) or set(body) != {
+            "expected_chunks",
+            "expected_bytes",
+        }:
+            return web.json_response(
+                {"ok": False, "user_message": "Capsule completion details were incomplete."},
+                status=400,
+                headers=headers,
+            )
+        expected_chunks = body.get("expected_chunks")
+        expected_bytes = body.get("expected_bytes")
+        if (
+            isinstance(expected_chunks, bool)
+            or not isinstance(expected_chunks, int)
+            or not (1 <= expected_chunks <= CAPSULE_CAPTURE_MAX_CHUNKS)
+            or isinstance(expected_bytes, bool)
+            or not isinstance(expected_bytes, int)
+            or expected_bytes <= 0
+        ):
+            return web.json_response(
+                {"ok": False, "user_message": "Capsule completion details were invalid."},
+                status=400,
+                headers=headers,
+            )
+        mgr = self.daemon._call_registry.get(call_id)
+        if mgr is None:
+            return web.json_response(
+                {"ok": False, "user_message": "This call is no longer active."},
+                status=404,
+                headers=headers,
+            )
+        state = self._capsule_ingest_states().get(call_id)
+        if state is None:
+            return web.json_response(
+                {"ok": False, "user_message": "No capsule audio was received."},
+                status=409,
+                headers=headers,
+            )
+        lock = state.get("finalize_lock")
+        if not isinstance(lock, asyncio.Lock):
+            lock = asyncio.Lock()
+            state["finalize_lock"] = lock
+        async with lock:
+            next_sequence = int(state.get("next_sequence", 0))
+            builder = mgr.state.capsule_builder
+            total_bytes = builder.total_bytes() if builder is not None else 0
+            capsule = mgr.state.finalized_capsule
+            if expected_chunks != next_sequence or expected_bytes != total_bytes:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "expected_sequence": next_sequence,
+                        "received_bytes": total_bytes,
+                        "user_message": "The capsule is still receiving audio.",
+                    },
+                    status=409,
+                    headers=headers,
+                )
+            output = state.get("finalized_output")
+            duplicate = capsule is not None
+            if capsule is None:
+                if not mgr.is_capturing or builder is None:
+                    return web.json_response(
+                        {"ok": False, "user_message": "Capsule capture is no longer open."},
+                        status=409,
+                        headers=headers,
+                    )
+                builder.audio_codec = str(state.get("codec") or "opus")
+                output = mgr.handle(
+                    ManagerEvent(
+                        kind=ManagerEventKind.CAPSULE_FINALIZED,
+                        occurred_at_ms=max(
+                            int(time.time() * 1000),
+                            int(builder.started_at_ms),
+                        ),
+                    )
+                )
+                capsule = output.finalized_capsule
+                if capsule is None:
+                    return web.json_response(
+                        {"ok": False, "user_message": "The capsule could not be finalized."},
+                        status=422,
+                        headers=headers,
+                    )
+                state["finalized_output"] = output
+            if output is not None and not bool(state.get("flush_complete")):
+                try:
+                    await self.daemon._flush_manager_output(mgr, output)
+                except Exception as exc:
+                    log.warning(
+                        "capsule persistence/delivery flush failed for %s: %s", call_id, exc
+                    )
+                    state["updated_ms"] = int(time.time() * 1000)
+                    return web.json_response(
+                        {"ok": False, "user_message": "The capsule is saved and waiting to send."},
+                        status=503,
+                        headers=headers,
+                    )
+                state["flush_complete"] = True
+            state["updated_ms"] = int(time.time() * 1000)
+            assert capsule is not None
+            return web.json_response(
+                {
+                    "ok": True,
+                    "call_id": call_id,
+                    "capsule_id": capsule.capsule_id,
+                    "size_bytes": capsule.size_bytes(),
+                    "duration_ms": capsule.duration_ms,
+                    "resumable_until_ms": capsule.resumable_until_ms,
+                    "duplicate": duplicate,
+                },
+                headers=headers,
+            )
 
     async def _handle_media_layer_action(
         self, action_name: str, body: dict,
@@ -6757,6 +10828,18 @@ class UIServer:
                 {"ok": False, "user_message": "This call is no longer active."},
             )
         peer_master_vk_hex = mgr.state.peer_master_vk_hex
+        call_kind = mgr.state.call_kind
+        if not self.daemon._call_capability_allowed(
+            peer_master_vk_hex,
+            call_kind,
+        ):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "user_message": "This call type is no longer allowed.",
+                },
+                status=403,
+            )
         peer = self.daemon._resolve_peer_for_outbound(peer_master_vk_hex)
         if peer is None:
             return web.json_response(
@@ -6769,17 +10852,31 @@ class UIServer:
                 return web.json_response(
                     {"ok": False, "user_message": "Couldn't send that audio/video setup."},
                 )
-            kind = SdpKind.OFFER if action_name == "send_sdp_offer" else SdpKind.ANSWER
-            payload = SdpPayload(
-                schema=CALL_INVITE_SDP_V1, kind=kind, sdp=sdp_text,
-            ).to_wire()
-            wire_t = (
-                "CALL_SDP_OFFER" if action_name == "send_sdp_offer"
-                else "CALL_SDP_ANSWER"
+            normalized_sdp = sdp_text.replace("\r", "\n").lower()
+            carries_video = any(
+                line.strip().startswith("m=video") for line in normalized_sdp.split("\n")
             )
+            if carries_video and call_kind != "video":
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "user_message": "A voice call cannot enable video.",
+                    },
+                    status=403,
+                )
+            kind = SdpKind.OFFER if action_name == "send_sdp_offer" else SdpKind.ANSWER
+            payload = SdpPayload.from_wire(
+                SdpPayload(
+                    schema=CALL_INVITE_SDP_V1,
+                    kind=kind,
+                    sdp=sdp_text,
+                ).to_wire()
+            ).to_wire()
+            wire_t = "CALL_SDP_OFFER" if action_name == "send_sdp_offer" else "CALL_SDP_ANSWER"
             wire_msg = make_msg(
                 wire_t, self.daemon.me.short_id,
                 call_id=call_id,
+                call_kind=call_kind,
                 sdp_offer=payload if kind == SdpKind.OFFER else None,
                 sdp_answer=payload if kind == SdpKind.ANSWER else None,
             )
@@ -6805,24 +10902,29 @@ class UIServer:
         sdp_m_line_index = body.get("sdp_m_line_index")
         end_of_cand = bool(body.get("end_of_candidates"))
         try:
-            cand = IceCandidatePayload(
-                schema=CALL_INVITE_SDP_V1,
-                candidate=cand_str,
-                sdp_mid=sdp_mid if isinstance(sdp_mid, str) else None,
-                sdp_m_line_index=(
-                    int(sdp_m_line_index)
-                    if isinstance(sdp_m_line_index, (int, str))
-                    and str(sdp_m_line_index).lstrip("-").isdigit()
-                    else None
-                ),
-                end_of_candidates=end_of_cand,
+            cand = IceCandidatePayload.from_wire(
+                IceCandidatePayload(
+                    schema=CALL_INVITE_SDP_V1,
+                    candidate=cand_str,
+                    sdp_mid=sdp_mid if isinstance(sdp_mid, str) else None,
+                    sdp_m_line_index=(
+                        int(sdp_m_line_index)
+                        if isinstance(sdp_m_line_index, (int, str))
+                        and str(sdp_m_line_index).lstrip("-").isdigit()
+                        else None
+                    ),
+                    end_of_candidates=end_of_cand,
+                ).to_wire()
             )
         except Exception:
             return web.json_response(
                 {"ok": False, "user_message": "Couldn't send that connection detail."},
             )
         body_msg = build_ice_message(call_id=call_id, candidate=cand)
-        wire_msg = make_msg(CALL_ICE, self.daemon.me.short_id, **body_msg)
+        wire_msg = make_msg(CALL_ICE, self.daemon.me.short_id,
+            call_kind=call_kind,
+            **body_msg,
+        )
         try:
             await self.daemon.send_call_signal(peer, [wire_msg])
         except Exception as exc:
@@ -6908,8 +11010,13 @@ class UIServer:
                     or getattr(rec, "hostname", None)
                     or peer_label
                 )
-        except Exception:
-            pass
+        except Exception as peer_exc:
+            report_best_effort_failure(
+                log,
+                "call_peer_label",
+                peer_exc,
+                level=logging.DEBUG,
+            )
         return peer_label
 
     def _call_media_backfill(self, call_id: str) -> tuple[dict, list]:
@@ -6941,6 +11048,7 @@ class UIServer:
             "peer_master_vk_hex": peer_fp,
             "peer_label": self._call_peer_label(peer_fp),
             "local_role": local_role,
+            "call_kind": getattr(mgr.state, "call_kind", "voice"),
             "is_incoming": local_role == "recipient",
             "pending_sdp_offer": sdp_backfill.get("sdp_offer"),
             "pending_sdp_answer": sdp_backfill.get("sdp_answer"),
@@ -7054,6 +11162,10 @@ class UIServer:
                 "pip_unavailable",
                 "background_blur_changed",
                 "voicemail_capsule_requested",
+                "capsule_capture_started",
+                "capsule_chunk_upload_failed",
+                "capsule_capture_finalized",
+                "capsule_capture_finalize_failed",
                 "group_call_requested",
                 "call_hold_started",
                 "call_hold_ended",
@@ -7507,8 +11619,13 @@ class UIServer:
                         or getattr(rec, "hostname", None)
                         or peer_label
                     )
-            except Exception:
-                pass
+            except Exception as peer_exc:
+                report_best_effort_failure(
+                    log,
+                    "call_list_peer_label",
+                    peer_exc,
+                    level=logging.DEBUG,
+                )
             local_role = mgr.state.local_role
             sdp_backfill = {}
             try:
@@ -7528,7 +11645,8 @@ class UIServer:
                 "peer_master_vk_hex": peer_fp,
                 "peer_label": peer_label,
                 "local_role": local_role,
-                "is_incoming": local_role == "recipient",
+                    "call_kind": getattr(mgr.state, "call_kind", "voice"),
+                    "is_incoming": local_role == "recipient",
                 "pending_sdp_offer": sdp_backfill.get("sdp_offer"),
                 "pending_sdp_answer": sdp_backfill.get("sdp_answer"),
                 "pending_ice_candidates": ice_backfill,
@@ -7572,8 +11690,13 @@ class UIServer:
                     or getattr(rec, "hostname", None)
                     or peer_label
                 )
-        except Exception:
-            pass
+        except Exception as peer_exc:
+            report_best_effort_failure(
+                log,
+                "call_detail_peer_label",
+                peer_exc,
+                level=logging.DEBUG,
+            )
         local_role = mgr.state.local_role
         sdp_backfill = {}
         try:
@@ -7594,7 +11717,8 @@ class UIServer:
             "peer_master_vk_hex": peer_fp,
             "peer_label": peer_label,
             "local_role": local_role,
-            "is_incoming": local_role == "recipient",
+                "call_kind": getattr(mgr.state, "call_kind", "voice"),
+                "is_incoming": local_role == "recipient",
             "pending_sdp_offer": sdp_backfill.get("sdp_offer"),
             "pending_sdp_answer": sdp_backfill.get("sdp_answer"),
             "pending_ice_candidates": ice_backfill,
@@ -7657,10 +11781,9 @@ class UIServer:
     ) -> web.Response:
         """v0.21.x: return the active persistent UI sessions so the
         Settings panel can show 'You're signed in on 3 browsers' +
-        let the user revoke individual ones. The session_uuid is
-        truncated in the response so a copy of the panel HTML can't
-        be used to forge the cookie value — the FULL uuid is only
-        ever in the HttpOnly cookie itself."""
+        let the user revoke individual ones. The database stores only a
+        one-way token record key; the API returns its short fingerprint plus
+        the numeric row id, never the HttpOnly bearer token."""
         if self.daemon.state is None:
             return web.json_response(
                 {"error": "state not available"}, status=503,
@@ -7669,7 +11792,8 @@ class UIServer:
         # Mark which row is the CALLER's own session (so the UI can
         # render 'this browser' and refuse to let them revoke the
         # session they're currently using without confirming).
-        my_sid = request.cookies.get(SESSION_COOKIE_NAME, "")
+        my_sid = self._request_ui_session_token(request)
+        my_record_key = self.daemon.state.ui_session_token_id(my_sid)
         out = []
         for r in rows:
             sid = r["session_uuid"]
@@ -7681,7 +11805,7 @@ class UIServer:
                 "label": r["label"] or "Unknown browser",
                 "remote_first": r["remote_first"],
                 "is_this_browser": bool(
-                    my_sid and hmac.compare_digest(my_sid, sid)
+                        my_record_key and hmac.compare_digest(my_record_key, sid)
                 ),
             })
         return web.json_response({"sessions": out, "count": len(out)})
@@ -7710,25 +11834,59 @@ class UIServer:
     async def api_revoke_ui_session(
         self, request: web.Request,
     ) -> web.Response:
-        """Revoke a single named session by its uuid. Use case:
+        """Revoke one session by an explicit ``id-<row>`` reference. Use case:
         user notices a browser they don't recognize in the Active
         Sessions list, clicks Revoke on that one row, keeps every
-        other browser signed in."""
+        other browser signed in. A full legacy cookie token remains accepted
+        for API compatibility, but the UI and list endpoint never expose one.
+        The typed row reference prevents an all-numeric display fingerprint
+        from being confused with a database id."""
         if self.daemon.state is None:
             return web.json_response(
                 {"error": "state not available"}, status=503,
             )
-        sid = request.match_info.get("session_uuid", "")
-        if not sid or len(sid) < 32:
+        session_ref = request.match_info.get("session_ref", "").strip()
+        if not session_ref or len(session_ref) > 128:
             return web.json_response(
-                {"error": "bad session_uuid"}, status=400,
+                {"error": "bad session reference"}, status=400,
             )
-        ok = self.daemon.state.revoke_ui_session(sid)
+        my_token = self._request_ui_session_token(request)
+        my_row = self.daemon.state.lookup_ui_session(my_token)
+        revoked_own = False
+        if session_ref.startswith("id-"):
+            row_text = session_ref.removeprefix("id-")
+            if (
+                not row_text.isascii()
+                or not row_text.isdigit()
+                or row_text.startswith("0")
+                or len(row_text) > 19
+            ):
+                return web.json_response(
+                    {"error": "bad session reference"},
+                    status=400,
+                )
+            session_id = int(row_text)
+            if not 1 <= session_id <= 9_223_372_036_854_775_807:
+                return web.json_response(
+                    {"error": "bad session reference"},
+                    status=400,
+                )
+            revoked_own = bool(my_row and int(my_row["id"]) == session_id)
+            ok = self.daemon.state.revoke_ui_session_by_id(session_id)
+        else:
+            # Compatibility with v0.21.x clients that retained a full bearer
+            # token locally. Prefixes were never sufficient and are rejected.
+            if self.daemon.state.ui_session_token_id(session_ref) is None:
+                return web.json_response(
+                    {"error": "bad session reference"},
+                    status=400,
+                )
+            revoked_own = bool(my_token and hmac.compare_digest(my_token, session_ref))
+            ok = self.daemon.state.revoke_ui_session(session_ref)
         resp = web.json_response({"ok": ok, "revoked": 1 if ok else 0})
         # If the user revoked their OWN session, clear cookies too
         # so the next request reaches the unauth path cleanly.
-        my_sid = request.cookies.get(SESSION_COOKIE_NAME, "")
-        if my_sid and hmac.compare_digest(my_sid, sid):
+        if revoked_own:
             resp.del_cookie(SESSION_COOKIE_NAME, path="/")
             resp.del_cookie(SESSION_PRESENT_MARKER_COOKIE, path="/")
         return resp
@@ -7745,9 +11903,9 @@ class UIServer:
         from one_link.paths import data_dir as _dd
         bind_host = getattr(self, "bind_host", "127.0.0.1") or "127.0.0.1"
         lan_explicit = bind_host not in ("127.0.0.1", "::1", "localhost")
-        is_encrypted = bool(
-            getattr(self.daemon.state, "is_encrypted", False)
-        ) if self.daemon.state else False
+        is_encrypted = (
+            bool(getattr(self.daemon.state, "is_encrypted", False)) if self.daemon.state else False
+        )
         findings = run_all_checks(
             data_dir=_dd(),
             bind_host=bind_host,
@@ -7838,6 +11996,40 @@ class UIServer:
             resp.del_cookie(SESSION_PRESENT_MARKER_COOKIE, path="/")
         return resp
 
+    async def _external_update_capability(self, *, fresh: bool = False):
+        """Inspect the exact frozen bundle off-loop with a bounded UI cache.
+
+        A proof hashes every bundled member and can cover hundreds of
+        megabytes. Repeating it on ordinary ``/api/me`` refreshes would steal
+        disk bandwidth from live transfers. Successful proofs are therefore
+        reused for five minutes and failures for thirty seconds; both update
+        planning and installation explicitly request a fresh proof, including
+        the post-network TOCTOU recheck.
+        """
+
+        from one_link.update_helper import inspect_external_update_capability
+
+        def _usable_cached(now: float):
+            cached = getattr(self, "_update_capability_cache", None)
+            if fresh or cached is None:
+                return None
+            cached_capability = cached[1]
+            ttl = 300.0 if bool(cached_capability.available) else 30.0
+            return cached_capability if now - cached[0] <= ttl else None
+
+        cached_capability = _usable_cached(time.monotonic())
+        if cached_capability is not None:
+            return cached_capability
+        async with self._update_capability_lock:
+            # Coalesce concurrent first-load /api/me requests rather than
+            # scheduling one full-tree hash per browser tab.
+            cached_capability = _usable_cached(time.monotonic())
+            if cached_capability is not None:
+                return cached_capability
+            capability = await asyncio.to_thread(inspect_external_update_capability)
+            self._update_capability_cache = (time.monotonic(), capability)
+            return capability
+
     async def api_me(self, request: web.Request) -> web.Response:
         me = self.daemon.me
         display_name = None
@@ -7851,9 +12043,7 @@ class UIServer:
             # v0.9.4: surface the persisted onboarding flag so a
             # fresh browser tab can skip the wizard if the daemon
             # has already seen it once.
-            onboarding_completed = (
-                self.daemon.state.get_setting("onboarding_completed") == "true"
-            )
+            onboarding_completed = self.daemon.state.get_setting("onboarding_completed") == "true"
             one_setup_completed = (
                 self.daemon.state.get_setting("one_setup_completed") == "true"
                 or onboarding_completed
@@ -7888,24 +12078,15 @@ class UIServer:
             suggested_folder = str(_pick_writable_share_root())
         except Exception:
             suggested_folder = ""
-        # v0.21.x: surface whether the experimental one-click
-        # v0.21.x: auto-install ON by default. The 'Update now' button
-        # in the update banner triggers the real install flow unless
-        # the user has explicitly disabled it in Settings, OR the
-        # operator has set ONE_LINK_EXPERIMENTAL_AUTOINSTALL=0 as a
-        # hard override (locked-down deployments).
-        import os as _os
-        env_gate = _os.environ.get("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", "")
-        if env_gate in ("0", "false", "no"):
-            autoinstall_enabled = False
-        else:
-            user_pref = "1"
-            if self.daemon.state is not None:
-                with contextlib.suppress(Exception):
-                    stored = self.daemon.state.get_setting("auto_install_updates")
-                    if stored is not None:
-                        user_pref = str(stored)
-            autoinstall_enabled = user_pref not in ("0", "false", "no")
+        # Installation is available only when this exact running executable,
+        # every member in its standalone bundle, and the separately frozen
+        # external helper all validate. Source/pip/dev environments stay
+        # fail-closed and continue to expose the exact release link only.
+        update_capability = await self._external_update_capability()
+        # Unattended/background installation is deliberately unavailable.
+        # The distinct update_install_available bit describes the explicit,
+        # owner-confirmed one-shot external-helper path.
+        autoinstall_enabled = False
         # 2026-06-04: surface the install method so the UI's update
         # modal can pick the right CTA. ``frozen`` = PyInstaller .exe
         # / .app / .AppImage (the installer build — the majority);
@@ -7923,9 +12104,7 @@ class UIServer:
             try:
                 import one_link as _ol_pkg
                 _ol_dir = (getattr(_ol_pkg, "__file__", "") or "").lower()
-                install_method = (
-                    "pip" if "site-packages" in _ol_dir else "source"
-                )
+                install_method = "pip" if "site-packages" in _ol_dir else "source"
             except Exception:
                 install_method = "source"
         return web.json_response({
@@ -7945,7 +12124,10 @@ class UIServer:
             "presence": self.daemon.get_my_presence(),
             "suggested_folder": suggested_folder,
             "autoinstall_enabled": autoinstall_enabled,
-            "install_method": install_method,
+                "update_install_available": bool(update_capability.available),
+                "update_install_reason": update_capability.reason,
+                "update_install_platform": update_capability.platform,
+                "install_method": install_method,
         })
 
     def _one_setup_snapshot(self) -> dict[str, Any]:
@@ -7994,10 +12176,7 @@ class UIServer:
             if str(p.get("state") or "").lower() == "awake"
         ]
         display_name = state.get_setting("display_name") or me.hostname
-        completed = (
-            setting_bool("one_setup_completed")
-            or setting_bool("onboarding_completed")
-        )
+        completed = setting_bool("one_setup_completed") or setting_bool("onboarding_completed")
         skipped_at = setting_int("one_setup_skipped_at_ms")
         privacy_viewed = setting_int("one_setup_privacy_proof_viewed_at_ms") > 0
         safety_reviewed = setting_int("one_setup_safety_reviewed_at_ms") > 0
@@ -8012,7 +12191,9 @@ class UIServer:
         from one_link import recovery_api
         from one_link.paths import data_dir as _recovery_data_dir
         recovery_snap = recovery_api.snapshot_status(state, _recovery_data_dir())
-        recovery_ready = recovery_snap.any_ready or setting_int("one_setup_recovery_configured_at_ms") > 0
+        recovery_ready = (
+            recovery_snap.any_ready or setting_int("one_setup_recovery_configured_at_ms") > 0
+        )
         recovery_methods = recovery_api.configured_track_labels(state)
 
         items = [
@@ -8129,15 +12310,20 @@ class UIServer:
 
         next_map = {
             "identity": ("create_identity", "Create identity",
-                         "Make this device ready to add your other devices."),
+                         "Make this device ready to add your other devices.",
+            ),
             "add_device": ("add_device", "Add a device",
-                           "Pair your phone or laptop under your One identity."),
+                           "Pair your phone or laptop under your One identity.",
+            ),
             "first_success": ("send_test_message", "Send test message",
-                              "Send a tiny private message to your trusted device."),
+                              "Send a tiny private message to your trusted device.",
+            ),
             "privacy_proof": ("view_privacy_proof", "View privacy proof",
-                              "See what happened in plain language."),
+                              "See what happened in plain language.",
+            ),
             "safety": ("review_safety", "Review safety",
-                       "Learn how to freeze a lost device safely."),
+                       "Learn how to freeze a lost device safely.",
+            ),
             "finish": ("finish", "Start using One Link",
                        "Your core setup is ready."),
         }
@@ -8162,7 +12348,11 @@ class UIServer:
                 "device_kind": pending.get("device_kind") or "remote-device",
                 "device_pub_b64": pending.get("device_pub_b64") or "",
                 "trust_code": pending.get("trust_code") or "",
-                "claimed_ms": pending.get("claimed_ms") or 0,
+                    "trust_phrase": pending.get("trust_phrase") or pending.get("trust_code") or "",
+                    "trust_words": list(pending.get("trust_words") or []),
+                    "sas_version": pending.get("sas_version") or "",
+                    "compatibility_code": pending.get("compatibility_code") or "",
+                    "claimed_ms": pending.get("claimed_ms") or 0,
                 "expires_ms": rec.get("expires_ms") or 0,
                 "created_ms": rec.get("created_ms") or 0,
                 "remaining_ms": max(0, int(rec.get("expires_ms") or 0) - now),
@@ -8368,15 +12558,18 @@ class UIServer:
         # Reject unknown labels — only fall back to "normal" for the
         # explicitly-empty case.
         canonical = selector_native.normalize_user_mode(raw)
-        if raw.strip() and canonical == "normal" and raw.strip().lower() not in (
-            "normal", "n",
+        if (
+            raw.strip()
+            and canonical == "normal"
+            and raw.strip().lower()
+            not in (
+                "normal",
+                "n",
+            )
         ):
             return web.json_response(
                 {
-                    "error": (
-                        "mode must be one of "
-                        "normal|paranoid|battery_save|latency_strict"
-                    )
+                    "error": ("mode must be one of normal|paranoid|battery_save|latency_strict")
                 },
                 status=400,
             )
@@ -8434,7 +12627,13 @@ class UIServer:
                     f = float(tau)
                     peers_snapshot[fp[:16]] = f
                     tau_values.append(f)
-            except Exception:
+            except (RuntimeError, TypeError, ValueError) as exc:
+                report_best_effort_failure(
+                    log,
+                    "field_status_peer_snapshot",
+                    exc,
+                    level=logging.DEBUG,
+                )
                 continue
         if tau_values:
             summary: dict[str, float | None] = {
@@ -8782,7 +12981,8 @@ class UIServer:
                 "scores": [],
                 "actions": [],
                 "timeline": [],
-            }, status=503)
+            }, status=503,
+            )
 
         setup = self._one_setup_snapshot()
         roots = state.list_self_mesh_roots()
@@ -9027,7 +13227,9 @@ class UIServer:
                 "safety_state": dev.get("safety_state") or "trusted",
             })
 
-        state_label = "excellent" if overall >= 85 else "good" if overall >= 70 else "needs_attention"
+        state_label = (
+            "excellent" if overall >= 85 else "good" if overall >= 70 else "needs_attention"
+        )
         headline = {
             "excellent": "One Link is strongly protected",
             "good": "One Link is ready, with a few upgrades available",
@@ -9146,7 +13348,8 @@ class UIServer:
             return web.json_response({
                 "error": "recovery_phrase_unavailable",
                 "hint": str(exc),
-            }, status=500)
+            }, status=500,
+            )
         now = int(time.time() * 1000)
         state.set_setting("one_setup_recovery_phrase_generated_at_ms", str(now))
         return web.json_response({
@@ -9156,10 +13359,7 @@ class UIServer:
             "word_count": 24,
             "created": bool(created),
             "generated_at_ms": now,
-            "message": (
-                "Write these 24 words on paper. One Link cannot recover "
-                "them for you."
-            ),
+            "message": ("Write these 24 words on paper. One Link cannot recover them for you."),
         })
 
     # ── recovery wizard (v0.21.x) ──────────────────────────────────
@@ -9180,6 +13380,115 @@ class UIServer:
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
+
+    async def _read_recovery_bundle_request(
+        self,
+        request: web.Request,
+    ) -> tuple[dict[str, Any], bytes | bytearray]:
+        """Read a recovery bundle without base64/JSON amplification.
+
+        Current browsers send multipart fields plus the raw .olbak Blob. A
+        bounded legacy JSON decoder remains for older tabs and direct API
+        clients, but both encodings enforce the same decoded 256 MiB ceiling.
+        Multipart parts and field counts are independently bounded, and the
+        whole read has a deadline so a slow client cannot hold a handler
+        forever.
+        """
+
+        content_type = (request.content_type or "").lower()
+        if not content_type.startswith("multipart/"):
+            data = await request.json()
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            encoded = data.get("bundle_b64") or ""
+            if not isinstance(encoded, str) or not encoded:
+                raise ValueError("bundle_b64 required")
+            if len(encoded) > RECOVERY_BUNDLE_BASE64_MAX_BYTES:
+                raise _RecoveryBundleTooLarge("bundle exceeds 256 MiB cap")
+            try:
+                bundle = base64.b64decode(encoded, validate=True)
+            except (ValueError, TypeError) as exc:
+                raise ValueError("bundle_b64 is not valid base64") from exc
+            if len(bundle) > RECOVERY_BUNDLE_MAX_BYTES:
+                raise _RecoveryBundleTooLarge("bundle exceeds 256 MiB cap")
+            return data, bundle
+
+        reader = await request.multipart()
+        values: dict[str, Any] = {}
+        bundle_buf = bytearray()
+        seen: set[str] = set()
+        part_count = 0
+        field_limits = {
+            "phrase": 512,
+            "force": 16,
+            "confirmed_replace": 16,
+        }
+
+        async def _read_part_bounded(part: Any, limit: int) -> bytes:
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = await part.read_chunk(size=64 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > limit:
+                    if part.name in {"bundle", "bundle_file"}:
+                        raise _RecoveryBundleTooLarge("bundle exceeds 256 MiB cap")
+                    raise ValueError(f"multipart field {part.name!r} is too large")
+                chunks.append(bytes(chunk))
+            return b"".join(chunks)
+
+        async with asyncio.timeout(300.0):
+            from aiohttp.multipart import BodyPartReader, MultipartReader
+
+            while True:
+                part = await reader.next()
+                if part is None:
+                    break
+                if isinstance(part, MultipartReader):
+                    raise ValueError("nested multipart fields are not allowed")
+                body_part = cast(BodyPartReader, part)
+                part_count += 1
+                if part_count > 8:
+                    raise ValueError("too many multipart fields")
+                name = str(body_part.name or "")
+                if name not in {"bundle", "bundle_file", *field_limits}:
+                    raise ValueError("unexpected multipart field")
+                if name in seen or (
+                    name in {"bundle", "bundle_file"}
+                    and ("bundle" in seen or "bundle_file" in seen)
+                ):
+                    raise ValueError("duplicate multipart field")
+                seen.add(name)
+                if name in {"bundle", "bundle_file"}:
+                    while True:
+                        chunk = await body_part.read_chunk(size=64 * 1024)
+                        if not chunk:
+                            break
+                        if len(bundle_buf) + len(chunk) > RECOVERY_BUNDLE_MAX_BYTES:
+                            raise _RecoveryBundleTooLarge("bundle exceeds 256 MiB cap")
+                        bundle_buf.extend(chunk)
+                else:
+                    raw = await _read_part_bounded(body_part, field_limits[name])
+                    try:
+                        decoded = raw.decode("utf-8", errors="strict")
+                    except UnicodeDecodeError as exc:
+                        raise ValueError(f"multipart field {name!r} is not UTF-8") from exc
+                    if name in {"force", "confirmed_replace"}:
+                        normalized = decoded.strip().lower()
+                        if normalized not in {"true", "false", "1", "0"}:
+                            raise ValueError(f"multipart field {name!r} must be boolean")
+                        values[name] = normalized in {"true", "1"}
+                    else:
+                        values[name] = decoded
+        if not bundle_buf:
+            raise ValueError("bundle file required")
+        # Return the accumulator itself. Converting it to ``bytes`` duplicated
+        # the entire upload at exactly the point where AES-GCM was about to
+        # allocate a plaintext of the same size. ``open_bundle`` consumes the
+        # buffer through a zero-copy memoryview.
+        return values, bundle_buf
 
     async def api_recovery_status(self, request: web.Request) -> web.Response:
         from one_link import recovery_api
@@ -9211,7 +13520,8 @@ class UIServer:
             return web.json_response({
                 "error": "recovery_phrase_unavailable",
                 "hint": str(exc),
-            }, status=500)
+            }, status=500,
+            )
         finally:
             with contextlib.suppress(Exception):
                 seed = b"\x00" * len(seed)
@@ -9281,6 +13591,36 @@ class UIServer:
             resp = web.json_response({"ok": False, "mismatches": mismatches})
             self._recovery_no_store_headers(resp)
             return resp
+        # Correct word positions prove paper transcription, not that every
+        # live authority is actually recoverable.  In particular, legacy
+        # direct-scrypt LockBox rows require the source passphrase until the
+        # versioned seed-recovery envelope is durably published.  Never mark
+        # the track ready on a seed-only proof.
+        phrase_words = recovery_api.load_phrase_words(data_dir())
+        authority = recovery_api.test_phrase_against_current_seed(
+            data_dir=data_dir(),
+            phrase=" ".join(phrase_words or []),
+        )
+        if not authority.get("matches_current_authority"):
+            resp = web.json_response(
+                {
+                    "ok": False,
+                    "error": authority.get("error") or "recovery_authority_not_converged",
+                    "requires_lockbox_passphrase": bool(
+                        authority.get("requires_lockbox_passphrase")
+                    ),
+                    "additional_recovery_factors": authority.get("additional_recovery_factors", []),
+                    "hint": (
+                        "Start One Link with the source ONE_LINK_PASSPHRASE, "
+                        "then export and test a new encrypted backup."
+                        if authority.get("requires_lockbox_passphrase")
+                        else "Recovery authority artifacts have not converged."
+                    ),
+                },
+                status=409,
+            )
+            self._recovery_no_store_headers(resp)
+            return resp
         verified_at_ms = recovery_api.mark_phrase_verified(state)
         resp = web.json_response({
             "ok": True,
@@ -9300,7 +13640,6 @@ class UIServer:
           - one_setup_recovery_backup_last_export_at_ms / _size
           - one_setup_recovery_social_configured_at_ms / _count / _threshold_k
           - one_setup_recovery_configured_at_ms (legacy any-track flag)
-          - pending_rotation_announcements rows (rotation queue)
 
         Refuses without ``confirmed_reset=true`` so a click-jacked
         flow can't silently clear setup state.
@@ -9335,7 +13674,8 @@ class UIServer:
                     "track can be re-run. It does NOT touch the master "
                     "seed, identity, or peer state."
                 ),
-            }, status=409)
+            }, status=409,
+            )
         recovery_api.reset_all_recovery_state(state)
         resp = web.json_response({
             "ok": True,
@@ -9383,8 +13723,8 @@ class UIServer:
             )
         try:
             data = await request.json()
-        except Exception as e:
-            return web.json_response({"error": f"bad json: {e}"}, status=400)
+        except Exception:
+            return web.json_response({"error": "bad json"}, status=400)
         phrase = str(data.get("phrase") or "").strip()
         if not phrase:
             words = data.get("words")
@@ -9440,9 +13780,13 @@ class UIServer:
                 status=429,
             )
         try:
-            data = await request.json()
-        except Exception as e:
-            return web.json_response({"error": f"bad json: {e}"}, status=400)
+            data, bundle_bytes = await self._read_recovery_bundle_request(request)
+        except _RecoveryBundleTooLarge:
+            return web.json_response({"error": "bundle exceeds 256 MiB cap"}, status=413)
+        except TimeoutError:
+            return web.json_response({"error": "bundle upload timed out"}, status=408)
+        except Exception:
+            return web.json_response({"error": "invalid recovery bundle request"}, status=400)
         phrase = str(data.get("phrase") or "").strip()
         if not phrase:
             words = data.get("words")
@@ -9450,23 +13794,6 @@ class UIServer:
                 phrase = " ".join(str(w) for w in words)
         if not phrase:
             return web.json_response({"error": "phrase required"}, status=400)
-        bundle_b64 = data.get("bundle_b64") or ""
-        if not bundle_b64:
-            return web.json_response({"error": "bundle_b64 required"}, status=400)
-        MAX_B64_LEN = 256 * 1024 * 1024 * 4 // 3 + 64  # ~341 MiB b64
-        if len(bundle_b64) > MAX_B64_LEN:
-            return web.json_response(
-                {"error": "bundle exceeds 256 MiB cap"},
-                status=413,
-            )
-        import base64 as _b64
-        try:
-            bundle_bytes = _b64.b64decode(str(bundle_b64), validate=True)
-        except Exception as e:
-            return web.json_response(
-                {"error": f"bundle_b64 not valid base64: {e}"},
-                status=400,
-            )
         result = recovery_api.test_bundle_against_phrase(
             phrase=phrase, bundle_bytes=bundle_bytes,
         )
@@ -9539,7 +13866,8 @@ class UIServer:
                 except Exception as e:
                     return web.json_response({
                         "error": f"share {s!r} malformed: {e}",
-                    }, status=400)
+                    }, status=400,
+                    )
                 share_tuples.append((idx, b))
         share_lines = data.get("share_lines")
         if isinstance(share_lines, str):
@@ -9550,7 +13878,8 @@ class UIServer:
                 if ":" not in line:
                     return web.json_response({
                         "error": f"share line missing colon separator: {line[:32]!r}",
-                    }, status=400)
+                    }, status=400,
+                    )
                 idx_s, b64_s = line.split(":", 1)
                 try:
                     idx = int(idx_s.strip())
@@ -9558,12 +13887,14 @@ class UIServer:
                 except Exception as e:
                     return web.json_response({
                         "error": f"share line malformed: {e}",
-                    }, status=400)
+                    }, status=400,
+                    )
                 share_tuples.append((idx, b))
         if not share_tuples:
             return web.json_response({
                 "error": "no shares supplied (need 'shares' list or 'share_lines' string)",
-            }, status=400)
+            }, status=400,
+            )
         result = recovery_api.test_shares_against_current_seed(
             data_dir=data_dir(), shares=share_tuples,
         )
@@ -9632,7 +13963,8 @@ class UIServer:
                 except Exception as e:
                     return web.json_response({
                         "error": f"share {s!r} malformed: {e}",
-                    }, status=400)
+                    }, status=400,
+                    )
                 share_tuples.append((idx, b))
         share_lines = data.get("share_lines")
         if isinstance(share_lines, str):
@@ -9643,7 +13975,8 @@ class UIServer:
                 if ":" not in line:
                     return web.json_response({
                         "error": f"share line missing colon separator: {line[:32]!r}",
-                    }, status=400)
+                    }, status=400,
+                    )
                 idx_s, b64_s = line.split(":", 1)
                 try:
                     idx = int(idx_s.strip())
@@ -9651,21 +13984,26 @@ class UIServer:
                 except Exception as e:
                     return web.json_response({
                         "error": f"share line malformed: {e}",
-                    }, status=400)
+                    }, status=400,
+                    )
                 share_tuples.append((idx, b))
         if not share_tuples:
             return web.json_response({
                 "error": "no shares supplied (need 'shares' list or 'share_lines' string)",
-            }, status=400)
+            }, status=400,
+            )
         if len(share_tuples) < 2:
             return web.json_response({
                 "error": "need at least 2 shares to recover",
-            }, status=400)
+            }, status=400,
+            )
 
         force = bool(data.get("force"))
         confirmed = bool(data.get("confirmed_replace"))
 
-        clean, evidence = recovery_api.is_install_clean_for_restore(state)
+        clean, evidence = recovery_api.is_install_clean_for_restore(state,
+            data_dir=data_dir(),
+        )
         from one_link import master_seed
         has_seed = master_seed.has_seed(data_dir())
         destructive = (not clean) or has_seed
@@ -9678,7 +14016,8 @@ class UIServer:
                     "This install already has identity state. Set "
                     "force=true AND confirmed_replace=true to proceed."
                 ),
-            }, status=409)
+            }, status=409,
+            )
 
         try:
             recovery_api.restore_from_shares(
@@ -9692,18 +14031,22 @@ class UIServer:
             return web.json_response({
                 "error": "shares_restore_failed",
                 "hint": str(exc),
-            }, status=500)
+            }, status=500,
+            )
 
+        pending_restart = recovery_api.has_pending_recovery(data_dir())
         resp = web.json_response({
             "ok": True,
-            "restart_required": True,
+            "restart_required": pending_restart,
+                "recovery_pending": pending_restart,
             "was_destructive": destructive,
             "shares_combined": len(share_tuples),
             "message": (
-                "Identity reconstructed from guardian shares. "
-                "Restart One Link to complete recovery; peers paired "
-                "with the original device will recognize you again."
-            ),
+                    "Guardian shares validated and recovery durably staged; "
+                    "existing authority is unchanged until restart."
+                    if pending_restart
+                    else "Guardian-share recovery restored and verified."
+                ),
         })
         self._recovery_no_store_headers(resp)
         return resp
@@ -9851,14 +14194,16 @@ class UIServer:
         if self.daemon.me is None or self.daemon.me.private is None:
             return web.json_response({
                 "error": "daemon has no identity to unwrap with",
-            }, status=503)
+            }, status=503,
+            )
         try:
             my_seed = self.daemon.me.private.private_bytes_raw()
         except Exception as exc:
             return web.json_response({
                 "error": "could not access identity key",
                 "hint": str(exc),
-            }, status=500)
+            }, status=500,
+            )
         try:
             try:
                 idx, share_bytes = social_recovery.unwrap_share(
@@ -9869,7 +14214,8 @@ class UIServer:
                 return web.json_response({
                     "error": "unwrap_failed",
                     "hint": str(e),
-                }, status=400)
+                }, status=400,
+                )
         finally:
             with contextlib.suppress(Exception):
                 my_seed = b"\x00" * len(my_seed)
@@ -9914,7 +14260,8 @@ class UIServer:
             return web.json_response({
                 "error": "backup_export_failed",
                 "hint": str(exc),
-            }, status=500)
+            }, status=500,
+            )
         now_ms = int(time.time() * 1000)
         recovery_api.mark_backup_exported(state, size_bytes=len(bundle), now_ms=now_ms)
         filename = recovery_api.backup_filename(now_ms)
@@ -9984,7 +14331,8 @@ class UIServer:
             return web.json_response({
                 "error": "social_issue_failed",
                 "hint": str(exc),
-            }, status=500)
+            }, status=500,
+            )
         now_ms = recovery_api.mark_social_configured(
             state,
             guardian_count=len(guardians),
@@ -10015,7 +14363,9 @@ class UIServer:
         state = self.daemon.state
         if state is None:
             return web.json_response({"error": "state not available"}, status=503)
-        clean, evidence = recovery_api.is_install_clean_for_restore(state)
+        clean, evidence = recovery_api.is_install_clean_for_restore(state,
+            data_dir=data_dir(),
+        )
         has_seed = master_seed.has_seed(data_dir())
         resp = web.json_response({
             "ok": True,
@@ -10028,10 +14378,11 @@ class UIServer:
         return resp
 
     async def api_recovery_restore_phrase(self, request: web.Request) -> web.Response:
-        """Decode a 24-word recovery phrase, write the master seed,
-        clear identity.key + DRK so the daemon re-derives both from
-        the restored seed on next start. Returns a flag telling the
-        UI to ask the user to restart the daemon.
+        """Validate a 24-word phrase and publish a durable recovery intent.
+
+        Existing seed/identity/DRK/state bytes remain unchanged while this
+        daemon is live. Startup commits the transaction only after owning the
+        singleton lock, then exact-readback verifies every authority artifact.
 
         Per-token rate-limited (5 attempts / 60s) so a stolen UI
         token can't brute-force its way through phrase guesses on
@@ -10073,7 +14424,9 @@ class UIServer:
         force = bool(data.get("force"))
         confirmed = bool(data.get("confirmed_replace"))
 
-        clean, evidence = recovery_api.is_install_clean_for_restore(state)
+        clean, evidence = recovery_api.is_install_clean_for_restore(state,
+            data_dir=data_dir(),
+        )
         from one_link import master_seed
         has_seed = master_seed.has_seed(data_dir())
         destructive = (not clean) or has_seed
@@ -10089,7 +14442,8 @@ class UIServer:
                     "current peers will see you as a different device "
                     "until you re-pair."
                 ),
-            }, status=409)
+            }, status=409,
+            )
 
         try:
             seed = recovery_api.restore_seed_from_phrase(
@@ -10103,21 +14457,25 @@ class UIServer:
             return web.json_response({
                 "error": "restore_failed",
                 "hint": str(exc),
-            }, status=500)
+            }, status=500,
+            )
         finally:
             with contextlib.suppress(Exception):
                 seed = b"\x00" * len(seed)
                 del seed
 
+        pending_restart = recovery_api.has_pending_recovery(data_dir())
         resp = web.json_response({
             "ok": True,
-            "restart_required": True,
+            "restart_required": pending_restart,
+                "recovery_pending": pending_restart,
             "was_destructive": destructive,
             "message": (
-                "Recovery phrase accepted. Restart One Link to complete "
-                "recovery; peers paired with the original device will "
-                "recognize you again."
-            ),
+                    "Recovery phrase accepted and durably staged. Existing "
+                    "authority is unchanged; restart One Link to commit recovery."
+                    if pending_restart
+                    else "Recovery authority restored and verified."
+                ),
         })
         self._recovery_no_store_headers(resp)
         return resp
@@ -10125,8 +14483,9 @@ class UIServer:
     async def api_recovery_restore_bundle(self, request: web.Request) -> web.Response:
         """Combined phrase + .olbak file restore. Decodes the 24-word
         phrase, decrypts the bundle (the bundle key derives from the
-        same seed via HKDF), and atomically extracts the bundle's
-        plaintext archive into the daemon's data_dir.
+        same seed via HKDF), fully validates it, and stages the encrypted
+        bundle beside a durable recovery intent. Existing live files are not
+        promoted or replaced until locked daemon startup replays the intent.
 
         Body shape (JSON):
           {
@@ -10155,9 +14514,13 @@ class UIServer:
                 status=429,
             )
         try:
-            data = await request.json()
-        except Exception as e:
-            return web.json_response({"error": f"bad json: {e}"}, status=400)
+            data, bundle_bytes = await self._read_recovery_bundle_request(request)
+        except _RecoveryBundleTooLarge:
+            return web.json_response({"error": "bundle exceeds 256 MiB cap"}, status=413)
+        except TimeoutError:
+            return web.json_response({"error": "bundle upload timed out"}, status=408)
+        except Exception:
+            return web.json_response({"error": "invalid recovery bundle request"}, status=400)
         phrase = str(data.get("phrase") or "").strip()
         if not phrase:
             words = data.get("words")
@@ -10165,33 +14528,12 @@ class UIServer:
                 phrase = " ".join(str(w) for w in words)
         if not phrase:
             return web.json_response({"error": "phrase required"}, status=400)
-        bundle_b64 = data.get("bundle_b64") or ""
-        if not bundle_b64:
-            return web.json_response({"error": "bundle_b64 required"}, status=400)
-        # Bound the payload before decoding to bound memory + decode
-        # time. .olbak bundles for the default-include set are tens
-        # of MB max; users who shipped --include-files can hit
-        # multi-GB. We cap at 256 MiB here as a safety bound that
-        # still covers realistic backups; the UI warns about larger
-        # bundles before upload.
-        MAX_B64_LEN = 256 * 1024 * 1024 * 4 // 3 + 64  # ~341 MiB b64
-        if len(bundle_b64) > MAX_B64_LEN:
-            return web.json_response(
-                {"error": "bundle exceeds 256 MiB cap"},
-                status=413,
-            )
-        import base64 as _b64
-        try:
-            bundle_bytes = _b64.b64decode(str(bundle_b64), validate=True)
-        except Exception as e:
-            return web.json_response(
-                {"error": f"bundle_b64 not valid base64: {e}"},
-                status=400,
-            )
         force = bool(data.get("force"))
         confirmed = bool(data.get("confirmed_replace"))
 
-        clean, evidence = recovery_api.is_install_clean_for_restore(state)
+        clean, evidence = recovery_api.is_install_clean_for_restore(state,
+            data_dir=data_dir(),
+        )
         from one_link import master_seed
         has_seed = master_seed.has_seed(data_dir())
         destructive = (not clean) or has_seed
@@ -10207,7 +14549,8 @@ class UIServer:
                     "current peers will see you as a different device "
                     "until you re-pair."
                 ),
-            }, status=409)
+            }, status=409,
+            )
 
         try:
             result = recovery_api.restore_from_bundle(
@@ -10228,33 +14571,40 @@ class UIServer:
             return web.json_response({
                 "error": "bundle_would_overwrite_existing_files",
                 "hint": str(e),
-            }, status=409)
+            }, status=409,
+            )
         except Exception as exc:
             return web.json_response({
                 "error": "bundle_restore_failed",
                 "hint": str(exc),
-            }, status=500)
+            }, status=500,
+            )
 
+        pending_restart = bool(result.get("pending_restart"))
         resp = web.json_response({
             "ok": True,
-            "restart_required": True,
+            "restart_required": pending_restart,
+                "recovery_pending": pending_restart,
             "was_destructive": destructive,
             "file_count": result.get("file_count", 0),
             "bundle_created_ms": result.get("bundle_created_ms", 0),
             "message": (
-                "Recovery phrase + backup accepted. Restart One Link "
-                "to complete recovery; your chat history, identity, "
-                "and settings will be back."
-            ),
+                    "Recovery phrase + backup validated and durably staged. "
+                    "Existing live files are unchanged; restart One Link to "
+                    "commit recovery."
+                    if pending_restart
+                    else "Recovery phrase + backup restored and verified."
+                ),
         })
         self._recovery_no_store_headers(resp)
         return resp
 
     async def api_recovery_rotate(self, request: web.Request) -> web.Response:
-        """Mint a new identity, sign a rotation certificate with the
-        OLD private key, persist the new seed, clear identity.key +
-        DRK so the daemon re-derives both from the new seed on next
-        start, and queue per-peer announcements for delivery.
+        """Sign and durably stage an identity rotation for boot replay.
+
+        Current seed/identity/DRK/State remain unchanged. On restart the daemon
+        applies authority under its singleton lock, then atomically queues the
+        complete signed peer-announcement snapshot before serving.
 
         Per-token rate limit (3 attempts / 5min): rotation is a
         significant security event; a stolen UI token must not be
@@ -10273,11 +14623,12 @@ class UIServer:
             "new_phrase": "...",        # 24 words for paper backup
             "new_fp": "...",
             "old_fp": "...",
-            "queued_peer_count": int,
+            "staged_peer_count": int,
+            "queued_peer_count": 0,
             "restart_required": true,
           }
         """
-        from one_link import identity_rotation
+        from one_link import identity_rotation, recovery_api
         from one_link.paths import data_dir
         state = self.daemon.state
         if state is None:
@@ -10301,8 +14652,9 @@ class UIServer:
             return web.json_response({
                 "error": "invalid reason",
                 "valid": sorted(identity_rotation.VALID_REASONS),
-            }, status=400)
-        if not bool(data.get("confirmed_rotate")):
+            }, status=400,
+            )
+        if data.get("confirmed_rotate") is not True:
             return web.json_response({
                 "error": "confirmed_rotate=true required",
                 "hint": (
@@ -10313,7 +14665,32 @@ class UIServer:
                     "see the new key as a stranger. Set "
                     "confirmed_rotate=true to acknowledge."
                 ),
-            }, status=409)
+            }, status=409,
+            )
+
+        try:
+            pending = recovery_api.pending_recovery_summary(data_dir())
+        except recovery_api.RecoveryTransactionError as exc:
+            log.error("identity rotation journal inspection failed: %s", exc)
+            return web.json_response(
+                {
+                    "error": "recovery_journal_unavailable",
+                    "hint": ("Existing recovery metadata is invalid; rotation was not staged."),
+                },
+                status=503,
+            )
+        if pending["pending"]:
+            return web.json_response(
+                {
+                    "error": "restart_required_before_rotate",
+                    "hint": (
+                        "A recovery or identity-rotation transaction is already "
+                        "pending. Restart One Link to commit it before rotating."
+                    ),
+                    "pending": pending,
+                },
+                status=409,
+            )
 
         # Collect pinned peer fingerprints so we can queue per-peer
         # announcements. A "pinned" peer is one set_peer_trust=pinned.
@@ -10322,43 +14699,36 @@ class UIServer:
         # will use this).
         pinned_fps: list[str] = []
         try:
-            for p in (state.list_peers() or []):
+            for p in state.list_peers() or []:
                 if getattr(p, "trust", None) == "pinned":
                     fp = getattr(p, "fingerprint", "") or ""
                     if fp:
                         pinned_fps.append(fp)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Rotating without a complete pinned-peer snapshot can strand
+            # peers on the old identity because no rotation announcement is
+            # queued for them. Refuse the destructive transition and retry.
+            log.error("identity rotation peer snapshot failed: %s", exc)
+            return web.json_response(
+                {"error": "peer state is unavailable; identity was not rotated"},
+                status=503,
+            )
 
         if self.daemon.me is None or self.daemon.me.private is None:
             return web.json_response({
                 "error": "daemon has no current identity to rotate from",
-            }, status=503)
+            }, status=503,
+            )
 
-        # v0.21.x safety: refuse to rotate twice without a restart in
-        # between. After the first rotation, the on-disk seed has
-        # been replaced but the daemon's in-memory identity is still
-        # the OLD one. A second rotation would:
-        #   1. mint cert with old_priv = ORIGINAL identity, naming
-        #      the THIRD identity as target (skipping the second).
-        #   2. overwrite the on-disk seed (the SECOND identity's
-        #      seed) so it can never be re-derived.
-        #   3. queue cert(original -> third) alongside the still-
-        #      pending cert(original -> second) from the first
-        #      rotation.
-        # When peers process them in order they transition to second,
-        # then refuse cert(original -> third) because their pinned fp
-        # is now second's fp, not original's. Peers stay at SECOND
-        # while the local daemon (after restart) is at THIRD - a
-        # desync that the user cannot escape without re-pairing.
-        # Block the second rotation by comparing the on-disk seed's
-        # derived identity to the in-memory identity.
+        # Defense in depth for an old pre-journal partial rotation or manual
+        # authority replacement: the current seed must name the live signer.
         from one_link import master_seed
         on_disk_seed = master_seed.load_seed(data_dir())
         if on_disk_seed is not None:
             try:
-                on_disk_pub = master_seed.derive_identity_priv(on_disk_seed)\
-                    .public_key().public_bytes_raw()
+                on_disk_pub = (
+                    master_seed.derive_identity_priv(on_disk_seed).public_key().public_bytes_raw()
+                )
             except Exception:
                 on_disk_pub = None
             finally:
@@ -10369,12 +14739,12 @@ class UIServer:
                 return web.json_response({
                     "error": "restart_required_before_rotate",
                     "hint": (
-                        "Identity was already rotated in this session. "
-                        "Restart One Link to load the new identity "
-                        "before rotating again - otherwise peers stuck "
-                        "at the intermediate identity cannot follow."
-                    ),
-                }, status=409)
+                            "The live identity does not match current on-disk "
+                            "authority. Restart One Link and resolve any startup "
+                            "integrity error before rotating."
+                        ),
+                }, status=409,
+                )
 
         try:
             result = identity_rotation.perform_local_rotation(
@@ -10382,13 +14752,21 @@ class UIServer:
                 old_priv=self.daemon.me.private,
                 pinned_peer_fingerprints=pinned_fps,
                 reason=reason,
-                state=state,
+            )
+        except recovery_api.RecoveryTransactionError as exc:
+            return web.json_response(
+                {
+                    "error": "rotation_not_ready",
+                    "hint": str(exc),
+                },
+                status=409,
             )
         except Exception as exc:
             return web.json_response({
                 "error": "rotation_failed",
                 "hint": str(exc),
-            }, status=500)
+            }, status=500,
+            )
 
         resp = web.json_response({
             "ok": True,
@@ -10397,16 +14775,80 @@ class UIServer:
             "old_fp": result.old_fp,
             "new_fp": result.new_fp,
             "queued_peer_count": result.queued_peer_count,
-            "restart_required": True,
-            "message": (
-                "Identity rotated. Write down your new 24 words now, "
-                "then restart One Link. Paired peers will receive a "
-                "signed key-change announcement and update "
-                "automatically when they next contact this daemon."
-            ),
+                "staged_peer_count": result.staged_peer_count,
+                "restart_required": True,
+                "recovery_pending": True,
+                "message": (
+                    "Identity rotation is signed and durably staged. Existing "
+                    "live keys and queues are unchanged. Write down the new 24 "
+                    "words, then restart One Link to atomically install the key "
+                    "and queue every paired peer announcement."
+                ),
         })
         self._recovery_no_store_headers(resp)
         return resp
+
+    async def api_recovery_rotate_pending_phrase(
+        self,
+        request: web.Request,
+    ) -> web.Response:
+        """Re-display one prepared rotation's phrase after response loss."""
+        from one_link import recovery_api
+        from one_link.paths import data_dir
+
+        def respond(payload: dict[str, Any], *, status: int = 200) -> web.Response:
+            response = web.json_response(payload, status=status)
+            self._recovery_no_store_headers(response)
+            return response
+
+        if self._rate_limited(
+            "recovery_rotate_pending_phrase",
+            self._client_rate_key(request),
+            limit=5,
+            window_seconds=300.0,
+        ):
+            return respond(
+                {"error": "too many phrase display attempts; wait a few minutes"},
+                status=429,
+            )
+        try:
+            data = await request.json()
+        except Exception:
+            return respond({"error": "bad json"}, status=400)
+        if not isinstance(data, dict):
+            return respond({"error": "request body must be an object"}, status=400)
+        if data.get("confirmed_view") is not True:
+            return respond({"error": "confirmed_view=true required"}, status=409)
+        expected_new_fp = data.get("expected_new_fp")
+        if (
+            not isinstance(expected_new_fp, str)
+            or len(expected_new_fp) != 64
+            or any(ch not in "0123456789abcdef" for ch in expected_new_fp)
+        ):
+            return respond(
+                {"error": "expected_new_fp must be 64 lowercase hex characters"},
+                status=400,
+            )
+        try:
+            result = recovery_api.reveal_pending_rotation_phrase(
+                data_dir=data_dir(),
+                expected_new_fp=expected_new_fp,
+            )
+        except (ValueError, recovery_api.RecoveryTransactionError) as exc:
+            return respond(
+                {"error": "pending_rotation_phrase_unavailable", "hint": str(exc)},
+                status=409,
+            )
+        return respond(
+            {
+                "ok": True,
+                **result,
+                "message": (
+                    "These words belong to the signed rotation staged for the "
+                    "named fingerprint. Write them down before restarting."
+                ),
+            }
+        )
 
     async def api_recovery_rotate_status(self, request: web.Request) -> web.Response:
         """Read the rotation-announcement queue summary so the UI can
@@ -10421,13 +14863,27 @@ class UIServer:
             return web.json_response({"error": "state not available"}, status=503)
         summary = state.rotation_announcement_summary()
         rows = state.list_pending_rotation_announcements(unacked_only=False, limit=128)
+        from one_link import recovery_api
+        from one_link.paths import data_dir
+
+        staged_rotation: dict[str, Any] | None = None
+        try:
+            pending = recovery_api.pending_recovery_summary(data_dir())
+            if pending.get("kind") == "rotation":
+                staged_rotation = pending
+        except recovery_api.RecoveryTransactionError as exc:
+            log.error("rotation status journal inspection failed: %s", exc)
+            staged_rotation = {
+                "pending": True,
+                "error": "recovery_journal_unavailable",
+            }
         # Look up display labels for the rotation's TARGET peers.
         # The peer's pinned fingerprint may already have transitioned
         # (the peer rotated too, in the interval since we queued the
         # announcement), so we tolerate misses.
         labels: dict[str, str] = {}
         with contextlib.suppress(Exception):
-            for p in (state.list_peers() or []):
+            for p in state.list_peers() or []:
                 fp = getattr(p, "fingerprint", "") or ""
                 if not fp:
                     continue
@@ -10441,7 +14897,8 @@ class UIServer:
         resp = web.json_response({
             "ok": True,
             "summary": summary,
-            "rows": [
+                "staged_rotation": staged_rotation,
+                "rows": [
                 {
                     "id": r["id"],
                     "peer_fp": r["peer_fp"],
@@ -10458,13 +14915,14 @@ class UIServer:
         self._recovery_no_store_headers(resp)
         return resp
 
-    def _setup_device_invite_pair_handoff(self) -> dict:
+    def _setup_device_invite_pair_handoff(self, *, device_pub: bytes) -> dict:
         """2026-05-23: build the WebRTC handoff bundle a freshly-
         confirmed phone needs to open a control DataChannel back
         to this daemon. Reuses the same machinery the older
         autopair QR flow uses (``api_mint_pairing``):
 
           pair_token       — single-use signaling auth
+                             bound to this device's signed-offer key
           daemon_fingerprint — pinned identity
           daemon_pubkey_b64u — pinned public key for offer-signature
                                 verification
@@ -10477,7 +14935,15 @@ class UIServer:
         nowhere to go from there.
         """
         from one_link.peer_rtc import _b64u as _peer_b64u
-        pp = self.peer_rtc.mint_pairing_token()
+
+        device_pub = bytes(device_pub)
+        if len(device_pub) != 32:
+            raise ValueError("device_pub must be exactly 32 bytes")
+        device_fingerprint = "sha256:" + hashlib.sha256(device_pub).hexdigest()
+        pp = self.peer_rtc.mint_pairing_token(
+            device_pub=device_pub,
+            fp_hint=device_fingerprint,
+        )
         daemon_pub = self.daemon.me.public_bytes
         daemon_pub_b64u = _peer_b64u(daemon_pub)
         # 2026-05-23: wire_fingerprint (sha256:<hex>) — see
@@ -10511,7 +14977,130 @@ class UIServer:
             "ws_signaling_url": ws_url,
         }
 
-    def _sweep_phone_uploads(self) -> None:
+    def _release_upload_reservation(self, rec: dict[str, Any]) -> None:
+        reservation_id = str(rec.get("reservation_id") or "")
+        if not reservation_id:
+            return
+        reservation_peer = str(rec.get("reservation_peer") or "")
+        self._upload_reservations.release(
+            reservation_id,
+            peer_fp=reservation_peer or None,
+        )
+
+    async def _claim_phone_upload_intent(
+        self,
+        *,
+        intent_key: str,
+        peer_fp: str,
+        filename: str,
+        size: int,
+    ) -> tuple[str, asyncio.Future[str | None] | None, dict[str, Any] | None]:
+        """Claim one live staging session for an authenticated stable ID."""
+
+        while True:
+            current = self._phone_upload_intents.get(intent_key)
+            if current is None:
+                claim = asyncio.get_running_loop().create_future()
+                # No await occurs between the read and write, so this is an
+                # atomic event-loop claim even when many init frames arrive in
+                # the same loop turn.
+                self._phone_upload_intents[intent_key] = claim
+                return "owner", claim, None
+            if isinstance(current, asyncio.Future):
+                await asyncio.shield(current)
+                continue
+            upload_id = current
+            rec = self._phone_uploads.get(upload_id)
+            if rec is None:
+                rec = self._phone_finalizing_uploads.get(upload_id)
+            if rec is None or rec.get("state") in {"discarding", "discarded"}:
+                if self._phone_upload_intents.get(intent_key) == upload_id:
+                    self._phone_upload_intents.pop(intent_key, None)
+                continue
+            if (
+                rec.get("peer_fp") != peer_fp
+                or rec.get("filename") != filename
+                or int(rec.get("expected_size", -1)) != size
+            ):
+                raise UIDeliveryContractConflict(
+                    "client_msg_id was already used for another file upload"
+                )
+            return str(rec.get("state") or "open"), None, rec
+
+    def _publish_phone_upload_intent(
+        self,
+        *,
+        intent_key: str,
+        claim: asyncio.Future[str | None],
+        upload_id: str | None,
+    ) -> None:
+        """Resolve one init claim without leaving cancelled waiters stuck."""
+
+        if self._phone_upload_intents.get(intent_key) is claim:
+            if upload_id is None:
+                self._phone_upload_intents.pop(intent_key, None)
+            else:
+                self._phone_upload_intents[intent_key] = upload_id
+        if not claim.done():
+            claim.set_result(upload_id)
+
+    def _finish_phone_upload_session(self, rec: dict[str, Any]) -> None:
+        """Remove only this record's live/finalizing intent publication."""
+
+        upload_id = str(rec.get("upload_id") or "")
+        if upload_id:
+            if self._phone_uploads.get(upload_id) is rec:
+                self._phone_uploads.pop(upload_id, None)
+            if self._phone_finalizing_uploads.get(upload_id) is rec:
+                self._phone_finalizing_uploads.pop(upload_id, None)
+        intent_key = str(rec.get("intent_key") or "")
+        if intent_key and self._phone_upload_intents.get(intent_key) == upload_id:
+            self._phone_upload_intents.pop(intent_key, None)
+
+    async def _cleanup_phone_upload_record(self, rec: dict[str, Any]) -> None:
+        """Close/unlink one already-claimed record outside the event loop."""
+
+        try:
+            await _blocking_file_io(
+                _close_and_unlink_ui_upload,
+                rec.get("fh"),
+                Path(rec["path"]) if rec.get("path") is not None else None,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("could not fully clean an abandoned phone upload")
+        finally:
+            rec["state"] = "discarded"
+            self._finish_phone_upload_session(rec)
+            self._release_upload_reservation(rec)
+
+    async def _discard_phone_upload(self, upload_id: str) -> bool:
+        """Atomically claim, close, unlink, and unreserve one phone upload."""
+
+        upload_id = str(upload_id)
+        rec = self._phone_uploads.get(upload_id)
+        if rec is None:
+            return False
+        lock = rec.get("lock")
+        if not isinstance(lock, asyncio.Lock):
+            # Upgrade compatibility for records created by an older in-memory
+            # implementation before this process finished hot-reloading.
+            claimed = self._phone_uploads.pop(upload_id, None)
+            if claimed is None:
+                return False
+            claimed["state"] = "discarding"
+            await self._cleanup_phone_upload_record(claimed)
+            return True
+        async with lock:
+            if self._phone_uploads.get(upload_id) is not rec or rec.get("state") != "open":
+                return False
+            rec["state"] = "discarding"
+            self._phone_uploads.pop(upload_id, None)
+        await self._cleanup_phone_upload_record(rec)
+        return True
+
+    async def _sweep_phone_uploads(self) -> None:
         """2026-05-23 phase 2: drop in-progress phone uploads that
         have gone idle past PHONE_UPLOAD_IDLE_TIMEOUT_MS — phone
         crashed mid-upload, tab closed, network died, etc. Without
@@ -10523,17 +15112,66 @@ class UIServer:
         for upload_id, rec in list(self._phone_uploads.items()):
             if int(rec.get("last_chunk_ms") or 0) > cutoff:
                 continue
+            lock = rec.get("lock")
+            if not isinstance(lock, asyncio.Lock):
+                await self._discard_phone_upload(upload_id)
+                continue
+            claimed = False
+            async with lock:
+                if (
+                    self._phone_uploads.get(upload_id) is rec
+                    and rec.get("state") == "open"
+                    and int(rec.get("last_chunk_ms") or 0) <= cutoff
+                ):
+                    rec["state"] = "discarding"
+                    self._phone_uploads.pop(upload_id, None)
+                    claimed = True
+            if claimed:
+                await self._cleanup_phone_upload_record(rec)
+
+    async def _phone_upload_sweeper_loop(self) -> None:
+        """Autonomously expire abandoned phone sessions without new traffic."""
+
+        while not self._closing:
             try:
-                fh = rec.get("fh")
-                if fh:
-                    fh.close()
+                await asyncio.sleep(PHONE_UPLOAD_SWEEP_INTERVAL_SECONDS)
+                if self._closing:
+                    return
+                await self._sweep_phone_uploads()
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                pass
-            path = rec.get("path")
-            if path:
-                with contextlib.suppress(OSError):
-                    Path(path).unlink(missing_ok=True)
-            self._phone_uploads.pop(upload_id, None)
+                log.exception("phone upload idle sweeper failed")
+
+    def _reclaim_crash_orphaned_phone_uploads(self) -> None:
+        """Fail closed while reclaiming aged, unowned staging after restart."""
+
+        state = getattr(self.daemon, "state", None)
+        if state is None:
+            return
+        from one_link.storage_lifecycle import (
+            reclaim_stale_unreferenced_phone_uploads,
+        )
+
+        active_paths = tuple(
+            Path(rec["path"]) for rec in self._phone_uploads.values() if rec.get("path") is not None
+        )
+        result = reclaim_stale_unreferenced_phone_uploads(
+            state,
+            uploads_root=data_dir() / "uploads",
+            active_paths=active_paths,
+            grace_ms=PHONE_UPLOAD_ORPHAN_GRACE_MS,
+        )
+        if result.removed:
+            log.info(
+                "reclaimed %d crash-orphaned phone upload(s)",
+                len(result.removed),
+            )
+        if result.errors:
+            log.warning(
+                "phone upload orphan reconciliation retained uncertain files: %s",
+                "; ".join(result.errors[:4]),
+            )
 
     def _sweep_setup_device_invites(self) -> None:
         # 2026-05-23: only remove on expires_ms. Previously also
@@ -10732,11 +15370,17 @@ class UIServer:
             return web.json_response({
                 "error": "setup_device_invite_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_setup_device_invite_claim(self, request: web.Request) -> web.Response:
-        from one_link.pairing import compute_sas, format_sas
-        from one_link.self_mesh_enrollment import b64u, b64u_decode
+        from one_link.pairing import (
+            compute_sas,
+            compute_setup_sas_words,
+            format_sas,
+            format_sas_words,
+        )
+        from one_link.self_mesh_enrollment import b64u
 
         # 2026-05-23: this endpoint is intentionally PUBLIC (no UI
         # token / cookie required) — see the route registration
@@ -10755,67 +15399,186 @@ class UIServer:
         state = self.daemon.state
         if state is None:
             return web.json_response({"error": "state_unavailable"}, status=503)
-        body = await request.json()
         try:
-            token = str(body.get("token") or "")
-            self._sweep_setup_device_invites()
-            invite = self._setup_device_invites.get(token)
-            if invite is None:
-                raise ValueError("invite expired or not found")
-            device_pub = b64u_decode(str(body.get("device_pub_b64") or ""))
-            if len(device_pub) != 32:
-                raise ValueError("device public key must be 32 bytes")
-            kind = str(body.get("device_kind") or "remote-device")[:80]
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("request body must be an object")
+            token_value = body.get("token")
+            if (
+                not isinstance(token_value, str)
+                or len(token_value) != 43
+                or any(
+                    char not in ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+                    for char in token_value
+                )
+            ):
+                raise ValueError("invite token is invalid")
+            token = token_value
+            invite_secret = decode_b64u_strict(
+                token,
+                field="token",
+                exact_bytes=32,
+                max_bytes=32,
+            )
+            device_pub = decode_b64u_strict(
+                body.get("device_pub_b64"),
+                field="device_pub_b64",
+                exact_bytes=32,
+                max_bytes=32,
+            )
+            kind_value = body.get("device_kind") or "remote-device"
+            if not isinstance(kind_value, str):
+                raise ValueError("device_kind must be text")
+            kind = kind_value.strip()
+            if not kind or len(kind.encode("utf-8")) > 64:
+                raise ValueError("device_kind must be 1-64 UTF-8 bytes")
             # 2026-05-23: smart label. If the operator didn't pass a
             # custom label (or passed the generic "Phone browser"
             # default the peer.html flow sends), parse the User-Agent
             # and synthesize something readable like "iPhone (Safari)"
             # so the Settings → Devices list doesn't end up as seven
             # identical "Phone browser" rows.
-            raw_label = str(body.get("label") or "")
+            label_value = body.get("label") or ""
+            if not isinstance(label_value, str):
+                raise ValueError("label must be text")
+            raw_label = label_value
             ua_header = request.headers.get("User-Agent") or ""
             if not raw_label or raw_label.lower() in (
                 "phone browser", "browser", "browser-peer", "remote-device",
                 "device", "one link device", "one_link device",
             ):
                 raw_label = _smart_device_label_from_ua(ua_header, raw_label)
-            label = (raw_label or kind or "One Link device")[:120]
-            sas = compute_sas(self.daemon.me.public_bytes, device_pub)
+            label = (raw_label or kind or "One Link device").strip()[:120]
+            if not label:
+                raise ValueError("label must not be empty")
             claimed_ms = int(time.time() * 1000)
-            invite["pending_claim"] = {
-                "device_pub": device_pub,
-                "device_pub_b64": b64u(device_pub),
-                "device_kind": kind,
-                "label": label,
-                "trust_code": format_sas(sas),
-                "claimed_ms": claimed_ms,
-            }
-            state.record_self_mesh_audit(
-                event="setup_device_invite_pending",
-                severity="info",
-                root_pub=bytes(invite["root_pub"]),
-                device_pub=device_pub,
-                detail=label,
-                metadata={"device_kind": kind},
-            )
-            with contextlib.suppress(Exception):
-                self.daemon._broadcast_self_mesh_changed(
+            claim_binding = hashlib.sha256(
+                b"OL/setup-device-invite/claim/v1\0"
+                + device_pub
+                + json.dumps(
+                    {"device_kind": kind, "label": label},
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("ascii")
+            ).hexdigest()
+            # There is no await inside this lock.  The first claimant owns the
+            # bearer until confirm/reject/expiry; an exact retry is idempotent,
+            # while any device, kind, or label mutation is rejected and cannot
+            # replace the SAS currently visible to the operator.
+            async with self._setup_device_invites_lock:
+                self._sweep_setup_device_invites()
+                invite = self._setup_device_invites.get(token)
+                if invite is None:
+                    raise ValueError("invite expired or not found")
+                if invite.get("confirmed") or invite.get("rejected"):
+                    raise ValueError("invite has already been finalized")
+                root_pub = bytes(invite.get("root_pub") or b"")
+                sas = compute_sas(root_pub, device_pub)
+                sas_words = compute_setup_sas_words(
+                    root_pub,
+                    device_pub,
+                    invite_secret=invite_secret,
+                )
+                sas_phrase = format_sas_words(sas_words)
+                new_pending = {
+                    "device_pub": device_pub,
+                    "device_pub_b64": b64u(device_pub),
+                    "device_kind": kind,
+                    "label": label,
+                    # ``trust_code`` is retained as the compatibility JSON
+                    # field consumed by older peer pages, but now carries the
+                    # stronger canonical phrase. Numeric output is display-only.
+                    "trust_code": sas_phrase,
+                    "trust_phrase": sas_phrase,
+                    "trust_words": list(sas_words),
+                    "sas_version": "setup-words-v1",
+                    "compatibility_code": format_sas(sas),
+                    "claimed_ms": claimed_ms,
+                    "claim_binding": claim_binding,
+                }
+                existing = invite.get("pending_claim")
+                idempotent_replay = False
+                if isinstance(existing, dict):
+                    existing_binding = existing.get("claim_binding")
+                    if not isinstance(existing_binding, str):
+                        # Compatibility for an in-memory claim made by an older
+                        # build immediately before a hot reload.
+                        existing_pub = bytes(existing.get("device_pub", b""))
+                        existing_binding = hashlib.sha256(
+                            b"OL/setup-device-invite/claim/v1\0"
+                            + existing_pub
+                            + json.dumps(
+                                {
+                                    "device_kind": str(existing.get("device_kind") or ""),
+                                    "label": str(existing.get("label") or ""),
+                                },
+                                ensure_ascii=True,
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ).encode("ascii")
+                        ).hexdigest()
+                    if not hmac.compare_digest(existing_binding, claim_binding):
+                        raise ValueError("invite is already claimed by another payload")
+                    # An exact retry after a hot upgrade may carry the old
+                    # digits-only in-memory record. Upgrade that same owner in
+                    # place to the stronger phrase; never accept numeric SAS as
+                    # enrollment authority in the current process.
+                    pending = dict(existing)
+                    pending.update(
+                        {
+                            "trust_code": sas_phrase,
+                            "trust_phrase": sas_phrase,
+                            "trust_words": list(sas_words),
+                            "sas_version": "setup-words-v1",
+                            "compatibility_code": format_sas(sas),
+                        }
+                    )
+                    invite["pending_claim"] = pending
+                    idempotent_replay = True
+                else:
+                    invite["pending_claim"] = new_pending
+                    pending = new_pending
+
+            if not idempotent_replay:
+                state.record_self_mesh_audit(
                     event="setup_device_invite_pending",
+                    severity="info",
                     root_pub=bytes(invite["root_pub"]),
                     device_pub=device_pub,
-                    label=label,
+                    detail=label,
+                    metadata={"device_kind": kind},
                 )
+                with contextlib.suppress(Exception):
+                    self.daemon._broadcast_self_mesh_changed(
+                        event="setup_device_invite_pending",
+                        root_pub=bytes(invite["root_pub"]),
+                        device_pub=device_pub,
+                        label=label,
+                    )
+            response_claimed_ms = int(pending.get("claimed_ms") or claimed_ms)
+            response_device_pub = bytes(pending["device_pub"])
+            response_kind = str(pending.get("device_kind") or kind)
+            response_label = str(pending.get("label") or label)
+            response_trust_code = str(
+                pending.get("trust_phrase") or pending.get("trust_code") or sas_phrase
+            )
             return web.json_response({
                 "ok": True,
                 "pending": True,
                 "root_pub_b64": b64u(bytes(invite["root_pub"])),
-                "device_pub_b64": b64u(device_pub),
-                "device_kind": kind,
-                "label": label,
-                "trust_code": format_sas(sas),
+                "device_pub_b64": b64u(response_device_pub),
+                "device_kind": response_kind,
+                "label": response_label,
+                "trust_code": response_trust_code,
+                    "trust_phrase": response_trust_code,
+                    "trust_words": list(pending.get("trust_words") or sas_words),
+                    "sas_version": str(pending.get("sas_version") or "setup-words-v1"),
+                    "compatibility_code": str(pending.get("compatibility_code") or format_sas(sas)),
                 "trusted": False,
-                "created_ms": int(invite.get("created_ms") or 0),
-                "claimed_ms": claimed_ms,
+                    "idempotent_replay": idempotent_replay,
+                    "created_ms": int(invite.get("created_ms") or 0),
+                "claimed_ms": response_claimed_ms,
                 "expires_ms": int(invite.get("expires_ms") or 0),
                 "remaining_ms": max(
                     0,
@@ -10823,14 +15586,15 @@ class UIServer:
                 ),
                 "pair_elapsed_ms": max(
                     0,
-                    claimed_ms - int(invite.get("created_ms") or claimed_ms),
+                        response_claimed_ms - int(invite.get("created_ms") or response_claimed_ms),
                 ),
             })
         except Exception as exc:
             return web.json_response({
                 "error": "setup_device_invite_claim_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_setup_device_invite_status(self, request: web.Request) -> web.Response:
         """2026-05-23: public status surface for the claiming
@@ -10842,7 +15606,7 @@ class UIServer:
             operator hasn't acted yet
           * ``{status: "confirmed", root_pub_b64, device_pub_b64,
             cert_b64, label, device_kind, trusted}`` — operator
-            tapped Codes match; cert is the freshly-minted
+            confirmed that the five words match; cert is the freshly-minted
             device cert the phone should persist locally
           * ``{status: "rejected", reason}`` — operator tapped
             reject; phone should clear state and show a "scan a
@@ -10897,7 +15661,11 @@ class UIServer:
             return web.json_response({
                 "status": "pending",
                 "trust_code": pending.get("trust_code") or "",
-                "label": pending.get("label") or "",
+                    "trust_phrase": pending.get("trust_phrase") or pending.get("trust_code") or "",
+                    "trust_words": list(pending.get("trust_words") or []),
+                    "sas_version": pending.get("sas_version") or "",
+                    "compatibility_code": pending.get("compatibility_code") or "",
+                    "label": pending.get("label") or "",
                 "device_kind": pending.get("device_kind") or "",
                 "created_ms": int(invite.get("created_ms") or 0),
                 "claimed_ms": int(pending.get("claimed_ms") or 0),
@@ -10926,154 +15694,224 @@ class UIServer:
             ),
         })
 
+    @staticmethod
+    def _device_relogin_json(payload: dict[str, Any], *, status: int = 200) -> web.Response:
+        """Build a relogin response that cannot be retained by browser caches."""
+
+        response = web.json_response(payload, status=status)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+    def _verified_rostered_device_cert(self, cert_b64: object) -> tuple[Any, dict]:
+        """Strictly verify a cert against a live, trusted roster entry."""
+
+        from one_link.identity_dag import parse_device_cert, verify_device_cert
+
+        state = self.daemon.state
+        if state is None:
+            raise RuntimeError("self-mesh state is unavailable")
+        cert_bytes = decode_b64u_strict(
+            cert_b64,
+            field="cert_b64",
+            min_bytes=1,
+            max_bytes=RELOGIN_CERT_MAX_BYTES,
+        )
+        # Parse the bounded structure first and reject unknown roots before
+        # spending asymmetric-verification work on an unauthenticated public
+        # endpoint. Signature verification still follows for every known root.
+        unverified = parse_device_cert(cert_bytes)
+        roots = state.list_self_mesh_roots()
+        root_matches = False
+        for root in roots:
+            candidate = root.get("root_pub") if isinstance(root, dict) else None
+            if not isinstance(candidate, (bytes, bytearray, memoryview)):
+                continue
+            candidate_bytes = bytes(candidate)
+            if len(candidate_bytes) == 32 and hmac.compare_digest(
+                candidate_bytes,
+                unverified.root_pub,
+            ):
+                root_matches = True
+                break
+        if not root_matches:
+            raise ValueError("device certificate is not rooted on this daemon")
+        parsed = verify_device_cert(
+            cert_bytes,
+            expected_root_pub=unverified.root_pub,
+        )
+
+        devices = state.list_self_mesh_devices(root_pub=parsed.root_pub)
+        device_row = next(
+            (
+                row
+                for row in devices
+                if isinstance(row, dict)
+                and isinstance(
+                    row.get("device_pub"),
+                    (bytes, bytearray, memoryview),
+                )
+                and hmac.compare_digest(
+                    bytes(row["device_pub"]),
+                    parsed.device_pub,
+                )
+            ),
+            None,
+        )
+        if device_row is None:
+            raise ValueError("device is not in the trusted roster")
+        if bool(device_row.get("revoked")) or not bool(device_row.get("trusted")):
+            raise ValueError("device is not currently trusted")
+        return parsed, device_row
+
+    async def api_setup_device_invite_relogin_challenge(
+        self,
+        request: web.Request,
+    ) -> web.Response:
+        """Issue a short-lived, one-time proof to one rostered device cert."""
+
+        if self._rate_limited(
+            "device_invite_relogin_challenge",
+            self._client_rate_key(request),
+            limit=MAX_FAILED_AUTH_ATTEMPTS,
+        ):
+            return self._device_relogin_json(
+                {"error": "too_many_relogin_challenges"},
+                status=429,
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return self._device_relogin_json(
+                {"error": "invalid_relogin_request"},
+                status=400,
+            )
+        try:
+            if not isinstance(body, dict):
+                raise DeviceReloginChallengeError("request body must be an object")
+            parsed, _device_row = self._verified_rostered_device_cert(body.get("cert_b64"))
+            daemon_pub = bytes(self.daemon.me.public_bytes)
+            challenge = self._device_relogin_challenges.issue(
+                device_pub=parsed.device_pub,
+                root_pub=parsed.root_pub,
+                daemon_pub=daemon_pub,
+            )
+            return self._device_relogin_json(
+                {
+                    "ok": True,
+                    "challenge_id": challenge.challenge_id,
+                    "proof_b64": encode_b64u(challenge.proof),
+                    "expires_ms": challenge.expires_unix_ms,
+                    "ttl_ms": self._device_relogin_challenges.ttl_ms,
+                }
+            )
+        except DeviceReloginChallengeCapacityError:
+            return self._device_relogin_json(
+                {"error": "relogin_challenge_capacity"},
+                status=429,
+            )
+        except (DeviceReloginChallengeError, ValueError):
+            return self._device_relogin_json(
+                {
+                    "error": "device_relogin_challenge_rejected",
+                    "hint": "The saved device certificate is not currently trusted.",
+                },
+                status=400,
+            )
+        except Exception:
+            log.exception("device relogin challenge issuance failed")
+            return self._device_relogin_json(
+                {"error": "device_relogin_temporarily_unavailable"},
+                status=503,
+            )
+
     async def api_setup_device_invite_relogin(self, request: web.Request) -> web.Response:
-        """2026-05-23: cert-authenticated reconnect.
+        """Redeem one daemon-issued challenge for a device-bound handoff.
 
-        A phone that paired previously holds a long-lived device
-        cert (signed by this daemon's root) in localStorage. After
-        a daemon restart / tab close, that cert is still valid but
-        the WebRTC session is dead and the original pair_token has
-        expired. Without this endpoint the only way back is a fresh
-        QR-scan pair — clunky enough to feel broken.
-
-        Wire (public, IP-rate-limited):
-          POST /api/setup/device-invite/relogin
-          body: {cert_b64, nonce_b64, sig_b64}
-            cert_b64  — the device cert the phone has in
-                        localStorage SELF_MESH_CERT_KEY
-            nonce_b64 — fresh random nonce the phone generates
-            sig_b64   — Ed25519 sig over the nonce bytes, signed
-                        with the phone's OPFS private key (the
-                        public half is in the cert)
-
-          response:
-            200 {ok: True, pair_token, daemon_fingerprint,
-                 daemon_pubkey_b64u, ws_signaling_url,
-                 device_pub_b64, device_kind, label}
-              → phone runs _runAutoPairFlow with these fields
-                and the live link is restored.
-            400 {error: ..., hint: ...}
-              → bad cert / bad sig / device not in roster.
-              Phone falls back to welcome card + 'scan a fresh QR'.
-
-        Security model:
-          * Cert chain validation proves the cert was signed by
-            this daemon's root (private to this daemon).
-          * Sig-on-nonce proves the phone holds the cert's
-            matching private key — prevents replay if a cert was
-            ever exfiltrated.
-          * Per-IP rate limit prevents brute-force on the
-            nonce-sig path.
-          * Cert expiry is honored by verify_device_cert.
+        The client signs the opaque ``proof_b64`` returned by
+        :meth:`api_setup_device_invite_relogin_challenge`.  The proof contains
+        a server nonce and is domain-separated and bound to the daemon, mesh
+        root, device key, challenge id, and expiry.  Its registry entry is
+        atomically consumed before signature verification, making both exact
+        replay and concurrent double redemption fail closed.
         """
-        from one_link.identity_dag import verify_device_cert
+
+        from cryptography.exceptions import InvalidSignature
         from cryptography.hazmat.primitives.asymmetric.ed25519 import (
             Ed25519PublicKey,
         )
-        from cryptography.exceptions import InvalidSignature
-        from one_link.self_mesh_enrollment import b64u, b64u_decode
 
         if self._rate_limited(
             "device_invite_relogin",
             self._client_rate_key(request),
             limit=MAX_FAILED_AUTH_ATTEMPTS,
         ):
-            return web.json_response(
-                {"error": "too many relogin attempts"},
+            return self._device_relogin_json(
+                {"error": "too_many_relogin_attempts"},
                 status=429,
             )
 
-        state = self.daemon.state
-        if state is None:
-            return web.json_response({"error": "state_unavailable"}, status=503)
-
         try:
             body = await request.json()
-        except Exception as e:
-            return web.json_response(
-                {"error": "bad_body", "hint": f"json parse: {e}"},
+        except Exception:
+            return self._device_relogin_json(
+                {"error": "invalid_relogin_request"},
                 status=400,
             )
 
         try:
-            cert_b64 = str(body.get("cert_b64") or "")
-            nonce_b64 = str(body.get("nonce_b64") or "")
-            sig_b64 = str(body.get("sig_b64") or "")
-            if not cert_b64 or not nonce_b64 or not sig_b64:
-                raise ValueError(
-                    "cert_b64, nonce_b64, sig_b64 all required"
-                )
-            cert_bytes = b64u_decode(cert_b64)
-            nonce_bytes = b64u_decode(nonce_b64)
-            sig_bytes = b64u_decode(sig_b64)
-            if len(nonce_bytes) < 16:
-                raise ValueError("nonce must be >= 16 bytes")
-            # Find this daemon's root pub. If there are multiple roots
-            # (shouldn't be — but be defensive), try each.
-            roots = state.list_self_mesh_roots()
-            if not roots:
-                raise ValueError("no self-mesh root on this daemon")
-            root_pubs = [bytes(r["root_pub"]) for r in roots if r.get("root_pub")]
-            parsed = None
-            last_err = None
-            for rp in root_pubs:
-                try:
-                    parsed = verify_device_cert(cert_bytes, expected_root_pub=rp)
-                    break
-                except ValueError as e:
-                    last_err = e
-                    continue
-            if parsed is None:
-                raise ValueError(
-                    f"cert doesn't match any root on this daemon: "
-                    f"{last_err}"
-                )
-            # The cert is valid against one of our roots. Now verify
-            # the phone actually holds the private key by checking
-            # the sig on the nonce.
+            if not isinstance(body, dict):
+                raise DeviceReloginChallengeError("request body must be an object")
+            parsed, device_row = self._verified_rostered_device_cert(body.get("cert_b64"))
+            signature = decode_b64u_strict(body.get("sig_b64"),
+                field="sig_b64",
+                exact_bytes=RELOGIN_SIGNATURE_BYTES,
+                max_bytes=RELOGIN_SIGNATURE_BYTES,
+            )
+            challenge = self._device_relogin_challenges.consume(
+                body.get("challenge_id"),
+                device_pub=parsed.device_pub,
+                root_pub=parsed.root_pub,
+                daemon_pub=bytes(self.daemon.me.public_bytes),
+            )
             try:
                 Ed25519PublicKey.from_public_bytes(parsed.device_pub).verify(
-                    sig_bytes, nonce_bytes,
+                    signature,
+                    challenge.proof,
                 )
-            except InvalidSignature:
-                raise ValueError("nonce signature invalid")
-            # Defensively: device should be in the trusted roster.
-            # If not, refuse — pair never completed or was revoked.
-            devices = state.list_self_mesh_devices(
-                root_pub=parsed.root_pub,
+            except InvalidSignature as exc:
+                raise DeviceReloginChallengeError("device proof signature is invalid") from exc
+
+            # The bearer is additionally scoped to this certified device key.
+            # A copied response cannot enroll an attacker's signed-offer key.
+            handoff = self._setup_device_invite_pair_handoff(
+                device_pub=parsed.device_pub,
             )
-            device_row = next(
-                (
-                    d for d in devices
-                    if bytes(d.get("device_pub", b"")) == parsed.device_pub
-                ),
-                None,
-            )
-            if device_row is None:
-                raise ValueError(
-                    "device not in trusted roster (revoked or never finished pair)"
-                )
-            if device_row.get("revoked"):
-                raise ValueError("device revoked")
-            # Mint a fresh WebRTC handoff. Same shape as /status
-            # confirmed returns, so the phone's existing autopair
-            # bootstrap accepts it unchanged.
-            handoff = self._setup_device_invite_pair_handoff()
-            return web.json_response({
+            return self._device_relogin_json({
                 "ok": True,
-                "device_pub_b64": b64u(parsed.device_pub),
+                "device_pub_b64": encode_b64u(parsed.device_pub),
                 "device_kind": str(device_row.get("device_kind") or ""),
                 "label": str(device_row.get("label") or ""),
-                "root_pub_b64": b64u(parsed.root_pub),
+                "root_pub_b64": encode_b64u(parsed.root_pub),
                 **handoff,
             })
-        except Exception as exc:
-            return web.json_response(
+        except (DeviceReloginChallengeError, ValueError):
+            return self._device_relogin_json(
                 {
                     "error": "device_invite_relogin_rejected",
-                    "hint": str(exc),
+                    "hint": (
+                        "The reconnect proof was invalid, expired, or already used. "
+                        "Reload to request a fresh challenge."
+                    ),
                 },
                 status=400,
+            )
+        except Exception:
+            log.exception("device relogin failed")
+            return self._device_relogin_json(
+                {"error": "device_relogin_temporarily_unavailable"},
+                status=503,
             )
 
     async def api_setup_device_invite_confirm(self, request: web.Request) -> web.Response:
@@ -11102,11 +15940,12 @@ class UIServer:
             # (Short Authentication String) the operator read off
             # the claim screen. That made the SAS purely cosmetic.
             # Require the SAS in the request body and constant-time-
-            # compare against ``pending["trust_code"]``. Both sides
+            # compare against the canonical five-word phrase. ``trust_code``
+            # remains the legacy JSON field name, not a numeric authority. Both sides
             # must show the same SAS, so the operator's confirmation
             # is now load-bearing.
-            expected_sas = str(pending.get("trust_code") or "")
-            presented_sas = str(body.get("sas") or body.get("trust_code") or "")
+            expected_sas = str(pending.get("trust_phrase") or pending.get("trust_code") or "")
+            presented_sas = str(body.get("sas") or body.get("trust_phrase") or body.get("trust_code") or "")
             if not expected_sas or not presented_sas:
                 raise ValueError("missing SAS confirmation (sas required)")
             if not hmac.compare_digest(expected_sas, presented_sas):
@@ -11163,7 +16002,9 @@ class UIServer:
             # this the phone has a device cert but no live channel
             # to the daemon and dead-ends at 'trusted' with no
             # path to actually use the app.
-            pair_handoff = self._setup_device_invite_pair_handoff()
+            pair_handoff = self._setup_device_invite_pair_handoff(
+                device_pub=device_pub,
+            )
             invite["device_row"] = {
                 "root_pub_b64": b64u(bytes(invite["root_pub"])),
                 "device_pub_b64": b64u(device_pub),
@@ -11187,7 +16028,7 @@ class UIServer:
                 detail=label,
                 metadata={
                     "device_kind": kind,
-                    "trust_code": pending.get("trust_code"),
+                    "sas_version": pending.get("sas_version") or "setup-words-v1",
                     "pair_elapsed_ms": invite["pair_elapsed_ms"],
                     "claim_to_confirm_ms": invite["claim_to_confirm_ms"],
                 },
@@ -11218,7 +16059,8 @@ class UIServer:
             return web.json_response({
                 "error": "setup_device_invite_confirm_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_setup_device_invite_reject(self, request: web.Request) -> web.Response:
         state = self.daemon.state
@@ -11259,7 +16101,8 @@ class UIServer:
             return web.json_response({
                 "error": "setup_device_invite_reject_failed",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_setup_device_invite_qr(self, request: web.Request) -> web.Response:
         token = str(request.query.get("token") or "")
@@ -11287,12 +16130,14 @@ class UIServer:
             return web.json_response({
                 "error": "qrcode_lib_missing",
                 "hint": "pip install qrcode>=7",
-            }, status=500)
+            }, status=500,
+            )
         except Exception as exc:
             return web.json_response({
                 "error": "setup_device_invite_qr_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_metrics(self, request: web.Request) -> web.Response:
         """Production telemetry surface. Returns JSON with:
@@ -11334,8 +16179,13 @@ class UIServer:
                 # peers advertise QUIC_TRANSPORT_V1 + endpoint up).
                 try:
                     entry["transport_kind"] = d.transport_choice_for_peer(peer)
-                except Exception:
-                    pass
+                except Exception as transport_exc:
+                    report_best_effort_failure(
+                        log,
+                        "transport_choice_metrics",
+                        transport_exc,
+                        level=logging.DEBUG,
+                    )
                 if entry:
                     per_peer[short_id] = entry
         relay_count = len(getattr(d, "_relay_metrics", {}) or {})
@@ -11758,13 +16608,15 @@ class UIServer:
                 guide_step("connect_cable_or_same_network", "choose path", local_detail),
                 guide_step("show_or_import_route_token", "share token", token_detail),
                 guide_step("verify_local_endpoint", "verify", verify_detail),
-                guide_step("send", "send", "One Link will use the trusted local path automatically", status=send_status),
+                guide_step("send", "send", "One Link will use the trusted local path automatically", status=send_status,
+                ),
             ],
             "receive": [
                 guide_step("connect_cable_or_same_network", "join path", local_detail),
                 guide_step("show_or_import_route_token", "import token", token_detail),
                 guide_step("verify_local_endpoint", "verify", verify_detail),
-                guide_step("send", "receive", "incoming transfers can arrive over the verified path", status=send_status),
+                guide_step("send", "receive", "incoming transfers can arrive over the verified path", status=send_status,
+                ),
             ],
         }
 
@@ -11986,7 +16838,8 @@ class UIServer:
             return web.json_response({
                 "error": "missing path_id",
                 "hint": "choose one creation plan path_id",
-            }, status=400)
+            }, status=400,
+            )
         fabric = self._safe_fabric_snapshot()
         probes = [
             p for p in ((fabric or {}).get("probes") or [])
@@ -12014,12 +16867,14 @@ class UIServer:
             return web.json_response({
                 "error": "path_creation_launch_rejected",
                 "hint": str(exc),
-            }, status=409)
+            }, status=409,
+            )
         except Exception as exc:
             return web.json_response({
                 "error": "path_creation_launch_failed",
                 "hint": str(exc),
-            }, status=500)
+            }, status=500,
+            )
 
     async def api_fabric_path_create_native(self, request: web.Request) -> web.Response:
         """Execute a supported native path creation helper.
@@ -12039,7 +16894,8 @@ class UIServer:
             return web.json_response({
                 "error": "missing path_id",
                 "hint": "choose one creation plan path_id",
-            }, status=400)
+            }, status=400,
+            )
         fabric = self._safe_fabric_snapshot()
         probes = [
             p for p in ((fabric or {}).get("probes") or [])
@@ -12078,12 +16934,14 @@ class UIServer:
             return web.json_response({
                 "error": "native_path_creation_rejected",
                 "hint": str(exc),
-            }, status=409)
+            }, status=409,
+            )
         except Exception as exc:
             return web.json_response({
                 "error": "native_path_creation_failed",
                 "hint": str(exc),
-            }, status=500)
+            }, status=500,
+            )
 
     async def api_fabric_mobile_reach(self, request: web.Request) -> web.Response:
         """Report phone/native helper readiness for the comms fabric."""
@@ -12098,7 +16956,8 @@ class UIServer:
                 "ok": False,
                 "error": "invalid_mobile_storage_budget",
                 "message": str(exc),
-            }, status=400)
+            }, status=400,
+            )
         return web.json_response(plan_mobile_reach(peers, storage_budget_bytes=budget))
 
     async def api_self_mesh(self, request: web.Request) -> web.Response:
@@ -12223,7 +17082,8 @@ class UIServer:
                 "status": "pending",
                 "updated_ms": item.get("ts_ms"),
                 "events": [],
-            })
+            },
+            )
             entry["action"] = entry.get("action") or item.get("action")
             entry["path"] = entry.get("path") or item.get("path")
             entry["peer_fp"] = entry.get("peer_fp") or item.get("peer_fp")
@@ -12372,7 +17232,8 @@ class UIServer:
             return web.json_response({
                 "error": "self_mesh_root_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_self_mesh_mint_device(self, request: web.Request) -> web.Response:
         """Mint a cert for another self-device pubkey."""
@@ -12422,7 +17283,8 @@ class UIServer:
             return web.json_response({
                 "error": "self_mesh_mint_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_self_mesh_enroll_device(self, request: web.Request) -> web.Response:
         """Enroll a device cert minted by this or another local UI."""
@@ -12439,16 +17301,25 @@ class UIServer:
                 if body.get("root_pub_b64") else None
             )
             parsed = verify_enrollment_cert(cert, expected_root_pub=expected_root)
+            device_kind = str(body.get("device_kind") or parsed["device_kind"])
+            if device_kind != parsed["device_kind"]:
+                raise ValueError("device_kind must match the root-signed certificate")
             row = state.upsert_self_mesh_device(
                 root_pub=parsed["root_pub"],
                 device_pub=parsed["device_pub"],
                 cert=cert,
-                device_kind=str(body.get("device_kind") or parsed["device_kind"]),
+                device_kind=device_kind,
                 label=str(body.get("label") or parsed["device_kind"]),
                 local=bool(body.get("local", False)),
                 trusted=bool(body.get("trusted", True)),
                 metadata={"source": "api_enroll"},
             )
+            eviction = {"pending_tokens": 0, "active_peers": 0}
+            if not self.peer_rtc._authorization_row_is_live(row):
+                eviction = self.peer_rtc.revoke_device(
+                    root_pub=parsed["root_pub"],
+                    device_pub=parsed["device_pub"],
+                )
             state.record_self_mesh_audit(
                 event="device_enrolled",
                 severity="good",
@@ -12464,12 +17335,14 @@ class UIServer:
                 "label": row["label"],
                 "trusted": row["trusted"],
                 "revoked": row["revoked"],
-            })
+                    "browser_authority_evicted": eviction,
+                })
         except Exception as exc:
             return web.json_response({
                 "error": "self_mesh_enroll_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_self_mesh_revoke_device(self, request: web.Request) -> web.Response:
         from one_link.self_mesh_enrollment import b64u, b64u_decode
@@ -12494,17 +17367,23 @@ class UIServer:
                 device_pub=device_pub,
                 detail=row["label"],
             )
+            eviction = self.peer_rtc.revoke_device(
+                root_pub=root_pub,
+                device_pub=device_pub,
+            )
             return web.json_response({
                 "ok": True,
                 "root_pub_b64": b64u(root_pub),
                 "device_pub_b64": b64u(device_pub),
                 "revoked": True,
-            })
+                    "browser_authority_evicted": eviction,
+                })
         except Exception as exc:
             return web.json_response({
                 "error": "self_mesh_revoke_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_self_mesh_delete_device(self, request: web.Request) -> web.Response:
         """2026-05-23: hard-delete a self-mesh device row.
@@ -12534,8 +17413,7 @@ class UIServer:
                 raise ValueError("device not in roster")
             if existing.get("local"):
                 raise ValueError(
-                    "cannot delete local-self device; "
-                    "use a different device to prune this one"
+                    "cannot delete local-self device; use a different device to prune this one"
                 )
             label = existing.get("label", "")
             removed = state.delete_self_mesh_device(
@@ -12543,6 +17421,10 @@ class UIServer:
             )
             if not removed:
                 raise ValueError("device not removed (may be local-self)")
+            eviction = self.peer_rtc.revoke_device(
+                root_pub=root_pub,
+                device_pub=device_pub,
+            )
             state.record_self_mesh_audit(
                 event="device_deleted",
                 severity="warn",
@@ -12563,12 +17445,14 @@ class UIServer:
                 "root_pub_b64": b64u(root_pub),
                 "device_pub_b64": b64u(device_pub),
                 "deleted": True,
-            })
+                    "browser_authority_evicted": eviction,
+                })
         except Exception as exc:
             return web.json_response({
                 "error": "self_mesh_delete_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_self_mesh_device_safety(self, request: web.Request) -> web.Response:
         """Device Guardian safety-state transition endpoint."""
@@ -12616,6 +17500,12 @@ class UIServer:
                     device_pub_b64=b64u(device_pub),
                     safety_state=device.get("safety_state"),
                 )
+            eviction = {"pending_tokens": 0, "active_peers": 0}
+            if result.get("ok") and str(device.get("safety_state") or "trusted") != "trusted":
+                eviction = self.peer_rtc.revoke_device(
+                    root_pub=root_pub,
+                    device_pub=device_pub,
+                )
             status = 200 if result.get("ok") else 409
             return web.json_response({
                 "ok": bool(result.get("ok")),
@@ -12635,12 +17525,15 @@ class UIServer:
                 "decision": decision,
                 "event_hash": result.get("event_hash"),
                 "previous_hash": result.get("previous_hash"),
-            }, status=status)
+                    "browser_authority_evicted": eviction,
+                }, status=status,
+            )
         except Exception as exc:
             return web.json_response({
                 "error": "self_mesh_guardian_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_self_mesh_remote_instruct(self, request: web.Request) -> web.Response:
         """Sign and send a scoped remote instruction to another self-device."""
@@ -12711,7 +17604,8 @@ class UIServer:
             return web.json_response({
                 "error": "self_mesh_remote_instruct_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_self_mesh_enrollment_invite(self, request: web.Request) -> web.Response:
         """Return a mobile-friendly self-mesh enrollment deep link token."""
@@ -12744,16 +17638,15 @@ class UIServer:
             return web.json_response({
                 "ok": True,
                 **invite,
-                "qr_url": (
-                    "/api/self-mesh/enrollment-invite/qr.svg"
-                    f"?token={invite['token']}"
+                "qr_url": (f"/api/self-mesh/enrollment-invite/qr.svg?token={invite['token']}"
                 ),
             })
         except Exception as exc:
             return web.json_response({
                 "error": "self_mesh_invite_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_self_mesh_enrollment_invite_preview(
         self,
@@ -12762,9 +17655,9 @@ class UIServer:
         """Parse a self-mesh invite before the user claims it."""
         token = str(request.query.get("token") or "")
         try:
-            local_pub = base64.urlsafe_b64encode(
-                self.daemon.me.public_bytes
-            ).rstrip(b"=").decode("ascii")
+            local_pub = (
+                base64.urlsafe_b64encode(self.daemon.me.public_bytes).rstrip(b"=").decode("ascii")
+            )
             return web.json_response(
                 self._self_mesh_enrollment_invite_preview_payload(
                     token,
@@ -12776,28 +17669,50 @@ class UIServer:
             return web.json_response({
                 "error": "self_mesh_invite_preview_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_public_self_mesh_enrollment_invite_preview(
         self,
         request: web.Request,
     ) -> web.Response:
         """Verify a self-mesh invite for the browser-peer phone shell."""
-        token = str(request.query.get("token") or "")
-        device_pub = str(request.query.get("device_pub_b64") or "")
+        if self._rate_limited(
+            "public_self_mesh_invite_preview",
+            self._client_rate_key(request),
+            limit=MAX_PUBLIC_INVITE_PREVIEWS,
+        ):
+            return web.json_response(
+                {"error": "too_many_invite_preview_attempts"},
+                status=429,
+                headers={"Cache-Control": "no-store", "Retry-After": "60"},
+            )
+        token = request.query.get("token") or ""
+        device_pub = request.query.get("device_pub_b64") or ""
         try:
+            if device_pub:
+                device_pub = encode_b64u(
+                    decode_b64u_strict(
+                        device_pub,
+                        field="device_pub_b64",
+                        exact_bytes=32,
+                        max_bytes=32,
+                    )
+                )
             return web.json_response(
                 self._self_mesh_enrollment_invite_preview_payload(
                     token,
                     device_pub_b64=device_pub or None,
                     claim_key="claimable_by_device",
-                )
+                ),
+                headers={"Cache-Control": "no-store"},
             )
-        except Exception as exc:
+        except Exception:
             return web.json_response({
                 "error": "self_mesh_invite_preview_rejected",
-                "hint": str(exc),
-            }, status=400)
+                }, status=400,
+                headers={"Cache-Control": "no-store"},
+            )
 
     def _self_mesh_enrollment_invite_preview_payload(
         self,
@@ -12880,7 +17795,8 @@ class UIServer:
             return web.json_response({
                 "error": "self_mesh_invite_claim_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_self_mesh_enrollment_invite_qr(
         self,
@@ -12912,12 +17828,14 @@ class UIServer:
             return web.json_response({
                 "error": "qrcode_lib_missing",
                 "hint": "pip install qrcode>=7",
-            }, status=500)
+            }, status=500,
+            )
         except Exception as exc:
             return web.json_response({
                 "error": "self_mesh_invite_qr_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_self_mesh_performance(self, request: web.Request) -> web.Response:
         state = getattr(self.daemon, "state", None)
@@ -13007,7 +17925,8 @@ class UIServer:
             return web.json_response({
                 "error": "self_mesh_allowed_roots_rejected",
                 "hint": str(exc),
-            }, status=400)
+            }, status=400,
+            )
 
     async def api_courier_status(self, request: web.Request) -> web.Response:
         """Readiness for encrypted offline chunk courier bundles."""
@@ -13051,7 +17970,9 @@ class UIServer:
                 },
             },
             "ledger": {
-                "seen_bundle_ids": len(self._courier_seen_bundle_ids),
+                    "healthy": self._courier_ledger_error is None,
+                    "error": self._courier_ledger_error,
+                    "seen_bundle_ids": len(self._courier_seen_bundle_ids),
                 "events": len(self._courier_events),
                 "recent": self._courier_events[-8:],
             },
@@ -13110,7 +18031,8 @@ class UIServer:
                 "ok": False,
                 "error": "removable_target_not_found",
                 "message": "That removable target is not available.",
-            }, status=404)
+            }, status=404,
+            )
         return web.json_response({
             "ok": True,
             "target_id": target.id,
@@ -13134,13 +18056,15 @@ class UIServer:
                 "ok": False,
                 "error": "bad_json",
                 "message": "Expected JSON with a chunks array.",
-            }, status=400)
+            }, status=400,
+            )
         if not isinstance(data, dict):
             return web.json_response({
                 "ok": False,
                 "error": "bad_json",
                 "message": "Courier export expects a JSON object.",
-            }, status=400)
+            }, status=400,
+            )
         raw_chunks = data.get("chunks")
         export_blob_hash = str(data.get("blob_hash") or "").strip().lower()
         export_name = str(data.get("name") or "").strip() or None
@@ -13163,7 +18087,8 @@ class UIServer:
                 "ok": False,
                 "error": "missing_chunks",
                 "message": "Choose a cached transfer or at least one cached chunk to courier.",
-            }, status=400)
+            }, status=400,
+            )
         chunks: list[tuple[str, bytes]] = []
         missing: list[str] = []
         for raw_hash in raw_chunks:
@@ -13173,7 +18098,8 @@ class UIServer:
                     "ok": False,
                     "error": "invalid_chunk_hash",
                     "message": "Courier export received a malformed chunk hash.",
-                }, status=400)
+                }, status=400,
+                )
             data_bytes = self.daemon._read_chunk_cache(h)
             if data_bytes is None:
                 missing.append(h)
@@ -13186,7 +18112,8 @@ class UIServer:
                 "message": "One Link has not cached every requested chunk yet.",
                 "missing": missing[:64],
                 "missing_count": len(missing),
-            }, status=409)
+            }, status=409,
+            )
         try:
             ttl_s = int(data.get("ttl_s") or 24 * 60 * 60)
         except (TypeError, ValueError, OverflowError):
@@ -13199,19 +18126,22 @@ class UIServer:
                 blob_hash=export_blob_hash if export_blob_hash else None,
                 name=export_name,
                 ttl_s=ttl_s,
+                signing_key=self.daemon.me.private,
             )
         except CourierBundleError as exc:
             return web.json_response({
                 "ok": False,
                 "error": "courier_export_rejected",
                 "message": str(exc),
-            }, status=400)
+            }, status=400,
+            )
         except Exception as exc:
             return web.json_response({
                 "ok": False,
                 "error": "courier_export_failed",
                 "message": str(exc),
-            }, status=500)
+            }, status=500,
+            )
         with contextlib.suppress(Exception):
             self._record_courier_event(
                 "export",
@@ -13238,13 +18168,15 @@ class UIServer:
                 "ok": False,
                 "error": "bad_json",
                 "message": "Expected JSON with export options.",
-            }, status=400)
+            }, status=400,
+            )
         if not isinstance(data, dict):
             return web.json_response({
                 "ok": False,
                 "error": "bad_json",
                 "message": "Courier export-file expects a JSON object.",
-            }, status=400)
+            }, status=400,
+            )
         class _MemoryRequest:
             async def json(self_nonlocal):
                 return data
@@ -13260,7 +18192,8 @@ class UIServer:
                 "ok": False,
                 "error": "courier_export_file_failed",
                 "message": str(exc),
-            }, status=500)
+            }, status=500,
+            )
         bundle_id = str(manifest.get("bundle_id") or secrets.token_hex(16))
         name = self.daemon._safe_transfer_name(manifest.get("name") or f"{bundle_id}.olcb.json")
         if not name.lower().endswith(".olcb.json"):
@@ -13276,7 +18209,8 @@ class UIServer:
             "version": 1,
             "bundle_b64": bundle_b64,
             "manifest": manifest,
-        }, ensure_ascii=False, indent=2)
+        }, ensure_ascii=False, indent=2,
+        )
         tmp = out_path.with_name(f".{out_path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
         tmp.write_text(body, encoding="utf-8")
         os.replace(tmp, out_path)
@@ -13303,27 +18237,31 @@ class UIServer:
                 "ok": False,
                 "error": "bad_json",
                 "message": "Expected JSON with file_id and target_id.",
-            }, status=400)
+            }, status=400,
+            )
         if not isinstance(data, dict):
             return web.json_response({
                 "ok": False,
                 "error": "bad_json",
                 "message": "Courier removable copy expects a JSON object.",
-            }, status=400)
+            }, status=400,
+            )
         src = self._resolve_courier_outbox_file_id(str(data.get("file_id") or ""))
         if src is None:
             return web.json_response({
                 "ok": False,
                 "error": "courier_outbox_file_not_found",
                 "message": "That staged courier file is not in the outbox anymore.",
-            }, status=404)
+            }, status=404,
+            )
         target = find_removable_target(str(data.get("target_id") or ""))
         if target is None:
             return web.json_response({
                 "ok": False,
                 "error": "removable_target_not_found",
                 "message": "That removable target is not available.",
-            }, status=404)
+            }, status=404,
+            )
         try:
             dest_root = (target.path / "One Link Courier").resolve()
             target_root = target.path.resolve()
@@ -13332,7 +18270,8 @@ class UIServer:
                     "ok": False,
                     "error": "removable_target_rejected",
                     "message": "Courier target resolved outside the removable drive.",
-                }, status=400)
+                }, status=400,
+                )
             dest_root.mkdir(parents=True, exist_ok=True)
             dest = (dest_root / src.name).resolve()
             if dest.parent != dest_root:
@@ -13347,7 +18286,8 @@ class UIServer:
                 "ok": False,
                 "error": "courier_removable_copy_failed",
                 "message": str(exc),
-            }, status=500)
+            }, status=500,
+            )
         return web.json_response({
             "ok": True,
             "path": str(dest),
@@ -13370,27 +18310,31 @@ class UIServer:
                 "ok": False,
                 "error": "bad_json",
                 "message": "Expected JSON with target_id and file_id.",
-            }, status=400)
+            }, status=400,
+            )
         if not isinstance(data, dict):
             return web.json_response({
                 "ok": False,
                 "error": "bad_json",
                 "message": "Courier removable copy expects a JSON object.",
-            }, status=400)
+            }, status=400,
+            )
         target = find_removable_target(str(data.get("target_id") or ""))
         if target is None:
             return web.json_response({
                 "ok": False,
                 "error": "removable_target_not_found",
                 "message": "That removable target is not available.",
-            }, status=404)
+            }, status=404,
+            )
         src = self._resolve_removable_courier_file_id(target.path, str(data.get("file_id") or ""))
         if src is None:
             return web.json_response({
                 "ok": False,
                 "error": "removable_courier_file_not_found",
                 "message": "That courier file is not available on the removable target.",
-            }, status=404)
+            }, status=404,
+            )
         try:
             drop = self._courier_drop_dir().resolve()
             dest = (drop / src.name).resolve()
@@ -13407,7 +18351,8 @@ class UIServer:
                 "ok": False,
                 "error": "courier_removable_copy_failed",
                 "message": str(exc),
-            }, status=500)
+            }, status=500,
+            )
         return web.json_response({
             "ok": True,
             "path": str(dest),
@@ -13427,13 +18372,15 @@ class UIServer:
                 "ok": False,
                 "error": "bad_json",
                 "message": "Expected JSON with bundle_b64 and key_token.",
-            }, status=400)
+            }, status=400,
+            )
         if not isinstance(data, dict):
             return web.json_response({
                 "ok": False,
                 "error": "bad_json",
                 "message": "Courier import expects a JSON object.",
-            }, status=400)
+            }, status=400,
+            )
         return self._import_courier_payload(data)
 
     def _import_courier_payload(self, data: dict) -> web.Response:
@@ -13443,6 +18390,20 @@ class UIServer:
             import_courier_bundle,
         )
 
+        if self._courier_ledger_error is not None:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "courier_replay_ledger_unavailable",
+                    "message": (
+                        "Courier import is blocked because its durable replay "
+                        "ledger is unreadable or invalid. Preserve the ledger "
+                        "and restore it from a trusted backup before importing."
+                    ),
+                },
+                status=503,
+            )
+
         bundle_text = data.get("bundle_b64") or data.get("bundle")
         key_token = str(data.get("key_token") or "").strip()
         if not bundle_text or not key_token:
@@ -13450,7 +18411,8 @@ class UIServer:
                 "ok": False,
                 "error": "missing_courier_fields",
                 "message": "Courier import needs both the encrypted bundle and its unlock token.",
-            }, status=400)
+            }, status=400,
+            )
         expected_recipient = data.get("expected_recipient_fp")
         if expected_recipient is None and data.get("enforce_recipient", True):
             expected_recipient = self.daemon.me.fingerprint
@@ -13460,10 +18422,17 @@ class UIServer:
                 bundle,
                 key_token,
                 expected_recipient_fp=expected_recipient,
+                expected_sender_fp=data.get("expected_sender_fp") or None,
+                require_sender_signature=bool(data.get("require_sender_signature", False)),
             )
             bundle_id = str(imported.manifest.get("bundle_id") or "").strip().lower()
             if bundle_id in self._courier_seen_bundle_ids:
                 raise CourierBundleError("courier bundle was already imported")
+            # Persist replay admission before any chunk-cache side effect. If
+            # durability fails, the import fails with zero admitted chunks;
+            # a crash can never apply payload bytes without first recording
+            # the bundle id in the durable replay authority.
+            self._mark_courier_imported(dict(imported.manifest))
             stored = 0
             import_blob_hash = imported.manifest.get("blob_hash")
             for chunk_hash, chunk_data in imported.chunks:
@@ -13474,7 +18443,6 @@ class UIServer:
                     chunk_index=stored if isinstance(import_blob_hash, str) else None,
                 )
                 stored += 1
-            self._mark_courier_imported(dict(imported.manifest))
             self._record_courier_event(
                 "import",
                 dict(imported.manifest),
@@ -13486,13 +18454,15 @@ class UIServer:
                 "ok": False,
                 "error": "courier_import_rejected",
                 "message": str(exc),
-            }, status=400)
+            }, status=400,
+            )
         except Exception as exc:
             return web.json_response({
                 "ok": False,
                 "error": "courier_import_failed",
                 "message": str(exc),
-            }, status=500)
+            }, status=500,
+            )
         return web.json_response({
             "ok": True,
             "manifest": imported.manifest,
@@ -13511,20 +18481,23 @@ class UIServer:
                 "ok": False,
                 "error": "bad_json",
                 "message": "Expected JSON with file_id and key_token.",
-            }, status=400)
+            }, status=400,
+            )
         if not isinstance(data, dict):
             return web.json_response({
                 "ok": False,
                 "error": "bad_json",
                 "message": "Courier file import expects a JSON object.",
-            }, status=400)
+            }, status=400,
+            )
         path = self._resolve_courier_file_id(str(data.get("file_id") or ""))
         if path is None:
             return web.json_response({
                 "ok": False,
                 "error": "courier_file_not_found",
                 "message": "That courier file is not in the drop folder anymore.",
-            }, status=404)
+            }, status=404,
+            )
         try:
             if path.stat().st_size > COURIER_FILE_MAX_BYTES:
                 raise ValueError("courier file exceeds the size limit")
@@ -13534,7 +18507,8 @@ class UIServer:
                 "ok": False,
                 "error": "courier_file_unreadable",
                 "message": str(exc),
-            }, status=400)
+            }, status=400,
+            )
         return self._import_courier_payload({
             "bundle_b64": bundle_b64,
             "key_token": data.get("key_token"),
@@ -13546,75 +18520,122 @@ class UIServer:
         """Assemble a fully cached courier-imported blob into the inbox."""
 
         try:
-            import blake3
+            from one_link.courier_bundle import (
+                CourierBundleError,
+                assemble_courier_chunks,
+            )
+
             data = await request.json()
         except Exception:
             return web.json_response({
                 "ok": False,
                 "error": "bad_json",
                 "message": "Expected JSON with a blob_hash field.",
-            }, status=400)
+            }, status=400,
+            )
         if not isinstance(data, dict):
             return web.json_response({
                 "ok": False,
                 "error": "bad_json",
                 "message": "Courier assemble expects a JSON object.",
-            }, status=400)
+            }, status=400,
+            )
         blob_hash = str(data.get("blob_hash") or "").strip().lower()
         if not getattr(self.daemon, "_valid_blob_hex")(blob_hash):
             return web.json_response({
                 "ok": False,
                 "error": "invalid_blob_hash",
                 "message": "Courier assemble received a malformed blob hash.",
-            }, status=400)
+            }, status=400,
+            )
         state = getattr(self.daemon, "state", None)
         if state is None:
             return web.json_response({
                 "ok": False,
                 "error": "state_unavailable",
                 "message": "Chunk index is not available yet.",
-            }, status=503)
+            }, status=503,
+            )
         rows = state.list_chunks_for_blob(blob_hash)
         if not rows:
             return web.json_response({
                 "ok": False,
                 "error": "missing_chunk_index",
                 "message": "No chunk index is known for this courier blob.",
-            }, status=404)
-        missing: list[str] = []
-        parts: list[bytes] = []
-        for row in rows:
-            chunk_hash = str(row.get("chunk_hash") or "").strip().lower()
-            chunk_data = self.daemon._read_chunk_cache(chunk_hash)
-            if chunk_data is None:
-                missing.append(chunk_hash)
-            else:
-                parts.append(chunk_data)
-        if missing:
-            return web.json_response({
-                "ok": False,
-                "error": "missing_cached_chunks",
-                "message": "Courier import has not received every chunk for this file yet.",
-                "missing_count": len(missing),
-                "missing": missing[:64],
-            }, status=409)
-        assembled = b"".join(parts)
-        if blake3.blake3(assembled).hexdigest() != blob_hash:
-            return web.json_response({
-                "ok": False,
-                "error": "blob_hash_mismatch",
-                "message": "Cached chunks do not assemble to the expected file hash.",
-            }, status=409)
+            }, status=404,
+            )
         name = self.daemon._safe_transfer_name(data.get("name") or f"{blob_hash[:12]}.bin")
         out_path = self.daemon._unique_inbox_path(blob_hash, name)
-        with open(out_path, "xb") as fh:
-            fh.write(assembled)
+
+        def cached_chunks():
+            for row in rows:
+                chunk_hash = str(row.get("chunk_hash") or "").strip().lower()
+                if not getattr(self.daemon, "_valid_blob_hex")(chunk_hash):
+                    raise CourierBundleError("courier chunk index contains an invalid hash")
+                chunk_data = self.daemon._read_chunk_cache(chunk_hash)
+                if chunk_data is None:
+                    raise KeyError(chunk_hash)
+                yield chunk_hash, chunk_data
+
+        written = 0
+        try:
+            with open(out_path, "xb") as fh:
+                written = assemble_courier_chunks(
+                    cached_chunks(),
+                    fh,
+                    expected_blob_hash=blob_hash,
+                )
+                fh.flush()
+                os.fsync(fh.fileno())
+        except KeyError as exc:
+            with contextlib.suppress(OSError):
+                out_path.unlink()
+            missing_hash = str(exc.args[0]) if exc.args else ""
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "missing_cached_chunks",
+                    "message": "Courier import has not received every chunk for this file yet.",
+                    "missing_count": 1,
+                    "missing": [missing_hash] if missing_hash else [],
+                },
+                status=409,
+            )
+        except CourierBundleError as exc:
+            with contextlib.suppress(OSError):
+                out_path.unlink()
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "courier_assemble_rejected",
+                    "message": str(exc),
+                },
+                status=409,
+            )
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                out_path.unlink()
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "courier_assemble_failed",
+                    "message": str(exc),
+                },
+                status=500,
+            )
+        if os.name != "nt":
+            with contextlib.suppress(OSError):
+                dir_fd = os.open(out_path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
         return web.json_response({
             "ok": True,
             "path": str(out_path),
             "name": out_path.name,
             "blob_hash": blob_hash,
-            "bytes": len(assembled),
+            "bytes": written,
             "chunks": len(rows),
         })
 
@@ -13649,7 +18670,8 @@ class UIServer:
                     "One Link is waiting for a reachable peer listener."
                     if str(exc) == "no_route_hints" else str(exc)
                 ),
-            }, status=status)
+            }, status=status,
+            )
 
     def _mint_route_bootstrap_token(self, *, ttl_s: int = 180):
         from one_link.capabilities import LOCAL_CAPABILITIES
@@ -13726,7 +18748,8 @@ class UIServer:
                     "One Link is waiting for a reachable peer listener."
                     if str(exc) == "no_route_hints" else str(exc)
                 ),
-            }, status=status)
+            }, status=status,
+            )
         qr = qrcode.QRCode(border=2, box_size=8)
         qr.add_data(token)
         qr.make(fit=True)
@@ -13755,14 +18778,16 @@ class UIServer:
                 "ok": False,
                 "error": "bad_json",
                 "message": "Expected JSON with a token field.",
-            }, status=400)
+            }, status=400,
+            )
         token = str(data.get("token") or "").strip() if isinstance(data, dict) else ""
         if not token:
             return web.json_response({
                 "ok": False,
                 "error": "missing_token",
                 "message": "Paste or scan a One Link route token first.",
-            }, status=400)
+            }, status=400,
+            )
         try:
             result = await self.daemon.ingest_route_bootstrap(token)
         except ValueError as exc:
@@ -13770,13 +18795,15 @@ class UIServer:
                 "ok": False,
                 "error": "invalid_route_bootstrap",
                 "message": str(exc),
-            }, status=400)
+            }, status=400,
+            )
         except Exception as exc:
             return web.json_response({
                 "ok": False,
                 "error": "route_bootstrap_import_failed",
                 "message": str(exc),
-            }, status=500)
+            }, status=500,
+            )
         status = 200 if result.get("ok") else 409
         return web.json_response(result, status=status)
 
@@ -13807,18 +18834,21 @@ class UIServer:
         verifier who routes the doc to a different channel will
         reject it."""
         try:
-            import base64
             from one_link.handshake_attestation import (
                 AttestationWire,
+                decode_challenge_b64,
                 issue_for_challenge,
             )
             body = await request.json()
-            challenge = base64.b64decode(body["challenge_b64"])
+            if not isinstance(body, dict) or set(body) != {"challenge_b64"}:
+                raise ValueError("attestation issue body has invalid fields")
+            challenge = decode_challenge_b64(body["challenge_b64"])
             sealed = self.daemon.sealed_master
             if sealed is None:
                 return web.json_response(
                     {"ok": False, "error": "row-10 sealed master not available; "
-                     "daemon missing master seed or native ext not built"},
+                     "daemon missing master seed or native ext not built",
+                    },
                     status=503,
                 )
             my_sdp_pubkey = bytes(self.daemon.me.public_bytes)
@@ -13836,11 +18866,22 @@ class UIServer:
         "expected_issuer_sdp_pubkey_b64": "..."}``. Returns
         ``{"ok": true}`` on pass, error JSON otherwise."""
         try:
-            import base64
-            from one_link.handshake_attestation import AttestationWire, verify_doc
+            from one_link.handshake_attestation import (
+                AttestationWire,
+                decode_challenge_b64,
+                decode_issuer_sdp_public_key_b64,
+                verify_doc,
+            )
+
             body = await request.json()
-            challenge = base64.b64decode(body["challenge_b64"])
-            expected_sdp = base64.b64decode(
+            if not isinstance(body, dict) or set(body) != {
+                "challenge_b64",
+                "doc",
+                "expected_issuer_sdp_pubkey_b64",
+            }:
+                raise ValueError("attestation verify body has invalid fields")
+            challenge = decode_challenge_b64(body["challenge_b64"])
+            expected_sdp = decode_issuer_sdp_public_key_b64(
                 body["expected_issuer_sdp_pubkey_b64"]
             )
             wire = AttestationWire.from_wire_dict(body["doc"])
@@ -13872,7 +18913,9 @@ class UIServer:
                 state.schema_version() if state is not None else 0
             ),
             "bind_host": self.bind_host,
-            "me": {
+                "daemon_instance_id": getattr(self.daemon, "_control_instance_id", None),
+                "pid": os.getpid(),
+                "me": {
                 "short_id": self.daemon.me.short_id,
                 "fingerprint": self.daemon.me.fingerprint,
                 "hostname": self.daemon.me.hostname,
@@ -13910,22 +18953,15 @@ class UIServer:
         # default after user feedback that the friction wasn't
         # worth it for trusted SAS-verified peers.)
         pair_allow_all_raw = s.get("pair_default_allow_all")
-        pair_allow_all = (
-            pair_allow_all_raw is None
-            or pair_allow_all_raw.lower() in ("1", "true", "yes")
+        pair_allow_all = pair_allow_all_raw is None or pair_allow_all_raw.lower() in (
+            "1",
+            "true",
+            "yes",
         )
         # v0.10.0 settings polish — surface theme + DND + sound +
         # log verbosity + custom download folder. Sane defaults so a
         # never-touched daemon Just Works.
-        # v0.21.x: auto-install updates defaults TRUE (the project's
-        # 'just works' / 'no corporate gate' stance). Users opt out
-        # explicitly via Settings -> About; the operator can also
-        # hard-disable via ONE_LINK_EXPERIMENTAL_AUTOINSTALL=0.
-        auto_install_raw = s.get("auto_install_updates")
-        auto_install = (
-            auto_install_raw is None
-            or auto_install_raw.lower() in ("1", "true", "yes")
-        )
+        auto_install = False
         return web.json_response({
             "display_name": s.get("display_name"),
             "auto_accept_lan": s.get("auto_accept_lan", "false") == "true",
@@ -14036,6 +19072,261 @@ class UIServer:
             "user_mode": s.get("user_mode", "normal"),
         })
 
+    @staticmethod
+    def _validate_settings_update(data: object) -> None:
+        """Validate the complete PATCH-like payload before the first write.
+
+        The endpoint historically validated each field immediately before
+        writing it.  A valid early field followed by an invalid late field
+        therefore returned HTTP 400 *after* partially changing the product.
+        This preflight is deliberately side-effect free (apart from a bounded
+        writeability probe for an explicitly selected inbox directory).
+        """
+        if not isinstance(data, dict):
+            raise _SettingsUpdateRejected("settings payload must be a JSON object")
+
+        boolean_keys = (
+            "auto_accept_lan",
+            "pair_default_allow_all",
+            "sync_quiet_hours_enabled",
+            "sync_pause_on_metered",
+            "sync_pause_on_battery",
+            "sync_paused",
+            "onboarding_completed",
+            "incoming_files_require_accept",
+            "dnd_enabled",
+            "notification_sound",
+            "notification_preview",
+            "notify_on_reactions",
+            "send_read_receipts",
+            "display_read_receipts",
+            "send_typing_indicators",
+            "display_typing_indicators",
+            "enter_to_send",
+            "compact_message_list",
+            "show_message_seconds",
+            "auto_scroll_new_messages",
+            "send_link_previews",
+        )
+        for key in boolean_keys:
+            if key in data and type(data[key]) is not bool:
+                raise _SettingsUpdateRejected(f"{key} must be a boolean")
+
+        if "display_name" in data:
+            value = data["display_name"]
+            if value is not None and not isinstance(value, str):
+                raise _SettingsUpdateRejected("display_name must be a string or null")
+            if isinstance(value, str) and len(value) > DISPLAY_NAME_MAX_LENGTH:
+                raise _SettingsUpdateRejected(
+                    f"display_name max {DISPLAY_NAME_MAX_LENGTH} chars"
+                )
+
+        if "auto_install_updates" in data:
+            value = data["auto_install_updates"]
+            enabled: bool | None = None
+            if type(value) is bool:
+                enabled = value
+            elif isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in ("1", "true", "yes"):
+                    enabled = True
+                elif normalized in ("0", "false", "no"):
+                    enabled = False
+            if enabled is None:
+                raise _SettingsUpdateRejected(
+                    "auto_install_updates must be a boolean"
+                )
+            if enabled:
+                raise _SettingsUpdateRejected(
+                    "in-place native updates are unavailable; use a verified "
+                    "full-application release",
+                    status=409,
+                )
+
+        def integer_value(
+            key: str,
+            *,
+            allow_empty: bool = False,
+            minimum: int | None = None,
+        ) -> int | None:
+            if key not in data:
+                return None
+            value = data[key]
+            if allow_empty and (value is None or value == ""):
+                return 0
+            if isinstance(value, bool) or not isinstance(value, (int, str)):
+                raise _SettingsUpdateRejected(f"{key} must be an integer")
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                raise _SettingsUpdateRejected(f"{key} must be an integer") from None
+            if parsed < -(2 ** 63) or parsed > 2 ** 63 - 1:
+                raise _SettingsUpdateRejected(f"{key} is outside the supported range")
+            if minimum is not None and parsed < minimum:
+                raise _SettingsUpdateRejected(f"{key} must be >= {minimum}")
+            return parsed
+
+        integer_value("sync_bandwidth_kbps", allow_empty=True, minimum=0)
+        integer_value("default_dm_ttl_ms", allow_empty=True)
+        integer_value("bandwidth_cap_kbps", allow_empty=True, minimum=0)
+        integer_value("auto_accept_max_size_mb", allow_empty=True, minimum=0)
+        for key, minimum in (
+            ("safety_max_file_tb", 1),
+            ("safety_min_free_mb", 256),
+            ("safety_peer_active_transfers", 1),
+            ("safety_peer_active_gb", 1),
+        ):
+            integer_value(key, allow_empty=True, minimum=minimum)
+
+        def validate_time(
+            key: str,
+            *,
+            allow_empty: bool,
+            require_two_digit_minute: bool,
+        ) -> None:
+            if key not in data:
+                return
+            value = data[key]
+            if allow_empty and (value is None or value == ""):
+                return
+            if not isinstance(value, str):
+                raise _SettingsUpdateRejected(f"{key} must be HH:MM")
+            minute_pattern = r"\d{2}" if require_two_digit_minute else r"\d{1,2}"
+            match = re.fullmatch(rf"(\d{{1,2}}):({minute_pattern})", value.strip())
+            if match is None:
+                raise _SettingsUpdateRejected(f"{key} must be HH:MM")
+            if not (0 <= int(match.group(1)) <= 23 and 0 <= int(match.group(2)) <= 59):
+                raise _SettingsUpdateRejected(
+                    f"{key} hour 0-23, minute 0-59"
+                )
+
+        validate_time(
+            "sync_quiet_start",
+            allow_empty=False,
+            require_two_digit_minute=True,
+        )
+        validate_time(
+            "sync_quiet_end",
+            allow_empty=False,
+            require_two_digit_minute=True,
+        )
+        validate_time(
+            "dnd_start",
+            allow_empty=True,
+            require_two_digit_minute=False,
+        )
+        validate_time(
+            "dnd_end",
+            allow_empty=True,
+            require_two_digit_minute=False,
+        )
+
+        for key, allowed, default in (
+            ("theme", ("dark", "light", "auto"), "dark"),
+            ("ui_density", ("comfortable", "compact", "spacious"), "comfortable"),
+            ("message_bubble_style", ("gradient", "solid", "minimal"), "gradient"),
+            ("font_scale", ("small", "normal", "large"), "normal"),
+            ("motion_level", ("full", "reduced", "off"), "full"),
+            ("chat_wallpaper", ("soft", "none", "field", "midnight"), "soft"),
+        ):
+            if key not in data:
+                continue
+            raw = data[key]
+            if raw is not None and not isinstance(raw, str):
+                raise _SettingsUpdateRejected(f"{key} must be a string")
+            value = raw or default
+            if value not in allowed:
+                raise _SettingsUpdateRejected(
+                    f"{key} must be one of {'|'.join(allowed)}"
+                )
+
+        if "accent_color" in data:
+            raw = data["accent_color"]
+            if raw is not None and not isinstance(raw, str):
+                raise _SettingsUpdateRejected("accent_color must be #RRGGBB")
+            value = (raw or "#7c5cff").strip()
+            if re.fullmatch(r"#[0-9a-fA-F]{6}", value) is None:
+                raise _SettingsUpdateRejected("accent_color must be #RRGGBB")
+
+        if "download_folder" in data:
+            raw = data["download_folder"]
+            if raw is not None and not isinstance(raw, str):
+                raise _SettingsUpdateRejected(
+                    "download_folder must be a string or null"
+                )
+            value = (raw or "").strip()
+            if value:
+                path = Path(value)
+                if not path.is_dir():
+                    raise _SettingsUpdateRejected(
+                        f"download_folder is not a directory: {value}"
+                    )
+                if not _probe_writable(path):
+                    raise _SettingsUpdateRejected(
+                        f"download_folder is not writable: {value}"
+                    )
+
+        if "log_level" in data:
+            raw = data["log_level"]
+            if raw is not None and not isinstance(raw, str):
+                raise _SettingsUpdateRejected(
+                    "log_level must be error|warn|info|debug"
+                )
+            if (raw or "info").lower() not in ("error", "warn", "info", "debug"):
+                raise _SettingsUpdateRejected(
+                    "log_level must be error|warn|info|debug"
+                )
+
+        if "bio" in data:
+            value = data["bio"]
+            if value is not None and not isinstance(value, str):
+                raise _SettingsUpdateRejected("bio must be a string")
+            if isinstance(value, str) and len(value) > BIO_MAX_LENGTH:
+                raise _SettingsUpdateRejected(f"bio max {BIO_MAX_LENGTH} chars")
+
+        if "avatar_color" in data:
+            value = data["avatar_color"]
+            if value not in (None, ""):
+                if not isinstance(value, str) or value not in AVATAR_COLOR_PRESETS:
+                    raise _SettingsUpdateRejected(
+                        f"avatar_color must be one of {list(AVATAR_COLOR_PRESETS)}"
+                    )
+
+        if "auto_accept_extensions" in data:
+            raw = data["auto_accept_extensions"]
+            if isinstance(raw, list):
+                if len(raw) > 256 or any(not isinstance(item, str) for item in raw):
+                    raise _SettingsUpdateRejected(
+                        "auto_accept_extensions must contain at most 256 strings"
+                    )
+            elif raw is not None and not isinstance(raw, str):
+                raise _SettingsUpdateRejected(
+                    "auto_accept_extensions must be a string or list"
+                )
+            if isinstance(raw, str) and len(raw) > 4096:
+                raise _SettingsUpdateRejected(
+                    "auto_accept_extensions exceeds 4096 characters"
+                )
+
+        if "user_mode" in data:
+            value = data["user_mode"]
+            if value is not None and not isinstance(value, str):
+                raise _SettingsUpdateRejected("user_mode must be a string")
+            if isinstance(value, str):
+                from one_link import selector_native
+
+                canonical = selector_native.normalize_user_mode(value)
+                if (
+                    value.strip()
+                    and canonical == "normal"
+                    and value.strip().lower() not in ("normal", "n", "")
+                ):
+                    raise _SettingsUpdateRejected(
+                        "user_mode must be one of "
+                        "normal|paranoid|battery_save|latency_strict"
+                    )
+
+    @_atomic_settings_update
     async def api_set_settings(self, request: web.Request) -> web.Response:
         if self.daemon.state is None:
             return web.json_response({"error": "state not available"}, status=503)
@@ -14043,6 +19334,10 @@ class UIServer:
             data = await request.json()
         except Exception as e:
             return web.json_response({"error": f"bad json: {e}"}, status=400)
+        try:
+            self._validate_settings_update(data)
+        except _SettingsUpdateRejected as exc:
+            return web.json_response({"error": str(exc)}, status=exc.status)
         if "display_name" in data:
             v = data["display_name"]
             if v is None or v == "":
@@ -14059,16 +19354,41 @@ class UIServer:
                 "pair_default_allow_all",
                 "true" if data["pair_default_allow_all"] else "false",
             )
-        # v0.21.x: auto-install updates. '1'/'true' enables (default),
-        # '0'/'false' disables. The /api/update/install handler reads
-        # this setting + refuses to install when False.
+        # This legacy setting controls unattended/background installation, not
+        # the distinct explicitly confirmed transactional helper handoff. Allow
+        # clients to clear stale opt-in state, but never persist consent for a
+        # background capability the product does not execute.
         if "auto_install_updates" in data:
             v = data["auto_install_updates"]
             if isinstance(v, bool):
                 stored = "1" if v else "0"
+            elif isinstance(v, str):
+                normalized = v.strip().lower()
+                if normalized in ("1", "true", "yes"):
+                    stored = "1"
+                elif normalized in ("0", "false", "no"):
+                    stored = "0"
+                else:
+                    return web.json_response(
+                        {"error": "auto_install_updates must be a boolean"},
+                        status=400,
+                    )
             else:
-                stored = "0" if str(v).lower() in ("0", "false", "no") else "1"
-            self.daemon.state.set_setting("auto_install_updates", stored)
+                return web.json_response(
+                    {"error": "auto_install_updates must be a boolean"},
+                    status=400,
+                )
+            if stored == "1":
+                return web.json_response(
+                    {
+                        "error": (
+                            "in-place native updates are unavailable; use a "
+                            "verified full-application release"
+                        ),
+                    },
+                    status=409,
+                )
+            self.daemon.state.delete_setting("auto_install_updates")
         # v0.21.x Ship 6: sync bandwidth + scheduling settings.
         if "sync_bandwidth_kbps" in data:
             try:
@@ -14089,7 +19409,9 @@ class UIServer:
         ):
             if key in data:
                 v = data[key]
-                stored = "true" if (v is True or str(v).lower() in ("1", "true", "yes")) else "false"
+                stored = (
+                    "true" if (v is True or str(v).lower() in ("1", "true", "yes")) else "false"
+                )
                 self.daemon.state.set_setting(key, stored)
         for key in ("sync_quiet_start", "sync_quiet_end"):
             if key in data:
@@ -14128,7 +19450,7 @@ class UIServer:
         # v0.10.0 — settings polish. Each branch validates its input
         # so a malformed value can't poison the database.
         if "theme" in data:
-            v = (data["theme"] or "dark")
+            v = data["theme"] or "dark"
             if v not in ("dark", "light", "auto"):
                 return web.json_response(
                     {"error": "theme must be dark|light|auto"}, status=400,
@@ -14142,7 +19464,7 @@ class UIServer:
             ("chat_wallpaper", ("soft", "none", "field", "midnight"), "soft"),
         ):
             if key in data:
-                v = (data[key] or default)
+                v = data[key] or default
                 if v not in allowed:
                     return web.json_response(
                         {"error": f"{key} must be one of {'|'.join(allowed)}"},
@@ -14266,9 +19588,7 @@ class UIServer:
                 if v not in AVATAR_COLOR_PRESETS:
                     return web.json_response(
                         {
-                            "error": (
-                                "avatar_color must be one of "
-                                f"{list(AVATAR_COLOR_PRESETS)}"
+                            "error": (f"avatar_color must be one of {list(AVATAR_COLOR_PRESETS)}"
                             )
                         },
                         status=400,
@@ -14290,6 +19610,11 @@ class UIServer:
                 self.daemon.state.set_setting(
                     key, "true" if data[key] else "false",
                 )
+        if data.get("display_typing_indicators") is False:
+            # The privacy transition is immediate: retire composition
+            # metadata already cached before the switch was turned off.
+            self.daemon._peer_typing.clear()
+            self.daemon._group_typing.clear()
         # v0.11.6 — storage + data settings.
         if "default_dm_ttl_ms" in data:
             v = data["default_dm_ttl_ms"]
@@ -14400,8 +19725,10 @@ class UIServer:
                 # If the user passed something that didn't match a known
                 # mode AND wasn't blank, surface a 400 rather than
                 # silently normalizing to "normal".
-                if v.strip() and canonical == "normal" and v.strip().lower() not in (
-                    "normal", "n", ""
+                if (
+                    v.strip()
+                    and canonical == "normal"
+                    and v.strip().lower() not in ("normal", "n", "")
                 ):
                     return web.json_response(
                         {
@@ -14453,8 +19780,13 @@ class UIServer:
                 display_name = self.daemon.state.get_setting("display_name")
                 if display_name:
                     local_names.add(display_name)
-            except Exception:
-                pass
+            except Exception as setting_exc:
+                report_best_effort_failure(
+                    log,
+                    "peer_list_display_name",
+                    setting_exc,
+                    level=logging.DEBUG,
+                )
         if self.daemon.discovery:
             for discovered in self.daemon.discovery.registry.list():
                 fp = ""
@@ -14584,8 +19916,16 @@ class UIServer:
                             # v0.11.2: per-chat mute with duration.
                             "muted_until_ms": rec.muted_until_ms,
                         }
-            except Exception:
-                pass
+            except Exception as state_exc:
+                report_best_effort_failure(
+                    log,
+                    "peer_list_state_merge",
+                    state_exc,
+                )
+                return web.json_response(
+                    {"error": "peer state temporarily unavailable"},
+                    status=503,
+                )
 
         # Same-host pending collapse: if multiple pending peers advertise
         # one of our own hostnames, keep only the most-recently-seen one.
@@ -14708,10 +20048,7 @@ class UIServer:
             # reported value in _peer_presence; missing key = peer
             # never reported (treat as 'online' on the wire).
             peer_presence = getattr(self.daemon, "_peer_presence", {}) or {}
-            p["presence"] = (
-                peer_presence.get(fp, "online")
-                if fp else "online"
-            )
+            p["presence"] = peer_presence.get(fp, "online") if fp else "online"
             # v0.7.0: per-pairing health metrics. last_alive_ms is wall-
             # clock time of the last bytes seen from this peer (in or
             # out). latency_ewma_ms is the rolling round-trip time
@@ -14788,7 +20125,9 @@ class UIServer:
             return web.json_response({"folders": []})
         out = []
         for f in self.daemon.state.list_folders():
-            entries = self.daemon.state.list_manifest(f["name"]) if self.daemon.folder_engine else []
+            entries = (
+                self.daemon.state.list_manifest(f["name"]) if self.daemon.folder_engine else []
+            )
             local = sum(1 for e in entries if e["blob_hash"] is not None)
             in_store = 0
             if self.daemon.blob_store:
@@ -14949,7 +20288,10 @@ class UIServer:
                 "allowed": new_policy,
             })
         except Exception:
-            pass
+            log.exception(
+                "explicit folder capability grant failed for peer=%s",
+                peer_fp[:8],
+            )
 
     async def api_remove_folder(self, request: web.Request) -> web.Response:
         if self.daemon.state is None or self.daemon.folder_engine is None:
@@ -15186,11 +20528,41 @@ class UIServer:
         Returns (archive_path, original_size, archive_size).
         Files are added with paths relative to folder_root so the
         receiver extracts directly into inbox/<folder_name>/<...>.
+
+        The walk is deliberately fail-closed.  A nested symlink, Windows
+        junction/reparse point, special file, containment failure, unreadable
+        entry, or file mutation aborts and removes the partial archive instead
+        of silently omitting data or following a link to files outside the
+        folder the user chose to send.
         """
         import zipfile
+        import stat as stat_mod
         from one_link.paths import data_dir as _dd
+
+        safe_folder_name = _safe_untrusted_folder_leaf(folder_name)
+        raw_root = Path(folder_root).expanduser()
+        try:
+            raw_root_stat = os.lstat(raw_root)
+        except OSError as exc:
+            raise ValueError(f"folder source is not accessible: {exc}") from exc
+        if _path_is_link_or_reparse(raw_root, raw_root_stat):
+            raise ValueError("folder source must not be a symlink or reparse point")
+        try:
+            root = raw_root.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"folder source cannot be resolved: {exc}") from exc
+        if not root.is_dir():
+            raise ValueError("folder source is not a directory")
+
         staging = _dd() / "folder_archive_staging"
         staging.mkdir(parents=True, exist_ok=True)
+        staging = staging.resolve(strict=True)
+        try:
+            staging.relative_to(root)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("folder archive staging must be outside the source folder")
         # Clean up old archives older than the TTL.
         cutoff = time.time() - self._FOLDER_ARCHIVE_TEMP_TTL_S
         for old in staging.iterdir():
@@ -15199,26 +20571,139 @@ class UIServer:
                     old.unlink(missing_ok=True)
             except OSError:
                 continue
-        archive_name = f"{int(time.time() * 1000)}_{secrets.token_hex(6)}_{folder_name}.zip"
+        archive_name = f"{int(time.time() * 1000)}_{secrets.token_hex(6)}_{safe_folder_name}.zip"
         archive_path = staging / archive_name
         original_size = 0
-        with zipfile.ZipFile(
-            archive_path, mode="w",
-            compression=zipfile.ZIP_DEFLATED, compresslevel=6,
-        ) as zf:
-            for p in folder_root.rglob("*"):
-                try:
-                    if not p.is_file():
-                        continue
-                    arcname = p.relative_to(folder_root).as_posix()
-                    zf.write(p, arcname=arcname)
-                    original_size += p.stat().st_size
-                except OSError as e:
-                    log.warning(
-                        "folder-archive stage: skip %s: %s", p, e,
-                    )
-        archive_size = archive_path.stat().st_size
-        return archive_path, original_size, archive_size
+
+        def _prove_contained(path: Path) -> Path:
+            try:
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(root)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ValueError(f"folder archive entry escapes source root: {path}") from exc
+            return resolved
+
+        def _walk_error(exc: OSError) -> None:
+            raise exc
+
+        archive_owned = False
+        try:
+            archive_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+            archive_flags |= int(getattr(os, "O_BINARY", 0))
+            archive_fd = os.open(archive_path, archive_flags, 0o600)
+            archive_owned = True
+            with (
+                os.fdopen(archive_fd, "w+b") as archive_stream,
+                zipfile.ZipFile(
+                    archive_stream,
+                    mode="w",
+                    compression=zipfile.ZIP_DEFLATED,
+                    compresslevel=6,
+                    allowZip64=True,
+                ) as zf,
+            ):
+                for current_raw, dirnames, filenames in os.walk(
+                    root,
+                    topdown=True,
+                    onerror=_walk_error,
+                    followlinks=False,
+                ):
+                    current = Path(current_raw)
+                    _prove_contained(current)
+                    dirnames.sort()
+                    filenames.sort()
+
+                    # Reject links/reparse points before os.walk gets a chance
+                    # to descend.  ``followlinks=False`` is not sufficient on
+                    # every Python/Windows junction combination.
+                    for dirname in dirnames:
+                        directory = current / dirname
+                        directory_stat = os.lstat(directory)
+                        if _path_is_link_or_reparse(directory, directory_stat):
+                            raise ValueError(
+                                f"folder archive refuses linked directory: {directory}"
+                            )
+                        if not stat_mod.S_ISDIR(directory_stat.st_mode):
+                            raise ValueError(
+                                f"folder archive found non-directory entry: {directory}"
+                            )
+                        _prove_contained(directory)
+
+                    for filename in filenames:
+                        path = current / filename
+                        before = os.lstat(path)
+                        if _path_is_link_or_reparse(path, before):
+                            raise ValueError(f"folder archive refuses linked file: {path}")
+                        if not stat_mod.S_ISREG(before.st_mode):
+                            raise ValueError(f"folder archive refuses special file: {path}")
+                        _prove_contained(path)
+
+                        flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+                        flags |= int(getattr(os, "O_NOFOLLOW", 0))
+                        fd = os.open(path, flags)
+                        with os.fdopen(fd, "rb") as source:
+                            opened = os.fstat(source.fileno())
+                            if not stat_mod.S_ISREG(opened.st_mode):
+                                raise ValueError(f"folder archive entry changed type: {path}")
+                            # st_ino is meaningful on supported desktop file
+                            # systems.  Compare it with lstat to catch a swap
+                            # between validation and open; O_NOFOLLOW provides
+                            # an additional final-component boundary on Unix.
+                            if (
+                                before.st_ino
+                                and opened.st_ino
+                                and (
+                                    before.st_dev != opened.st_dev or before.st_ino != opened.st_ino
+                                )
+                            ):
+                                raise ValueError(
+                                    f"folder archive entry changed during open: {path}"
+                                )
+                            _prove_contained(path)
+
+                            arcname = path.relative_to(root).as_posix()
+                            # ZIP's DOS timestamp range is 1980..2107. Clamp
+                            # hostile/corrupt filesystem timestamps instead of
+                            # letting ZipInfo abort after the file was read.
+                            timestamp = min(
+                                max(float(opened.st_mtime), 315532800.0),
+                                4354819198.0,
+                            )
+                            info = zipfile.ZipInfo(
+                                arcname,
+                                date_time=time.localtime(timestamp)[:6],
+                            )
+                            info.compress_type = zipfile.ZIP_DEFLATED
+                            info.external_attr = (opened.st_mode & 0xFFFF) << 16
+                            info.file_size = opened.st_size
+                            remaining = int(opened.st_size)
+                            with zf.open(info, mode="w", force_zip64=True) as target:
+                                while remaining:
+                                    chunk = source.read(min(1024 * 1024, remaining))
+                                    if not chunk:
+                                        raise OSError(
+                                            f"folder archive entry shrank while reading: {path}"
+                                        )
+                                    target.write(chunk)
+                                    remaining -= len(chunk)
+                                if source.read(1):
+                                    raise OSError(
+                                        f"folder archive entry grew while reading: {path}"
+                                    )
+                            after = os.fstat(source.fileno())
+                            if (
+                                after.st_size != opened.st_size
+                                or after.st_mtime_ns != opened.st_mtime_ns
+                            ):
+                                raise OSError(f"folder archive entry changed while reading: {path}")
+                            original_size += int(opened.st_size)
+            archive_size = archive_path.stat().st_size
+            return archive_path, original_size, archive_size
+        except BaseException:
+            if archive_owned:
+                with contextlib.suppress(OSError):
+                    archive_path.unlink(missing_ok=True)
+            raise
 
     async def _send_folder_archive(
         self, *, peer, peer_fp: str, folder_root: Path,
@@ -15362,10 +20847,7 @@ class UIServer:
         n = len(files)
         comp_stats = self._classify_compressibility(files)
         total = comp_stats["total_bytes"]
-        comp_ratio = (
-            comp_stats["compressible_bytes"] / max(1, total)
-            if total > 0 else 0.0
-        )
+        comp_ratio = comp_stats["compressible_bytes"] / max(1, total) if total > 0 else 0.0
         # Pre-flight dedup probe — skipped when caller asked us to
         # OR when peer isn't reachable.
         dedup_ratio = 0.0
@@ -15503,12 +20985,8 @@ class UIServer:
         # archive_size is more useful for the summary. Archive mode
         # gets the original_size (pre-compression) since dedup_bytes
         # already covers the savings.
-        total_bytes = (
-            original_size if original_size is not None else None
-        )
-        sent_bytes = (
-            archive_size if archive_size is not None else None
-        )
+        total_bytes = original_size if original_size is not None else None
+        sent_bytes = archive_size if archive_size is not None else None
         metadata: dict[str, Any] = {}
         if folder_send_group:
             metadata["folder_send_group"] = folder_send_group
@@ -15627,20 +21105,23 @@ class UIServer:
                     },
                 )
                 log.info(
-                    "folder send %s/%s attempt %d/%d failed (transient); "
-                    "retrying in %.1fs",
+                    "folder send %s/%s attempt %d/%d failed (transient); retrying in %.1fs",
                     scope, ident, attempt,
                     self._FOLDER_SEND_MAX_RETRIES, backoff,
                 )
                 await asyncio.sleep(backoff)
-            result = last_result if isinstance(last_result, dict) else {
-                "ok": False,
-                "error": (
-                    f"folder send failed after {self._FOLDER_SEND_MAX_RETRIES} "
-                    f"attempts: {last_result}"
-                ),
-                "blobs_sent": 0,
-            }
+            result = (
+                last_result
+                if isinstance(last_result, dict)
+                else {
+                    "ok": False,
+                    "error": (
+                        f"folder send failed after {self._FOLDER_SEND_MAX_RETRIES} "
+                        f"attempts: {last_result}"
+                    ),
+                    "blobs_sent": 0,
+                }
+            )
             ok = bool(result.get("ok"))
             self._emit_folder_send_event(
                 event="send_complete" if ok else "send_failed",
@@ -15730,20 +21211,23 @@ class UIServer:
                     },
                 )
                 log.info(
-                    "adhoc folder send %s/%s attempt %d/%d failed (transient); "
-                    "retrying in %.1fs",
+                    "adhoc folder send %s/%s attempt %d/%d failed (transient); retrying in %.1fs",
                     scope, ident, attempt,
                     self._FOLDER_SEND_MAX_RETRIES, backoff,
                 )
                 await asyncio.sleep(backoff)
-            result = last_result if isinstance(last_result, dict) else {
-                "ok": False,
-                "error": (
-                    f"folder send failed after {self._FOLDER_SEND_MAX_RETRIES} "
-                    f"attempts: {last_result}"
-                ),
-                "blobs_sent": 0,
-            }
+            result = (
+                last_result
+                if isinstance(last_result, dict)
+                else {
+                    "ok": False,
+                    "error": (
+                        f"folder send failed after {self._FOLDER_SEND_MAX_RETRIES} "
+                        f"attempts: {last_result}"
+                    ),
+                    "blobs_sent": 0,
+                }
+            )
             ok = bool(result.get("ok"))
             self._emit_folder_send_event(
                 event="send_complete" if ok else "send_failed",
@@ -15861,18 +21345,54 @@ class UIServer:
         [(absolute path, rel_path)] with every entry prefixed by
         rel_root so the recipient ends up with inbox/<rel_root>/<rel>.
         """
+        root_resolved = Path(root).resolve(strict=True)
         files: list[tuple[Path, str]] = []
         total_bytes = 0
         skipped = 0
-        for p in root.rglob("*"):
-            try:
-                if not p.is_file():
-                    continue
-                rel = p.relative_to(root).as_posix()
-                files.append((p, f"{rel_root}/{rel}"))
-                total_bytes += p.stat().st_size
-            except OSError:
-                skipped += 1
+
+        def _linklike(path: Path) -> bool:
+            if path.is_symlink():
+                return True
+            is_junction = getattr(path, "is_junction", None)
+            return bool(callable(is_junction) and is_junction())
+
+        # Path.rglob()+is_file() follows file symlinks and can traverse
+        # reparse-point directories on some Python/Windows combinations. A
+        # folder share containing `link -> ../../private.key` could therefore
+        # exfiltrate a file the user never selected. Walk without following
+        # links, prune link-like directories explicitly, and lstat every leaf.
+        for current_raw, dirnames, filenames in os.walk(
+            root_resolved,
+            topdown=True,
+            followlinks=False,
+        ):
+            current = Path(current_raw)
+            safe_dirs: list[str] = []
+            for dirname in sorted(dirnames):
+                child = current / dirname
+                try:
+                    if _linklike(child):
+                        skipped += 1
+                        continue
+                    child.resolve(strict=True).relative_to(root_resolved)
+                    safe_dirs.append(dirname)
+                except (OSError, ValueError):
+                    skipped += 1
+            dirnames[:] = safe_dirs
+
+            for filename in sorted(filenames):
+                p = current / filename
+                try:
+                    info = p.lstat()
+                    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                        skipped += 1
+                        continue
+                    p.resolve(strict=True).relative_to(root_resolved)
+                    rel = p.relative_to(root_resolved).as_posix()
+                    files.append((p, f"{rel_root}/{rel}"))
+                    total_bytes += int(info.st_size)
+                except (OSError, ValueError):
+                    skipped += 1
         return files, total_bytes, skipped
 
     async def _preview_folder_send(
@@ -16000,11 +21520,10 @@ class UIServer:
                 file_hashes = [(p, rel, None) for p, rel in files]
             # Split files into fast-path dedup hits + actually-new.
             # Fast-path: peer has the file complete → no wire activity.
-            # Actually-new files get routed by size:
-            #   - Tiny / many: send_files_batched (BATCHED FILE_OFFER,
-            #     simple sequential chunk streaming)
-            #   - Large: per-file send_file (native pipeline, QUIC
-            #     fast-path, adaptive scheduling all kick in)
+            # Actually-new files get routed by size. The collection helper
+            # uses canonical per-file commit receipts; large files call the
+            # same pipeline directly so their individual telemetry remains
+            # easy to surface.
             LARGE_FILE_THRESHOLD = 16 * 1024 * 1024  # 16 MB
             batched_specs: list[tuple[Path, str]] = []
             large_specs: list[tuple[Path, str]] = []
@@ -16023,12 +21542,14 @@ class UIServer:
                 else:
                     batched_specs.append((path_obj, rel))
 
-            # BATCHED SEND for small files — collapses N FILE_OFFER
-            # round-trips into ⌈N/256⌉ via FILE_OFFER_BATCH_V1.
+            # Collection send for small files. FILE_OFFER_BATCH_V1 is
+            # intentionally retired until a versioned batch protocol carries
+            # stable delivery nonces and durable per-file commit receipts.
             if batched_specs:
                 try:
                     bres = await self.daemon.send_files_batched(
                         peer, batched_specs,
+                        extra_metadata=send_file_extra,
                     )
                     sent += int(bres.get("sent", 0))
                     failed += int(bres.get("failed", 0))
@@ -16037,9 +21558,8 @@ class UIServer:
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    # Batched path failed catastrophically — degrade
-                    # to per-file send_file for the same set. Same
-                    # bytes either way, just lose the round-trip win.
+                    # Collection orchestration failed catastrophically;
+                    # retry each file through the same canonical protocol.
                     log.warning(
                         "folder send %s/%s: batched path failed (%s); "
                         "degrading to per-file send_file",
@@ -16057,8 +21577,7 @@ class UIServer:
                         except Exception as ex:
                             failed += 1
                             log.warning(
-                                "folder send %s/%s rel=%s degraded "
-                                "fallback failed: %s",
+                                "folder send %s/%s rel=%s degraded fallback failed: %s",
                                 scope, ident, rel, ex,
                             )
             # LARGE FILES via per-file send_file so the native pipeline
@@ -16433,17 +21952,25 @@ class UIServer:
         except (OSError, ValueError) as e:
             return None, None, {"error": f"bad local_path: {e}"}
         if not path.is_dir():
-            return None, None, {
-                "error": f"path is not a directory: {path}",
-                "code": "not_a_directory",
-            }
+            return (
+                None,
+                None,
+                {
+                    "error": f"path is not a directory: {path}",
+                    "code": "not_a_directory",
+                },
+            )
         # The folder name we ship in rel_path. Sanitize via the same
         # rules that gate file names so "C:\." or "/" can't sneak in.
         leaf = path.name
         if not leaf or leaf in (".", "..", "/", "\\"):
-            return None, None, {
-                "error": "could not derive a folder name from path",
-            }
+            return (
+                None,
+                None,
+                {
+                    "error": "could not derive a folder name from path",
+                },
+            )
         return path, leaf, None
 
     async def api_fs_send_folder(
@@ -16696,11 +22223,12 @@ class UIServer:
         })
 
     async def api_folder_tree(self, request: web.Request) -> web.Response:
-        """File-engine v2 Phase B layer 9 substrate — expose the
-        folder's content tree as a JSON file tree. Foundation for
-        any future filesystem-mount integration (FUSE / Dokan /
-        FSKit) and also useful directly for UI file browsers + the
-        CLI's ``ol folder ls`` surface.
+        """Expose a folder's content tree as a bounded JSON file tree.
+
+        The current Linux FUSE path consumes the stricter in-process manifest
+        and verified CAS reader; this endpoint remains useful to owner UI file
+        browsers and the CLI's ``ol folder ls`` surface. Windows Dokan/WinFsp
+        and macOS FSKit adapters are still unimplemented.
 
         Query params:
           - ``prefix=<path>``: scope the listing to entries under
@@ -16855,7 +22383,14 @@ class UIServer:
                 results.append(_sync_result(peer_fp, "offline", ok=False))
                 continue
             try:
-                r = await self.daemon.push_folder_to_peer(peer, name)
+                # A user-triggered "sync now" is a convergence operation,
+                # not a one-way upload.  Request the single-channel duplex
+                # protocol explicitly so the response's durable receipt
+                # covers both directions instead of relying on a later
+                # periodic background cycle to happen to pull the reverse.
+                r = await self.daemon.push_folder_to_peer(peer, name,
+                    bidirectional=True,
+                )
                 results.append(_sync_result(peer_fp, "pushed", **r))
             except Exception as e:
                 results.append(_sync_result(peer_fp, "error", ok=False, error=str(e)))
@@ -16954,7 +22489,22 @@ class UIServer:
                 {"error": "offer is from an unpinned peer; pair first"},
                 status=403,
             )
-        folder_name = offer["folder_name"]
+        try:
+            folder_name = _safe_untrusted_folder_leaf(offer.get("folder_name"))
+        except ValueError as exc:
+            log.warning(
+                "refusing unsafe folder offer name from %s: %r (%s)",
+                peer_fp[:8],
+                offer.get("folder_name"),
+                exc,
+            )
+            return web.json_response(
+                {
+                    "error": "the offered folder name is unsafe",
+                    "code": "unsafe_folder_name",
+                },
+                status=400,
+            )
         # If a folder with this name already exists locally (e.g.
         # user accepted via the regular Add form before clicking
         # Accept on the offer), refuse with a clear message so the
@@ -16967,7 +22517,8 @@ class UIServer:
                     "accept this offer again."
                 ),
                 "code": "folder_name_conflict",
-            }, status=409)
+            }, status=409,
+            )
         effective_local_path = local_path
         used_fallback = False
         fallback_reason: str | None = None
@@ -17019,7 +22570,12 @@ class UIServer:
             fallback_reason = str(e)
             try:
                 fb_root = _pick_writable_share_root()
-                fb_path = fb_root / folder_name
+                # ``folder_name`` came from the peer.  Validate it as one
+                # portable leaf and resolve the prospective child before the
+                # join is handed to the folder engine.  This also rejects a
+                # pre-existing symlink/junction under the fallback root that
+                # resolves somewhere else.
+                fb_path = _contained_leaf_path(fb_root, folder_name)
                 self.daemon.folder_engine.add_folder(
                     name=folder_name,
                     local_path=fb_path,
@@ -17030,8 +22586,7 @@ class UIServer:
                 used_fallback = True
             except Exception as e2:
                 log.warning(
-                    "accept folder offer fallback also failed "
-                    "(%s/%s): %s",
+                    "accept folder offer fallback also failed (%s/%s): %s",
                     peer_fp[:8], folder_name, e2,
                 )
                 return web.json_response(
@@ -17455,7 +23010,8 @@ class UIServer:
 
     async def api_set_peer_verified(self, request: web.Request) -> web.Response:
         """v0.7.7: mark a peer as verified-in-person.
-        POST body: {method: 'sas-digits'|'sas-qr'|'sas-audio'|'manual',
+        POST body: {method: 'sas-words-v3'|'sas-digits'|'sas-qr'|
+                            'sas-audio'|'manual',
                     note?: string}
         Verification is a side-channel claim — the daemon takes the
         user's word for it (the protocol cannot prove the user
@@ -17471,7 +23027,7 @@ class UIServer:
         method = data.get("method")
         if not isinstance(method, str) or not method:
             return web.json_response(
-                {"error": "method required (sas-digits|sas-qr|sas-audio|manual)"},
+                {"error": ("method required (sas-words-v3|sas-digits|sas-qr|sas-audio|manual)")},
                 status=400,
             )
         note_raw = data.get("note")
@@ -17525,7 +23081,10 @@ class UIServer:
                     if isinstance(raw, str):
                         note = raw.strip() or None
             except Exception:
-                pass
+                return web.json_response(
+                    {"error": "request body must be valid JSON"},
+                    status=400,
+                )
         updated = self.daemon.state.clear_peer_verified(
             fp, actor="ui", note=note,
         )
@@ -17670,8 +23229,8 @@ class UIServer:
         })
 
     async def api_test_force_dial(self, request: web.Request) -> web.Response:
-        """v0.21.x test-only: trigger an immediate _dial_peer to the
-        peer at the given fingerprint, skipping mDNS rediscovery.
+        """v0.21.x test-only: establish and probe an authenticated session
+        to the peer at the given fingerprint, skipping mDNS rediscovery.
 
         Gated by env ONE_LINK_ENABLE_TEST_API=1 — without it the
         endpoint returns 404 so production builds can't be used as a
@@ -17696,17 +23255,27 @@ class UIServer:
                 status=404,
             )
         try:
-            await asyncio.wait_for(
-                self.daemon._dial_peer(peer), timeout=10.0,
+            session = await asyncio.wait_for(
+                self.daemon._get_outbound_session(peer,
+                    resume_pending=False,
+                    flush_pending=False,
+                ), timeout=10.0,
             )
+            if not await self.daemon._probe_outbound_session(session):
+                await self.daemon._drop_outbound_session(fp)
+                return web.json_response(
+                    {"ok": False, "error": "authenticated probe failed"},
+                    status=502,
+                )
         except asyncio.TimeoutError:
             return web.json_response(
                 {"ok": False, "error": "dial timeout"},
                 status=504,
             )
         except Exception as e:
+            log.debug("test force-dial failed for %s: %s", fp[:8], e)
             return web.json_response(
-                {"ok": False, "error": str(e)}, status=502,
+                {"ok": False, "error": "authenticated dial failed"}, status=502,
             )
         return web.json_response({"ok": True, "fingerprint": fp})
 
@@ -18076,11 +23645,10 @@ class UIServer:
         phrase = str(data.get("confirm") or "").strip().lower()
         if phrase != WIPE_LOCAL_TRACES_CONFIRM:
             return web.json_response({
-                "error": (
-                    "confirmation required: type "
-                    f"{WIPE_LOCAL_TRACES_CONFIRM!r}"
+                "error": (f"confirmation required: type {WIPE_LOCAL_TRACES_CONFIRM!r}"
                 )
-            }, status=400)
+            }, status=400,
+            )
         hidden = self._hide_current_inbox_files()
         counts = self.daemon.state.clear_all_app_traces()
         counts["inbox_files_hidden"] = hidden
@@ -18339,10 +23907,10 @@ class UIServer:
 
     async def api_get_activity_feed(self, request: web.Request) -> web.Response:
         """v0.9.1: cross-peer activity feed. Query params:
-          - since (ms timestamp; default last 7 days)
-          - kinds (comma-list of trust|key_change|transfer|conflict|peer)
-          - peer (fingerprint; only show events tied to this peer)
-          - limit (default 200, max 2000)"""
+        - since (ms timestamp; default last 7 days)
+        - kinds (comma-list of trust|key_change|transfer|conflict|peer)
+        - peer (fingerprint; only show events tied to this peer)
+        - limit (default 200, max 2000)"""
         if self.daemon.state is None:
             return web.json_response({"error": "state not available"}, status=503)
         try:
@@ -18433,8 +24001,13 @@ class UIServer:
         try:
             for rec in self.daemon.state.list_peers():
                 peer_lookup[rec.fingerprint] = rec.display_name
-        except Exception:
-            pass
+        except Exception as peer_exc:
+            report_best_effort_failure(
+                log,
+                "global_search_peer_labels",
+                peer_exc,
+                level=logging.DEBUG,
+            )
         for m in state_hits.get("messages", []):
             m["peer_display_name"] = peer_lookup.get(m.get("peer_fp"))
 
@@ -18448,9 +24021,9 @@ class UIServer:
 
     async def api_list_folder_conflicts(self, request: web.Request) -> web.Response:
         """v0.8.9: list manifest conflicts. Query params:
-          - folder=name → only this folder
-          - unresolved=1 → only unresolved
-          - limit (default 200, capped at 1000)"""
+        - folder=name → only this folder
+        - unresolved=1 → only unresolved
+        - limit (default 200, capped at 1000)"""
         if self.daemon.state is None:
             return web.json_response({"error": "state not available"}, status=503)
         folder_name = request.query.get("folder") or None
@@ -18530,10 +24103,10 @@ class UIServer:
     # ─── /api/rendezvous (v0.5.1) ─────────────────────────────────────
     async def api_get_rendezvous(self, request: web.Request) -> web.Response:
         """Report the daemon's current rendezvous status:
-          - configured URLs
-          - active client (running yes/no)
-          - last self-observation per URL (so the user can confirm
-            the rendezvous saw the right public IP)."""
+        - configured URLs
+        - active client (running yes/no)
+        - last self-observation per URL (so the user can confirm
+          the rendezvous saw the right public IP)."""
         if self.daemon.state is None:
             return web.json_response({"error": "state not available"}, status=503)
         urls = self.daemon.state.get_rendezvous_urls()
@@ -18584,7 +24157,8 @@ class UIServer:
                 "ok": False,
                 "urls": applied,
                 "error": f"saved but failed to apply: {e}",
-            }, status=500)
+            }, status=500,
+            )
         return web.json_response({
             "ok": True,
             "urls": applied,
@@ -18659,8 +24233,20 @@ class UIServer:
         except Exception as e:
             log.exception("pair init failed")
             return web.json_response({"error": str(e)}, status=500)
-        from one_link.pairing import format_sas
-        return web.json_response({"ok": True, "sas": sas, "formatted": format_sas(sas)})
+        from one_link.pairing import format_sas, format_sas_words
+
+        ctx = self.daemon.pairing.get(fp)
+        words = tuple(ctx.sas_words) if ctx is not None else ()
+        return web.json_response({"ok": True,
+                # ``sas`` remains the numeric compatibility value for clients
+                # predating the five-word ceremony. Current clients render the
+                # independently derived transcript-bound phrase as the authority.
+                "sas": sas, "formatted": format_sas(sas),
+                "sas_words": list(words),
+                "sas_phrase": format_sas_words(words) if words else "",
+                "sas_version": "words-v3" if words else "digits-v2-compat",
+                "sas_scope": "live_encrypted_channel_transcript",
+            })
 
     async def api_pair_confirm(self, request: web.Request) -> web.Response:
         fp = request.match_info["fp"]
@@ -18908,6 +24494,15 @@ class UIServer:
         if self.daemon.state is None:
             return web.json_response({"error": "state not available"}, status=503)
         fp = request.match_info["fp"]
+        send_on = self.daemon._typing_setting_enabled("send_typing_indicators")
+        if send_on is not True:
+            return web.json_response({
+                "ok": True,
+                "delivered": False,
+                "skipped": (
+                    "privacy" if send_on is False else "privacy_state_unavailable"
+                ),
+            })
         peer = await self.daemon.resolve_for_send(fp)
         if peer is None:
             return web.json_response({"ok": True, "delivered": False})
@@ -19053,10 +24648,7 @@ class UIServer:
         if len(unique_member_fps) < 2:
             return web.json_response(
                 {
-                    "error": (
-                        "groups need at least 3 people total; "
-                        "pick at least 2 paired devices"
-                    )
+                    "error": ("groups need at least 3 people total; pick at least 2 paired devices")
                 },
                 status=400,
             )
@@ -19076,10 +24668,7 @@ class UIServer:
         if len(member_pubkeys) < 2:
             return web.json_response(
                 {
-                    "error": (
-                        "groups need at least 3 people total; "
-                        "use device chat for 1-on-1"
-                    )
+                    "error": ("groups need at least 3 people total; use device chat for 1-on-1")
                 },
                 status=400,
             )
@@ -19206,11 +24795,7 @@ class UIServer:
                 {"error": "body must be a non-empty string"}, status=400,
             )
         reply_to_raw = data.get("reply_to")
-        reply_to = (
-            str(reply_to_raw)
-            if isinstance(reply_to_raw, str) and reply_to_raw
-            else None
-        )
+        reply_to = str(reply_to_raw) if isinstance(reply_to_raw, str) and reply_to_raw else None
         try:
             result = await self.daemon.send_group_message(
                 group_id=gid, body=body, reply_to=reply_to,
@@ -19219,6 +24804,40 @@ class UIServer:
         except Exception as e:
             log.exception("send_group_message failed: %s", e)
             return web.json_response({"error": str(e)}, status=500)
+
+    async def api_set_group_typing(self, request: web.Request) -> web.Response:
+        """Fan out an ephemeral typing signal to current group members."""
+
+        if self.daemon.state is None:
+            return web.json_response({"error": "state not available"}, status=503)
+        try:
+            gid = bytes.fromhex(request.match_info["gid"])
+        except ValueError:
+            return web.json_response({"error": "bad group id"}, status=400)
+        if len(gid) != 16:
+            return web.json_response({"error": "bad group id"}, status=400)
+        materialized = self._materialize_group(gid)
+        if materialized is None or not materialized.get("is_member"):
+            return web.json_response({"error": "group not found"}, status=404)
+        try:
+            result = await self.daemon.send_group_typing(group_id=gid)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except RuntimeError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
+        delivered_count = int(result.get("delivered") or 0)
+        recipient_count = int(result.get("recipients") or 0)
+        failure_count = len(result.get("failures") or [])
+        return web.json_response(
+            {
+                "ok": True,
+                "delivered": delivered_count > 0,
+                "delivered_count": delivered_count,
+                "recipient_count": recipient_count,
+                "failed_count": failure_count,
+                "skipped": result.get("skipped"),
+            }
+        )
 
     async def api_react_group_message(self, request: web.Request) -> web.Response:
         if self.daemon.state is None:
@@ -19547,8 +25166,7 @@ class UIServer:
             "name": "peer_server",
             "ok": ps is not None,
             "detail": (
-                f"listening on port "
-                f"{getattr(self.daemon, '_rendezvous_peer_port', '?')}"
+                f"listening on port {getattr(self.daemon, '_rendezvous_peer_port', '?')}"
                 if ps is not None else "not listening"
             ),
         })
@@ -19563,9 +25181,14 @@ class UIServer:
 
         # Outbox depth
         try:
-            pending = self.daemon.state.list_outbox(
-                pending_only=True, limit=1000,
-            ) if self.daemon.state else []
+            pending = (
+                self.daemon.state.list_outbox(
+                    pending_only=True,
+                    limit=1000,
+                )
+                if self.daemon.state
+                else []
+            )
             checks.append({
                 "name": "outbox",
                 "ok": True,
@@ -19580,9 +25203,13 @@ class UIServer:
 
         # Paused transfers
         try:
-            transfers = self.daemon.state.list_transfers(
-                limit=500,
-            ) if self.daemon.state else []
+            transfers = (
+                self.daemon.state.list_transfers(
+                    limit=500,
+                )
+                if self.daemon.state
+                else []
+            )
             paused = [t for t in transfers if t.status == "paused"]
             checks.append({
                 "name": "paused_transfers",
@@ -19646,20 +25273,48 @@ class UIServer:
     async def api_send(self, request: web.Request) -> web.Response:
         try:
             data = await request.json()
-        except Exception as e:
-            return web.json_response({"error": f"bad json: {e}"}, status=400)
-        peer_needle = data.get("peer", "")
-        body = data.get("body", "")
+        except Exception:
+            return web.json_response({"error": "bad json"}, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({"error": "request body must be an object"}, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({"error": "JSON body must be an object"}, status=400)
+        allowed_fields = {
+            "peer",
+            "body",
+            "queue_on_failure",
+            "reply_to",
+            "client_msg_id",
+        }
+        if set(data) - allowed_fields:
+            return web.json_response({"error": "unsupported send fields"}, status=400)
+        peer_raw = data.get("peer")
+        body = data.get("body")
+        if not isinstance(peer_raw, str) or not peer_raw.strip() or len(peer_raw) > 256:
+            return web.json_response({"error": "valid peer required"}, status=400)
+        if not isinstance(body, str) or not body.strip():
+            return web.json_response({"error": "non-empty body required"}, status=400)
+        if len(body.encode("utf-8")) > MAX_TEXT_BODY_BYTES:
+            return web.json_response({"error": "body exceeds 64 KiB UTF-8"}, status=413)
+        peer_needle = peer_raw.strip()
         # v0.7.1: by default, fall back to outbox when the peer is
         # offline or the send fails with a transient/network error.
         # Set `queue_on_failure: false` to opt out (e.g. for the
         # control plane's strict send command).
-        queue_on_failure = bool(data.get("queue_on_failure", True))
+        queue_raw = data.get("queue_on_failure", True)
+        if not isinstance(queue_raw, bool):
+            return web.json_response(
+                {"error": "queue_on_failure must be boolean"},
+                status=400,
+            )
+        queue_on_failure = queue_raw
         # v0.7.5: optional reply_to threads this TEXT under a parent
         # message id. Validated as a 32-hex string-ish; daemon
         # tolerates anything string-shaped.
         reply_to_raw = data.get("reply_to")
-        reply_to = str(reply_to_raw) if isinstance(reply_to_raw, str) and reply_to_raw else None
+        if reply_to_raw is not None and not _valid_chat_message_id(reply_to_raw):
+            return web.json_response({"error": "invalid reply_to"}, status=400)
+        reply_to = str(reply_to_raw) if reply_to_raw is not None else None
         # v0.21.x bulletproof send: optional client-generated msg id.
         # The browser uses this to paint an optimistic bubble *before*
         # the round-trip and then reconcile when the daemon's broadcast
@@ -19669,14 +25324,10 @@ class UIServer:
         # collapses two identical messages into one on the fast path.
         client_msg_id_raw = data.get("client_msg_id")
         client_msg_id: str | None = None
-        if isinstance(client_msg_id_raw, str):
-            stripped = client_msg_id_raw.strip()
-            if 8 <= len(stripped) <= 64 and all(
-                c in "0123456789abcdefABCDEF-" for c in stripped
-            ):
-                client_msg_id = stripped
-        if not peer_needle or not body:
-            return web.json_response({"error": "peer and body required"}, status=400)
+        if client_msg_id_raw is not None:
+            if not _valid_chat_message_id(client_msg_id_raw):
+                return web.json_response({"error": "invalid client_msg_id"}, status=400)
+            client_msg_id = str(client_msg_id_raw)
         # v0.5.1: also tries the rendezvous if the peer isn't on mDNS.
         peer = await self.daemon.resolve_for_send(peer_needle)
         target_fp = self._resolve_pinned_fp(peer_needle, peer)
@@ -19688,15 +25339,23 @@ class UIServer:
                 try:
                     entry = self.daemon.enqueue_text_outbox(
                         target_fp, body, client_msg_id=client_msg_id,
+                        **({"reply_to": reply_to} if reply_to is not None else {}),
                     )
                     return web.json_response({
                         "ok": True, "queued": True,
                         "outbox_id": entry["outbox_id"],
                         "msg": entry["msg"],
                         "reason": "peer_offline",
-                    }, status=202)
+                    }, status=202,
+                    )
                 except Exception as enqueue_err:
                     log.warning("offline-enqueue failed: %s", enqueue_err)
+                    translated = _translate_send_error(enqueue_err)
+                    if translated["status"] != 500:
+                        return web.json_response(
+                            translated,
+                            status=translated["status"],
+                        )
             return web.json_response({"error": f"no peer {peer_needle!r}"}, status=404)
         try:
             # v0.21.x: hard timeout so a wedged channel can never hang
@@ -19723,14 +25382,11 @@ class UIServer:
                 "peer_unreachable", "handshake_failed",
                 "timeout", "send_failed",
             }
-            if (
-                queue_on_failure
-                and target_fp
-                and translated.get("code") in queueable_codes
-            ):
+            if queue_on_failure and target_fp and translated.get("code") in queueable_codes:
                 try:
                     entry = self.daemon.enqueue_text_outbox(
                         target_fp, body, client_msg_id=client_msg_id,
+                        **({"reply_to": reply_to} if reply_to is not None else {}),
                     )
                     return web.json_response({
                         "ok": True, "queued": True,
@@ -19738,11 +25394,18 @@ class UIServer:
                         "msg": entry["msg"],
                         "reason": translated.get("code"),
                         "after_failure": translated,
-                    }, status=202)
+                    }, status=202,
+                    )
                 except Exception as enqueue_err:
                     log.warning(
                         "queue-on-failure enqueue failed: %s", enqueue_err
                     )
+                    enqueue_translated = _translate_send_error(enqueue_err)
+                    if enqueue_translated["status"] != 500:
+                        return web.json_response(
+                            enqueue_translated,
+                            status=enqueue_translated["status"],
+                        )
             return web.json_response(translated, status=translated["status"])
 
     def _resolve_pinned_fp(self, needle: str, peer_obj) -> str | None:
@@ -19761,8 +25424,12 @@ class UIServer:
                     rec = self.daemon.state.get_peer(fp)
                     if rec and rec.trust == "pinned":
                         return fp
-            except Exception:
-                pass
+            except Exception as resolve_exc:
+                report_best_effort_failure(
+                    log,
+                    "pinned_peer_live_resolution",
+                    resolve_exc,
+                )
         # Otherwise, try the needle as fp / short_id directly.
         n = (needle or "").strip()
         if not n:
@@ -19776,18 +25443,196 @@ class UIServer:
                 rec = self.daemon.state.get_peer_by_short_id(n)
                 if rec and rec.trust == "pinned":
                     return rec.fingerprint
-        except Exception:
-            pass
+        except Exception as resolve_exc:
+            report_best_effort_failure(
+                log,
+                "pinned_peer_state_resolution",
+                resolve_exc,
+            )
         return None
+
+    @staticmethod
+    def _ui_delivery_ledger_contract_matches(
+        binding: UIDeliveryBinding,
+        rec: Any,
+    ) -> bool:
+        """Authenticate a transfer-ledger row against one UI intent."""
+
+        if rec is None:
+            return False
+        contract = binding.contract
+        metadata = dict(getattr(rec, "metadata", None) or {})
+        normalized_rel = contract.rel_path.replace("\\", "/").strip("/")
+        expected_kind = (
+            "folder_archive" if normalized_rel.split("/", 1)[0] == "__one_link_folder__" else "file"
+        )
+        try:
+            return bool(
+                getattr(rec, "id", None) == binding.transfer_id
+                and getattr(rec, "direction", None) == "out"
+                and getattr(rec, "peer_fp", None) == contract.peer_fp
+                and getattr(rec, "kind", None) == "file"
+                and getattr(rec, "name", None) == contract.display_name
+                and int(getattr(rec, "size", -1)) == contract.size
+                and int(getattr(rec, "total_bytes", -1)) == contract.size
+                and getattr(rec, "blob_hash", None) == contract.blob_hash
+                and metadata.get("display_name") == contract.display_name
+                and metadata.get("chat_inline") is contract.chat_inline
+                and str(metadata.get("rel_path") or "") == contract.rel_path
+                and metadata.get("delivery_id") == binding.delivery_id
+                and metadata.get("delivery_name") == contract.display_name
+                and str(metadata.get("delivery_rel_path") or "") == contract.rel_path
+                and metadata.get("delivery_kind") == expected_kind
+            )
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _ui_delivery_has_exact_commit_receipt(
+        binding: UIDeliveryBinding,
+        rec: Any,
+    ) -> bool:
+        """Verify the authenticated remote commit evidence for one intent."""
+
+        metadata = dict(getattr(rec, "metadata", None) or {})
+        receipt = metadata.get("commit_receipt")
+        offer_id = receipt.get("of") if isinstance(receipt, dict) else None
+        mode = metadata.get("mode")
+        if (
+            not isinstance(receipt, dict)
+            or not isinstance(offer_id, str)
+            or not 8 <= len(offer_id) <= 128
+            or not isinstance(mode, str)
+            or not mode
+        ):
+            return False
+        try:
+            from one_link.daemon import _validate_file_commit_receipt
+
+            _validate_file_commit_receipt(
+                receipt,
+                offer_id=offer_id,
+                blob=binding.contract.blob_hash,
+                size=binding.contract.size,
+                mode=mode,
+                delivery_id=str(binding.delivery_id or ""),
+                delivery_name=binding.contract.display_name,
+                delivery_rel_path=binding.contract.rel_path,
+                delivery_kind=str(metadata.get("delivery_kind") or ""),
+            )
+        except Exception:
+            return False
+        return True
+
+    def _ui_delivery_pristine_preoffer(
+        self,
+        binding: UIDeliveryBinding,
+        rec: Any,
+    ) -> bool:
+        """Prove a durable queue row could not have emitted an offer."""
+
+        if not self._ui_delivery_ledger_contract_matches(binding, rec):
+            return False
+        metadata = dict(getattr(rec, "metadata", None) or {})
+        try:
+            pristine = (
+                getattr(rec, "status", None) in {"queued", "paused"}
+                and metadata.get("delivery_state") in {"queued", "waiting_for_device"}
+                and type(metadata.get("attempts", 0)) is int
+                and int(metadata.get("attempts", 0)) == 0
+                and metadata.get("last_attempt_ms") in (None, 0)
+                and int(getattr(rec, "progress_bytes", -1)) == 0
+                and int(getattr(rec, "chunks_done", -1)) == 0
+                and int(getattr(rec, "raw_bytes", -1)) == 0
+                and int(getattr(rec, "wire_bytes", -1)) == 0
+            )
+        except (TypeError, ValueError):
+            return False
+        if not pristine:
+            return False
+        marker_path = getattr(self.daemon, "_remote_commit_failstop_path", None)
+        marker_check = getattr(self.daemon, "_remote_commit_is_failstopped", None)
+        if not callable(marker_path) or not callable(marker_check):
+            return False
+        try:
+            if Path(marker_path(binding.transfer_id)).exists():
+                return False
+            return marker_check(binding.transfer_id) is False
+        except Exception:
+            return False
+
+    def _schedule_ui_delivery_background(self, peer_fp: str) -> None:
+        """Nudge one durable file queue without extending the caller RPC."""
+
+        resume = getattr(self.daemon, "_resume_paused_swallow", None)
+        if callable(resume):
+            task = asyncio.get_running_loop().create_task(resume(peer_fp, force=True))
+            self._ui_delivery_tasks.add(task)
+            task.add_done_callback(self._ui_delivery_tasks.discard)
+            return
+        scheduler = getattr(self.daemon, "_schedule_resume_paused", None)
+        if callable(scheduler):
+            scheduler(peer_fp, force=True)
+
+    async def _phone_delivery_key_and_prior(
+        self,
+        *,
+        source_fp: str,
+        legacy_client_msg_id: str,
+        canonical_client_msg_id: str,
+    ) -> tuple[str, UIDeliveryBinding | None]:
+        """Resolve upgrade-compatible, source-isolated phone idempotency."""
+
+        principal_scope = f"phone:{source_fp}"
+        for legacy_value in dict.fromkeys((legacy_client_msg_id, canonical_client_msg_id)):
+            legacy_id = self._ui_delivery_idempotency.derive_client_delivery_id(
+                namespace="phone-file",
+                value=legacy_value,
+            )
+            legacy = await _blocking_file_io(
+                self._ui_delivery_idempotency.probe,
+                principal_scope=principal_scope,
+                client_delivery_id=legacy_id,
+            )
+            if legacy is not None:
+                return legacy_id, legacy
+        mapped_id = self._ui_delivery_idempotency.derive_client_delivery_id(
+            namespace=("phone-file:" + hashlib.sha256(source_fp.encode("utf-8")).hexdigest()),
+            value=canonical_client_msg_id,
+        )
+        prior = await _blocking_file_io(
+            self._ui_delivery_idempotency.probe,
+            principal_scope=principal_scope,
+            client_delivery_id=mapped_id,
+        )
+        return mapped_id, prior
 
     # ─── /api/send-file ───────────────────────────────────────────────
     async def api_send_file(self, request: web.Request) -> web.Response:
         if not request.content_type or "multipart/form-data" not in request.content_type:
             return web.json_response({"error": "expected multipart/form-data"}, status=400)
-        reader = await request.multipart()
+        declared_request_bytes = getattr(request, "content_length", None)
+        if declared_request_bytes is not None and (
+            isinstance(declared_request_bytes, bool)
+            or declared_request_bytes < 0
+            or declared_request_bytes > UI_UPLOAD_REQUEST_MAX_BYTES
+        ):
+            return web.json_response({"error": "upload too large"}, status=413)
+        # A fixed Content-Length is an upper bound on the file part because it
+        # also includes multipart framing. Chunked requests have no such
+        # bound, so reserve the full endpoint cap before reading any bytes.
+        reservation_size = min(
+            declared_request_bytes if declared_request_bytes is not None else UI_UPLOAD_MAX_BYTES,
+            UI_UPLOAD_MAX_BYTES,
+        )
+        upload_reservation_id = f"http:{secrets.token_hex(16)}"
+        upload_reservation_peer = "local_ui"
+        upload_reserved = False
         peer_needle: Optional[str] = None
+        peer_seen = False
         upload_path: Optional[Path] = None
         upload_name: str = "upload.bin"
+        uploaded_bytes = 0
         # v0.21.x: optional folder-relative path. When set + safe,
         # forwarded to daemon.send_file so the receiver mirrors the
         # tree under inbox/<rel_path>. Sanitization happens in
@@ -19795,67 +25640,435 @@ class UIServer:
         # unsafe value gets rejected with a 400 instead of silently
         # dropped on the wire.
         rel_path_raw: Optional[str] = None
+        rel_path_seen = False
+        # Browser-minted, cryptographically random idempotency key.  Legacy
+        # callers may omit it; the shipped UI always supplies it and therefore
+        # receives restart-safe exact-once HTTP admission.
+        client_delivery_id: Optional[str] = None
+        client_delivery_id_seen = False
+        # Resolve an authenticated browser principal at most once per request.
+        # Session revocation/token rotation while a GiB body is streaming must
+        # not move one client_delivery_id into a second store namespace.
+        idempotency_principal_scope: Optional[str] = None
+        declared_file_size: Optional[int] = None
+        declared_file_size_seen = False
+        intent_metadata_complete = False
+        intent_metadata_complete_seen = False
         # v0.21.x accept-first: the chat UI sets chat_inline=1 when the
         # user pasted / dropped / attached this file in a conversation
         # so the receiver auto-accepts (no prompt for conversational
         # content like screenshots). Standalone "send file" flows leave
         # it absent so accept-first still applies.
         chat_inline: bool = False
+        chat_inline_seen = False
 
         from aiohttp.multipart import MultipartReader as _MultipartReader
 
         try:
-            async for raw_part in reader:
+            reader = await asyncio.wait_for(
+                request.multipart(),
+                timeout=UI_UPLOAD_IDLE_TIMEOUT_SECONDS,
+            )
+            multipart_iterator = reader.__aiter__()
+            multipart_part_count = 0
+            while True:
+                try:
+                    raw_part = await asyncio.wait_for(
+                        multipart_iterator.__anext__(),
+                        timeout=UI_UPLOAD_IDLE_TIMEOUT_SECONDS,
+                    )
+                except StopAsyncIteration:
+                    break
+                multipart_part_count += 1
+                if multipart_part_count > UI_UPLOAD_MULTIPART_MAX_PARTS:
+                    raise ValueError("multipart request contains too many parts")
                 # aiohttp's reader yields either BodyPartReader (the
-                # leaves we care about) or nested MultipartReader.
-                # Skip the latter — the API only accepts a flat form.
+                # leaves we care about) or nested MultipartReader.  The API
+                # has one exact flat-form grammar, so nested or unnamed parts
+                # are rejected rather than silently drained.
                 # Test doubles aren't either type but expose ``name``;
                 # accept them via duck-typing so the server tests can
                 # exercise this surface without spinning up an aiohttp
                 # request.
                 if isinstance(raw_part, _MultipartReader) or raw_part is None:
-                    continue
+                    raise ValueError("multipart request must be a flat form")
                 part: Any = raw_part
                 if part.name == "peer":
-                    peer_needle = (await part.text()).strip()
+                    if peer_seen:
+                        raise ValueError("multipart request contains more than one peer")
+                    peer_seen = True
+                    peer_needle = (await _read_bounded_multipart_text(
+                            part,
+                            field="peer",
+                            max_bytes=UI_UPLOAD_METADATA_LIMITS["peer"],
+                        )).strip()
                 elif part.name == "rel_path":
+                    if rel_path_seen:
+                        raise ValueError("multipart request contains more than one rel_path")
+                    rel_path_seen = True
                     # NO .strip() — trailing space is one of the
                     # things the sanitizer rejects (Windows silently
                     # truncates trailing dots/spaces, creating a
                     # collision risk). Pre-stripping would mask it.
-                    rel_path_text = await part.text()
+                    rel_path_text = await _read_bounded_multipart_text(
+                        part,
+                        field="rel_path",
+                        max_bytes=UI_UPLOAD_METADATA_LIMITS["rel_path"],
+                    )
                     rel_path_raw = rel_path_text if rel_path_text else None
                 elif part.name == "chat_inline":
-                    chat_inline = (await part.text()).strip().lower() in (
-                        "1", "true", "yes", "on",
+                    if chat_inline_seen:
+                        raise ValueError("multipart request contains more than one chat_inline")
+                    chat_inline_seen = True
+                    chat_inline_text = (
+                        (
+                            await _read_bounded_multipart_text(
+                                part,
+                                field="chat_inline",
+                                max_bytes=UI_UPLOAD_METADATA_LIMITS["chat_inline"],
+                            )
+                        )
+                        .strip()
+                        .lower()
                     )
+                    if chat_inline_text in {"1", "true", "yes", "on"}:
+                        chat_inline = True
+                    elif chat_inline_text in {"0", "false", "no", "off"}:
+                        chat_inline = False
+                    else:
+                        raise ValueError("multipart chat_inline is invalid")
+                elif part.name == "client_delivery_id":
+                    if client_delivery_id_seen:
+                        raise ValueError(
+                            "multipart request contains more than one client_delivery_id"
+                        )
+                    client_delivery_id_seen = True
+                    # Do not strip: accepting an ambiguous spelling would let
+                    # two clients disagree about the idempotency key.
+                    client_delivery_id = await _read_bounded_multipart_text(
+                        part,
+                        field="client_delivery_id",
+                        max_bytes=UI_UPLOAD_METADATA_LIMITS["client_delivery_id"],
+                    )
+                elif part.name == "file_size":
+                    if declared_file_size_seen:
+                        raise ValueError("multipart request contains more than one file_size")
+                    declared_file_size_seen = True
+                    file_size_text = await _read_bounded_multipart_text(
+                        part,
+                        field="file_size",
+                        max_bytes=UI_UPLOAD_METADATA_LIMITS["file_size"],
+                    )
+                    if (
+                        not file_size_text
+                        or len(file_size_text) > 20
+                        or not file_size_text.isascii()
+                        or not file_size_text.isdecimal()
+                    ):
+                        raise ValueError("multipart file_size is invalid")
+                    declared_file_size = int(file_size_text)
+                    if declared_file_size > UI_UPLOAD_MAX_BYTES:
+                        raise ValueError("multipart file_size exceeds upload limit")
+                elif part.name == "intent_metadata_complete":
+                    if intent_metadata_complete_seen:
+                        raise ValueError(
+                            "multipart request contains more than one intent_metadata_complete"
+                        )
+                    intent_metadata_complete_seen = True
+                    intent_metadata_complete = (
+                        await _read_bounded_multipart_text(
+                            part,
+                            field="intent_metadata_complete",
+                            max_bytes=UI_UPLOAD_METADATA_LIMITS["intent_metadata_complete"],
+                        )
+                        == "1"
+                    )
+                    if not intent_metadata_complete:
+                        raise ValueError("multipart intent metadata marker is invalid")
                 elif part.name == "file":
-                    upload_name = Path(part.filename or "upload.bin").name
-                    if not upload_name or upload_name in (".", ".."):
-                        upload_name = "upload.bin"
+                    if upload_path is not None:
+                        raise ValueError("multipart request contains more than one file")
+                    # Use the same portable name in the idempotency contract,
+                    # durable transfer ledger, and eventual FILE_OFFER. The
+                    # random staging path below never embeds attacker input.
+                    upload_name = _normalize_ui_transfer_name(
+                        self.daemon,
+                        part.filename or "upload.bin",
+                    )
+                    # The shipped UI places the authenticated intent prefix
+                    # before the (potentially enormous) byte part. For an
+                    # existing random key, compare every prefix-visible
+                    # contract field against the encrypted durable contract
+                    # and replay without reading one file byte. Content itself
+                    # remains fully hashed on first use; thereafter the 128-bit
+                    # client key is the authority for that exact intent, so a
+                    # retry cannot mutate or create another wire delivery.
+                    if (
+                        intent_metadata_complete
+                        and client_delivery_id is not None
+                        and declared_file_size is not None
+                        and peer_needle
+                    ):
+                        if len(client_delivery_id) != 32 or any(
+                            c not in "0123456789abcdef" for c in client_delivery_id
+                        ):
+                            return web.json_response(
+                                {
+                                    "error": (
+                                        "client_delivery_id must be 32 lowercase hex characters"
+                                    ),
+                                    "code": "bad_client_delivery_id",
+                                },
+                                status=400,
+                            )
+                        early_rel_path = ""
+                        if rel_path_raw is not None:
+                            sanitized = self.daemon._safe_transfer_rel_path(rel_path_raw)
+                            if sanitized is None:
+                                return web.json_response(
+                                    {
+                                        "error": "rel_path failed validation",
+                                        "code": "bad_rel_path",
+                                    },
+                                    status=400,
+                                )
+                            early_rel_path = str(sanitized)
+                        early_target_fp = await _blocking_file_io(
+                            self._resolve_pinned_fp,
+                            peer_needle,
+                            None,
+                        )
+                        if early_target_fp:
+                            try:
+                                if idempotency_principal_scope is None:
+                                    idempotency_principal_scope = await _blocking_file_io(
+                                        self._ui_delivery_principal_scope,
+                                        request,
+                                    )
+                                prior = await _blocking_file_io(
+                                    self._ui_delivery_idempotency.probe,
+                                    principal_scope=idempotency_principal_scope,
+                                    client_delivery_id=client_delivery_id,
+                                )
+                            except (UIDeliveryStoreUnavailable, OSError, ValueError) as exc:
+                                log.exception(
+                                    "durable UI delivery replay probe failed: %s",
+                                    exc,
+                                )
+                                return web.json_response(
+                                    {
+                                        "ok": False,
+                                        "error": (
+                                            "Durable delivery accounting is "
+                                            "unavailable. No file bytes were read "
+                                            "or sent."
+                                        ),
+                                        "code": "delivery_accounting_unavailable",
+                                        "retryable": True,
+                                    },
+                                    status=503,
+                                )
+                            if prior is not None:
+                                expected = prior.contract
+                                if (
+                                    expected.peer_fp != early_target_fp
+                                    or expected.size != declared_file_size
+                                    or expected.display_name != upload_name
+                                    or expected.rel_path != early_rel_path
+                                    or expected.chat_inline is not chat_inline
+                                ):
+                                    return web.json_response(
+                                        {
+                                            "error": (
+                                                "client_delivery_id was already "
+                                                "used for a different file, peer, "
+                                                "name, path, or chat intent"
+                                            ),
+                                            "code": ("client_delivery_contract_conflict"),
+                                        },
+                                        status=409,
+                                    )
+                                if prior.is_replay:
+                                    assert prior.response_body is not None
+                                    assert prior.response_status is not None
+                                    if prior.response_body.get("queued"):
+                                        with contextlib.suppress(Exception):
+                                            self._schedule_ui_delivery_background(
+                                                prior.contract.peer_fp
+                                            )
+                                    return web.json_response(
+                                        prior.response_body,
+                                        status=prior.response_status,
+                                    )
+                                # A prior server that died after its dispatch
+                                # boundary needs the authoritative transfer
+                                # ledger reconciliation below. Those rare rows
+                                # still consume the retry body; ordinary
+                                # same-process in-flight duplicates do not.
+                                if (
+                                    not prior.recoverable_after_restart
+                                    and not prior.reclaimable_before_dispatch
+                                ):
+                                    if prior.phase == "queued":
+                                        with contextlib.suppress(Exception):
+                                            self._schedule_ui_delivery_background(
+                                                prior.contract.peer_fp
+                                            )
+                                    return web.json_response(
+                                        {
+                                            "ok": True,
+                                            "replayed": True,
+                                            "in_progress": True,
+                                            "outcome_unknown": (prior.is_outcome_ambiguous),
+                                            "client_delivery_id": (client_delivery_id),
+                                            "transfer_id": prior.transfer_id,
+                                            "delivery_id": prior.delivery_id,
+                                            "hint": (
+                                                "The original delivery is still "
+                                                "in progress; One Link did not "
+                                                "read the file again or send a "
+                                                "duplicate offer."
+                                            ),
+                                        },
+                                        status=202,
+                                    )
+                    # Capacity is reserved only after the replay probe. A lost
+                    # response consumes zero disk, so low free space must not
+                    # block replaying its already committed outcome. New and
+                    # legacy intents still reserve their declared upper bound
+                    # before the staging directory or file is created.
+                    admission = self._upload_reservations.reserve(
+                        reservation_id=upload_reservation_id,
+                        name="multipart-upload",
+                        size=reservation_size,
+                        peer_fp=upload_reservation_peer,
+                        policy=self._upload_admission_policy,
+                    )
+                    if not admission.ok:
+                        return web.json_response(
+                            {
+                                "error": (admission.user_message or "insufficient upload capacity"),
+                                "code": (f"upload_admission_{admission.wire_reason()}"),
+                            },
+                            status=507,
+                        )
+                    upload_reserved = True
                     # Stream to a temp file inside data_dir so we don't OOM on big uploads.
                     staging = data_dir() / "uploads"
-                    staging.mkdir(parents=True, exist_ok=True)
                     upload_path = staging / (
-                        f"{int(time.time()*1000)}_{secrets.token_hex(8)}_{upload_name}"
+                        f"{int(time.time()*1000)}_{secrets.token_hex(16)}.upload"
                     )
-                    with open(upload_path, "wb") as f:
+                    upload_handle = await _blocking_file_io(
+                        _open_private_ui_upload,
+                        staging,
+                        upload_path,
+                    )
+                    try:
                         while True:
-                            chunk = await part.read_chunk(size=1024 * 1024)
+                            chunk = await asyncio.wait_for(
+                                part.read_chunk(size=1024 * 1024),
+                                timeout=UI_UPLOAD_IDLE_TIMEOUT_SECONDS,
+                            )
                             if not chunk:
                                 break
-                            f.write(chunk)
+                            if uploaded_bytes + len(chunk) > UI_UPLOAD_MAX_BYTES:
+                                raise ValueError("multipart file exceeds upload limit")
+                            if uploaded_bytes + len(chunk) > reservation_size:
+                                raise ValueError("multipart file exceeds declared request length")
+                            written = await _blocking_file_io(
+                                upload_handle.write,
+                                chunk,
+                            )
+                            if written != len(chunk):
+                                raise OSError(f"short upload write: {written} of {len(chunk)}")
+                            uploaded_bytes += len(chunk)
+                            self._upload_reservations.consume(
+                                upload_reservation_id,
+                                len(chunk),
+                            )
+                        await _blocking_file_io(
+                            _durably_flush_ui_upload,
+                            upload_handle,
+                            upload_path,
+                        )
+                    finally:
+                        with contextlib.suppress(Exception):
+                            await _blocking_file_io(upload_handle.close)
+                else:
+                    raise ValueError("multipart request contains an unknown field")
+        except asyncio.CancelledError:
+            if upload_path is not None:
+                with contextlib.suppress(OSError):
+                    upload_path.unlink(missing_ok=True)
+            raise
+        except asyncio.TimeoutError as e:
+            if upload_path is not None:
+                with contextlib.suppress(OSError):
+                    upload_path.unlink(missing_ok=True)
+            log.warning("multipart upload went idle before completion: %s", e)
+            return web.json_response(
+                {
+                    "error": "multipart upload stalled before the next segment",
+                    "code": "upload_idle_timeout",
+                    "retryable": True,
+                },
+                status=408,
+            )
         except Exception as e:
             if upload_path is not None:
                 with contextlib.suppress(OSError):
                     upload_path.unlink(missing_ok=True)
             log.warning("multipart upload failed before send: %s", e)
             return web.json_response({"error": "upload failed before send"}, status=400)
+        finally:
+            if upload_reserved:
+                self._upload_reservations.release(
+                    upload_reservation_id,
+                    peer_fp=upload_reservation_peer,
+                )
 
+        if intent_metadata_complete and declared_file_size is None:
+            if upload_path is not None:
+                with contextlib.suppress(OSError):
+                    upload_path.unlink(missing_ok=True)
+            return web.json_response(
+                {"error": "intent metadata is missing file_size"},
+                status=400,
+            )
+        if (
+            declared_file_size is not None
+            and upload_path is not None
+            and uploaded_bytes != declared_file_size
+        ):
+            with contextlib.suppress(OSError):
+                upload_path.unlink(missing_ok=True)
+            return web.json_response(
+                {
+                    "error": "multipart file length did not match file_size",
+                    "code": "file_size_mismatch",
+                },
+                status=400,
+            )
         if not peer_needle:
+            if upload_path is not None:
+                with contextlib.suppress(OSError):
+                    upload_path.unlink(missing_ok=True)
             return web.json_response({"error": "missing 'peer' field"}, status=400)
         if not upload_path or not upload_path.is_file():
             return web.json_response({"error": "missing 'file' field"}, status=400)
+        if client_delivery_id is not None and (
+            len(client_delivery_id) != 32
+            or any(c not in "0123456789abcdef" for c in client_delivery_id)
+        ):
+            with contextlib.suppress(OSError):
+                upload_path.unlink(missing_ok=True)
+            return web.json_response(
+                {
+                    "error": "client_delivery_id must be 32 lowercase hex characters",
+                    "code": "bad_client_delivery_id",
+                },
+                status=400,
+            )
 
         # v0.21.x: validate rel_path here so an unsafe value gets a 400
         # at the entry rather than being silently dropped by the
@@ -19874,66 +26087,842 @@ class UIServer:
                     status=400,
                 )
 
+        async def _predispatch_idempotency_call(
+            function: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> UIDeliveryBinding:
+            """Run one admission transition and release only this request.
+
+            ``_blocking_file_io`` deliberately waits for a FULL-sync worker
+            after HTTP cancellation.  Capture its completed binding inside the
+            worker so cancellation cleanup can distinguish a row this request
+            actually claimed from a concurrent duplicate owned by the same
+            server epoch.  Probing by epoch alone is insufficient: all live
+            requests in one process intentionally share that epoch.
+            """
+
+            completed: list[UIDeliveryBinding] = []
+
+            def _run() -> UIDeliveryBinding:
+                binding = function(*args, **kwargs)
+                completed.append(binding)
+                return binding
+
+            try:
+                return await _blocking_file_io(_run)
+            except asyncio.CancelledError:
+                if completed:
+                    binding = completed[0]
+                    if (
+                        binding.owns_attempt
+                        and binding.phase in {"bound", "queued"}
+                        and not binding.is_replay
+                    ):
+                        try:
+                            await _blocking_file_io(
+                                self._ui_delivery_idempotency.release_before_dispatch,
+                                binding,
+                            )
+                        except Exception:
+                            log.exception("could not release cancelled UI delivery admission")
+                raise
+
         # v0.5.1: also tries the rendezvous if the peer isn't on mDNS.
-        peer = await self.daemon.resolve_for_send(peer_needle)
-        target_fp = self._resolve_pinned_fp(peer_needle, peer)
+        try:
+            peer = await self.daemon.resolve_for_send(peer_needle)
+        except asyncio.CancelledError:
+            # Until a transfer row exists the staged inode has no durable
+            # owner. A shutdown/client cancellation at the resolver boundary
+            # must not leave an unreferenced multi-gigabyte upload behind.
+            with contextlib.suppress(OSError):
+                upload_path.unlink(missing_ok=True)
+            raise
+        except Exception as e:
+            # Resolution happens after the multipart body has been durably
+            # staged. A resolver/network exception must not strand that file
+            # outside both the active-upload map and the durable send queue.
+            with contextlib.suppress(OSError):
+                upload_path.unlink(missing_ok=True)
+            log.exception("send-file peer resolution failed: %s", e)
+            translated = _translate_send_error(e)
+            _record_translated_error(translated, e, source="server.api.resolve")
+            return web.json_response(translated, status=translated["status"])
+        try:
+            target_fp = await _blocking_file_io(
+                self._resolve_pinned_fp,
+                peer_needle,
+                peer,
+            )
+        except asyncio.CancelledError:
+            with contextlib.suppress(OSError):
+                upload_path.unlink(missing_ok=True)
+            raise
+        except Exception as exc:
+            with contextlib.suppress(OSError):
+                upload_path.unlink(missing_ok=True)
+            log.exception("send-file peer identity lookup failed: %s", exc)
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "The paired-device ledger is unavailable.",
+                    "code": "peer_identity_unavailable",
+                    "retryable": True,
+                },
+                status=503,
+            )
+        idempotency_binding: UIDeliveryBinding | None = None
+        if client_delivery_id is not None:
+            if not target_fp:
+                with contextlib.suppress(OSError):
+                    upload_path.unlink(missing_ok=True)
+                return web.json_response(
+                    {
+                        "error": "file delivery requires a paired device fingerprint",
+                        "code": "peer_not_pinned",
+                    },
+                    status=404,
+                )
+            try:
+                # One strong off-loop scan prepares the daemon's descriptor-
+                # bound index/cache entry and supplies the immutable contract
+                # hash. queue_file_transfer/send_file then reuse that exact
+                # prepared identity instead of rescanning a 385 MiB upload.
+                prepare = getattr(self.daemon, "prepare_file_for_transfer", None)
+                if callable(prepare):
+                    prepared = await _blocking_file_io(
+                        prepare,
+                        upload_path,
+                        peer_fp=target_fp,
+                    )
+                    content_hash = str(prepared.file_index.blob_hash)
+                else:
+                    # Compatibility for focused server doubles/older embedders.
+                    from one_link.cdc import hash_path
+
+                    content_hash = await _blocking_file_io(hash_path, upload_path)
+                contract = UIDeliveryContract(
+                    peer_fp=target_fp,
+                    blob_hash=content_hash,
+                    size=uploaded_bytes,
+                    display_name=upload_name,
+                    rel_path=str(clean_rel_path or ""),
+                    chat_inline=chat_inline,
+                )
+                if idempotency_principal_scope is None:
+                    idempotency_principal_scope = await _blocking_file_io(
+                        self._ui_delivery_principal_scope,
+                        request,
+                    )
+                idempotency_binding = await _predispatch_idempotency_call(
+                    self._ui_delivery_idempotency.bind,
+                    principal_scope=idempotency_principal_scope,
+                    client_delivery_id=client_delivery_id,
+                    contract=contract,
+                )
+            except asyncio.CancelledError:
+                # _blocking_file_io waits for the descriptor-bound scan to
+                # finish before cancellation escapes, so this unlink cannot
+                # race a worker thread still reading/caching the staging path.
+                with contextlib.suppress(OSError):
+                    upload_path.unlink(missing_ok=True)
+                raise
+            except UIDeliveryContractConflict:
+                with contextlib.suppress(OSError):
+                    upload_path.unlink(missing_ok=True)
+                return web.json_response(
+                    {
+                        "error": (
+                            "client_delivery_id was already used for a different "
+                            "file, peer, name, path, or chat intent"
+                        ),
+                        "code": "client_delivery_contract_conflict",
+                    },
+                    status=409,
+                )
+            except (UIDeliveryStoreUnavailable, OSError, ValueError) as exc:
+                with contextlib.suppress(OSError):
+                    upload_path.unlink(missing_ok=True)
+                log.exception("durable UI delivery binding failed before offer: %s", exc)
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": (
+                            "Durable delivery accounting is unavailable. "
+                            "No file bytes or offer were sent."
+                        ),
+                        "code": "delivery_accounting_unavailable",
+                        "retryable": True,
+                    },
+                    status=503,
+                )
+
+            if idempotency_binding.is_replay:
+                # This request uploaded a duplicate local staging copy solely
+                # because the prior HTTP response was lost.  The authoritative
+                # staged bytes/transfer row belong to the first request.
+                with contextlib.suppress(OSError):
+                    upload_path.unlink(missing_ok=True)
+                assert idempotency_binding.response_body is not None
+                assert idempotency_binding.response_status is not None
+                if idempotency_binding.response_body.get("queued"):
+                    with contextlib.suppress(Exception):
+                        self._schedule_ui_delivery_background(idempotency_binding.contract.peer_fp)
+                return web.json_response(
+                    idempotency_binding.response_body,
+                    status=idempotency_binding.response_status,
+                )
+
+        async def _recorded_response(
+            body: dict[str, Any],
+            *,
+            status: int = 200,
+            reconciled_after_restart: bool = False,
+        ) -> web.Response:
+            """FULL-sync an idempotent result before exposing HTTP success."""
+
+            if idempotency_binding is None:
+                return web.json_response(body, status=status)
+            try:
+                recorder = (
+                    self._ui_delivery_idempotency.record_reconciled_response
+                    if reconciled_after_restart
+                    else self._ui_delivery_idempotency.record_response
+                )
+                recorded = await _blocking_file_io(
+                    recorder,
+                    idempotency_binding,
+                    status=status,
+                    body=body,
+                )
+            except Exception as exc:
+                # Dispatch may already have reached the peer.  Never return an
+                # unaccounted success that a client would safely assume it can
+                # retry.  The durable transfer/receipt ledger owns recovery.
+                log.critical(
+                    "file delivery response could not be committed; outcome unknown: %s",
+                    exc,
+                    exc_info=True,
+                )
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": (
+                            "The delivery outcome is being reconciled. "
+                            "No duplicate offer will be sent."
+                        ),
+                        "code": "delivery_outcome_unknown",
+                        "outcome_unknown": True,
+                        "client_delivery_id": client_delivery_id,
+                        "transfer_id": idempotency_binding.transfer_id,
+                        "delivery_id": idempotency_binding.delivery_id,
+                    },
+                    status=503,
+                )
+            assert recorded.response_body is not None
+            assert recorded.response_status is not None
+            return web.json_response(
+                recorded.response_body,
+                status=recorded.response_status,
+            )
+
+        def _wire_delivery_id(rec: Any) -> str | None:
+            raw = str(((getattr(rec, "metadata", None) or {}).get("delivery_id") or ""))
+            if len(raw) == 32 and all(c in "0123456789abcdef" for c in raw):
+                return raw
+            return None
+
+        def _adopt_durable_source(rec: Any) -> None:
+            """Drop a retry upload when the exact ledger row owns other bytes.
+
+            A restart can reclaim a pre-dispatch ``queued`` idempotency row.
+            ``queue_file_transfer`` then verifies and returns that existing row;
+            it intentionally keeps its original authoritative staging path.
+            Retaining the newly uploaded retry copy as well leaked one complete
+            file per crash retry. Switch local cleanup ownership to the verified
+            ledger source and remove only the redundant random staging inode.
+            """
+
+            nonlocal upload_path
+            raw = str((getattr(rec, "metadata", None) or {}).get("path") or "")
+            if not raw or upload_path is None:
+                return
+            authoritative = Path(raw)
+            try:
+                current_resolved = upload_path.resolve(strict=True)
+                authoritative_resolved = authoritative.resolve(strict=True)
+            except (OSError, RuntimeError):
+                return
+            if current_resolved == authoritative_resolved:
+                return
+            if not authoritative.is_file() or authoritative.is_symlink():
+                raise RuntimeError("durable transfer ledger returned an unsafe source path")
+            duplicate = upload_path
+            upload_path = authoritative
+            with contextlib.suppress(OSError):
+                duplicate.unlink(missing_ok=True)
+
+        def _schedule_background_delivery(peer_fp: str) -> None:
+            """Nudge a durable transfer without depending on mDNS presence.
+
+            ``resolve_for_send`` above may have found a rendezvous/WebRTC path
+            that is absent from the discovery registry. Calling the daemon's
+            swallowing resume coroutine directly preserves that route while
+            its per-peer lock still prevents concurrent duplicate dispatch.
+            Older doubles/embedders fall back to the established scheduler.
+            """
+
+            self._schedule_ui_delivery_background(peer_fp)
+
+        def _with_delivery_identity(body: dict[str, Any]) -> dict[str, Any]:
+            if idempotency_binding is None:
+                return body
+            enriched = dict(body)
+            enriched.setdefault("client_delivery_id", client_delivery_id)
+            enriched.setdefault("transfer_id", idempotency_binding.transfer_id)
+            enriched.setdefault("delivery_id", idempotency_binding.delivery_id)
+            return enriched
+
+        async def _release_idempotent_attempt_before_wire() -> None:
+            if idempotency_binding is None or idempotency_binding.phase == "dispatching":
+                return
+            try:
+                await _blocking_file_io(
+                    self._ui_delivery_idempotency.release_before_dispatch,
+                    idempotency_binding,
+                )
+            except Exception:
+                log.exception("could not release pre-wire UI delivery admission")
+
+        def _ledger_contract_matches(rec: Any) -> bool:
+            """Bind an ambiguous UI row to the exact authoritative transfer."""
+
+            if idempotency_binding is None or rec is None:
+                return False
+            contract = idempotency_binding.contract
+            metadata = dict(getattr(rec, "metadata", None) or {})
+            normalized_rel = contract.rel_path.replace("\\", "/").strip("/")
+            expected_kind = (
+                "folder_archive"
+                if normalized_rel.split("/", 1)[0] == "__one_link_folder__"
+                else "file"
+            )
+            try:
+                return bool(
+                    getattr(rec, "id", None) == idempotency_binding.transfer_id
+                    and getattr(rec, "direction", None) == "out"
+                    and getattr(rec, "peer_fp", None) == contract.peer_fp
+                    and getattr(rec, "kind", None) == "file"
+                    and getattr(rec, "name", None) == contract.display_name
+                    and int(getattr(rec, "size", -1)) == contract.size
+                    and int(getattr(rec, "total_bytes", -1)) == contract.size
+                    and getattr(rec, "blob_hash", None) == contract.blob_hash
+                    and metadata.get("display_name") == contract.display_name
+                    and metadata.get("chat_inline") is contract.chat_inline
+                    and str(metadata.get("rel_path") or "") == contract.rel_path
+                    and metadata.get("delivery_id") == idempotency_binding.delivery_id
+                    and metadata.get("delivery_name") == contract.display_name
+                    and str(metadata.get("delivery_rel_path") or "") == contract.rel_path
+                    and metadata.get("delivery_kind") == expected_kind
+                )
+            except (TypeError, ValueError):
+                return False
+
+        def _has_exact_commit_receipt(rec: Any) -> bool:
+            if idempotency_binding is None:
+                return False
+            metadata = dict(getattr(rec, "metadata", None) or {})
+            receipt = metadata.get("commit_receipt")
+            offer_id = receipt.get("of") if isinstance(receipt, dict) else None
+            mode = metadata.get("mode")
+            if (
+                not isinstance(receipt, dict)
+                or not isinstance(offer_id, str)
+                or not 8 <= len(offer_id) <= 128
+                or not isinstance(mode, str)
+                or not mode
+            ):
+                return False
+            try:
+                from one_link.daemon import _validate_file_commit_receipt
+
+                _validate_file_commit_receipt(
+                    receipt,
+                    offer_id=offer_id,
+                    blob=idempotency_binding.contract.blob_hash,
+                    size=idempotency_binding.contract.size,
+                    mode=mode,
+                    delivery_id=str(idempotency_binding.delivery_id or ""),
+                    delivery_name=idempotency_binding.contract.display_name,
+                    delivery_rel_path=idempotency_binding.contract.rel_path,
+                    delivery_kind=str(metadata.get("delivery_kind") or ""),
+                )
+            except Exception:
+                return False
+            return True
+
+        def _pristine_preoffer_record(rec: Any) -> bool:
+            """Prove no offer/byte could precede a restart reclamation."""
+
+            binding = idempotency_binding
+            if binding is None or not _ledger_contract_matches(rec):
+                return False
+            metadata = dict(getattr(rec, "metadata", None) or {})
+            try:
+                pristine = (
+                    getattr(rec, "status", None) in {"queued", "paused"}
+                    and metadata.get("delivery_state") in {"queued", "waiting_for_device"}
+                    and type(metadata.get("attempts", 0)) is int
+                    and int(metadata.get("attempts", 0)) == 0
+                    and metadata.get("last_attempt_ms") in (None, 0)
+                    and int(getattr(rec, "progress_bytes", -1)) == 0
+                    and int(getattr(rec, "chunks_done", -1)) == 0
+                    and int(getattr(rec, "raw_bytes", -1)) == 0
+                    and int(getattr(rec, "wire_bytes", -1)) == 0
+                )
+            except (TypeError, ValueError):
+                return False
+            if not pristine:
+                return False
+            marker_path = getattr(self.daemon, "_remote_commit_failstop_path", None)
+            marker_check = getattr(self.daemon, "_remote_commit_is_failstopped", None)
+            if not callable(marker_path) or not callable(marker_check):
+                return False
+            try:
+                # Any marker means a remotely visible boundary may exist. The
+                # marker is fail-stop evidence only; it is never positive proof
+                # of success because its JSON is not independently authenticated.
+                if Path(marker_path(binding.transfer_id)).exists():
+                    return False
+                return marker_check(binding.transfer_id) is False
+            except Exception:
+                return False
+
+        if idempotency_binding is not None and not idempotency_binding.owns_attempt:
+
+            def _discard_duplicate_staging() -> None:
+                with contextlib.suppress(OSError):
+                    if upload_path is not None:
+                        upload_path.unlink(missing_ok=True)
+
+            if not idempotency_binding.recoverable_after_restart:
+                _discard_duplicate_staging()
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "replayed": True,
+                        "in_progress": True,
+                        "outcome_unknown": idempotency_binding.is_outcome_ambiguous,
+                        "client_delivery_id": client_delivery_id,
+                        "transfer_id": idempotency_binding.transfer_id,
+                        "delivery_id": idempotency_binding.delivery_id,
+                        "hint": (
+                            "The original delivery is still in progress; "
+                            "One Link did not send a duplicate offer."
+                        ),
+                    },
+                    status=202,
+                )
+
+            state = getattr(self.daemon, "state", None)
+            try:
+                rec = (
+                    await _blocking_file_io(
+                        state.get_transfer,
+                        idempotency_binding.transfer_id,
+                    )
+                    if state is not None
+                    else None
+                )
+            except asyncio.CancelledError:
+                _discard_duplicate_staging()
+                raise
+            except Exception as exc:
+                # The idempotency row crossed the dispatch boundary, so an
+                # unavailable transfer ledger is an unknown outcome, never
+                # permission to retry the wire send.  Drop only this duplicate
+                # HTTP upload and preserve the authoritative original state.
+                _discard_duplicate_staging()
+                log.exception(
+                    "could not read transfer ledger during UI delivery reconciliation: %s",
+                    exc,
+                )
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": (
+                            "The delivery outcome is being reconciled. "
+                            "No duplicate offer will be sent."
+                        ),
+                        "code": "delivery_outcome_unknown",
+                        "outcome_unknown": True,
+                        "retryable": True,
+                        "client_delivery_id": client_delivery_id,
+                        "transfer_id": idempotency_binding.transfer_id,
+                        "delivery_id": idempotency_binding.delivery_id,
+                    },
+                    status=503,
+                )
+            if rec is not None and not _ledger_contract_matches(rec):
+                _discard_duplicate_staging()
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": (
+                            "The durable transfer ledger disagrees with the "
+                            "original browser delivery contract. No offer was sent."
+                        ),
+                        "code": "delivery_ledger_contract_conflict",
+                        "client_delivery_id": client_delivery_id,
+                        "transfer_id": idempotency_binding.transfer_id,
+                        "delivery_id": idempotency_binding.delivery_id,
+                    },
+                    status=409,
+                )
+
+            metadata = dict(getattr(rec, "metadata", None) or {}) if rec else {}
+            if (
+                rec is not None
+                and getattr(rec, "status", None) == "complete"
+                and metadata.get("delivery_state") == "done"
+                and metadata.get("commit_confirmed") is True
+                and int(getattr(rec, "progress_bytes", -1)) == uploaded_bytes
+                and _has_exact_commit_receipt(rec)
+            ):
+                _discard_duplicate_staging()
+                recovered_result = {
+                    "transfer_id": idempotency_binding.transfer_id,
+                    "delivery_id": idempotency_binding.delivery_id,
+                    "blob": idempotency_binding.contract.blob_hash,
+                    "size": idempotency_binding.contract.size,
+                    "confirmed": True,
+                    "status": "done",
+                    "recovered_from_ledger": True,
+                }
+                return await _recorded_response(
+                    _with_delivery_identity({"ok": True, "result": recovered_result}),
+                    reconciled_after_restart=True,
+                )
+
+            if (
+                rec is not None
+                and getattr(rec, "status", None) == "failed"
+                and metadata.get("delivery_state") == "sent_unconfirmed"
+                and metadata.get("commit_confirmed") is False
+                and int(getattr(rec, "progress_bytes", -1)) == uploaded_bytes
+            ):
+                _discard_duplicate_staging()
+                recovered_result = {
+                    "transfer_id": idempotency_binding.transfer_id,
+                    "delivery_id": idempotency_binding.delivery_id,
+                    "blob": idempotency_binding.contract.blob_hash,
+                    "size": idempotency_binding.contract.size,
+                    "confirmed": False,
+                    "status": "sent_unconfirmed",
+                    "recovered_from_ledger": True,
+                }
+                return await _recorded_response(
+                    _with_delivery_identity({"ok": True, "result": recovered_result}),
+                    reconciled_after_restart=True,
+                )
+
+            if rec is not None and _pristine_preoffer_record(rec):
+                authoritative_source = Path(str(metadata.get("path") or ""))
+                if authoritative_source.is_file() and not authoritative_source.is_symlink():
+                    try:
+                        idempotency_binding = await _predispatch_idempotency_call(
+                            self._ui_delivery_idempotency.reclaim_dispatching_before_wire,
+                            idempotency_binding,
+                        )
+                    except asyncio.CancelledError:
+                        _discard_duplicate_staging()
+                        raise
+                    except Exception as exc:
+                        log.exception(
+                            "could not reclaim ledger-proven pre-offer delivery: %s",
+                            exc,
+                        )
+                    else:
+                        retry_staging = upload_path
+                        upload_path = authoritative_source
+                        with contextlib.suppress(OSError):
+                            if retry_staging.resolve() != authoritative_source.resolve():
+                                retry_staging.unlink(missing_ok=True)
+
+            if not idempotency_binding.owns_attempt:
+                if rec is not None and getattr(rec, "status", None) == "paused":
+                    _discard_duplicate_staging()
+                    return await _recorded_response(
+                        _with_delivery_identity(
+                            {
+                                "ok": True,
+                                "queued": True,
+                                "paused": True,
+                                "transfer_id": idempotency_binding.transfer_id,
+                                "error": metadata.get("error"),
+                                "hint": metadata.get("user_message")
+                                or "The durable transfer will resume when its path is healthy.",
+                                "recovered_from_ledger": True,
+                            }
+                        ),
+                        status=202,
+                        reconciled_after_restart=True,
+                    )
+                if rec is not None and getattr(rec, "status", None) == "failed":
+                    _discard_duplicate_staging()
+                    return await _recorded_response(
+                        _with_delivery_identity(
+                            {
+                                "ok": False,
+                                "error": metadata.get("user_message")
+                                or metadata.get("error")
+                                or "The durable delivery failed.",
+                                "code": "delivery_failed_reconciled",
+                                "recovered_from_ledger": True,
+                            }
+                        ),
+                        status=409,
+                        reconciled_after_restart=True,
+                    )
+                _discard_duplicate_staging()
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "replayed": True,
+                        "in_progress": True,
+                        "outcome_unknown": True,
+                        "client_delivery_id": client_delivery_id,
+                        "transfer_id": idempotency_binding.transfer_id,
+                        "delivery_id": idempotency_binding.delivery_id,
+                        "hint": (
+                            "The authoritative transfer is still being reconciled. "
+                            "No duplicate offer was sent."
+                        ),
+                    },
+                    status=202,
+                )
+
         if peer is None:
             if target_fp:
                 keep_upload_for_resume = True
                 try:
-                    rec = self.daemon.queue_file_transfer(
-                        peer_fp=target_fp,
-                        path=upload_path,
-                        reason="waiting for device",
-                    )
+                    if idempotency_binding is not None:
+                        rec = await _blocking_file_io(
+                            self.daemon.queue_file_transfer,
+                            peer_fp=target_fp,
+                            path=upload_path,
+                            reason="waiting for device",
+                            schedule_resume=False,
+                            display_name=upload_name,
+                            chat_inline=chat_inline,
+                            rel_path=clean_rel_path,
+                            transfer_id=idempotency_binding.transfer_id,
+                        )
+                    else:
+                        # Compatibility with older daemon/test-double method
+                        # signatures. New daemons persist presentation intent;
+                        # old ones can still queue the bytes safely.
+                        try:
+                            rec = await _blocking_file_io(
+                                self.daemon.queue_file_transfer,
+                                peer_fp=target_fp,
+                                path=upload_path,
+                                reason="waiting for device",
+                                display_name=upload_name,
+                                chat_inline=chat_inline,
+                                rel_path=clean_rel_path,
+                            )
+                        except TypeError:
+                            rec = await _blocking_file_io(
+                                self.daemon.queue_file_transfer,
+                                peer_fp=target_fp,
+                                path=upload_path,
+                                reason="waiting for device",
+                            )
+                    if rec is None:
+                        raise RuntimeError("transfer ledger returned no durable row")
+                    if idempotency_binding is not None:
+                        _adopt_durable_source(rec)
+                    delivery_id = _wire_delivery_id(rec)
+                    if idempotency_binding is not None:
+                        if rec.id != idempotency_binding.transfer_id or not delivery_id:
+                            raise RuntimeError(
+                                "transfer ledger did not preserve idempotent delivery identity"
+                            )
+                        idempotency_binding = await _predispatch_idempotency_call(
+                            self._ui_delivery_idempotency.mark_queued,
+                            idempotency_binding,
+                            delivery_id=delivery_id,
+                        )
+                    body: dict[str, Any] = {
+                        "ok": True,
+                        "queued": True,
+                        "paused": True,
+                        "transfer_id": rec.id,
+                        "hint": "Waiting for the device. One Link will send it automatically when the path is healthy.",
+                    }
+                    if idempotency_binding is not None:
+                        body.update(
+                            {
+                                "client_delivery_id": client_delivery_id,
+                                "delivery_id": delivery_id,
+                            }
+                        )
+                    response = await _recorded_response(body,
+                        status=202)
+                    if response.status == 202:
+                        with contextlib.suppress(Exception):
+                            _schedule_background_delivery(target_fp)
+                    return response
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    await _release_idempotent_attempt_before_wire()
+                    log.exception("queue_file_transfer failed: %s", e)
                     return web.json_response(
                         {
-                            "ok": True,
-                            "queued": True,
-                            "paused": True,
-                            "transfer_id": rec.id if rec else None,
-                            "hint": "Waiting for the device. One Link will send it automatically when the path is healthy.",
+                            "ok": False,
+                            "error": (
+                                "The transfer ledger is unavailable. "
+                                "No file bytes were sent; the staged upload was retained."
+                            ),
+                            "code": "transfer_ledger_unavailable",
+                            "retryable": True,
                         },
-                        status=202,
+                        status=503,
                     )
-                except Exception as e:
-                    log.exception("queue_file_transfer failed: %s", e)
             with contextlib.suppress(OSError):
                 upload_path.unlink(missing_ok=True)
             return web.json_response({
                 "error": f"no peer {peer_needle!r}",
                 "hint": "Pick a paired device. Once a paired device is known, One Link can wait and send automatically.",
-            }, status=404)
+            }, status=404,
+            )
 
         keep_upload_for_resume = False
         durable_transfer_id: Optional[str] = None
         if target_fp:
             try:
-                rec = self.daemon.queue_file_transfer(
-                    peer_fp=target_fp,
-                    path=upload_path,
-                    reason="sending",
-                    schedule_resume=False,
-                )
-                durable_transfer_id = rec.id if rec else None
+                if idempotency_binding is not None:
+                    rec = await _blocking_file_io(
+                        self.daemon.queue_file_transfer,
+                        peer_fp=target_fp,
+                        path=upload_path,
+                        reason="sending",
+                        schedule_resume=False,
+                        display_name=upload_name,
+                        chat_inline=chat_inline,
+                        rel_path=clean_rel_path,
+                        transfer_id=idempotency_binding.transfer_id,
+                    )
+                else:
+                    # Older test doubles / older daemon objects may not expose
+                    # presentation fields or schedule_resume. Fall back while
+                    # keeping all compatibility exceptions inside the outer
+                    # cleanup-aware guard.
+                    try:
+                        rec = await _blocking_file_io(
+                            self.daemon.queue_file_transfer,
+                            peer_fp=target_fp,
+                            path=upload_path,
+                            reason="sending",
+                            schedule_resume=False,
+                            display_name=upload_name,
+                            chat_inline=chat_inline,
+                            rel_path=clean_rel_path,
+                        )
+                    except TypeError:
+                        try:
+                            rec = await _blocking_file_io(
+                                self.daemon.queue_file_transfer,
+                                peer_fp=target_fp,
+                                path=upload_path,
+                                reason="sending",
+                                schedule_resume=False,
+                            )
+                        except TypeError:
+                            rec = await _blocking_file_io(
+                                self.daemon.queue_file_transfer,
+                                peer_fp=target_fp,
+                                path=upload_path,
+                                reason="sending",
+                            )
+                if rec is None:
+                    raise RuntimeError("transfer ledger returned no durable row")
+                if idempotency_binding is not None:
+                    _adopt_durable_source(rec)
+                durable_transfer_id = rec.id
+                if idempotency_binding is not None:
+                    delivery_id = _wire_delivery_id(rec)
+                    if rec.id != idempotency_binding.transfer_id or not delivery_id:
+                        raise RuntimeError(
+                            "transfer ledger did not preserve idempotent delivery identity"
+                        )
+                    idempotency_binding = await _predispatch_idempotency_call(
+                        self._ui_delivery_idempotency.mark_queued,
+                        idempotency_binding,
+                        delivery_id=delivery_id,
+                    )
                 keep_upload_for_resume = True
-            except TypeError:
-                # Older test doubles / older daemon objects may not expose
-                # schedule_resume yet. Fall back to the legacy queue call and
-                # still send against the durable row if one is returned.
-                rec = self.daemon.queue_file_transfer(
-                    peer_fp=target_fp,
-                    path=upload_path,
-                    reason="sending",
-                )
-                durable_transfer_id = rec.id if rec else None
+            except asyncio.CancelledError:
                 keep_upload_for_resume = True
+                raise
             except Exception as e:
-                log.warning(
-                    "durable pre-queue failed before live send; "
-                    "continuing with direct send: %s",
+                keep_upload_for_resume = True
+                await _release_idempotent_attempt_before_wire()
+                log.exception(
+                    "durable pre-queue failed; live send refused before offer: %s",
                     e,
                 )
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": (
+                            "The transfer ledger is unavailable. "
+                            "No file bytes were sent; the staged upload was retained."
+                        ),
+                        "code": "transfer_ledger_unavailable",
+                        "retryable": True,
+                    },
+                    status=503,
+                )
+        if idempotency_binding is not None:
+            # The browser request's job ends at durable local admission.  A
+            # remote transfer can legitimately run for minutes (or wait for a
+            # reconnect); keeping the multipart fetch open for that lifetime
+            # caused users to retry an apparently stuck upload.  Persist the
+            # exact replayable 202 first, then hand dispatch to the daemon's
+            # durable queue pump.  A lost HTTP response replays this same body
+            # and can never enqueue or offer a second transfer identity.
+            admission_response = await _recorded_response(
+                _with_delivery_identity(
+                    {
+                        "ok": True,
+                        "accepted": True,
+                        "queued": True,
+                        "background": True,
+                        "transfer_id": durable_transfer_id,
+                        "status": "scheduled",
+                        "hint": (
+                            "Securely staged. One Link is sending this file "
+                            "in the background and will resume automatically."
+                        ),
+                    }
+                ),
+                status=202,
+            )
+            if admission_response.status == 202 and target_fp:
+                try:
+                    _schedule_background_delivery(target_fp)
+                except Exception as exc:
+                    # Admission and the transfer ledger are already FULL-
+                    # synced. The daemon's periodic queue pump/session-up hook
+                    # remains authoritative if this immediate nudge fails.
+                    log.warning(
+                        "background transfer scheduling nudge failed: %s",
+                        exc,
+                    )
+            return admission_response
         try:
             # v0.6.3: auto-retry once on ordinary transient failure.
             # v0.7.4: if send_file already created a paused transfer row,
@@ -19952,14 +26941,16 @@ class UIServer:
                 transfer_id_attr = getattr(first_err, "transfer_id", None)
                 if transfer_id_attr:
                     keep_upload_for_resume = True
-                    return web.json_response(
-                        {
-                            "ok": True,
-                            "paused": True,
-                            "transfer_id": transfer_id_attr,
-                            "error": str(first_err),
-                            "hint": "Transfer paused; it will resume automatically when the device reconnects.",
-                        },
+                    return await _recorded_response(
+                        _with_delivery_identity(
+                            {
+                                "ok": True,
+                                "paused": True,
+                                "transfer_id": transfer_id_attr,
+                                "error": str(first_err),
+                                "hint": "Transfer paused; it will resume automatically when the device reconnects.",
+                            }
+                        ),
                         status=202,
                     )
                 translated_first = _translate_send_error(first_err)
@@ -19973,8 +26964,7 @@ class UIServer:
                 if str(translated_first.get("code") or "") not in retryable_codes:
                     raise first_err
                 log.warning(
-                    "send_file first attempt failed (%s) - retrying with "
-                    "fresh resolve", first_err,
+                    "send_file first attempt failed (%s) - retrying with fresh resolve", first_err,
                 )
                 fresh_peer = await self.daemon.resolve_for_send(peer_needle)
                 if fresh_peer is None:
@@ -19993,19 +26983,28 @@ class UIServer:
             # deleting this staged upload made delivered image bubbles
             # look broken on the sender side.
             keep_upload_for_resume = bool(durable_transfer_id)
-            return web.json_response({"ok": True, "result": result})
+            result_body: Any = result
+            if idempotency_binding is not None:
+                result_body = dict(result) if isinstance(result, dict) else {"value": result}
+                result_body.setdefault("transfer_id", idempotency_binding.transfer_id)
+                result_body.setdefault("delivery_id", idempotency_binding.delivery_id)
+            return await _recorded_response(
+                _with_delivery_identity({"ok": True, "result": result_body})
+            )
         except Exception as e:
             transfer_id_attr = getattr(e, "transfer_id", None)
             if transfer_id_attr:
                 keep_upload_for_resume = True
-                return web.json_response(
-                    {
-                        "ok": True,
-                        "paused": True,
-                        "transfer_id": transfer_id_attr,
-                        "error": str(e),
-                        "hint": "Transfer paused; it will resume automatically when the device reconnects.",
-                    },
+                return await _recorded_response(
+                    _with_delivery_identity(
+                        {
+                            "ok": True,
+                            "paused": True,
+                            "transfer_id": transfer_id_attr,
+                            "error": str(e),
+                            "hint": "Transfer paused; it will resume automatically when the device reconnects.",
+                        }
+                    ),
                     status=202,
                 )
             log.exception("send_file failed: %s", e)
@@ -20030,22 +27029,41 @@ class UIServer:
                 if target_fp:
                     with contextlib.suppress(Exception):
                         self.daemon._schedule_resume_paused(target_fp, force=True)
-                return web.json_response(
-                    {
-                        "ok": True,
-                        "paused": True,
-                        "queued": True,
-                        "transfer_id": durable_transfer_id,
-                        "code": translated.get("code"),
-                        "error": translated.get("error"),
-                        "hint": "The device isn't reachable right now. One Link kept your file and will send it automatically when the device is back.",
-                    },
+                return await _recorded_response(
+                    _with_delivery_identity(
+                        {
+                            "ok": True,
+                            "paused": True,
+                            "queued": True,
+                            "transfer_id": durable_transfer_id,
+                            "code": translated.get("code"),
+                            "error": translated.get("error"),
+                            "hint": "The device isn't reachable right now. One Link kept your file and will send it automatically when the device is back.",
+                        }
+                    ),
                     status=202,
                 )
             if durable_transfer_id and self.daemon.state is not None:
                 with contextlib.suppress(Exception):
+                    # Permanent policy/trust failures occur before FILE_OFFER.
+                    # Terminalize the durable queue root before removing it;
+                    # State refuses direct deletion of live/resumable rows.
+                    queued = self.daemon.state.get_transfer(durable_transfer_id)
+                    if queued is not None and queued.status not in ("complete", "failed"):
+                        self.daemon.state.update_transfer(
+                            durable_transfer_id,
+                            status="failed",
+                            metadata={
+                                **(queued.metadata or {}),
+                                "error": translated.get("error") or str(e),
+                                "error_class": "PermanentPreWireRefusal",
+                                "pre_wire": True,
+                            },
+                        )
                     self.daemon.state.delete_transfer(durable_transfer_id)
-            return web.json_response(translated, status=translated["status"])
+            return await _recorded_response(
+                _with_delivery_identity(translated), status=translated["status"],
+            )
         finally:
             try:
                 if upload_path and not keep_upload_for_resume:
@@ -20163,6 +27181,25 @@ class UIServer:
         if self.daemon.state is None:
             return web.json_response({"error": "state not available"}, status=503)
         transfer_id = request.match_info["transfer_id"]
+        rec = self.daemon.state.get_transfer(transfer_id)
+        if rec is not None and rec.status in ("queued", "offered", "active", "paused"):
+            # Make deletion an explicit cancel -> terminal -> remove sequence.
+            # This preserves State's invariant that a live storage/protocol
+            # root is never silently discarded.
+            rec = self.daemon.state.update_transfer(
+                transfer_id,
+                status="failed",
+                metadata={
+                    **(rec.metadata or {}),
+                    "error": "cancelled and removed by user",
+                    "error_class": "CancelledAndDeletedByUser",
+                },
+            )
+            if rec is None:
+                return web.json_response(
+                    {"ok": False, "deleted": False, "error": "cancellation was not durable"},
+                    status=503,
+                )
         deleted = self.daemon.state.delete_transfer(transfer_id)
         return web.json_response({"ok": True, "deleted": deleted})
 
@@ -20180,7 +27217,73 @@ class UIServer:
             return web.json_response(
                 {"error": "only outbound transfers can be retried"}, status=400,
             )
-        if rec.status not in ("failed", "complete", "paused", "queued"):
+        metadata = dict(rec.metadata or {})
+        # A terminal success is not a retry candidate.  Older releases
+        # exposed ``complete`` rows through this endpoint and would emit a
+        # second FILE_OFFER when a client retried the HTTP action.  Modern
+        # receivers can deduplicate a stable delivery_id, but legacy peers
+        # cannot, so treating an already-complete row as a no-op is the only
+        # safe cross-version behavior.
+        if rec.status == "complete":
+            return web.json_response(
+                {
+                    "ok": True,
+                    "already_complete": True,
+                    "transfer_id": rec.id,
+                    "hint": "This delivery is already complete; no duplicate offer was sent.",
+                }
+            )
+        # A legacy peer can acknowledge all chunks without proving the final
+        # durable file commit.  Re-sending that outcome-unknown delivery may
+        # create another copy at the receiver.  Likewise, an on-disk
+        # remote-commit fail-stop marker means a prior offer crossed the wire
+        # but local accounting could not prove whether retry is safe.  Both
+        # states require reconciliation, never a blind/manual retry.
+        failstopped = False
+        failstop_check = getattr(
+            self.daemon,
+            "_remote_commit_is_failstopped",
+            None,
+        )
+        if callable(failstop_check):
+            try:
+                failstopped = bool(failstop_check(rec.id))
+            except Exception:
+                # Unknown marker state is not evidence that another offer is
+                # safe.  Fail closed if the durability check itself fails.
+                failstopped = True
+        unconfirmed = (
+            metadata.get("delivery_state")
+            in {
+                "sent_unconfirmed",
+                "outcome_unknown",
+            }
+            or metadata.get("error_class")
+            in {
+                "DeliveryUnconfirmed",
+                "SenderCommitAccountingError",
+            }
+            or metadata.get("commit_confirmed") is False
+        )
+        if failstopped or unconfirmed:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": (
+                        "The earlier delivery may already exist on the receiving "
+                        "device, so One Link refused to send a duplicate."
+                    ),
+                    "code": "delivery_outcome_unknown",
+                    "outcome_unknown": True,
+                    "transfer_id": rec.id,
+                    "hint": (
+                        "Check the receiving device or reconcile its commit "
+                        "receipt before creating a new delivery."
+                    ),
+                },
+                status=409,
+            )
+        if rec.status not in ("failed", "paused", "queued"):
             return web.json_response(
                 {"error": f"transfer is {rec.status} — not retriable"}, status=409,
             )
@@ -20210,7 +27313,11 @@ class UIServer:
         if peer is None:
             return web.json_response({"error": "peer offline"}, status=404)
         try:
-            result = await self.daemon.send_file(peer, path, transfer_id=rec.id)
+            result = await self.daemon.send_file(peer, path, transfer_id=rec.id,
+                display_name=metadata.get("display_name") or rec.name,
+                chat_inline=bool(metadata.get("chat_inline")),
+                rel_path=metadata.get("rel_path"),
+            )
             return web.json_response({"ok": True, "result": result})
         except Exception as e:
             log.exception("retry_transfer failed: %s", e)
@@ -20305,19 +27412,27 @@ class UIServer:
             return web.json_response({"error": "statuses must be a list"}, status=400)
         keep_latest = int(data.get("keep_latest", 50))
         older_than_ms = data.get("older_than_ms")
+        # Bound each request even when an old client asks to prune an
+        # unbounded ledger. Repeated calls make progress without holding the
+        # state lock or performing filesystem lifecycle work for minutes.
+        max_remove = max(1, min(int(data.get("max_remove", 500)), 5_000))
         removed = self.daemon.state.prune_transfers(
             statuses=[str(s) for s in statuses],
             older_than_ms=int(older_than_ms) if older_than_ms is not None else None,
             keep_latest=keep_latest,
+            max_remove=max_remove,
         )
-        return web.json_response({"ok": True, "removed": removed})
+        return web.json_response({"ok": True, "removed": removed,
+                "batch_limit": max_remove,
+                "more_may_remain": removed >= max_remove,
+            })
 
     # ─── /api/outbox (v0.7.1) ─────────────────────────────────────────
     async def api_list_outbox(self, request: web.Request) -> web.Response:
         if self.daemon.state is None:
             return web.json_response({"error": "state not available"}, status=503)
         peer_fp = request.query.get("peer_fp") or None
-        pending_only = (request.query.get("pending", "1") != "0")
+        pending_only = request.query.get("pending", "1") != "0"
         try:
             limit = int(request.query.get("limit", "200"))
         except ValueError:
@@ -20398,9 +27513,13 @@ class UIServer:
 
     # ─── /api/audit ───────────────────────────────────────────────────
     async def api_audit(self, request: web.Request) -> web.Response:
-        """Self-audit: report every kind of network call this binary makes,
-        enumerated from the registered routes and the peer protocol's
-        declared message types."""
+        """Self-audit the declared network and protocol surface.
+
+        This is an inventory, not a packet-capture attestation. Optional
+        destinations are listed even when the active sovereignty policy has
+        disabled them; ``/api/sovereignty/status`` reports that live policy and
+        ``/api/sovereignty/outbound`` reports recent instrumented calls.
+        """
         from one_link import wire as wire_mod
         from one_link.sovereign import doctrine
         # Local UI surface
@@ -20412,55 +27531,172 @@ class UIServer:
                 path = info.get("path") or info.get("formatter") or ""
                 local_routes.append({"method": method, "path": path})
         # Peer-protocol surface — encoded directly in daemon._on_peer_message.
-        peer_msg_types = [
-            "CAPS",
-            "TEXT",
-            "FILE_OFFER",
-            "FILE_WANTS",
-            "FILE_CHUNK",
-            "FILE_CDC_CHUNK",
-            "FILE_DONE",
-            "ACK",
-            "PING",
-            "PONG",
-            "PAIR_REQUEST",
-            "PAIR_CONFIRM",
-            "PAIR_REJECT",
-            "MANIFEST_PUSH",
-            "MANIFEST_WANTS",
-            "BLOB_OFFER",
-            "BLOB_CHUNK",
-            "CHUNK_QUERY",
-            "CHUNK_HAVE",
-            "CHUNK_PULL",
-            "CHUNK_DATA",
-        ]
-        # Outbound network endpoints we ever connect to: only LAN peers
-        # discovered via mDNS, never any external service.
+        peer_msg_types = sorted(
+            {
+                "ACK",
+                "BLOB_CHUNK",
+                "BLOB_INVENTORY_QUERY",
+                "BLOB_INVENTORY_REPLY",
+                "BLOB_OFFER",
+                "BLOB_REQUEST",
+                "BLOOM_INIT_FILTER",
+                "CALL_ACCEPT",
+                "CALL_DECLINE",
+                "CALL_END",
+                "CALL_FRAME_ATTEST",
+                "CALL_ICE",
+                "CALL_INVITE",
+                "CALL_RESUME_OFFER",
+                "CALL_SDP_ANSWER",
+                "CALL_SDP_OFFER",
+                "CAPABILITY_GRANT",
+                "CAPS",
+                "CAPSULE_CHUNK",
+                "CAPSULE_COMPLETE",
+                "CAPSULE_OFFER",
+                "CAPSULE_RECEIPT",
+                "CHUNK_DATA",
+                "CHUNK_HAVE",
+                "CHUNK_PULL",
+                "CHUNK_QUERY",
+                "COVER_PACKET",
+                "DELETE_MSG",
+                "EDIT_MSG",
+                "ENDPOINT_UPDATE",
+                "FILE_ABORT",
+                "FILE_ACK_BATCH",
+                "FILE_BIN_CHUNK",
+                "FILE_CDC_CHUNK",
+                "FILE_CHUNK",
+                "FILE_CHUNK_RECEIPT",
+                "FILE_COMMIT",
+                "FILE_COMMIT_VERIFYING",
+                "FILE_DECLINED",
+                "FILE_DONE",
+                "FILE_NATIVE_CHUNK",
+                "FILE_OFFER",
+                "FILE_OFFER_BATCH",
+                "FILE_OFFER_HELD",
+                "FILE_PROVENANCE",
+                "FILE_WANTS",
+                "FOLDER_OFFER_ACCEPTED",
+                "FOLDER_OFFER_DECLINED",
+                "FOLDER_SYNC_COMMIT",
+                "FOLDER_SYNC_VERIFY",
+                "GROUP_EVENT",
+                "GROUP_KEY_OFFER",
+                "GROUP_MSG",
+                "MANIFEST_PUSH",
+                "MANIFEST_WANTS",
+                "PAIR_CONFIRM",
+                "PAIR_REJECT",
+                "PAIR_REQUEST",
+                "PEER_VERIFY_NOTICE",
+                "PING",
+                "PONG",
+                "PRESENCE",
+                "REACTION",
+                "READ_MARKER",
+                "RECORDING_DECLINE",
+                "RECORDING_GRANT",
+                "RECORDING_REQUEST",
+                "RECORDING_START",
+                "RECORDING_STOP",
+                "ROTATION_CERT",
+                "ROTATION_CERT_ACK",
+                "SAS_CONFIRM",
+                "SAS_DECLINE",
+                "SELF_MESH_PRESENCE",
+                "SELF_MESH_REMOTE_INSTRUCTION",
+                "SHARE_LINK_REDEEM",
+                "TEXT",
+                "TYPING",
+            }
+        )
+        # Declared destination classes. Optional infrastructure belongs in the
+        # inventory even when the active preset currently disables it.
         outbound = [
             {"kind": "lan_peer_tcp",
              "destination": "address advertised in mDNS (_onelink._tcp.local.)",
-             "protocol": "TCP, X25519 + ChaCha20-Poly1305 framed"},
+             "protocol": "TCP, authenticated encrypted One Link frames",
+                "activation": "direct peer route",
+            },
+            {
+                "kind": "lan_peer_quic",
+                "destination": "paired peer address and negotiated UDP port",
+                "protocol": "QUIC/TLS 1.3 native transfer path",
+                "activation": "native module + mutual capability + reachable route",
+            },
             {"kind": "mdns_multicast",
              "destination": "224.0.0.251:5353",
-             "protocol": "UDP, mDNS service discovery"},
+             "protocol": "UDP, mDNS service discovery",
+                "activation": "enabled by sovereignty policy",
+            },
+            {
+                "kind": "stun",
+                "destination": "configured STUN server list",
+                "protocol": "WebRTC STUN binding requests",
+                "activation": "optional; resolved by sovereignty policy",
+            },
+            {
+                "kind": "turn_relay",
+                "destination": "configured TURN server list",
+                "protocol": "WebRTC TURN carrying encrypted media packets",
+                "activation": "optional fallback; resolved by sovereignty policy",
+            },
+            {
+                "kind": "rendezvous",
+                "destination": "configured HTTPS rendezvous URL(s)",
+                "protocol": "HTTPS registration/lookup",
+                "activation": "optional; resolved by sovereignty policy",
+            },
+            {
+                "kind": "encrypted_relay",
+                "destination": "configured rendezvous relay URL(s)",
+                "protocol": "WebSocket forwarding of end-to-end encrypted bytes",
+                "activation": "optional fallback; rendezvous/relay must be enabled",
+            },
+            {
+                "kind": "update_check",
+                "destination": "api.github.com (GitHub Releases API)",
+                "protocol": "HTTPS metadata request; never installs automatically",
+                "activation": "optional; default Just Works policy polls every 6 hours",
+            },
         ]
+        loopback_ui = self.bind_host in {"127.0.0.1", "::1", "localhost"}
         return web.json_response({
             "version": __import__("one_link").__version__,
             "local_ui_routes": local_routes,
-            "ui_bind": "127.0.0.1 only (loopback)",
-            "ui_auth": "per-process random URL-safe token",
+            "ui_bind": (
+                    f"{self.bind_host} (loopback only)"
+                    if loopback_ui
+                    else f"{self.bind_host} (explicit LAN bind; remote owner APIs require HTTPS)"
+                ),
+            "ui_auth": (
+                    "rotating 256-bit process bootstrap bearer plus independently "
+                    "revocable browser-session bearers stored by one-way record key"
+                ),
+                "ui_auth_details": {
+                    "bootstrap_rotates_each_start": True,
+                    "browser_sessions_independently_revocable": True,
+                    "remote_plain_http_owner_auth": False,
+                    "websocket_subprotocol_bound": OWNER_WS_PROTOCOL,
+                },
             "peer_protocol": {
-                "transport": "TCP, port advertised via mDNS",
+                "transport": "authenticated peer TCP plus negotiated native QUIC file lanes",
                 "auth": "Ed25519 mutual signature in handshake",
                 "encryption": "X25519 ECDH + HKDF + ChaCha20-Poly1305 (64-bit nonce counter)",
                 "message_types": peer_msg_types,
-                "max_frame_bytes": wire_mod.MAX_FRAME,
+                    "message_type_inventory": (
+                        "declared daemon vocabulary; capability negotiation selects "
+                        "the subset used with a peer"
+                    ),
+                    "max_frame_bytes": wire_mod.MAX_FRAME,
                 "sessions": __import__("one_link.sessions").sessions.protocol_catalog(),
             },
             "local_capabilities": __import__(
                 "one_link.capabilities"
-            ).capabilities.LOCAL_CAPABILITIES,
+            ).capabilities.advertised_capabilities(),
             "performance": {
                 "cdc_cache": self.daemon._chunk_cache_stats(),
                 "file_transfer": {
@@ -20475,16 +27711,23 @@ class UIServer:
                 "sessions": self.daemon._session_stats(),
             },
             "outbound_destinations": outbound,
-            "no_external_telemetry": True,
+                "outbound_inventory_scope": (
+                    "declared destination classes, not proof of calls made; inspect "
+                    "/api/sovereignty/status and /api/sovereignty/outbound for live policy/logs"
+                ),
+                "no_external_telemetry": True,
             "sovereign_network": doctrine(),
-            # v0.20.7+ (Bundles 22-45): every sovereignty / privacy
-            # primitive shipped in this build, advertised so an
-            # inspecting user can see the full surface without having
-            # to grep the source tree. Each entry is a (name, status,
-            # one-line summary) — name maps to the module that
-            # implements it.
-            "sovereign_primitives": _enumerate_sovereign_primitives(),
-        })
+                # Importable sovereignty/privacy modules with an explicit
+                # primitive-vs-live status. Module presence is never treated as
+                # proof that a daemon path, deployment, or security guarantee is
+                # active.
+                "sovereign_primitives": _enumerate_sovereign_primitives(),
+                "feature_truth": _feature_truth_matrix(self.daemon),
+                "feature_truth_scope": (
+                    "current source and runtime wiring; soak_proven remains partial "
+                    "until archived physical multi-platform release evidence exists"
+                ),
+            })
 
     async def api_file_download(self, request: web.Request) -> web.StreamResponse:
         name = request.match_info["name"]
@@ -20496,21 +27739,13 @@ class UIServer:
         if path is None:
             return web.json_response({"error": "not found"}, status=404)
         mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        # Inline previews (PDF, video, audio, SVG) load this endpoint
+        # Inline previews (PDF, video, audio, raster images) load this endpoint
         # as an <iframe>/<video>/<audio> src on the same origin as the
-        # parent UI. The global security middleware sets
-        # X-Frame-Options: DENY which blocks ALL framing - including
-        # same-origin previews. Override here with the modern CSP
-        # frame-ancestors 'self' AND the legacy X-Frame-Options
-        # SAMEORIGIN so older browsers also render the preview. The
-        # 'self' origin is the only one that can ever hit this route
-        # (loopback bound + token gate), so same-origin framing is
-        # the maximum safe widening.
-        headers = {
-            "Content-Type": mime,
-            "X-Frame-Options": "SAMEORIGIN",
-            "Content-Security-Policy": "frame-ancestors 'self'",
-        }
+        # parent UI.  Active documents (HTML/SVG/XML/MHTML/etc.) and
+        # executable/script files take a separate fail-closed path in
+        # _untrusted_file_headers: attachment + octet-stream + nosniff + CSP
+        # sandbox.  They must never become a document or subresource under the
+        # authenticated One Link origin.
         # 2026-06-04: ``?dl=1`` forces a save-to-Downloads on click.
         # Without an explicit Content-Disposition the browser uses
         # the <a download> attribute as a hint only — Edge in
@@ -20520,18 +27755,12 @@ class UIServer:
         # filename so the original display name (the post-prefix
         # name, not the inbox-mangled on-disk name) is what lands
         # in the Downloads folder.
-        if request.query.get("dl") == "1":
-            from urllib.parse import quote as _urlquote
-            display = request.query.get("name") or path.name
-            try:
-                ascii_name = display.encode("ascii").decode("ascii")
-                fallback_disp = f'filename="{ascii_name}"'
-            except UnicodeEncodeError:
-                fallback_disp = 'filename="download"'
-            quoted = _urlquote(display, safe="")
-            headers["Content-Disposition"] = (
-                f"attachment; {fallback_disp}; filename*=UTF-8''{quoted}"
-            )
+        headers = _untrusted_file_headers(
+            name=path.name,
+            mime_type=mime,
+            force_download=request.query.get("dl") == "1",
+            download_name=request.query.get("name") or path.name,
+        )
         return web.FileResponse(path, headers=headers)
 
     # 2026-06-04: explicit MIME map for common media types. Python's
@@ -20617,37 +27846,18 @@ class UIServer:
         ):
             return web.json_response({"error": "bad blob hash"}, status=400)
         ext_hint = request.query.get("as")
-        # Frame-ancestors widening matches api_file_download so the
-        # lightbox / inline <img> can load this on the same origin.
-        frame_headers = {
-            "X-Frame-Options": "SAMEORIGIN",
-            "Content-Security-Policy": "frame-ancestors 'self'",
-        }
-        # 2026-06-04: same ?dl=1 ↦ Content-Disposition: attachment
-        # contract as api_file_download, so the chat UI's content-
-        # addressed download path also forces a save-to-Downloads
-        # instead of inline-open. Computed once and merged into
-        # whichever FileResponse path wins below.
-        def _disposition_headers(name_for_save: str | None) -> dict:
-            if request.query.get("dl") != "1":
-                return {}
-            from urllib.parse import quote as _urlquote
-            display = (
-                request.query.get("name")
-                or name_for_save
-                or f"file-{blob[:12]}"
+
+        def _headers(name_for_save: str | None, mime: str) -> dict[str, str]:
+            inferred_name = name_for_save or (
+                f"file-{blob[:12]}.{ext_hint}" if ext_hint else f"file-{blob[:12]}"
             )
-            try:
-                ascii_name = display.encode("ascii").decode("ascii")
-                fallback_disp = f'filename="{ascii_name}"'
-            except UnicodeEncodeError:
-                fallback_disp = 'filename="download"'
-            quoted = _urlquote(display, safe="")
-            return {
-                "Content-Disposition": (
-                    f"attachment; {fallback_disp}; filename*=UTF-8''{quoted}"
-                ),
-            }
+            return _untrusted_file_headers(
+                name=inferred_name,
+                mime_type=mime,
+                force_download=request.query.get("dl") == "1",
+                download_name=request.query.get("name") or inferred_name,
+            )
+
         # 1) Ledger path — covers ordinary peer-to-peer received files
         #    (they land in the inbox, not the blob store).
         rec = None
@@ -20659,26 +27869,15 @@ class UIServer:
                 path = Path(path_str)
                 if path.is_file():
                     mime = self._mime_for_blob(ext_hint, rec.name)
-                    return web.FileResponse(path, headers={
-                        "Content-Type": mime,
-                        **frame_headers,
-                        **_disposition_headers(rec.name),
-                    })
+                    return web.FileResponse(path, headers=_headers(rec.name, mime),
+                    )
         # 2) Blob store — folder-sync + pinned-peer content.
         blob_store = getattr(self.daemon, "blob_store", None)
-        if (
-            blob_store is not None
-            and len(blob) == 64
-            and blob_store.has(blob)
-        ):
+        if blob_store is not None and len(blob) == 64 and blob_store.has(blob):
             mime = self._mime_for_blob(ext_hint, rec.name if rec else None)
             return web.FileResponse(
                 blob_store.path(blob),
-                headers={
-                    "Content-Type": mime,
-                    **frame_headers,
-                    **_disposition_headers(rec.name if rec else None),
-                },
+                headers=_headers(rec.name if rec else None, mime),
             )
         return web.json_response({"error": "not found"}, status=404)
 
@@ -20716,34 +27915,25 @@ class UIServer:
                  "missing_path": str(path)},
                 status=410,
             )
-        # Prefer the ledger-recorded original filename for the
-        # Content-Disposition header so downloads / Save As use the
-        # name the recipient saw, not whatever the on-disk basename is.
-        # 2026-05-21 audit T3-L: the ledger row's ``name`` is peer-
-        # supplied at FILE_OFFER time; a malicious sender could plant
-        # CR/LF/quote bytes that header-smuggle in the
-        # Content-Disposition field. Use RFC 5987 ``filename*`` with
-        # URL-encoding for any non-token character + emit an
-        # ASCII-only fallback ``filename=`` stripped of CRLF/quote.
-        from urllib.parse import quote as _urlquote
+        # Prefer the ledger-recorded original filename so Save As uses the
+        # name the recipient saw, not a staging basename. The shared header
+        # builder neutralizes header injection and prevents an active document
+        # from executing under the UI origin.
         raw_name = (rec.metadata or {}).get("name") or path.name
-        # ASCII fallback: kill CR/LF/quote/control chars; clip to 200.
-        ascii_name = "".join(
-            c if 0x20 <= ord(c) < 0x7f and c not in ('"', "\\")
-            else "_"
-            for c in raw_name
-        )[:200] or "file"
-        encoded_name = _urlquote(raw_name, safe="")
-        mime = mimetypes.guess_type(ascii_name)[0] or "application/octet-stream"
+        mime = mimetypes.guess_type(str(raw_name))[0] or "application/octet-stream"
+        headers = _untrusted_file_headers(
+            name=str(raw_name),
+            mime_type=mime,
+            download_name=str(raw_name),
+        )
+        if "Content-Disposition" not in headers:
+            headers["Content-Disposition"] = _safe_content_disposition(
+                raw_name,
+                disposition="inline",
+            )
         return web.FileResponse(
             path,
-            headers={
-                "Content-Type": mime,
-                "Content-Disposition": (
-                    f'inline; filename="{ascii_name}"; '
-                    f"filename*=UTF-8''{encoded_name}"
-                ),
-            },
+            headers=headers,
         )
 
     # v0.9.0: inline preview support. Whitelisted text-y extensions
@@ -20769,11 +27959,27 @@ class UIServer:
         # voice-note flow).
         "mp3": "audio", "wav": "audio", "ogg": "audio", "oga": "audio",
         "m4a": "audio", "aac": "audio", "flac": "audio", "opus": "audio",
-        # v0.21.x: SVG rendered as an <img> (the daemon serves it as
-        # image/svg+xml; the browser displays it inline). HTML files
-        # render in a tightly-sandboxed iframe so a malicious sender
-        # can't run arbitrary JS in the host page's origin.
-        "svg": "image",
+        # Active web documents are previewed as inert source text returned in
+        # JSON. They are never streamed into an element under the authenticated
+        # UI origin: SVG/XML can contain script and external references, while
+        # browser sandbox behavior for MHTML/webarchive varies across engines.
+        "svg": "code",
+        "svgz": "code",
+        "html": "code",
+        "htm": "code",
+        "shtml": "code",
+        "shtm": "code",
+        "xhtml": "code",
+        "xht": "code",
+        "mht": "code",
+        "mhtml": "code",
+        "webarchive": "code",
+        "xbl": "code",
+        "xsl": "code",
+        "xslt": "code",
+        "rss": "code",
+        "atom": "code",
+        "eml": "code",
         # v0.21.x Ship 1: raster image preview — backs the folder
         # file browser's inline image render. Browser-native decoders
         # cover all of these; we just need to serve the bytes with
@@ -20781,7 +27987,6 @@ class UIServer:
         "png": "image", "jpg": "image", "jpeg": "image",
         "gif": "image", "webp": "image", "bmp": "image", "ico": "image",
         "avif": "image", "heic": "image", "heif": "image",
-        "html": "html-sandboxed", "htm": "html-sandboxed",
         # markdown variants → markdown renderer (subset)
         "md": "markdown", "markdown": "markdown", "mdown": "markdown",
         # code-ish: monospace + line numbers
@@ -20831,11 +28036,11 @@ class UIServer:
         # v0.9.5: PDFs render via the browser's built-in viewer
         # (<iframe src=/api/files/{name}>), not by reading the
         # bytes server-side. Return metadata only so a 100 MB PDF
-        # doesn't OOM the daemon. v0.21.x: video/audio/image/html
+        # doesn't OOM the daemon. v0.21.x: video/audio/raster-image
         # follow the same stream pattern - the daemon hands the UI
-        # a URL it can drop into a <video>, <audio>, <img>, or
-        # <iframe> element. No bytes read here.
-        if kind in ("pdf", "video", "audio", "image", "html-sandboxed"):
+        # a URL it can drop into a <video>, <audio>, <img>, or iframe
+        # element. Active content takes the inert JSON-text path below.
+        if kind in ("pdf", "video", "audio", "image"):
             from urllib.parse import quote as _urlquote
             return web.json_response({
                 "name": safe,
@@ -20898,8 +28103,6 @@ class UIServer:
         window to the front (and reuses an existing window for the same
         path). On macOS/Linux `open`/`xdg-open` already activate the
         file manager to the foreground."""
-        import sys
-        import subprocess
         if sys.platform == "win32":
             import ctypes
             with contextlib.suppress(Exception):
@@ -20911,11 +28114,7 @@ class UIServer:
             with contextlib.suppress(Exception):
                 # ASFW_ANY (-1): let explorer.exe call SetForegroundWindow.
                 ctypes.windll.user32.AllowSetForegroundWindow(-1)
-            subprocess.Popen(["explorer.exe", path])
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-        else:
-            subprocess.Popen(["xdg-open", path])
+        launch_system_opener(path, platform_name=sys.platform)
 
     async def api_file_reveal(self, request: web.Request) -> web.Response:
         # Open the OS file manager with the inbox file selected.
@@ -20936,23 +28135,9 @@ class UIServer:
         # windows on the developer's screen.
         if os.environ.get("ONE_LINK_DISABLE_REVEAL") == "1":
             return web.json_response({"ok": True, "disabled": True})
-        import subprocess
-        import sys
         try:
-            if sys.platform == "win32":
-                # v0.9.7: use list-form Popen — string form was
-                # silently filing under "didn't work" for some users.
-                # explorer.exe parses /select,<path> as a single
-                # argv token (comma is part of the syntax, not a
-                # separator), so pass it as one element.
-                subprocess.Popen(
-                    ["explorer.exe", f"/select,{path}"],
-                )
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", "-R", str(path)])
-            else:
-                subprocess.Popen(["xdg-open", str(path.parent)])
-        except OSError as e:
+            launch_system_opener(path, reveal=True, platform_name=sys.platform)
+        except (OSError, ValueError) as e:
             return web.json_response({"error": f"reveal failed: {e}"}, status=500)
         return web.json_response({"ok": True, "path": str(path)})
 
@@ -20965,21 +28150,9 @@ class UIServer:
         # actual Explorer windows.
         if os.environ.get("ONE_LINK_DISABLE_REVEAL") == "1":
             return web.json_response({"ok": True, "path": str(path), "disabled": True})
-        import sys
         try:
-            if sys.platform == "win32":
-                # v0.9.7: switch to os.startfile (ShellExecute under
-                # the hood). Reuses an existing Explorer window if
-                # one is open, displays significantly faster than
-                # spawning a fresh explorer.exe via subprocess.
-                os.startfile(str(path))
-            elif sys.platform == "darwin":
-                import subprocess
-                subprocess.Popen(["open", str(path)])
-            else:
-                import subprocess
-                subprocess.Popen(["xdg-open", str(path)])
-        except OSError as e:
+            launch_system_opener(path, platform_name=sys.platform)
+        except (OSError, ValueError) as e:
             return web.json_response({"error": f"reveal failed: {e}"}, status=500)
         return web.json_response({"ok": True, "path": str(path)})
 
@@ -21076,7 +28249,7 @@ class UIServer:
         # don't know the file extension from a content hash).
         ext = (request.query.get("as") or "").lstrip(".").lower()
         kind = self.PREVIEW_KINDS.get(ext) if ext else None
-        if kind in ("pdf", "video", "audio", "image", "html-sandboxed"):
+        if kind in ("pdf", "video", "audio", "image"):
             return web.json_response({
                 "blob_hash": blob_hash,
                 "kind": kind,
@@ -21126,15 +28299,17 @@ class UIServer:
             if guess:
                 ctype = guess
         size = self.daemon.blob_store.size(blob_hash)
+        name_hint = f"blob-{blob_hash[:12]}.{ext}" if ext else f"blob-{blob_hash[:12]}"
+        headers = _untrusted_file_headers(
+            name=name_hint,
+            mime_type=ctype,
+            force_download=request.query.get("dl") == "1",
+        )
+        headers["Content-Length"] = str(size)
+        headers.setdefault("Cache-Control", "private, max-age=300")
         resp = web.StreamResponse(
             status=200,
-            headers={
-                "Content-Type": ctype,
-                "Content-Length": str(size),
-                "X-Frame-Options": "SAMEORIGIN",
-                "Content-Security-Policy": "default-src 'self'; frame-ancestors 'self'",
-                "Cache-Control": "private, max-age=300",
-            },
+            headers=headers,
         )
         await resp.prepare(request)
         try:
@@ -21193,12 +28368,9 @@ class UIServer:
         size = target.stat().st_size
         # For stream-friendly kinds, hand back a URL the browser can
         # load directly rather than inlining bytes.
-        if kind in ("pdf", "video", "audio", "image", "html-sandboxed"):
+        if kind in ("pdf", "video", "audio", "image"):
             from urllib.parse import quote as _urlquote
-            stream = (
-                f"/api/folders/{_urlquote(name, safe='')}"
-                f"/file/{_urlquote(rel, safe='/')}/raw"
-            )
+            stream = f"/api/folders/{_urlquote(name, safe='')}/file/{_urlquote(rel, safe='/')}/raw"
             return web.json_response({
                 "name": target.name,
                 "extension": ext,
@@ -21261,16 +28433,15 @@ class UIServer:
         ctype, _ = mimetypes.guess_type(target.name)
         if not ctype:
             ctype = "application/octet-stream"
+        headers = _untrusted_file_headers(
+            name=target.name,
+            mime_type=ctype,
+            force_download=request.query.get("dl") == "1",
+        )
+        headers["Content-Length"] = str(target.stat().st_size)
         resp = web.StreamResponse(
             status=200,
-            headers={
-                "Content-Type": ctype,
-                "Content-Length": str(target.stat().st_size),
-                "X-Frame-Options": "SAMEORIGIN",
-                "Content-Security-Policy": (
-                    "default-src 'self'; frame-ancestors 'self'"
-                ),
-            },
+            headers=headers,
         )
         await resp.prepare(request)
         try:
@@ -21308,16 +28479,9 @@ class UIServer:
             return web.json_response({"ok": True, "throttled": True})
         if os.environ.get("ONE_LINK_DISABLE_REVEAL") == "1":
             return web.json_response({"ok": True, "disabled": True})
-        import sys
-        import subprocess
         try:
-            if sys.platform == "win32":
-                subprocess.Popen(["explorer.exe", f"/select,{target}"])
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", "-R", str(target)])
-            else:
-                subprocess.Popen(["xdg-open", str(target.parent)])
-        except OSError as e:
+            launch_system_opener(target, reveal=True, platform_name=sys.platform)
+        except (OSError, ValueError) as e:
             return web.json_response({"error": f"reveal failed: {e}"}, status=500)
         return web.json_response({"ok": True})
 
@@ -21539,40 +28703,71 @@ class UIServer:
     _update_cache: tuple[float, dict] | None = None
     _update_cache_ttl_s: float = 900.0  # 15 minutes
 
+    @contextlib.asynccontextmanager
+    async def _update_network_guard(self):
+        factory = getattr(self.daemon, "get_update_check_network_lock", None)
+        if callable(factory):
+            async with factory():
+                yield
+            return
+        # Lightweight embedders/tests that do not construct a full Daemon do
+        # not originate a background update task, so no shared lock is needed.
+        yield
+
+    def _update_check_policy_enabled(self) -> bool:
+        """Resolve one update-network policy for every API/daemon surface."""
+        from one_link import sovereignty as _sov
+
+        env_value = os.environ.get("ONE_LINK_UPDATE_CHECK")
+        setting_value: str | None = None
+        preset_value: str | None = None
+        state = self.daemon.state
+        if state is not None:
+            try:
+                setting_value = state.get_setting("update_check_enabled")
+                runtime_preset = getattr(self.daemon, "runtime_sovereignty_preset_name", None)
+                preset_value = (
+                    runtime_preset()
+                    if callable(runtime_preset)
+                    else state.get_setting("sovereignty_preset")
+                )
+            except Exception:
+                normalized = str(env_value or "").strip().lower()
+                if normalized not in {
+                    "0",
+                    "1",
+                    "false",
+                    "true",
+                    "no",
+                    "yes",
+                    "off",
+                    "on",
+                }:
+                    return False
+                preset_value = "quiet"
+        return _sov.resolve_update_check_enabled(
+            state_setting=setting_value,
+            env_var=env_value,
+            preset_name=preset_value,
+        )
+
     async def api_update_check(self, request: web.Request) -> web.Response:
         import time as _time
-        import os as _os
         from one_link import __version__ as _local_ver
         from one_link.update_check import fetch_latest
 
-        # May 15 2026 — sovereignty default. /api/update/check is the
-        # path the UI's Settings panel + update chip poll on tab-load.
-        # It stays OPT-IN by default to honor One Link's "no calls home"
-        # promise: the GitHub Releases poll is the ONLY external call
-        # surface in the daemon, so a fresh install must NOT reach out
-        # until the user enables it (env ONE_LINK_UPDATE_CHECK=1 OR the
-        # update_check_enabled setting). The update chip simply stays
-        # hidden until then. (2026-06-04: an earlier attempt to honor
-        # the preset default here was reverted — it would have made
-        # fresh installs poll GitHub automatically, breaking the
-        # privacy promise pinned by test_api_update_check_disabled_by_default.)
-        env_on = _os.environ.get(
-            "ONE_LINK_UPDATE_CHECK", ""
-        ).strip().lower() in ("1", "true", "yes", "on")
-        setting_on = False
-        if self.daemon.state is not None:
-            with contextlib.suppress(Exception):
-                setting_on = (self.daemon.state.get_setting(
-                    "update_check_enabled"
-                ) or "").strip().lower() in ("1", "true", "yes", "on")
-        if not (env_on or setting_on):
+        # All update endpoints honor the same sovereignty resolver as the
+        # background loop. The default Just Works preset discloses its
+        # six-hour GitHub release check; Quiet and Off-grid make no call.
+        if not self._update_check_policy_enabled():
             return web.json_response({
                 "status": "disabled",
                 "local_version": _local_ver,
                 "reason": (
-                    "update-check is opt-in for sovereignty. Enable in "
-                    "Settings or set ONE_LINK_UPDATE_CHECK=1."
-                ),
+                        "update-check is disabled by the active sovereignty "
+                        "policy. Use Just Works to permit update checks; its "
+                        "Settings toggle can still disable them."
+                    ),
             })
 
         force_fresh = request.query.get("fresh") in ("1", "true", "yes")
@@ -21586,197 +28781,407 @@ class UIServer:
         # default executor so we don't block the event loop on slow
         # networks; the timeout inside fetch_latest is the inner limit.
         loop = asyncio.get_running_loop()
-        try:
-            result = await loop.run_in_executor(
-                None, lambda: fetch_latest(_local_ver)
+        async with self._update_network_guard():
+            # The policy may have tightened while this request waited for a
+            # background check. Never begin a call on the stale first result.
+            if not self._update_check_policy_enabled():
+                return web.json_response(
+                    {
+                        "status": "disabled",
+                        "local_version": _local_ver,
+                        "reason": "update network access was disabled",
+                    }
+                )
+            try:
+                result = await loop.run_in_executor(None, lambda: fetch_latest(_local_ver))
+            except Exception as e:  # safety net — fetch_latest already swallows
+                log.warning("update_check unexpected error: %s", e)
+                payload = {
+                    "status": "unknown",
+                    "local_version": _local_ver,
+                    "error": str(e),
+                }
+            else:
+                payload = result.to_dict()
+
+        with contextlib.suppress(Exception):
+            self.daemon.log_outbound_call(
+                destination="api.github.com (Releases)",
+                kind="update_check",
+                ok=payload.get("status") != "unknown",
+                note=(f"local={_local_ver} latest={payload.get('latest_version') or '?'}"),
             )
-        except Exception as e:  # safety net — fetch_latest already swallows
-            log.warning("update_check unexpected error: %s", e)
-            payload = {
-                "status": "unknown",
-                "local_version": _local_ver,
-                "error": str(e),
-            }
-        else:
-            payload = result.to_dict()
 
         self._update_cache = (now, payload)
         return web.json_response({**payload, "cached": False})
 
     # ─── /api/update/plan ───────────────────────────────────────────
-    # Inspects the latest GitHub Release, picks the wheel for this
-    # OS+ABI, looks up its SHA-256 in SHA256SUMS. Read-only: does
-    # NOT download or install anything. The UI calls this to decide
-    # whether to show the "Update now" button as enabled, and to
-    # display the wheel filename + size to the user before they click.
+    # Discover the complete standalone release contract. This is presentation
+    # data only: the external helper independently re-discovers the exact
+    # pinned tag/id and authenticates every signed artifact before activation.
     async def api_update_plan(self, request: web.Request) -> web.Response:
-        from one_link.updater import build_install_plan
-        loop = asyncio.get_running_loop()
-        try:
-            plan = await loop.run_in_executor(None, build_install_plan)
-        except Exception as e:
-            log.warning("update_plan unexpected error: %s", e)
+        from one_link.standalone_updater import build_standalone_install_plan
+        from one_link import __version__ as _local_ver
+
+        capability = await self._external_update_capability(fresh=True)
+        if not capability.available:
             return web.json_response(
-                {"status": "error", "error": str(e)}, status=200
+                {
+                    "status": "install_unavailable",
+                    "error": "transactional installation is unavailable in this runtime",
+                    "reason": capability.reason,
+                },
+                status=409,
             )
-        return web.json_response(plan.to_dict())
+        if not self._update_check_policy_enabled():
+            return web.json_response(
+                {
+                    "status": "disabled",
+                    "error": "update network access is disabled by sovereignty policy",
+                }
+            )
+        loop = asyncio.get_running_loop()
+        async with self._update_network_guard():
+            if not self._update_check_policy_enabled():
+                return web.json_response(
+                    {
+                        "status": "disabled",
+                        "error": "update network access was disabled",
+                    }
+                )
+            try:
+                plan = await loop.run_in_executor(
+                    None,
+                    lambda: build_standalone_install_plan(
+                        current_version=_local_ver,
+                        platform_key=capability.platform,
+                    ),
+                )
+            except Exception as e:
+                log.warning("update_plan unexpected error: %s", e)
+                return web.json_response({"status": "error", "error": str(e)}, status=200)
+        return web.json_response(
+            {
+                **plan.to_dict(),
+                "install_available": True,
+            }
+        )
 
     # ─── /api/update/install ────────────────────────────────────────
-    # GATED OFF by default. Setting ONE_LINK_EXPERIMENTAL_AUTOINSTALL=1
-    # in the daemon's environment enables it. The destructive parts
-    # (pip install + daemon respawn) need per-OS integration testing
-    # before going on by default; until then the UI's update banner
-    # falls back to the "View release" link and the user runs
-    # `pip install --upgrade one_link_native` manually.
-    #
-    # Flow when enabled:
-    #   1. Re-fetch the install plan (current OS, matched wheel).
-    #   2. Download wheel to a temp file.
-    #   3. SHA-256 verify against the release's SHA256SUMS.
-    #   4. Generate an updater script that:
-    #        a. Waits for THIS daemon's PID to exit
-    #        b. Runs pip install <wheel>
-    #        c. Relaunches the daemon
-    #   5. Spawn the updater script as a detached subprocess.
-    #   6. Return 202 to the UI.
-    #   7. Initiate daemon shutdown after sending the response.
-    #
-    # The client should expect the WebSocket to drop momentarily and
-    # auto-reconnect to the freshly-respawned daemon.
+    def _ui_update_handoff_blockers(self) -> dict[str, int]:
+        """Return HTTP-ingress work that cannot be interrupted safely."""
+
+        blockers: dict[str, int] = {}
+        for name, count in (
+            ("phone_uploads", len(getattr(self, "_phone_uploads", {}))),
+            (
+                "phone_uploads_finalizing",
+                len(getattr(self, "_phone_finalizing_uploads", {})),
+            ),
+            (
+                "ui_deliveries",
+                sum(1 for task in getattr(self, "_ui_delivery_tasks", set()) if not task.done()),
+            ),
+        ):
+            if count:
+                blockers[name] = count
+        return blockers
+
     async def api_update_install(self, request: web.Request) -> web.Response:
-        import os as _os
-        # v0.21.x: auto-install is ON by default. Users can opt out
-        # via Settings -> About -> 'Auto-install updates' toggle
-        # (persisted as the 'auto_install_updates' setting). The
-        # legacy ONE_LINK_EXPERIMENTAL_AUTOINSTALL env var still
-        # works as a hard override: setting it to '0' disables
-        # auto-install regardless of the user setting (for shared
-        # / locked-down deployments where the operator doesn't
-        # want users to update on their own).
-        env_gate = _os.environ.get("ONE_LINK_EXPERIMENTAL_AUTOINSTALL", "")
-        if env_gate in ("0", "false", "no"):
-            return web.json_response({
-                "status": "disabled",
-                "error": (
-                    "Auto-install is disabled by your environment "
-                    "(ONE_LINK_EXPERIMENTAL_AUTOINSTALL=0). Download "
-                    "the latest release manually from the One Link "
-                    "GitHub releases page."
-                ),
-            }, status=503)
-        user_pref = "1"
-        if self.daemon.state is not None:
-            with contextlib.suppress(Exception):
-                stored = self.daemon.state.get_setting("auto_install_updates")
-                if stored is not None:
-                    user_pref = str(stored)
-        if user_pref in ("0", "false", "no"):
-            return web.json_response({
-                "status": "disabled",
-                "error": (
-                    "Auto-install is turned off in Settings. Turn "
-                    "'Auto-install updates' on in Settings -> About "
-                    "to enable, or download the latest release "
-                    "manually from the One Link GitHub releases page."
-                ),
-            }, status=503)
+        """Launch one authenticated external A/B update and clean handoff."""
 
-        from one_link.updater import (
-            build_install_plan, download_to_temp, sha256_file,
-            write_updater_script, spawn_detached,
+        from one_link import __version__ as _local_ver
+        from one_link.lockbox import LockBox
+        from one_link.recovery_api import (
+            RecoveryTransactionError,
+            recovery_transaction_guard,
         )
-        loop = asyncio.get_running_loop()
+        from one_link.standalone_updater import build_standalone_install_plan
+        from one_link.update_helper import (
+            cancel_external_helper_launch,
+            prepare_external_helper_launch,
+            spawn_external_update_helper,
+        )
+        from one_link.update_transaction import acquire_update_state_authority
 
-        # Step 1: plan
-        plan = await loop.run_in_executor(None, build_install_plan)
-        if plan.status != "ready" or plan.wheel is None:
-            return web.json_response({
-                "status": "no_match",
-                "error": plan.error or "no wheel available for this host",
-                "plan": plan.to_dict(),
-            }, status=409)
-        # Guarded just above (plan.wheel is None -> 409 return). Bind a
-        # local so the narrowing also holds inside the executor lambda.
-        wheel = plan.wheel
-        assert wheel is not None
-
-        # Step 2: download
         try:
-            wheel_path = await loop.run_in_executor(
-                None,
-                lambda: download_to_temp(
-                    wheel.asset_url,
-                    expected_size=wheel.size,
-                ),
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad json"}, status=400)
+        if (
+            not isinstance(data, dict)
+            or set(data) != {"confirmed_install"}
+            or data.get("confirmed_install") is not True
+        ):
+            return web.json_response(
+                {
+                    "error": "confirmed_install=true is required as the only request field",
+                    "code": "install_confirmation_required",
+                },
+                status=409,
             )
-        except Exception as e:
-            log.exception("update download failed")
-            return web.json_response({
-                "status": "download_failed", "error": str(e),
-            }, status=502)
+        if self._rate_limited(
+            "update_install",
+            self._client_rate_key(request),
+            limit=1,
+            window_seconds=60.0,
+        ):
+            return web.json_response(
+                {
+                    "error": "too many update attempts; wait a minute",
+                },
+                status=429,
+            )
+        install_lock = self._update_install_lock
+        if install_lock.locked() or self._update_handoff_committed:
+            return web.json_response(
+                {
+                    "status": "handoff_in_progress",
+                    "error": "an authenticated update handoff is already in progress",
+                },
+                status=409,
+            )
 
-        # Step 3: SHA-256 verify (mandatory; abort if missing/mismatch)
-        expected = plan.wheel.expected_sha256
-        if not expected:
+        async with install_lock:
+            if self._update_handoff_committed:
+                return web.json_response(
+                    {
+                        "status": "handoff_in_progress",
+                        "error": "an authenticated update handoff is already in progress",
+                    },
+                    status=409,
+                )
+            if not self._update_check_policy_enabled():
+                return web.json_response(
+                    {
+                        "status": "disabled",
+                        "error": "update network access is disabled by sovereignty policy",
+                    },
+                    status=409,
+                )
+            capability = await self._external_update_capability(fresh=True)
+            if not capability.available:
+                return web.json_response(
+                    {
+                        "status": "install_unavailable",
+                        "error": "transactional installation is unavailable in this runtime",
+                        "reason": capability.reason,
+                    },
+                    status=409,
+                )
+
+            loop = asyncio.get_running_loop()
+            async with self._update_network_guard():
+                if not self._update_check_policy_enabled():
+                    return web.json_response(
+                        {
+                            "status": "disabled",
+                            "error": "update network access was disabled",
+                        },
+                        status=409,
+                    )
+                try:
+                    plan = await loop.run_in_executor(
+                        None,
+                        lambda: build_standalone_install_plan(
+                            current_version=_local_ver,
+                            platform_key=capability.platform,
+                        ),
+                    )
+                except Exception:
+                    incident = secrets.token_hex(6)
+                    log.exception(
+                        "standalone update discovery failed incident=%s",
+                        incident,
+                    )
+                    return web.json_response(
+                        {
+                            "status": "failed_closed",
+                            "error": ("the authenticated release could not be discovered safely"),
+                            "incident": incident,
+                        },
+                        status=502,
+                    )
+            if plan.status != "ready_for_authentication":
+                status_code = 409 if plan.status == "not_newer" else 502
+                return web.json_response(
+                    {
+                        **plan.to_dict(),
+                        "error": plan.error or "release is not ready for authentication",
+                    },
+                    status=status_code,
+                )
+            if (
+                not plan.tag
+                or type(plan.release_id) is not int
+                or plan.release_id <= 0
+                or plan.platform != capability.platform
+            ):
+                return web.json_response(
+                    {
+                        "status": "unverified",
+                        "error": "release discovery returned incomplete authority",
+                    },
+                    status=502,
+                )
+
+            # Re-hash after the network wait so local bundle replacement cannot
+            # race the first capability proof.
+            capability = await self._external_update_capability(fresh=True)
+            if not capability.available or capability.platform != plan.platform:
+                return web.json_response(
+                    {
+                        "status": "install_unavailable",
+                        "error": "the managed application changed during update planning",
+                        "reason": capability.reason,
+                    },
+                    status=409,
+                )
+            ui_blockers = self._ui_update_handoff_blockers()
+            if ui_blockers:
+                return web.json_response(
+                    {
+                        "status": "busy",
+                        "error": "finish active uploads before installing the update",
+                        "blockers": ui_blockers,
+                    },
+                    status=409,
+                )
+
+            state = self.daemon.state
+            lockbox = getattr(state, "_lockbox", None) if state is not None else None
+            if not isinstance(lockbox, LockBox):
+                return web.json_response(
+                    {
+                        "status": "install_unavailable",
+                        "error": "the protected local update authority is unavailable",
+                        "reason": "lockbox_unavailable",
+                    },
+                    status=503,
+                )
+            begin_handoff = getattr(self.daemon, "begin_update_handoff", None)
+            cancel_handoff = getattr(self.daemon, "cancel_update_handoff", None)
+            if not callable(begin_handoff) or not callable(cancel_handoff):
+                return web.json_response(
+                    {
+                        "status": "install_unavailable",
+                        "error": "the daemon does not support safe update draining",
+                        "reason": "handoff_drain_unavailable",
+                    },
+                    status=503,
+                )
+
+            launch = None
+            authority_key: bytes | None = None
+            draining = False
             try:
-                wheel_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            return web.json_response({
-                "status": "unverified",
-                "error": (
-                    "SHA256SUMS did not contain a hash for the wheel. "
-                    "Refusing to install an unverified binary."
-                ),
-            }, status=409)
-        got = await loop.run_in_executor(None, sha256_file, wheel_path)
-        if got != expected:
-            try:
-                wheel_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            return web.json_response({
-                "status": "hash_mismatch",
-                "error": f"expected {expected}, got {got}",
-            }, status=409)
+                assert capability.data_root is not None
+                assert capability.install_root is not None
+                assert capability.platform is not None
+                with recovery_transaction_guard(capability.data_root):
+                    blockers = begin_handoff()
+                    if blockers:
+                        return web.json_response(
+                            {
+                                "status": "busy",
+                                "error": "finish active calls or transfers before installing",
+                                "blockers": blockers,
+                            },
+                            status=409,
+                        )
+                    draining = True
+                    ui_blockers = self._ui_update_handoff_blockers()
+                    if ui_blockers:
+                        cancel_handoff()
+                        draining = False
+                        return web.json_response(
+                            {
+                                "status": "busy",
+                                "error": "finish active uploads before installing the update",
+                                "blockers": ui_blockers,
+                            },
+                            status=409,
+                        )
+                    acquired_authority = await asyncio.to_thread(
+                        acquire_update_state_authority,
+                        capability.data_root / "updates",
+                        lockbox,
+                    )
+                    authority_key = acquired_authority
+                    launch = await asyncio.to_thread(
+                        prepare_external_helper_launch,
+                        install_root=capability.install_root,
+                        data_root=capability.data_root,
+                        authority_key=acquired_authority,
+                        current_version=_local_ver,
+                        expected_tag=plan.tag,
+                        expected_release_id=plan.release_id,
+                        platform_key=capability.platform,
+                        parent_pid=os.getpid(),
+                        home_override=capability.home_override,
+                    )
+                    helper_pid = await asyncio.to_thread(
+                        spawn_external_update_helper,
+                        launch,
+                    )
+            except RecoveryTransactionError as exc:
+                if draining:
+                    cancel_handoff()
+                return web.json_response(
+                    {
+                        "status": "busy",
+                        "error": str(exc),
+                        "reason": "recovery_transaction_in_progress",
+                    },
+                    status=409,
+                )
+            except Exception as exc:
+                if launch is not None and authority_key is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.to_thread(
+                            cancel_external_helper_launch,
+                            launch,
+                            authority_key,
+                            result_code="parent_spawn_failed",
+                        )
+                if draining:
+                    cancel_handoff()
+                incident = secrets.token_hex(6)
+                log.exception("external update handoff failed incident=%s", incident)
+                return web.json_response(
+                    {
+                        "status": "failed_closed",
+                        "error": "the authenticated update handoff failed safely",
+                        "incident": incident,
+                    },
+                    status=503,
+                )
 
-        # Step 4: write updater script
-        script_path = await loop.run_in_executor(
-            None,
-            lambda: write_updater_script(
-                wheel_path,
-                parent_pid=_os.getpid(),
-            ),
-        )
+            self._update_handoff_committed = True
+            log.info(
+                "authenticated external update accepted pid=%d tag=%s",
+                helper_pid,
+                plan.tag,
+            )
 
-        # Step 5: spawn detached
-        updater_pid = await loop.run_in_executor(
-            None, spawn_detached, script_path
-        )
+            async def _shutdown_for_update() -> None:
+                await self.daemon.request_shutdown(delay_s=0.75)
 
-        # Step 6: tell client we're going down
-        resp = web.json_response({
-            "status": "installing",
-            "tag": plan.tag,
-            "wheel": plan.wheel.filename,
-            "updater_pid": updater_pid,
-            "hint": (
-                "The daemon is shutting down. The updater will install the "
-                "new wheel and start a fresh daemon. Your browser tab will "
-                "reconnect automatically once the new daemon is ready."
-            ),
-        })
-
-        # Step 7: shut down AFTER the response is sent. Schedule on
-        # the event loop so the response is flushed first.
-        async def _shutdown_soon():
-            await asyncio.sleep(0.5)
-            log.info("auto-update: daemon exiting so updater can run")
-            # Hard exit — the updater is responsible for restart.
-            _os._exit(0)
-        asyncio.create_task(_shutdown_soon())
-
-        return resp
+            asyncio.create_task(_shutdown_for_update())
+            return web.json_response(
+                {
+                    "status": "handoff_started",
+                    "ok": True,
+                    "tag": plan.tag,
+                    "helper_pid": helper_pid,
+                    "message": (
+                        "The authenticated update helper is verifying the release. "
+                        "One Link will restart and roll back automatically unless "
+                        "the exact replacement passes daemon and UI health checks."
+                    ),
+                },
+                status=202,
+            )
 
     async def api_daemon_shutdown(self, request: web.Request) -> web.Response:
         """Gracefully shut down the daemon process. The UI uses this
@@ -21816,7 +29221,8 @@ class UIServer:
                     "re-run the daemon command manually. Set "
                     "confirmed_shutdown=true to proceed."
                 ),
-            }, status=409)
+            }, status=409,
+            )
 
         reason = str(data.get("reason") or "user_request")[:64]
         log.info("daemon shutdown requested via API (reason=%s)", reason)
@@ -21830,20 +29236,17 @@ class UIServer:
         })
 
         async def _shutdown_soon():
-            await asyncio.sleep(0.5)
-            log.info("daemon shutdown: exiting with code 0")
-            # Was `_os._exit(0)` — but `_os` is never imported in this
-            # handler (module-level import is plain `os`), so the
-            # shutdown endpoint raised NameError instead of exiting.
-            # External-audit / mypy caught this real runtime bug.
-            os._exit(0)
+            log.info("daemon shutdown: requesting clean shutdown")
+            await self.daemon.request_shutdown(delay_s=0.5)
         asyncio.create_task(_shutdown_soon())
 
         return resp
 
     # ─── WebSocket events ─────────────────────────────────────────────
     async def ws_events(self, request: web.Request) -> web.WebSocketResponse:
-        ws = web.WebSocketResponse(heartbeat=30)
+        ws = web.WebSocketResponse(heartbeat=30,
+            protocols=(OWNER_WS_PROTOCOL,),
+        )
         await ws.prepare(request)
         self._ws_clients.add(ws)
         # Send an initial snapshot so the UI has state before any pushes.
@@ -21911,30 +29314,53 @@ class UIServer:
             log.debug("ws send failed: %s", exc)
 
     # ─── lifecycle ────────────────────────────────────────────────────
+    async def _start_local_stun(self, bind_host: str) -> None:
+        """Start private LAN address discovery without delaying UI startup."""
+
+        service = LocalStunService()
+        try:
+            await service.start(bind_host)
+        except (OSError, RuntimeError, ValueError) as exc:
+            # Chromium can still use numeric/mDNS host candidates and an
+            # operator-configured public STUN/TURN path remains available.
+            # Treat local-assist startup as a diagnosed degradation, not a
+            # reason to take the owner UI and daemon offline.
+            log.warning("local WebRTC address discovery unavailable: %s", exc)
+            self._local_stun = None
+            return
+        self._local_stun = service
+        log.info(
+            "local WebRTC address discovery up — UDP %s (LAN-scoped, no relay)",
+            ",".join(str(port) for port in service.ports.values()),
+        )
+
     async def start(self) -> int:
+        self._closing = False
+        # ``ui.token`` and ``server.port`` are process-lifetime publications.
+        # Invalidate prior values before the first await so a stale file cannot
+        # be mistaken for this process reaching readiness.  The authenticated
+        # control channel remains the authority while startup is in progress.
+        _remove_stale_runtime_publication(
+            _token_path(),
+            label="UI owner token",
+        )
+        _remove_stale_runtime_publication(
+            _server_port_path(),
+            label="UI server port",
+        )
+        try:
+            await _blocking_file_io(self._reclaim_crash_orphaned_phone_uploads)
+        except Exception:
+            # Reconciliation is fail-closed: an audit failure retains every
+            # candidate but must not make the local UI unavailable.
+            log.exception("phone upload crash-orphan reconciliation failed")
         self.runner = web.AppRunner(self.app, access_log=None)
         await self.runner.setup()
-        # v0.15.2 — LAN-bind opt-in via env var. Default 127.0.0.1
-        # 2026-05-22 UX: the default is now ``0.0.0.0`` (LAN-bound)
-        # so a phone / second laptop on the same Wi-Fi can complete
-        # the device-invite QR pair flow WITHOUT the user having to
-        # set ``ONE_LINK_BIND_HOST=0.0.0.0`` first. Token auth +
-        # CSRF still gate every mutating endpoint; the bind change
-        # only changes which network interface answers — it does NOT
-        # widen authorization. Tests and headless / loopback-only
-        # deployments can still force ``127.0.0.1`` via the env var.
-        #
-        # Why this is safe:
-        #   * ``_guarded`` requires a valid bearer token on every
-        #     POST/PUT/PATCH/DELETE.
-        #   * ``_csrf_origin_ok`` (T2-O) checks Origin/CSRF for
-        #     non-GET routes.
-        #   * The device-invite tokens are short-lived (5 min) and
-        #     single-use.
-        #   * On Windows the firewall prompt scopes the daemon to
-        #     "Private networks only" by default; that closes
-        #     coffee-shop exposure even before token auth.
-        bind_host = os.environ.get("ONE_LINK_BIND_HOST") or "0.0.0.0"
+        # Owner UI is local by default. Phone/LAN pairing is an explicit
+        # ``--lan`` opt-in; even then, remote plain HTTP refuses owner
+        # bearer/session authentication and only public short-lived pairing
+        # flows remain available without TLS.
+        bind_host = os.environ.get("ONE_LINK_BIND_HOST") or "127.0.0.1"
         # Try the well-known port first so browser tabs survive restarts.
         # Fall through 7118..7132 if taken, then OS-assigned random as
         # last resort.
@@ -21996,7 +29422,7 @@ class UIServer:
             self.site = site
             self.port = sock.getsockname()[1]
         self.bind_host = bind_host
-        _server_port_path().write_text(str(self.port))
+        await self._start_local_stun(bind_host)
         # v0.20.7 (security audit M29): wrap the UI token with the
         # daemon's lockbox WHEN explicit passphrase mode is active.
         # Silent-mode lockboxes (the default at-rest wrap for
@@ -22026,10 +29452,22 @@ class UIServer:
             log.warning(
                 "UI token wrap failed (%s); falling back to cleartext", e,
             )
-        _token_path().write_text(token_disk)
-        # POSIX permission tighten so a multi-user box doesn't read it.
-        with contextlib.suppress(OSError, NotImplementedError):
-            os.chmod(_token_path(), 0o600)
+        control_ipc.write_private_bytes_strict(
+            _token_path(),
+            token_disk.encode("ascii"),
+            max_bytes=64 * 1024,
+            label="UI owner token",
+        )
+        # Publish the port last: it is the filesystem readiness marker, so any
+        # observer that sees it is guaranteed to have a current token file
+        # from the same startup attempt. Authenticated launchers still verify
+        # the live control and HTTP instance before using the in-memory token.
+        control_ipc.write_private_bytes_strict(
+            _server_port_path(),
+            str(self.port).encode("ascii"),
+            max_bytes=64,
+            label="UI server port",
+        )
         # v0.21.x: prune revoked + stale ui_sessions rows on every
         # daemon startup so a long-running install doesn't accumulate
         # forensic history of every browser that ever signed in.
@@ -22047,8 +29485,7 @@ class UIServer:
                 )
                 if pruned > 0:
                     log.info(
-                        "ui_sessions: auto-pruned %d row(s) older than "
-                        "%d days", pruned,
+                        "ui_sessions: auto-pruned %d row(s) older than %d days", pruned,
                         SESSION_AUTOPRUNE_REVOKED_AFTER_DAYS,
                     )
             except Exception as e:  # pragma: no cover - defensive
@@ -22068,6 +29505,7 @@ class UIServer:
         self.https_cert_fp_sha256 = None
         await self._start_https_listener(bind_host)
         self._courier_monitor_task = asyncio.create_task(self._courier_monitor_loop())
+        self._phone_upload_sweeper_task = asyncio.create_task(self._phone_upload_sweeper_loop())
 
         return self.port
 
@@ -22140,30 +29578,98 @@ class UIServer:
         )
 
     async def stop(self) -> None:
+        self._closing = True
+        for peer in list(self.peer_rtc.list_peers()):
+            with contextlib.suppress(Exception):
+                self.peer_rtc._close_peer(peer)
+        ingress_tasks = list(getattr(self, "_peer_dc_tasks", set()))
+        for task in ingress_tasks:
+            task.cancel()
+        if ingress_tasks:
+            await asyncio.gather(*ingress_tasks, return_exceptions=True)
+        self._peer_dc_tasks.clear()
+        self._peer_dc_task_counts.clear()
+        if self._phone_upload_sweeper_task is not None:
+            self._phone_upload_sweeper_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._phone_upload_sweeper_task
+            self._phone_upload_sweeper_task = None
         if self._courier_monitor_task is not None:
             self._courier_monitor_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._courier_monitor_task
             self._courier_monitor_task = None
+        delivery_tasks = list(getattr(self, "_ui_delivery_tasks", set()))
+        for task in delivery_tasks:
+            task.cancel()
+        if delivery_tasks:
+            await asyncio.gather(*delivery_tasks, return_exceptions=True)
+        self._ui_delivery_tasks.clear()
+        for upload_id in list(getattr(self, "_phone_uploads", {})):
+            await self._discard_phone_upload(upload_id)
+        for claim in list(self._phone_upload_intents.values()):
+            if isinstance(claim, asyncio.Future) and not claim.done():
+                claim.set_result(None)
+        self._phone_upload_intents.clear()
+        upload_reservations = getattr(self, "_upload_reservations", None)
+        if upload_reservations is not None and not getattr(
+            self, "_upload_reservations_shared", False
+        ):
+            upload_reservations.clear()
         for ws in list(self._ws_clients):
             try:
                 await ws.close()
-            except Exception:
-                pass
+            except Exception as close_exc:
+                report_best_effort_failure(
+                    log,
+                    "shutdown_websocket",
+                    close_exc,
+                )
         self._ws_clients.clear()
+        if self._local_stun is not None:
+            await self._local_stun.stop()
+            self._local_stun = None
         if self.runner:
             await self.runner.cleanup()
+        # Withdraw readiness before deleting the bearer.  Clean shutdowns
+        # should not leave either process-lifetime publication behind; crash
+        # recovery performs the same invalidation at the next start.
+        for path, label in (
+            (_server_port_path(), "UI server port"),
+            (_token_path(), "UI owner token"),
+        ):
+            try:
+                _remove_stale_runtime_publication(path, label=label)
+            except RuntimeError as exc:
+                log.error("runtime publication cleanup failed: %s", exc)
+        delivery_store = getattr(self, "_ui_delivery_idempotency", None)
+        if delivery_store is not None:
+            delivery_store.close()
 
 
 def read_server_port() -> int:
     p = _server_port_path()
     if not p.exists():
         raise RuntimeError("UI server not running (no server.port file)")
-    return int(p.read_text().strip())
+    return int(
+        control_ipc.read_private_bytes_strict(
+            p,
+            max_bytes=64,
+            label="UI server port",
+        )
+        .decode("ascii").strip())
 
 
 def read_ui_token() -> str:
     p = _token_path()
     if not p.exists():
         raise RuntimeError("UI token file missing")
-    return p.read_text().strip()
+    return (
+        control_ipc.read_private_bytes_strict(
+            p,
+            max_bytes=64 * 1024,
+            label="UI owner token",
+        )
+        .decode("utf-8")
+        .strip()
+    )

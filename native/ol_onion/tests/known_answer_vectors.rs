@@ -1,8 +1,8 @@
-//! Known-answer test vectors (KAT) for ol_onion.
+//! Known-answer test vectors (KAT) for `ol_onion`.
 //!
 //! The onion building loop calls into the RNG for ephemeral
 //! material — to get DETERMINISTIC outputs, the KAT test uses a
-//! seeded RNG (rand_chacha::ChaCha20Rng with a fixed seed).
+//! seeded RNG (`rand_chacha::ChaCha20Rng` with a fixed seed).
 //!
 //! Pinning the exact byte output of a small fixed circuit catches:
 //! - ChaCha20-Poly1305 / BLAKE3 primitive changes upstream.
@@ -14,6 +14,7 @@
 //! intentionally changes.
 
 use rand::SeedableRng;
+use std::fmt::Write as _;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use ol_onion::keyderiv::derive_layer_key_sender;
@@ -49,7 +50,7 @@ const EXPECTED_OUTERMOST_AAD_HEX: &str =
 fn hex(b: &[u8]) -> String {
     let mut s = String::with_capacity(b.len() * 2);
     for &byte in b {
-        s.push_str(&format!("{:02x}", byte));
+        write!(&mut s, "{byte:02x}").expect("writing to String is infallible");
     }
     s
 }
@@ -121,10 +122,10 @@ fn kat_outer_packet_length_pinned() {
 #[test]
 fn kat_layer_key_derivation_pinned() {
     // Fixed sender ephemeral + fixed relay pubkey → deterministic LayerKey.
-    let sender_esk = StaticSecret::from([0x55u8; 32]);
-    let relay_sk = StaticSecret::from([0xAAu8; 32]);
-    let relay_pk = PublicKey::from(&relay_sk);
-    let key = derive_layer_key_sender(&sender_esk, &relay_pk);
+    let sender_secret = StaticSecret::from([0x55u8; 32]);
+    let relay_secret = StaticSecret::from([0xAAu8; 32]);
+    let relay_public = PublicKey::from(&relay_secret);
+    let key = derive_layer_key_sender(&sender_secret, &relay_public);
     let key_hex = hex(key.as_bytes());
     if EXPECTED_LAYER_KEY_HEX.is_empty() {
         if maybe_regen() {
@@ -162,12 +163,12 @@ fn kat_layer_key_sender_and_relay_paths_match() {
     // Property test of derive_layer_key; KAT pins the SAME byte
     // sequence is obtained from both paths.
     use ol_onion::keyderiv::derive_layer_key_relay;
-    let sender_esk = StaticSecret::from([0x55u8; 32]);
-    let relay_sk = StaticSecret::from([0xAAu8; 32]);
-    let relay_pk = PublicKey::from(&relay_sk);
-    let sender_epk = PublicKey::from(&sender_esk);
-    let k_send = derive_layer_key_sender(&sender_esk, &relay_pk);
-    let k_relay = derive_layer_key_relay(&relay_sk, &sender_epk);
+    let sender_secret = StaticSecret::from([0x55u8; 32]);
+    let relay_secret = StaticSecret::from([0xAAu8; 32]);
+    let relay_public = PublicKey::from(&relay_secret);
+    let sender_public = PublicKey::from(&sender_secret);
+    let k_send = derive_layer_key_sender(&sender_secret, &relay_public);
+    let k_relay = derive_layer_key_relay(&relay_secret, &sender_public);
     assert_eq!(k_send, k_relay);
 }
 
@@ -182,19 +183,18 @@ fn kat_end_to_end_payload_pinned() {
         PeelOutcome::Forward {
             inner_packet_bytes, ..
         } => OnionPacket::decode(&inner_packet_bytes).unwrap(),
-        _ => panic!(),
+        PeelOutcome::Deliver { .. } => panic!(),
     };
     let o2 = peel_one_layer(&r2_sk, &packet).unwrap();
     packet = match o2 {
         PeelOutcome::Forward {
             inner_packet_bytes, ..
         } => OnionPacket::decode(&inner_packet_bytes).unwrap(),
-        _ => panic!(),
+        PeelOutcome::Deliver { .. } => panic!(),
     };
     let o3 = peel_one_layer(&dest_sk, &packet).unwrap();
-    let payload = match o3 {
-        PeelOutcome::Deliver { payload } => payload,
-        _ => panic!(),
+    let PeelOutcome::Deliver { payload } = o3 else {
+        panic!();
     };
     assert_or_regen_str(
         "PEELED_PAYLOAD_HEX",

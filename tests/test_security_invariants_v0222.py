@@ -22,6 +22,8 @@ Anti-patterns we check for:
   None`` (FO-3).
 * ``rotate_cap_root_key`` raises (not silently writes plaintext) on
   DPAPI-wrap failure (FO-4).
+* Macaroon issuance never derives its HMAC root from the identity seed when
+  the independent capability root is unavailable (FO-5).
 * Default capability policy resolves to a non-None list before
   any gate consults it (T1-E).
 """
@@ -128,27 +130,51 @@ def test_check_outbound_trust_fails_closed_on_state_none():
 # ── FO-4: cap_root_key rotation raises on DPAPI fail (no silent plaintext)
 
 
-def test_rotate_cap_root_key_refuses_plaintext_persist():
+def test_rotate_cap_root_key_refuses_plaintext_persist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """FO-4: the rotation path used to write the prior key in
     plaintext when DPAPI wrap failed ('last-resort raw'). Now must
     raise — operator investigates DPAPI availability and retries."""
-    src = _read("src/one_link/cap_root_key.py")
+    import os
+
+    if os.name != "nt":
+        pytest.skip("DPAPI failure is Windows-specific")
+
+    from one_link import cap_root_key, lockbox
+    from one_link.key_material import KeyMaterialProtectionError
+
+    prior, _created = cap_root_key.load_or_create_cap_root_key(tmp_path)
+    active_path = tmp_path / cap_root_key.CAP_ROOT_KEY_FILENAME
+    wrapped_before = active_path.read_bytes()
+    monkeypatch.setattr(lockbox, "_dpapi_protect", lambda _raw: None)
+
+    with pytest.raises(KeyMaterialProtectionError, match="refusing to persist"):
+        cap_root_key.rotate_cap_root_key(tmp_path)
+
+    assert active_path.read_bytes() == wrapped_before
+    assert cap_root_key.load_cap_root_key(tmp_path) == prior
+    assert not (tmp_path / cap_root_key.CAP_ROOT_KEY_OLD_FILENAME).exists()
+
+
+def test_macaroon_issuance_refuses_identity_seed_fallback():
+    """FO-5: capability-root failure must disable macaroon dual issue.
+
+    Reusing the Ed25519 identity seed as an HMAC root defeats the deliberate
+    key separation and turns an optional migration path into an identity-key
+    exposure surface. The legacy signed grant remains available for protocol
+    compatibility; only the unsafe derived macaroon is refused.
+    """
+    src = _read("src/one_link/daemon.py")
     body = _slice_function(
-        src, "def rotate_cap_root_key(", lookahead=4000,
+        src, "    async def issue_capability_grant(", lookahead=8000,
     )
-    # Audit FO-4 left the rotation-time DPAPI-wrap branch raising
-    # an explicit RuntimeError instead of falling through to a raw
-    # plaintext write. Check both: the raise is present AND the
-    # old "last-resort raw" string is gone.
-    assert "DPAPI wrap failed" in body, (
-        "FO-4 regression: rotate_cap_root_key's DPAPI-failure path "
-        "no longer raises. Old 'last-resort raw' plaintext write "
-        "may have come back."
+    assert "mint_share_capability_from_root" in body
+    assert "mint_share_capability(" not in body, (
+        "FO-5 regression: daemon macaroon issuance again derives a root "
+        "from identity key material when cap_root_key is unavailable"
     )
-    assert "last-resort raw" not in body, (
-        "FO-4 regression: 'last-resort raw' plaintext-on-DPAPI-"
-        "failure path is back."
-    )
+    assert "macaroon root from identity key material" in body
 
 
 # ── T1-E: default policy must resolve to a concrete list, not None

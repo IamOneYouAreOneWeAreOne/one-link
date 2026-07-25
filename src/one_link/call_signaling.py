@@ -258,6 +258,8 @@ class CallLifecycle:
                 return self._recipient_accept(state, event)
             if kind == EventKind.USER_DECLINE:
                 return self._recipient_decline(state, event)
+            if kind == EventKind.INVITE_TIMER_EXPIRED:
+                return self._recipient_invite_timeout(state, event)
             if kind == EventKind.WIRE_END:
                 # Originator hung up before we picked up.
                 return self._recipient_caller_cancelled(state, event)
@@ -381,7 +383,22 @@ class CallLifecycle:
     ) -> FSMOutput:
         return FSMOutput(
             state=_replace(state, phase=CallPhase.RINGING),
-            local_actions=(LocalAction.SHOW_RING,),
+            local_actions=(LocalAction.SHOW_RING, LocalAction.START_INVITE_TIMER),
+        )
+
+    def _recipient_invite_timeout(
+        self, state: CallState, event: LifecycleEvent,
+    ) -> FSMOutput:
+        """Stop an unanswered ring locally when the authenticated TTL ends."""
+
+        return FSMOutput(
+            state=_replace(
+                state,
+                phase=CallPhase.ENDED,
+                ended_at_ms=event.occurred_at_ms,
+                end_cause=EndCause.INVITE_TIMEOUT,
+            ),
+            local_actions=(LocalAction.STOP_INVITE_TIMER, LocalAction.HIDE_RING),
         )
 
     def _recipient_accept(

@@ -98,7 +98,12 @@ fn check_actor_id(b: &[u8]) -> PyResult<[u8; 32]> {
 }
 
 /// Python view of a chunk record (everything the daemon needs).
-#[pyclass(name = "ReadChunk", module = "one_link_native.store", frozen)]
+#[pyclass(
+    from_py_object,
+    name = "ReadChunk",
+    module = "one_link_native.store",
+    frozen
+)]
 #[derive(Debug, Clone)]
 pub struct PyReadChunk {
     #[pyo3(get)]
@@ -123,15 +128,15 @@ pub struct PyReadChunk {
 impl PyReadChunk {
     #[getter]
     fn chunk_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.chunk_id)
+        PyBytes::new(py, &self.chunk_id)
     }
     #[getter]
     fn ratchet_key_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.ratchet_key_id)
+        PyBytes::new(py, &self.ratchet_key_id)
     }
     #[getter]
     fn ciphertext<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.ciphertext)
+        PyBytes::new(py, &self.ciphertext)
     }
     #[getter]
     fn stripe(&self) -> PyStripe {
@@ -170,7 +175,12 @@ impl PyReadChunk {
 }
 
 /// Python view of a stripe descriptor.
-#[pyclass(name = "StripeDescriptor", module = "one_link_native.store", frozen)]
+#[pyclass(
+    from_py_object,
+    name = "StripeDescriptor",
+    module = "one_link_native.store",
+    frozen
+)]
 #[derive(Debug, Clone)]
 pub struct PyStripe {
     #[pyo3(get)]
@@ -256,7 +266,12 @@ impl PyStripe {
 }
 
 /// Python view of a chunk's on-disk location.
-#[pyclass(name = "ChunkLocation", module = "one_link_native.store", frozen)]
+#[pyclass(
+    from_py_object,
+    name = "ChunkLocation",
+    module = "one_link_native.store",
+    frozen
+)]
 #[derive(Debug, Clone)]
 pub struct PyChunkLocation {
     #[pyo3(get)]
@@ -276,7 +291,7 @@ pub struct PyChunkLocation {
 impl PyChunkLocation {
     #[getter]
     fn ratchet_key_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.ratchet_key_id)
+        PyBytes::new(py, &self.ratchet_key_id)
     }
 }
 
@@ -301,7 +316,7 @@ pub struct PyChunkStore {
 
 #[pymethods]
 impl PyChunkStore {
-    /// Append a chunk record to the chunk_log. Returns the offset.
+    /// Append a chunk record to the `chunk_log`. Returns the offset.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         record_kind, address_kind, aead_kind,
@@ -325,6 +340,13 @@ impl PyChunkStore {
             .inner
             .as_mut()
             .ok_or_else(|| PyValueError::new_err("ChunkStore is closed"))?;
+        if ciphertext.len() > ol_chunk_store::MAX_CHUNK_CIPHERTEXT_LEN {
+            return Err(PyValueError::new_err(format!(
+                "ciphertext too large: {} > {}",
+                ciphertext.len(),
+                ol_chunk_store::MAX_CHUNK_CIPHERTEXT_LEN
+            )));
+        }
         let record = ChunkRecord {
             kind: parse_record_kind(record_kind)?,
             address_kind: parse_address_kind(address_kind)?,
@@ -361,6 +383,13 @@ impl PyChunkStore {
             .inner
             .as_mut()
             .ok_or_else(|| PyValueError::new_err("ChunkStore is closed"))?;
+        if body.len() > ol_chunk_store::MAX_MANIFEST_BODY_LEN {
+            return Err(PyValueError::new_err(format!(
+                "manifest body too large: {} > {}",
+                body.len(),
+                ol_chunk_store::MAX_MANIFEST_BODY_LEN
+            )));
+        }
         let r = ManifestRecord {
             kind: parse_manifest_kind(record_kind)?,
             flags,
@@ -380,7 +409,7 @@ impl PyChunkStore {
             .inner
             .as_mut()
             .ok_or_else(|| PyValueError::new_err("ChunkStore is closed"))?;
-        py.allow_threads(|| inner.flush())
+        py.detach(|| inner.flush())
             .map_err(chunk_store_error_to_pyerr)
     }
 
@@ -412,7 +441,7 @@ impl PyChunkStore {
             .ok_or_else(|| PyValueError::new_err("ChunkStore is closed"))?;
         let id = check_chunk_id(chunk_id)?;
         let r = py
-            .allow_threads(|| inner.read_chunk(&id))
+            .detach(|| inner.read_chunk(&id))
             .map_err(chunk_store_error_to_pyerr)?;
         Ok(PyReadChunk::from_rust(r))
     }
@@ -424,7 +453,7 @@ impl PyChunkStore {
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("ChunkStore is closed"))?;
         let s = inner.stats();
-        let dict = pyo3::types::PyDict::new_bound(py);
+        let dict = pyo3::types::PyDict::new(py);
         dict.set_item("indexed_chunks", s.indexed_chunks)?;
         dict.set_item("manifest_records", s.manifest_records)?;
         dict.set_item("bytes_scanned_at_replay", s.bytes_scanned_at_replay)?;
@@ -436,7 +465,7 @@ impl PyChunkStore {
     /// Close, flushing both logs.
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         if let Some(mut inner) = self.inner.take() {
-            py.allow_threads(|| inner.close())
+            py.detach(|| inner.close())
                 .map_err(chunk_store_error_to_pyerr)?;
         }
         Ok(())
@@ -448,7 +477,7 @@ impl PyChunkStore {
 fn open_store(py: Python<'_>, root: &str) -> PyResult<PyChunkStore> {
     let path = PathBuf::from(root);
     let inner = py
-        .allow_threads(|| ChunkStore::open(&path))
+        .detach(|| ChunkStore::open(&path))
         .map_err(chunk_store_error_to_pyerr)?;
     Ok(PyChunkStore { inner: Some(inner) })
 }
@@ -460,6 +489,14 @@ pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()>
     m.add("CHUNK_RECORD_HEADER_LEN", CHUNK_RECORD_HEADER_LEN)?;
     m.add("MANIFEST_RECORD_HEADER_LEN", MANIFEST_RECORD_HEADER_LEN)?;
     m.add("STRIPE_DESCRIPTOR_LEN", STRIPE_DESCRIPTOR_LEN)?;
+    m.add(
+        "MAX_CHUNK_CIPHERTEXT_LEN",
+        ol_chunk_store::MAX_CHUNK_CIPHERTEXT_LEN,
+    )?;
+    m.add(
+        "MAX_MANIFEST_BODY_LEN",
+        ol_chunk_store::MAX_MANIFEST_BODY_LEN,
+    )?;
 
     m.add_class::<PyStripe>()?;
     m.add_class::<PyChunkLocation>()?;

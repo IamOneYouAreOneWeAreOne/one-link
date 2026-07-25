@@ -18,7 +18,7 @@ import pytest
 
 from one_link import daemon as daemon_module
 from one_link import dedupe_sites as dedupe_sites_module
-from one_link.capabilities import BLOB_REQUEST_V1, COVER_TRAFFIC_V1
+from one_link.capabilities import BLOB_REQUEST_V1
 
 
 def _build_e2e_daemon():

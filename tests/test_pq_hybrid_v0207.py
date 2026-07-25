@@ -1,14 +1,12 @@
-"""v0.20.7 — post-quantum hybrid KEM scaffolding.
+"""Legacy v0.20.7 hybrid-combiner compatibility tests.
 
 A future quantum computer running Shor's algorithm breaks Curve25519
 in polynomial time. State actors today record encrypted traffic
 they can't yet read; "harvest-now-decrypt-later" is the threat.
 
-Mitigation: hybrid KEM = classical (X25519) ⊕ PQ (ML-KEM-768).
-The combined shared secret is secure unless BOTH KEMs are broken.
-Bundle 37 ships the architecture + wire format; the actual ML-KEM
-slot lives in NullKEM until ``cryptography`` ships FIPS 203
-bindings or we vendor a pure-Python ref.
+Production now uses the native FIPS-203 ML-KEM-768 backend and the live v3
+channel handshake. These tests retain the old pluggable wire/combine surface
+for explicit migrations; ``NullKEM`` is never a PQ claim.
 
 These tests pin:
   - X25519 KEM Protocol shape: keypair / encapsulate / decapsulate
@@ -21,8 +19,7 @@ These tests pin:
     shared secrets match
   - HybridKey wire format: encode / decode round-trip, truncation
     rejection
-  - Wire format pre-allocates the PQ slot (length prefix), so a
-    future ML-KEM-768 swap doesn't break parsing
+  - Legacy wire format's length-prefixed PQ slot remains strictly parseable
 """
 from __future__ import annotations
 
@@ -143,8 +140,7 @@ def test_hkdf_combine_one_secret_changes_output():
 
 
 def test_hybrid_kem_round_trip_default():
-    """Default HybridKEM = X25519 + NullKEM. Tomorrow this becomes
-    X25519 + ML-KEM-768 transparently."""
+    """Direct HybridKEM construction remains explicitly classical-only."""
     kem = ph.HybridKEM()
     bob_priv, bob_pub = kem.keypair()
     transcript = b"hello-bob-handshake"
@@ -197,8 +193,7 @@ def test_hybrid_key_encode_decode_round_trip():
 
 
 def test_hybrid_key_with_empty_pq_slot():
-    """Default NullKEM has empty pq; the encoding still has the
-    length-prefix slot so a future ML-KEM peer parses correctly."""
+    """The legacy NullKEM encoding retains an explicit empty PQ slot."""
     k = ph.HybridKey(classical=os.urandom(32), pq=b"")
     raw = k.encode()
     # 2 + 32 + 2 + 0 = 36 bytes
@@ -219,10 +214,7 @@ def test_hybrid_key_truncated_rejected():
 
 
 def test_hybrid_key_supports_ml_kem_768_size():
-    """Pre-flight: today the pq slot is 0 bytes (NullKEM), but the
-    wire format must already accommodate ML-KEM-768's 1184-byte
-    public key. Encode + decode at the future size now to catch
-    any u16-truncation bugs before the actual swap."""
+    """The legacy generic encoding safely carries a 1184-byte KEM key."""
     classical = os.urandom(32)
     fake_ml_kem_pub = os.urandom(1184)
     k = ph.HybridKey(classical=classical, pq=fake_ml_kem_pub)
@@ -233,14 +225,13 @@ def test_hybrid_key_supports_ml_kem_768_size():
     assert parsed.pq == fake_ml_kem_pub
 
 
-# ── future-PQ smoke test: synthetic non-trivial PQ KEM ────────────
+# ── generic-combiner smoke test: synthetic non-trivial KEM ────────
 
 
 class _SymmetricKEMForTest:
     """A toy KEM that uses a fixed symmetric secret — NOT secure,
     just exercises the HybridKEM combine logic with a non-trivial
-    PQ side. Demonstrates that swapping NullKEM for any real KEM
-    produces matching decap/encap secrets via the combine."""
+    second side. It does not stand in for the production native ML-KEM."""
     name = "Toy"
     pub_size = 16
     priv_size = 16
@@ -283,8 +274,6 @@ def test_hybrid_kem_with_non_null_pq_combines_both():
 
     # The two hybrids produce DIFFERENT shared secrets (different
     # KEM-name labels in the combine info, plus PQ vs Null
-    # contribution). This is the key property: a future ML-KEM
-    # rollout produces a different key from today's X25519+Null
-    # baseline, even with the same classical inputs — protecting
-    # against rollback attacks during the transition.
+    # contribution). A negotiated non-null suite cannot collide with the
+    # explicitly classical compatibility construction.
     assert ss_a_send != ss_b_send

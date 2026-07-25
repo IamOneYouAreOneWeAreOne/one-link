@@ -28,7 +28,6 @@ from one_link.rendezvous_proto import (
     RegisterAck,
     REPLAY_WINDOW_MS,
     sign_register,
-    sign_revoke,
 )
 from one_link.rendezvous_server import RendezvousApp, ServerConfig
 

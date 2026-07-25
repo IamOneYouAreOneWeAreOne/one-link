@@ -36,7 +36,7 @@ fn adr0016_rs_10_4_survives_any_4_erasure_across_10k_seeds() {
         let data: Vec<Vec<u8>> = (0..K)
             .map(|_| (0..SHARD_LEN).map(|_| rng.random::<u8>()).collect())
             .collect();
-        let data_refs: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
+        let data_refs: Vec<&[u8]> = data.iter().map(std::vec::Vec::as_slice).collect();
         let parity = codec.encode(&data_refs).expect("encode");
 
         // Pick 4 of 14 indices to drop, uniformly at random.
@@ -70,7 +70,7 @@ fn adr0016_rs_10_4_survives_any_4_erasure_across_10k_seeds() {
         let decoded = codec.decode(&present).expect("decode");
         if decoded != data {
             failures += 1;
-            eprintln!("seed {seed}: dropped={:?}, decoded mismatch", dropped);
+            eprintln!("seed {seed}: dropped={dropped:?}, decoded mismatch");
         }
     }
     assert_eq!(failures, 0, "Phase C gate: failed {failures}/{SEEDS}");
@@ -90,7 +90,7 @@ fn adr0016_rs_10_4_recovers_from_every_4_erasure_pattern() {
     let data: Vec<Vec<u8>> = (0..K)
         .map(|_| (0..SHARD_LEN).map(|_| rng.random::<u8>()).collect())
         .collect();
-    let data_refs: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
+    let data_refs: Vec<&[u8]> = data.iter().map(std::vec::Vec::as_slice).collect();
     let parity = codec.encode(&data_refs).expect("encode");
 
     // Enumerate all C(14, 4) = 1001 ways to drop 4 shards.

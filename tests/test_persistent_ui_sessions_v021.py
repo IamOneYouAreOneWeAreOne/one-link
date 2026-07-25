@@ -1,12 +1,12 @@
-"""v0.21.x persistent UI sessions: the cookie that outlives daemon
+"""v0.21.x persistent UI sessions: revocable browser authority that outlives daemon
 token rotation. Tests cover:
 
   - state.ui_sessions table mechanics (create/touch/lookup/revoke/
     revoke_all/prune)
-  - server auth path: _check_token accepts a valid ol_session cookie
-    even when the ol_ui token doesn't match
-  - bootstrap path: ?t=<valid> mints session cookie + JS-readable
-    marker; existing session is rolled forward, not duplicated
+  - server auth path: _check_token accepts a valid session bearer even when
+    the process owner token doesn't match
+  - plaintext bootstrap path: ?t=<valid> injects a port-origin-scoped bearer,
+    expires historical port-agnostic cookies, and never retains the owner token
   - revoke endpoints: single + all; clearing caller's cookie on
     own-session revoke
   - access-denied page self-heal: marker cookie triggers JS redirect
@@ -14,6 +14,7 @@ token rotation. Tests cover:
 from __future__ import annotations
 
 import time
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -26,7 +27,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from one_link.daemon import Daemon
 from one_link.identity import Identity, fingerprint_of
 from one_link.server import (
-    COOKIE_NAME, SESSION_COOKIE_NAME, SESSION_PRESENT_MARKER_COOKIE,
+    COOKIE_NAME, OWNER_WS_BEARER_PROTOCOL_PREFIX, OWNER_WS_PROTOCOL,
+    SESSION_COOKIE_NAME, SESSION_PRESENT_MARKER_COOKIE,
     UIServer,
 )
 from one_link.state import State
@@ -79,6 +81,48 @@ def test_create_returns_64hex_uuid(tmp_path: Path):
     s.close()
 
 
+def test_database_never_stores_replayable_session_token(tmp_path: Path):
+    s = State(db_path=tmp_path / "s.db")
+    sess = s.create_ui_session()
+    stored = s._conn.execute(
+        "SELECT session_uuid FROM ui_sessions WHERE id=1"
+    ).fetchone()["session_uuid"]
+    assert stored != sess["session_uuid"]
+    assert stored == State.ui_session_token_id(sess["session_uuid"])
+    assert s.touch_ui_session(stored) is False, (
+        "the at-rest record key must not itself be replayable as a cookie"
+    )
+    s.close()
+
+
+def test_v28_migration_hashes_legacy_tokens_without_logging_out(tmp_path: Path):
+    db = tmp_path / "s.db"
+    s = State(db_path=db)
+    sess = s.create_ui_session()
+    raw_token = sess["session_uuid"]
+    s.close()
+
+    # Recreate the exact v27 exposure: raw cookie in the credential index and
+    # schema_version 28 absent. Reopen must transform it exactly once.
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE ui_sessions SET session_uuid=? WHERE id=1", (raw_token,)
+    )
+    conn.execute("DELETE FROM schema_version WHERE version>=28")
+    conn.commit()
+    conn.close()
+
+    migrated = State(db_path=db)
+    assert migrated.schema_version() >= 29
+    assert migrated.touch_ui_session(raw_token) is True
+    stored = migrated._conn.execute(
+        "SELECT session_uuid FROM ui_sessions WHERE id=1"
+    ).fetchone()["session_uuid"]
+    assert stored == State.ui_session_token_id(raw_token)
+    assert stored != raw_token
+    migrated.close()
+
+
 def test_label_recognises_modern_edge_ua(tmp_path: Path):
     s = State(db_path=tmp_path / "s.db")
     sess = s.create_ui_session(
@@ -123,13 +167,13 @@ def test_revoked_session_no_longer_touches(tmp_path: Path):
 
 def test_revoke_all_counts_active(tmp_path: Path):
     s = State(db_path=tmp_path / "s.db")
-    s.create_ui_session(user_agent="A")
+    first = s.create_ui_session(user_agent="A")
     s.create_ui_session(user_agent="B")
     s.create_ui_session(user_agent="C")
     # Pre-revoke one — it shouldn't be re-counted.
-    one = s.list_ui_sessions()[0]["session_uuid"]
-    s.revoke_ui_session(one)
+    s.revoke_ui_session(first["session_uuid"])
     assert s.revoke_all_ui_sessions() == 2
+    s.close()
 
 
 def test_list_excludes_revoked_by_default(tmp_path: Path):
@@ -139,7 +183,9 @@ def test_list_excludes_revoked_by_default(tmp_path: Path):
     s.revoke_ui_session(a["session_uuid"])
     active = s.list_ui_sessions()
     assert len(active) == 1
-    assert active[0]["session_uuid"] == b["session_uuid"]
+    assert active[0]["session_uuid"] == State.ui_session_token_id(
+        b["session_uuid"]
+    )
     all_rows = s.list_ui_sessions(include_revoked=True)
     assert len(all_rows) == 2
     s.close()
@@ -158,8 +204,8 @@ def test_prune_drops_stale(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_session_cookie_accepted_when_token_rotates(ctx):
-    """The whole point of this feature: a browser holding ol_session
+async def test_session_bearer_accepted_when_token_rotates(ctx):
+    """The whole point of this feature: a browser holding a revocable session
     keeps authing even after the daemon's UI token rotates to a new
     value (which would normally invalidate ol_ui)."""
     sess = ctx["state"].create_ui_session(user_agent="Mozilla/5.0")
@@ -168,7 +214,7 @@ async def test_session_cookie_accepted_when_token_rotates(ctx):
     ctx["server"].token = "ROTATED-" + "x" * 50
     r = await ctx["client"].get(
         "/api/me",
-        cookies={SESSION_COOKIE_NAME: sess["session_uuid"]},
+        headers={"Authorization": f"Bearer {sess['session_uuid']}"},
     )
     assert r.status == 200, await r.text()
 
@@ -209,37 +255,37 @@ async def test_short_cookie_rejected_without_db_lookup(ctx):
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_with_valid_token_mints_session_cookie(ctx):
-    """First visit with ?t=<valid> should set BOTH the legacy ol_ui
-    cookie AND the new persistent ol_session + the JS-visible marker."""
+async def test_plaintext_bootstrap_injects_session_and_expires_cookies(ctx):
+    """Plain HTTP uses origin storage and actively deletes legacy cookies."""
     r = await ctx["client"].get(f"/?t={ctx['token']}")
     assert r.status == 200
     # Aiohttp test client surfaces Set-Cookie headers.
     cookie_hdrs = r.headers.getall("Set-Cookie", [])
     joined = " ".join(cookie_hdrs)
-    assert COOKIE_NAME in joined, (
-        "legacy ol_ui cookie must still be issued for back-compat"
-    )
-    assert SESSION_COOKIE_NAME in joined, (
-        "persistent ol_session cookie must be issued on bootstrap"
-    )
-    assert SESSION_PRESENT_MARKER_COOKIE in joined, (
-        "JS-readable marker must be issued so the access-denied "
-        "page can self-heal silently"
-    )
+    assert COOKIE_NAME in joined and SESSION_COOKIE_NAME in joined
+    assert SESSION_PRESENT_MARKER_COOKIE in joined
+    assert joined.count("Max-Age=0") == 3
+    body = await r.text()
+    assert "ol_persistent_session_token" in body
+    assert ctx["token"] not in body
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_creates_one_session_per_browser(ctx):
-    """Hitting the bootstrap twice with the same browser (already
-    has a session cookie) should NOT proliferate rows; the existing
-    session is touched + rolled forward."""
+async def test_bootstrap_reuses_explicit_origin_session_bearer(ctx):
+    """A browser recovery fetch reuses its origin-scoped session."""
     r1 = await ctx["client"].get(f"/?t={ctx['token']}")
     assert r1.status == 200
     sessions_after_first = ctx["state"].list_ui_sessions()
     assert len(sessions_after_first) == 1
-    # Second hit (the client carries cookies from the first one).
-    r2 = await ctx["client"].get(f"/?t={ctx['token']}")
+    import re
+
+    match = re.search(r'const b="([0-9a-f]{64})"', await r1.text())
+    assert match is not None
+    session_token = match.group(1)
+    r2 = await ctx["client"].get(
+        f"/?t={ctx['token']}",
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
     assert r2.status == 200
     sessions_after_second = ctx["state"].list_ui_sessions()
     assert len(sessions_after_second) == 1, (
@@ -257,15 +303,18 @@ async def test_list_sessions_marks_own_browser(ctx):
     other = ctx["state"].create_ui_session(user_agent="Firefox")
     r = await ctx["client"].get(
         "/api/auth/sessions",
-        cookies={SESSION_COOKIE_NAME: sess["session_uuid"]},
+        headers={"Authorization": f"Bearer {sess['session_uuid']}"},
     )
     assert r.status == 200
     body = await r.json()
     by_prefix = {
         s["session_uuid_prefix"]: s for s in body["sessions"]
     }
-    assert by_prefix[sess["session_uuid"][:8]]["is_this_browser"] is True
-    assert by_prefix[other["session_uuid"][:8]]["is_this_browser"] is False
+    own_prefix = State.ui_session_token_id(sess["session_uuid"])[:8]
+    other_prefix = State.ui_session_token_id(other["session_uuid"])[:8]
+    assert by_prefix[own_prefix]["is_this_browser"] is True
+    assert by_prefix[other_prefix]["is_this_browser"] is False
+    assert sess["session_uuid"] not in await r.text()
 
 
 def _csrf_origin_for(client) -> dict:
@@ -283,6 +332,127 @@ def _auth_headers(ctx, *, csrf_client=None) -> dict:
     return h
 
 
+def _session_headers(token: str, *, csrf_client=None) -> dict:
+    h = {"Authorization": f"Bearer {token}"}
+    if csrf_client is not None:
+        h["Origin"] = f"http://127.0.0.1:{csrf_client.port}"
+    return h
+
+
+@pytest.mark.asyncio
+async def test_cookie_auth_rejects_different_loopback_origin_port(ctx):
+    session = ctx["state"].create_ui_session(user_agent="malicious-local-app")
+    wrong_port = ctx["client"].port + 1
+
+    response = await ctx["client"].post(
+        "/api/auth/sessions/revoke-all",
+        cookies={SESSION_COOKIE_NAME: session["session_uuid"]},
+        headers={"Origin": f"http://127.0.0.1:{wrong_port}"},
+    )
+
+    assert response.status == 403
+    assert ctx["state"].lookup_ui_session(session["session_uuid"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_plaintext_cookie_auth_is_rejected_even_same_origin(ctx):
+    session = ctx["state"].create_ui_session(user_agent="legacy-cookie")
+    response = await ctx["client"].get(
+        "/api/me",
+        cookies={SESSION_COOKIE_NAME: session["session_uuid"]},
+    )
+    assert response.status == 401
+
+
+@pytest.mark.asyncio
+async def test_loopback_host_must_include_exact_listener_port(ctx):
+    response = await ctx["client"].get(
+        "/api/me",
+        headers={
+            "Authorization": f"Bearer {ctx['token']}",
+            "Host": f"127.0.0.1:{ctx['client'].port + 1}",
+        },
+    )
+    assert response.status == 421
+    assert (await response.json())["error"] == "host header rejected"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", ["same-site", "cross-site", "unknown"])
+async def test_fetch_metadata_rejects_non_origin_loopback_site(ctx, site: str):
+    response = await ctx["client"].get(
+        "/api/me",
+        headers={
+            "Authorization": f"Bearer {ctx['token']}",
+            "Sec-Fetch-Site": site,
+        },
+    )
+    assert response.status == 403
+
+
+@pytest.mark.asyncio
+async def test_referer_from_different_loopback_port_is_rejected(ctx):
+    response = await ctx["client"].get(
+        "/api/me",
+        headers={
+            "Authorization": f"Bearer {ctx['token']}",
+            "Referer": f"http://127.0.0.1:{ctx['client'].port + 1}/attack",
+        },
+    )
+    assert response.status == 403
+
+
+@pytest.mark.asyncio
+async def test_websocket_bearer_uses_subprotocol_not_url(ctx):
+    session = ctx["state"].create_ui_session(user_agent="ws-owner")
+    websocket = await ctx["client"].ws_connect(
+        "/api/events",
+        protocols=(
+            OWNER_WS_PROTOCOL,
+            OWNER_WS_BEARER_PROTOCOL_PREFIX + session["session_uuid"],
+        ),
+    )
+    try:
+        hello = await websocket.receive_json(timeout=2)
+        assert hello["type"] == "hello"
+        assert websocket.protocol == OWNER_WS_PROTOCOL
+    finally:
+        await websocket.close()
+
+
+@pytest.mark.parametrize(
+    "authority",
+    [
+        "",
+        " 127.0.0.1:7117",
+        "127.0.0.1:7117:evil",
+        "127.0.0.1:7117,evil.example",
+        "user@127.0.0.1:7117",
+        "[::1]suffix:7117",
+        "localhost:",
+        "[::1]:",
+        "localhost.:7117",
+        "localhost\\@evil:7117",
+    ],
+)
+def test_host_authority_parser_rejects_ambiguous_forms(authority: str):
+    assert UIServer._parse_host_authority(authority) is None
+
+
+def test_ipv6_wildcard_is_not_loopback_bound():
+    server = object.__new__(UIServer)
+    server.bind_host = "::"
+    assert server._is_loopback_bound() is False
+
+
+def test_invalid_bearer_does_not_bypass_csrf_origin_gate():
+    server = object.__new__(UIServer)
+    server.token = "real-owner-token"
+    server.daemon = SimpleNamespace(state=None)
+    request = SimpleNamespace(headers={"Authorization": "Bearer invalid"})
+    assert server._csrf_origin_ok(request) is False
+
+
 @pytest.mark.asyncio
 async def test_revoke_all_returns_count_and_clears_cookies(ctx):
     ctx["state"].create_ui_session(user_agent="A")
@@ -290,8 +460,10 @@ async def test_revoke_all_returns_count_and_clears_cookies(ctx):
     caller = ctx["state"].create_ui_session(user_agent="C")
     r = await ctx["client"].post(
         "/api/auth/sessions/revoke-all",
-        cookies={SESSION_COOKIE_NAME: caller["session_uuid"]},
-        headers=_csrf_origin_for(ctx["client"]),
+        headers=_session_headers(
+            caller["session_uuid"],
+            csrf_client=ctx["client"],
+        ),
     )
     assert r.status == 200, await r.text()
     body = await r.json()
@@ -307,10 +479,15 @@ async def test_revoke_all_returns_count_and_clears_cookies(ctx):
 async def test_revoke_one_session(ctx):
     a = ctx["state"].create_ui_session(user_agent="A")
     b = ctx["state"].create_ui_session(user_agent="B")
+    listed = ctx["state"].list_ui_sessions()
+    a_id = next(
+        row["id"]
+        for row in listed
+        if row["session_uuid"] == State.ui_session_token_id(a["session_uuid"])
+    )
     r = await ctx["client"].post(
-        f"/api/auth/sessions/{a['session_uuid']}/revoke",
-        cookies={SESSION_COOKIE_NAME: b["session_uuid"]},
-        headers=_csrf_origin_for(ctx["client"]),
+        f"/api/auth/sessions/id-{a_id}/revoke",
+        headers=_session_headers(b["session_uuid"], csrf_client=ctx["client"]),
     )
     assert r.status == 200, await r.text()
     body = await r.json()
@@ -318,7 +495,57 @@ async def test_revoke_one_session(ctx):
     # A is gone, B still active.
     active = ctx["state"].list_ui_sessions()
     assert len(active) == 1
-    assert active[0]["session_uuid"] == b["session_uuid"]
+    assert active[0]["session_uuid"] == State.ui_session_token_id(
+        b["session_uuid"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_revoke_endpoint_rejects_display_prefix(ctx):
+    caller = ctx["state"].create_ui_session(user_agent="A")
+    prefix = State.ui_session_token_id(caller["session_uuid"])[:8]
+    response = await ctx["client"].post(
+        f"/api/auth/sessions/{prefix}/revoke",
+        headers=_session_headers(
+            caller["session_uuid"],
+            csrf_client=ctx["client"],
+        ),
+    )
+    assert response.status == 400
+    assert ctx["state"].touch_ui_session(caller["session_uuid"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "session_ref",
+    ["id-", "id-0", "id-01", "id-+1", "id-١", "id-１２", "id-9223372036854775808"],
+)
+async def test_revoke_endpoint_requires_canonical_ascii_int64_reference(
+    ctx, session_ref: str,
+):
+    """Row references have one unambiguous, portable wire representation."""
+    caller = ctx["state"].create_ui_session(user_agent="A")
+    response = await ctx["client"].post(
+        f"/api/auth/sessions/{session_ref}/revoke",
+        headers=_session_headers(
+            caller["session_uuid"],
+            csrf_client=ctx["client"],
+        ),
+    )
+    assert response.status == 400
+    assert ctx["state"].touch_ui_session(caller["session_uuid"])
+
+
+def test_session_management_ui_revokes_by_non_secret_row_id():
+    html = (
+        Path(__file__).resolve().parent.parent
+        / "src"
+        / "one_link"
+        / "web"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+    assert "id-${encodeURIComponent(String(s.id))}/revoke" in html
+    assert "encodeURIComponent(s.session_uuid_prefix)}/revoke" not in html
 
 
 # ── access-denied self-heal page ─────────────────────────────────
@@ -337,27 +564,34 @@ def test_access_denied_page_includes_self_heal_script():
 
 
 @pytest.mark.asyncio
-async def test_stale_token_localhost_browser_auto_recovers(ctx):
-    """v0.21.x UX win: when a localhost browser tab carries a stale
-    ?t=<bad> token, the daemon doesn't show 'access denied' — it
-    serves the silent recovery page that strips the query + reloads,
-    AND sets a fresh cookie pair so the next request authenticates.
-
-    This is the path most users hit when they bookmark a One Link
-    URL and reopen days later. They should perceive a tiny flash,
-    not an error page."""
+async def test_stale_token_localhost_browser_cannot_mint_session(ctx):
+    """Loopback and navigation headers are not owner authentication."""
     r = await ctx["client"].get(
         "/?t=definitely-not-a-real-token",
         headers={"Accept": "text/html"},
     )
-    # Localhost recovery path returns 200 + recovery HTML + cookies.
-    assert r.status == 200, await r.text()
+    assert r.status == 401, await r.text()
     cookie_hdrs = " ".join(r.headers.getall("Set-Cookie", []))
-    assert SESSION_COOKIE_NAME in cookie_hdrs, (
-        "stale-token localhost recovery must mint a fresh persistent "
-        "session so the next reload survives even another rotation"
+    assert SESSION_COOKIE_NAME not in cookie_hdrs
+    assert SESSION_PRESENT_MARKER_COOKIE not in cookie_hdrs
+    assert "ol_ui" not in cookie_hdrs
+
+
+@pytest.mark.asyncio
+async def test_stale_query_with_valid_session_recovers_without_minting(ctx):
+    session = ctx["state"].create_ui_session(user_agent="valid")
+    r = await ctx["client"].get(
+        "/?t=definitely-not-a-real-token",
+        headers={
+            "Accept": "text/html",
+            "Authorization": f"Bearer {session['session_uuid']}",
+        },
     )
-    assert SESSION_PRESENT_MARKER_COOKIE in cookie_hdrs
+    assert r.status == 200, await r.text()
+    assert "location.replace(location.pathname)" in await r.text()
+    cookie_hdrs = " ".join(r.headers.getall("Set-Cookie", []))
+    assert "ol_ui" not in cookie_hdrs or "Max-Age=0" in cookie_hdrs
+    assert SESSION_COOKIE_NAME not in cookie_hdrs or "Max-Age=0" in cookie_hdrs
 
 
 def test_help_page_references_marker_cookie():
@@ -393,14 +627,10 @@ async def test_persistence_toggle_off_stops_cookie_issuance(ctx):
         r2 = await fresh_client.get(f"/?t={ctx['token']}")
         assert r2.status == 200
         cookie_hdrs = " ".join(r2.headers.getall("Set-Cookie", []))
-        assert SESSION_COOKIE_NAME not in cookie_hdrs, (
-            "persistence OFF must not issue ol_session"
-        )
-        assert SESSION_PRESENT_MARKER_COOKIE not in cookie_hdrs, (
-            "persistence OFF must not issue the marker"
-        )
-        # Legacy ol_ui cookie still issued for in-process auth.
+        assert SESSION_COOKIE_NAME in cookie_hdrs
+        assert SESSION_PRESENT_MARKER_COOKIE in cookie_hdrs
         assert COOKIE_NAME in cookie_hdrs
+        assert cookie_hdrs.count("Max-Age=0") == 3
     finally:
         await fresh_client.close()
 
@@ -526,7 +756,7 @@ def test_prune_only_drops_old_rows(tmp_path: Path):
     with s._write_lock:
         s._conn.execute(
             "UPDATE ui_sessions SET last_seen_ms=? WHERE session_uuid=?",
-            (1, stale["session_uuid"]),
+            (1, State.ui_session_token_id(stale["session_uuid"])),
         )
         s._conn.commit()
     pruned = s.prune_expired_ui_sessions(older_than_ms=1000)
@@ -598,20 +828,19 @@ def test_off_grid_preset_kills_all_session_state():
     assert p.ui_session_labels_enabled is False
 
 
-def test_resolver_explicit_setting_overrides_preset():
-    """Per-feature override in Privacy panel must win over the
-    preset's default."""
+def test_resolver_explicit_setting_can_only_tighten_preset():
+    """Per-feature settings cannot loosen the preset's privacy ceiling."""
     from one_link.sovereignty import (
         resolve_ui_session_persistence_enabled,
         resolve_ui_session_labels_enabled,
     )
-    # off_grid defaults to OFF for both. Explicit 'true' must win.
+    # Off-grid forbids both even when stale settings still say true.
     assert resolve_ui_session_persistence_enabled(
         state_setting="true", preset_name="off_grid",
-    ) is True
+    ) is False
     assert resolve_ui_session_labels_enabled(
         state_setting="on", preset_name="off_grid",
-    ) is True
+    ) is False
     # just_works defaults to ON. Explicit 'false' must win.
     assert resolve_ui_session_persistence_enabled(
         state_setting="false", preset_name="just_works",
@@ -642,10 +871,9 @@ async def test_off_grid_preset_blocks_cookie_issuance(ctx):
         r = await fresh_client.get(f"/?t={ctx['token']}")
         assert r.status == 200
         cookie_hdrs = " ".join(r.headers.getall("Set-Cookie", []))
-        assert SESSION_COOKIE_NAME not in cookie_hdrs, (
-            "off_grid preset must prevent ol_session minting"
-        )
-        assert SESSION_PRESENT_MARKER_COOKIE not in cookie_hdrs
+        assert SESSION_COOKIE_NAME in cookie_hdrs
+        assert SESSION_PRESENT_MARKER_COOKIE in cookie_hdrs
+        assert cookie_hdrs.count("Max-Age=0") == 3
     finally:
         await fresh_client.close()
 
@@ -664,9 +892,8 @@ async def test_quiet_preset_skips_ua_label(ctx):
         )
         assert r.status == 200
         cookie_hdrs = " ".join(r.headers.getall("Set-Cookie", []))
-        assert SESSION_COOKIE_NAME in cookie_hdrs, (
-            "quiet preset still mints session cookies — only labels off"
-        )
+        assert cookie_hdrs.count("Max-Age=0") == 3
+        assert "ol_persistent_session_token" in await r.text()
     finally:
         await fresh_client.close()
     rows = ctx["state"].list_ui_sessions()
@@ -731,3 +958,28 @@ def test_privacy_panel_renders_session_rows():
     assert "ui_session_labels" in src
     assert "Stay signed in across daemon restarts" in src
     assert "Remember which browser is which" in src
+
+
+def test_session_bearer_recovery_never_serializes_secret_into_url():
+    """A revocable browser bearer is valid only as an explicit header.
+
+    A retry path must never copy it into ``?t=`` where browser history,
+    referrers, screenshots, or access logs could retain it.
+    """
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "one_link" / "web" / "index.html"
+    ).read_text(encoding="utf-8")
+    assert "encodeURIComponent(stashedToken)" not in src
+    assert 'location.href = location.pathname + "?t="' not in src
+    assert "const recovered = await _attemptAutoRecovery();" in src
+
+    sw = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "one_link" / "web" / "sw.js"
+    ).read_text(encoding="utf-8")
+    assert 'const CACHE_NAME = "one-link-shell-v4";' in sw
+    assert 'const carriesBootstrapToken = url.searchParams.has("t");' in sw
+    assert "? authenticatedApiFetch(event.request)" in sw
+    assert "res.status === 200 && !carriesBootstrapToken" in sw
+    assert 'caches.match("/")' in sw

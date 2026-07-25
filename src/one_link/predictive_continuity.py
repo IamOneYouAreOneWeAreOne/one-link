@@ -20,21 +20,25 @@ Reality Engine tags it accordingly. The Doctrine of Invisibility
 because the surface tells them what kind of frame they're seeing.
 
 **Confirm ratio** is the dashboard metric. When
-``confirm / (confirm + corrected) >= 0.98``, the receiver is
-effectively rendering AHEAD of the sender — predictive negative
-latency in production.
+``confirm / (confirm + corrected) >= 0.98`` is a research graduation metric.
+This pure engine does not prove browser sample synthesis/playout, and the stable
+daemon therefore does not advertise predictive continuity as a capability.
 
 Companion: docs/LIVING_PRESENCE_ARCHITECTURE.md §4.7
 """
 
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass, replace
 from enum import IntEnum
 from typing import Callable, Optional, Protocol
 
+from one_link.fault_observability import report_best_effort_failure
 from one_link.frame_provenance import FrameKind
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -286,8 +290,13 @@ class PredictiveContinuity:
         if sink is not None:
             try:
                 sink(predicted)
-            except Exception:
-                pass
+            except Exception as exc:
+                report_best_effort_failure(
+                    log,
+                    "prediction_sink",
+                    exc,
+                    level=logging.DEBUG,
+                )
         return PredictionResult(frame=predicted, reason_code="predicted")
 
     # ── on_real_frame_arrives (receive path) ──────────────────
@@ -337,8 +346,13 @@ class PredictiveContinuity:
         if correction is not None and sink is not None:
             try:
                 sink(correction)
-            except Exception:
-                pass
+            except Exception as exc:
+                report_best_effort_failure(
+                    log,
+                    "prediction_correction_sink",
+                    exc,
+                    level=logging.DEBUG,
+                )
         return correction
 
     # ── Introspection ─────────────────────────────────────────

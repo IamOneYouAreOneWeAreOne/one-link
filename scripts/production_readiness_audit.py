@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Honest production-readiness audit for the file engine v2 stack.
+"""Scoped wiring-readiness audit for the file engine v2 stack.
 
 Walks every plan-mandated surface and reports its real wiring state.
 Distinct from `pre_release_audit.py` which checks that tests pass —
@@ -10,17 +10,20 @@ Categories:
 
 1. **Crate availability** — every Phase A/B/C/D/E crate present in
    ``one_link_native``.
-2. **Capability advertisement** — every cap in ``LOCAL_CAPABILITIES``
-   matches what the docs claim.
+2. **Capability advertisement** — runtime CAPS matches executable native
+   availability and never promotes protocol vocabulary into a live promise.
 3. **Daemon wiring** — every native primitive has a daemon-side hook
    that actually fires under the right conditions.
 4. **Telemetry** — every observable counter the ops runbook
    references is reachable via ``/api/metrics``-shape output.
-5. **Honest gaps** — surfaces that exist as scaffolds but aren't
-   yet wired into hot paths. Reported as ``advisory`` (not failure)
-   so operators see them but releases aren't blocked.
+5. **Honest gaps** — surfaces that exist as scaffolds but aren't yet wired
+   into hot paths. They remain visible as ``advisory`` findings, but this
+   script is intentionally not a whole-product release verdict.
 
-Exit code 0 = production-deployable. Exit code 1 = real wire gap.
+Exit code 0 = the scoped file-engine blocking checks passed. It does **not**
+mean the application is production-deployable; packaging, signing, platform,
+physical-device, security-review, and advisory closure are separate gates.
+Exit code 1 = a scoped blocking wire gap.
 Exit code 2 = audit infrastructure error.
 
 Usage:
@@ -32,7 +35,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -77,10 +79,10 @@ def _check_native_crates_present() -> dict[str, Any]:
 
 
 def _check_capabilities_advertised() -> dict[str, Any]:
-    """Every cap in ``LOCAL_CAPABILITIES`` is advertised. Audit
-    confirms BLOOM_INIT_V1 + QUIC_TRANSPORT_V1 (the two new ones)
-    AND every legacy cap is still there (regression gate)."""
+    """Runtime CAPS must exactly follow its executable native backends."""
+    from one_link import bloom_init, native_transfer, peer_quic
     from one_link.capabilities import (
+        BLOOM_INIT_EXACT_V2,
         BLOOM_INIT_V1,
         CHAT,
         DOUBLE_RATCHET_V1,
@@ -90,22 +92,52 @@ def _check_capabilities_advertised() -> dict[str, Any]:
         FILE_SWARM,
         FOLDER_SYNC,
         LOCAL_CAPABILITIES,
-        NATIVE_TRANSFER_V1,
+        NATIVE_TRANSFER_INDEXED_V1,
+        PREVIEW_CAPABILITIES,
         QUIC_TRANSPORT_V1,
+        advertised_capabilities,
     )
 
     must_advertise = (
         CHAT, FILES, FILE_CDC, FILE_RESUMABLE, FILE_SWARM, FOLDER_SYNC,
-        DOUBLE_RATCHET_V1, NATIVE_TRANSFER_V1, BLOOM_INIT_V1,
-        QUIC_TRANSPORT_V1,
+        DOUBLE_RATCHET_V1,
     )
-    missing = [c for c in must_advertise if c not in LOCAL_CAPABILITIES]
-    status = "PASS" if not missing else "FAIL"
+    advertised = advertised_capabilities()
+    missing = [c for c in must_advertise if c not in advertised]
+    native_truth = {
+        BLOOM_INIT_V1: bool(bloom_init.HAS_NATIVE),
+        BLOOM_INIT_EXACT_V2: bool(bloom_init.HAS_NATIVE),
+        NATIVE_TRANSFER_INDEXED_V1: bool(native_transfer.HAS_NATIVE),
+        QUIC_TRANSPORT_V1: bool(peer_quic.HAS_NATIVE),
+    }
+    native_mismatches = {
+        cap: {"advertised": cap in advertised, "available": available}
+        for cap, available in native_truth.items()
+        if (cap in advertised) is not available
+    }
+    falsely_advertised_preview = sorted(
+        set(PREVIEW_CAPABILITIES) & set(advertised)
+    )
+    duplicates = sorted(
+        cap for cap in set(LOCAL_CAPABILITIES)
+        if LOCAL_CAPABILITIES.count(cap) > 1
+    )
+    status = (
+        "PASS"
+        if not missing
+        and not native_mismatches
+        and not falsely_advertised_preview
+        and not duplicates
+        else "FAIL"
+    )
     return {
         "category": "capability advertisement",
         "status": status,
-        "advertised_count": len(LOCAL_CAPABILITIES),
+        "advertised_count": len(advertised),
         "missing_required": missing,
+        "native_mismatches": native_mismatches,
+        "falsely_advertised_preview": falsely_advertised_preview,
+        "duplicates": duplicates,
     }
 
 
@@ -205,28 +237,39 @@ def _check_field_snapshot_manager_safe_defaults() -> dict[str, Any]:
     }
 
 
-def _check_perf_gates_baseline_committed() -> dict[str, Any]:
-    """The per-PR regression baseline must exist."""
+def _check_coherence_perf_gates_configured() -> dict[str, Any]:
+    """Portable SLO gate and dedicated-runner lab artifact must exist."""
+
+    portable_gate = REPO_ROOT / "scripts" / "coherence_field_slo_gate.py"
     baseline = REPO_ROOT / "bench_baselines" / "coherence_field.json"
+    if not portable_gate.is_file():
+        return {
+            "category": "coherence-field performance gates",
+            "status": "FAIL",
+            "reason": f"portable SLO gate missing: {portable_gate}",
+        }
     if not baseline.is_file():
         return {
-            "category": "perf gate baseline",
+            "category": "coherence-field performance gates",
             "status": "FAIL",
-            "reason": f"{baseline} missing",
+            "reason": f"dedicated-runner lab baseline missing: {baseline}",
         }
     try:
         data = json.loads(baseline.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return {
-            "category": "perf gate baseline",
+            "category": "coherence-field performance gates",
             "status": "FAIL",
-            "reason": "baseline JSON invalid",
+            "reason": f"dedicated-runner lab baseline unreadable: {exc}",
         }
-    n_metrics = len(data.get("results", []))
+    rows = data.get("results") if isinstance(data, dict) else None
+    n_metrics = len(rows) if isinstance(rows, list) else 0
     return {
-        "category": "perf gate baseline",
+        "category": "coherence-field performance gates",
         "status": "PASS" if n_metrics > 0 else "FAIL",
-        "tracked_metric_count": n_metrics,
+        "portable_gate": portable_gate.name,
+        "historical_lab_metric_count": n_metrics,
+        "historical_baseline_scope": "dedicated environment-qualified runner only",
     }
 
 
@@ -256,38 +299,65 @@ def _advisory_facade_migration() -> dict[str, Any]:
 
 
 def _advisory_bloom_honor_state() -> dict[str, Any]:
-    import os
+    from one_link.bloom_init import bloom_honor_enabled
 
-    enabled = os.environ.get("ONE_LINK_BLOOM_HONOR", "0") in (
-        "1", "true", "yes"
-    )
+    enabled = bloom_honor_enabled()
     return {
         "category": "bloom-init honor state (advisory)",
         "status": "ADVISORY",
         "ONE_LINK_BLOOM_HONOR_enabled": enabled,
         "note": (
-            "Off by default; flip per-host once disagreement-counter "
-            "telemetry confirms safety. See PHASE_E_OPERATOR_RUNBOOK.md."
+            "Exact-v2 is default-on and lossless through manifest binding plus "
+            "false-positive corrections; set ONE_LINK_BLOOM_HONOR=0 for a "
+            "FILE_WANTS-only compatibility rollout. V1-only peers never cut over."
         ),
     }
 
 
 def _advisory_filesystem_mount_state() -> dict[str, Any]:
-    """FUSE / FSKit / WinFSP are scaffolds; actual mount-and-fsx-linux
-    verification is hardware-blocked. Surface what's shipped."""
-    state = {}
-    for crate in ("ol_fuse", "ol_fskit", "ol_winfs"):
-        path = REPO_ROOT / "native" / crate
-        state[crate] = "scaffold" if path.is_dir() else "missing"
+    """Report source and runtime mount truth without cross-platform promotion."""
+
+    linux_adapter = REPO_ROOT / "native" / "ol_fuse" / "src" / "adapter.rs"
+    python_binding = REPO_ROOT / "native" / "one_link_native" / "src" / "fuse.rs"
+    state = {
+        "ol_fuse": (
+            "linux_fuser_adapter" if linux_adapter.is_file() else "missing"
+        ),
+        "one_link_native.fuse": (
+            "python_binding" if python_binding.is_file() else "missing"
+        ),
+        "ol_fskit": (
+            "scaffold_unimplemented"
+            if (REPO_ROOT / "native" / "ol_fskit").is_dir()
+            else "missing"
+        ),
+        "ol_winfs": (
+            "scaffold_unimplemented"
+            if (REPO_ROOT / "native" / "ol_winfs").is_dir()
+            else "missing"
+        ),
+    }
+    try:
+        from one_link import fuse_native
+
+        runtime: dict[str, Any] = fuse_native.capabilities()
+    except Exception as exc:
+        runtime = {
+            "ready": False,
+            "backend": "none",
+            "reason": "probe_failed_closed",
+            "error": type(exc).__name__,
+        }
     return {
         "category": "filesystem-surface mount state (advisory)",
         "status": "ADVISORY",
         "crates": state,
+        "runtime": runtime,
         "note": (
-            "Linux FUSE adapter compiles; mount-and-fsx-linux 24h "
-            "verification pending Linux host. macOS FSKit + Windows "
-            "WinFSP/Dokan are scaffolds awaiting Swift/C++ bridge "
-            "implementation."
+            "Linux has a real read-only callback-backed fuser adapter and "
+            "packaged Python binding. Strict packaged /dev/fuse plus 24-hour "
+            "fsx qualification remains pending. macOS FSKit and Windows "
+            "WinFsp/Dokan adapters are unimplemented."
         ),
     }
 
@@ -303,7 +373,7 @@ def main(argv: list[str] | None = None) -> int:
         _check_daemon_wiring(),
         _check_native_diagnostics_blocks(),
         _check_field_snapshot_manager_safe_defaults(),
-        _check_perf_gates_baseline_committed(),
+        _check_coherence_perf_gates_configured(),
     ]
     advisories = [
         _advisory_facade_migration(),
@@ -313,7 +383,7 @@ def main(argv: list[str] | None = None) -> int:
 
     failed = [c for c in blocking_checks if c["status"] != "PASS"]
     print("=" * 70)
-    print("PRODUCTION-READINESS AUDIT (file engine v2)")
+    print("FILE-ENGINE V2 WIRING-READINESS AUDIT")
     print("=" * 70)
     print()
     print("Blocking gates:")
@@ -322,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     for c in blocking_checks:
         print(f"  {c['category'][:40]:40s} {c['status']:>8s}")
     print()
-    print("Advisory (release-non-blocking):")
+    print("Advisory (outside this script's scoped blocking verdict):")
     for c in advisories:
         print(f"  - {c['category']}")
         for k, v in c.items():
@@ -339,15 +409,24 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {f['category']}: {f.get('reason') or f.get('missing')}")
         exit_code = 1
     else:
-        print("PASS: every blocking production-readiness gate green.")
+        print("PASS: every scoped file-engine wiring gate is green.")
+        print("NOTE: this is not a whole-product production or release verdict.")
         exit_code = 0
 
     report = {
+        "scope": "file_engine_v2_wiring",
         "blocking": blocking_checks,
         "advisory": advisories,
-        "production_ready": exit_code == 0,
+        "file_engine_v2_wiring_ready": exit_code == 0,
+        # Kept as a fail-closed compatibility field for any older automation
+        # that interpreted this scoped report as a deployment decision.
+        "production_ready": False,
+        "production_ready_reason": (
+            "scoped wiring audit cannot establish whole-product production readiness"
+        ),
     }
     if args.json is not None:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(
             json.dumps(report, indent=2, default=str), encoding="utf-8"
         )

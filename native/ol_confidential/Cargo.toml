@@ -2,7 +2,7 @@
 name = "ol_confidential"
 version = "0.21.0-alpha.0"
 edition = "2021"
-description = "One Link Coherence Mesh: Row 10 — confidential-compute daemon. Sealed-op surface + remote attestation + per-platform enclave abstraction."
+description = "One Link Row 10 sealed-operation and signed provider-claim primitives; not a daemon enclave."
 license = "AGPL-3.0-or-later"
 publish = false
 
@@ -28,8 +28,8 @@ p256          = { version = "0.13", default-features = false, features = ["ecdsa
 # Row 1: PQ-hybrid signing primitive — attestation docs and sealed
 # signing both bind to the master's hybrid key.
 ol_pqsig      = { path = "../ol_pqsig" }
-# Row 9: field-witness machinery — attestation docs can be bound to a
-# coherence-field witness so they're non-transferable across hosts.
+# Row 9: field-context machinery — attestation docs can commit to caller-
+# supplied bytes. Equality does not prove physical origin or host binding.
 ol_threshold_recovery = { path = "../ol_threshold_recovery" }
 # Row 8 Layer 1: the daemon's master identity already lives here.
 # We compose with MasterIdentity rather than redefine it.

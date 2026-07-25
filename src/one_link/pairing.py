@@ -1,8 +1,8 @@
-"""Pairing: 8-digit SAS (Short Authentication String) for trust-on-first-use.
+"""Pairing SAS (Short Authentication String) for trust-on-first-use.
 
 The user-facing flow:
   1. User clicks Pair on a discovered peer.
-  2. Both daemons display the same 8-digit code, derived from BOTH peers'
+  2. Both daemons display the same five-word phrase, derived from BOTH peers'
      long-term Ed25519 public keys AND the encrypted-channel handshake
      transcript hash (a fresh per-session value bound to both sides'
      ephemerals + signatures).
@@ -15,7 +15,7 @@ The user-facing flow:
 After successful pairing, the peer is `pinned` permanently. Subsequent
 launches reconnect silently with no UI prompts (the magic feel).
 
-The SAS is derived as (v2, v0.20.7+):
+The compatibility code is derived as (v2, v0.20.7+):
     h = BLAKE3(transcript_hash || sorted_concat(pubkey_a, pubkey_b) || "OL-SAS-v2")
     sas = (first 5 bytes of h, big-endian) mod 100_000_000
 
@@ -47,22 +47,60 @@ Backward compatibility (v1 fallback):
   If a caller invokes compute_sas without a transcript_hash (e.g. a
   pre-v0.20.7 peer that doesn't carry one through), the function
   falls back to the legacy 6-digit v1 SAS so the existing pair-flow
-  doesn't break in the upgrade window. New users always get v2.
+  doesn't break in the upgrade window. New pair ceremonies display a
+  transcript-bound five-word, 30-bit phrase. The numeric v2 value remains
+  available only so a new client can pair safely with an older client that
+  cannot render words yet.
 """
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Optional, Sequence
 
 import blake3
 
 
 _SAS_INFO_V1 = b"OL-SAS-v1"
 _SAS_INFO_V2 = b"OL-SAS-v2"
+_SAS_WORDS_INFO_V3 = b"OL-SAS-words-v3"
+_SETUP_SAS_WORDS_INFO_V1 = b"OL/setup-sas-words/v1\x00"
+
+# Keep this dictionary byte-for-byte aligned with
+# ``native/ol_pair_qr/src/sas_words.rs``.  It is deliberately small enough
+# that every word represents exactly six bits, yet curated so every two-letter
+# prefix is unique and every pair has edit distance >= 2.  The active daemon
+# cannot require a native extension merely to render the trust ceremony, so
+# the words live here as a fail-closed pure-Python protocol constant too.
+PAIR_SAS_WORDS: tuple[str, ...] = (
+    "agile", "amuse", "apple", "basil", "blaze", "brick", "cargo", "cedar",
+    "chess", "climb", "copper", "crane", "daisy", "decoy", "drift", "eagle",
+    "ember", "exile", "fable", "flame", "frost", "globe", "gravy", "gusto",
+    "happy", "hover", "igloo", "indigo", "ivory", "jolly", "juice", "kindly",
+    "koala", "lemon", "lunar", "mango", "melon", "motor", "north", "nudge",
+    "ocean", "olive", "panda", "plume", "quiet", "rebel", "ridge", "saber",
+    "sleek", "sushi", "tiger", "trove", "ultra", "umbra", "vapor", "vivid",
+    "wagon", "winter", "xenon", "xylo", "yacht", "yodel", "zebra", "zinc",
+)
+PAIR_SAS_WORD_COUNT = 5
+PAIR_SAS_BITS = 30
+assert len(PAIR_SAS_WORDS) == 1 << 6
+
+
+def _sas_words_from_digest(digest: bytes) -> tuple[str, ...]:
+    if len(digest) < 4:
+        raise ValueError("SAS digest must contain at least four bytes")
+    raw_bits = int.from_bytes(digest[:4], "big") & ((1 << PAIR_SAS_BITS) - 1)
+    return tuple(
+        PAIR_SAS_WORDS[
+            (raw_bits >> (PAIR_SAS_BITS - 6 * (index + 1))) & 0x3F
+        ]
+        for index in range(PAIR_SAS_WORD_COUNT)
+    )
 
 # v0.20.7 (security audit H12): pair contexts auto-expire after 5
 # minutes. Without this, a stale "Match" prompt that the user
@@ -109,6 +147,78 @@ def compute_sas(
     return f"{n:06d}"
 
 
+def compute_sas_words(
+    my_pubkey: bytes,
+    peer_pubkey: bytes,
+    *,
+    transcript_hash: bytes,
+) -> tuple[str, ...]:
+    """Return the canonical five-word SAS for a live pair ceremony.
+
+    Unlike :func:`compute_sas`, this function has no transcript-free legacy
+    mode.  A word phrase is a current trust ceremony, not a static peer label;
+    silently deriving it without the authenticated channel transcript would
+    re-introduce the offline key-grinding weakness the v2 ceremony removed.
+
+    Five independently indexed 64-word positions encode 30 uniformly derived
+    bits (one in 2**30 for a one-shot guess).  The long-term Ed25519 keys and
+    the exact encrypted-channel transcript are domain-separated from every
+    other One Link hash use.
+    """
+    if len(my_pubkey) != 32 or len(peer_pubkey) != 32:
+        raise ValueError("pubkeys must be 32 bytes (Ed25519 raw)")
+    if not isinstance(transcript_hash, (bytes, bytearray, memoryview)):
+        raise TypeError("transcript_hash must be bytes-like")
+    transcript = bytes(transcript_hash)
+    if len(transcript) != 32:
+        raise ValueError("transcript_hash must be exactly 32 bytes")
+
+    first, second = sorted((bytes(my_pubkey), bytes(peer_pubkey)))
+    digest = blake3.blake3(
+        transcript + first + second + _SAS_WORDS_INFO_V3
+    ).digest()
+    return _sas_words_from_digest(digest)
+
+
+def compute_setup_sas_words(
+    owner_pubkey: bytes,
+    device_pubkey: bytes,
+    *,
+    invite_secret: bytes,
+) -> tuple[str, ...]:
+    """Derive the five-word One Setup/QR trust phrase on both devices.
+
+    The 256-bit invite secret is scanned out of band and binds the phrase to
+    this one enrollment attempt. SHA-256 is used for this browser-facing
+    ceremony because WebCrypto implements it natively on every supported
+    platform; the mapping and vocabulary are identical to the native and
+    daemon ceremonies. Both public keys are sorted so owner and joining device
+    derive byte-identical words independently.
+    """
+    if len(owner_pubkey) != 32 or len(device_pubkey) != 32:
+        raise ValueError("pubkeys must be 32 bytes (Ed25519 raw)")
+    if not isinstance(invite_secret, (bytes, bytearray, memoryview)):
+        raise TypeError("invite_secret must be bytes-like")
+    secret = bytes(invite_secret)
+    if len(secret) != 32:
+        raise ValueError("invite_secret must be exactly 32 bytes")
+    first, second = sorted((bytes(owner_pubkey), bytes(device_pubkey)))
+    digest = hashlib.sha256(
+        _SETUP_SAS_WORDS_INFO_V1 + secret + first + second
+    ).digest()
+    return _sas_words_from_digest(digest)
+
+
+def format_sas_words(words: Sequence[str]) -> str:
+    """Validate and render one canonical five-word pairing phrase."""
+    normalized = tuple(words)
+    if len(normalized) != PAIR_SAS_WORD_COUNT:
+        raise ValueError(f"SAS must contain exactly {PAIR_SAS_WORD_COUNT} words")
+    if any(not isinstance(word, str) or word not in PAIR_SAS_WORDS for word in normalized):
+        raise ValueError("SAS contains a word outside the canonical dictionary")
+    return " ".join(normalized)
+
+
 def format_sas(sas: str) -> str:
     """Display form: '12 345 678' for v2 (8 digits) or '123 456' for v1.
     Picking 3-digit groups for v2 keeps it easy to read aloud."""
@@ -131,6 +241,9 @@ class PairState(str, Enum):
 class PairContext:
     peer_fp: str
     sas: str
+    # Canonical transcript-bound phrase for current clients.  Empty only for
+    # a legacy peer/channel that did not expose a valid 32-byte transcript.
+    sas_words: tuple[str, ...] = field(default_factory=tuple)
     state: PairState = PairState.NONE
     started_ms: int = field(default_factory=lambda: int(time.time() * 1000))
     we_confirmed: bool = False
@@ -184,12 +297,19 @@ class PairingTracker:
         *,
         peer_fp: str,
         sas: str,
+        sas_words: Sequence[str] = (),
         incoming: bool,
         previously_rejected: bool = False,
     ) -> PairContext:
+        normalized_words = tuple(sas_words)
+        if normalized_words:
+            # Centralize protocol validation so UI/event call sites can never
+            # accidentally publish an uncurated or truncated phrase.
+            format_sas_words(normalized_words)
         ctx = PairContext(
             peer_fp=peer_fp,
             sas=sas,
+            sas_words=normalized_words,
             state=PairState.INCOMING if incoming else PairState.REQUESTED,
             previously_rejected=previously_rejected,
         )

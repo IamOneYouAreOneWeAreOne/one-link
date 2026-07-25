@@ -10,6 +10,8 @@
 //! - Truncated signatures
 //! - Replay across distinct keys
 
+use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
+use curve25519_dalek::scalar::Scalar;
 use ol_onion::sphinx::aggsig::{
     batch_verify, verify, SchnorrSignature, SchnorrSigningKey, SchnorrVerifyingKey,
 };
@@ -49,8 +51,6 @@ fn identity_pk_forgery_attempt_rejected() {
     let evil_vk = SchnorrVerifyingKey([0u8; 32]);
     // Construct a forgery that satisfies s*G == R with no signing key.
     // s = 7 (arbitrary), R = 7*G compressed.
-    use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
-    use curve25519_dalek::scalar::Scalar;
     let s = Scalar::from(7u64);
     let r_point = RISTRETTO_BASEPOINT_TABLE * &s;
     let mut sig_bytes = [0u8; 64];

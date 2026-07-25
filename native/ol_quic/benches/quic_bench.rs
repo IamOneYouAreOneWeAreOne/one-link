@@ -1,7 +1,7 @@
 //! Throughput benchmarks for `ol_quic` loopback.
 //!
 //! Run:
-//!   cargo bench -p ol_quic --bench quic_bench
+//!   cargo bench -p `ol_quic` --bench `quic_bench`
 
 use std::sync::Arc;
 
@@ -37,7 +37,7 @@ fn bench_loopback_round_trip(c: &mut Criterion) {
 
     for &payload_kib in &[1usize, 64, 256, 1024] {
         let payload_bytes = payload_kib * 1024;
-        group.throughput(Throughput::Bytes(payload_bytes as u64));
+        group.throughput(Throughput::Bytes(u64::try_from(payload_bytes).unwrap()));
         group.bench_with_input(
             BenchmarkId::from_parameter(payload_kib),
             &payload_bytes,
@@ -96,5 +96,12 @@ fn bench_loopback_round_trip(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_loopback_round_trip);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{bench_loopback_round_trip, criterion_group};
+
+    criterion_group!(benches, bench_loopback_round_trip);
+}
+criterion_main!(criterion_benchmark_harness::benches);

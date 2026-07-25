@@ -41,7 +41,7 @@ fn bench_batch_verify(c: &mut Criterion) {
         for _ in 0..n {
             sks.push(SchnorrSigningKey::generate(&mut OsRng));
         }
-        let msgs: Vec<Vec<u8>> = (0..n).map(|i| vec![(i & 0xFF) as u8; 64]).collect();
+        let msgs: Vec<Vec<u8>> = (0..n).map(|i| vec![i.to_le_bytes()[0]; 64]).collect();
         let sigs: Vec<SchnorrSignature> = sks
             .iter()
             .zip(msgs.iter())
@@ -68,13 +68,14 @@ fn bench_sequential_verify_for_compare(c: &mut Criterion) {
         for _ in 0..n {
             sks.push(SchnorrSigningKey::generate(&mut OsRng));
         }
-        let msgs: Vec<Vec<u8>> = (0..n).map(|i| vec![(i & 0xFF) as u8; 64]).collect();
+        let msgs: Vec<Vec<u8>> = (0..n).map(|i| vec![i.to_le_bytes()[0]; 64]).collect();
         let sigs: Vec<SchnorrSignature> = sks
             .iter()
             .zip(msgs.iter())
             .map(|(sk, m)| sk.sign(m))
             .collect();
-        let vks: Vec<SchnorrVerifyingKey> = sks.iter().map(|s| s.verifying_key()).collect();
+        let vks: Vec<SchnorrVerifyingKey> =
+            sks.iter().map(SchnorrSigningKey::verifying_key).collect();
 
         group.bench_with_input(
             BenchmarkId::from_parameter(n),
@@ -91,12 +92,22 @@ fn bench_sequential_verify_for_compare(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_sign,
-    bench_verify,
-    bench_verifying_key,
-    bench_batch_verify,
-    bench_sequential_verify_for_compare
-);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{
+        bench_batch_verify, bench_sequential_verify_for_compare, bench_sign, bench_verify,
+        bench_verifying_key, criterion_group,
+    };
+
+    criterion_group!(
+        benches,
+        bench_sign,
+        bench_verify,
+        bench_verifying_key,
+        bench_batch_verify,
+        bench_sequential_verify_for_compare
+    );
+}
+criterion_main!(criterion_benchmark_harness::benches);

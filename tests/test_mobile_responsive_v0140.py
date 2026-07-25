@@ -78,6 +78,32 @@ def sw_js() -> str:
     return Path("src/one_link/web/sw.js").read_text(encoding="utf-8")
 
 
+def _mobile_media_blocks(index_html: str) -> list[str]:
+    """Return every complete 720px media block without fixed-size slicing."""
+    needle = "@media (max-width: 720px)"
+    blocks: list[str] = []
+    cursor = 0
+    while True:
+        start = index_html.find(needle, cursor)
+        if start < 0:
+            return blocks
+        opening = index_html.find("{", start + len(needle))
+        assert opening >= 0, "mobile media query has no opening brace"
+        depth = 0
+        for end in range(opening, len(index_html)):
+            char = index_html[end]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    blocks.append(index_html[start:end + 1])
+                    cursor = end + 1
+                    break
+        else:
+            raise AssertionError("mobile media query has no closing brace")
+
+
 # ───────── mobile layout markup ──────────────────────────────────────
 
 def test_mobile_media_query_exists(index_html: str):
@@ -135,20 +161,9 @@ def test_touch_target_minimums(index_html: str):
     are smaller on desktop MUST grow on mobile. We allow the
     rule to live in ANY @media (max-width: 720px) block (the
     file now has multiple as more responsive UI ships)."""
-    # Collect all @media (max-width: 720px) blocks and ensure at
-    # least one of them contains the 44px rule.
-    needle = "@media (max-width: 720px)"
-    pos = 0
-    starts: list[int] = []
-    while True:
-        i = index_html.find(needle, pos)
-        if i < 0:
-            break
-        starts.append(i)
-        pos = i + 1
-    assert starts, "no mobile media-query blocks found"
-    # Scope each block to ~6000 chars (typical block size).
-    has_44 = any("44px" in index_html[s:s + 6000] for s in starts)
+    blocks = _mobile_media_blocks(index_html)
+    assert blocks, "no mobile media-query blocks found"
+    has_44 = any("44px" in block for block in blocks)
     assert has_44, (
         "44px touch-target minimum must appear in at least one "
         "@media (max-width: 720px) block"
@@ -158,10 +173,7 @@ def test_touch_target_minimums(index_html: str):
 def test_one_setup_is_phone_native_inside_mobile_query(index_html: str):
     """One Setup is often the first screen a phone user sees. It must
     behave like a mobile page, not a desktop modal squeezed onto glass."""
-    idx = index_html.find("@media (max-width: 720px)")
-    idx2 = index_html.find("@media (max-width: 720px)", idx + 1)
-    scope = index_html[idx2:idx2 + 9000]
-    for marker in (
+    markers = (
         ".onboarding-backdrop",
         ".onboarding-card",
         ".setup-device-line",
@@ -170,36 +182,38 @@ def test_one_setup_is_phone_native_inside_mobile_query(index_html: str):
         "min-height: 44px",
         "env(safe-area-inset-top)",
         "env(safe-area-inset-bottom)",
-    ):
-        assert marker in scope
+    )
+    assert any(
+        all(marker in block for marker in markers)
+        for block in _mobile_media_blocks(index_html)
+    ), "One Setup mobile rules must remain in one 720px media block"
 
 
 def test_one_setup_prevents_ios_input_zoom(index_html: str):
-    idx = index_html.find("@media (max-width: 720px)")
-    idx2 = index_html.find("@media (max-width: 720px)", idx + 1)
-    scope = index_html[idx2:idx2 + 9000]
-    assert '.onboarding-step input[type="text"]' in scope
-    assert "font-size: 16px" in scope
-    assert "min-height: 46px" in scope
+    assert any(
+        '.onboarding-step input[type="text"]' in block
+        and "font-size: 16px" in block
+        and "min-height: 46px" in block
+        for block in _mobile_media_blocks(index_html)
+    )
 
 
 def test_one_setup_receipts_stack_on_phone(index_html: str):
-    idx = index_html.find("@media (max-width: 720px)")
-    idx2 = index_html.find("@media (max-width: 720px)", idx + 1)
-    scope = index_html[idx2:idx2 + 9000]
-    assert ".setup-receipt-row," in scope
-    assert ".setup-technical-list div" in scope
-    assert "grid-template-columns: 1fr;" in scope
+    assert any(
+        ".setup-receipt-row," in block
+        and ".setup-technical-list div" in block
+        and "grid-template-columns: 1fr;" in block
+        for block in _mobile_media_blocks(index_html)
+    )
 
 
 def test_ios_zoom_prevention_on_textarea(index_html: str):
     """iOS Safari zooms the page when an input has font-size < 16px.
     Composer textarea must bump to 16px on mobile."""
-    idx = index_html.find("@media (max-width: 720px)")
-    idx2 = index_html.find("@media (max-width: 720px)", idx + 1)
-    scope = index_html[idx2:idx2 + 9000]
-    assert ".composer textarea" in scope
-    assert "font-size: 16px" in scope
+    assert any(
+        ".composer textarea" in block and "font-size: 16px" in block
+        for block in _mobile_media_blocks(index_html)
+    )
 
 
 # ───────── mobile sidebar JS ────────────────────────────────────────

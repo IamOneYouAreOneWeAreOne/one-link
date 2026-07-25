@@ -1,38 +1,42 @@
 //! Bloom filter primitive per [ADR-0011](../../../docs/decisions/0011-bloom-transfer-init.md).
 //!
 //! Constructed for a target FP rate + element count. Inserts and
-//! queries chunk_ids (32-byte BLAKE3 hashes). Encodes to / decodes from
+//! queries `chunk_ids` (32-byte BLAKE3 hashes). Encodes to / decodes from
 //! a 12-byte header + bit-array wire format.
 //!
 //! ## Hash function
 //!
 //! Per [ADR-0011]: Kirsch + Mitzenmacher 2006 double-hashing. Two
-//! 64-bit hashes (`h1`, `h2`) per chunk_id; the k bit positions are
+//! 64-bit hashes (`h1`, `h2`) per `chunk_id`; the `k` bit positions are
 //! `(h1 + i * h2) mod m` for i in 0..k.
 //!
 //! Implementation: **xxh3-128 with a domain-separation seed**. The
 //! 128-bit output splits into a 64-bit `h1` (low half) and a 64-bit
 //! `h2` (high half) in a single hash call. xxh3 is ~10 GiB/s scalar /
 //! ~30 GiB/s SIMD on 32-byte inputs — roughly **5-8× faster than
-//! BLAKE3 keyed_hash** at this size because BLAKE3 is setup-dominated
+//! BLAKE3 `keyed_hash`** at this size because BLAKE3 is setup-dominated
 //! below one block (64 bytes).
 //!
 //! The Bloom filter only requires uniform distribution, not
 //! cryptographic collision resistance, so a non-cryptographic hash is
 //! the right primitive for this layer. Domain separation against other
-//! xxh3 uses on the same chunk_id is provided by the seed value
+//! xxh3 uses on the same `chunk_id` is provided by the seed value
 //! [`XXH3_BLOOM_SEED`].
 
 use crate::error::BloomError;
 use crate::sizing::{optimal_k, optimal_m_bits, target_fp_rate};
 
-/// On-wire header length: m_bits (4) + k (4) + reserved (4).
+/// On-wire header length: `m_bits` (4) + `k` (4) + reserved (4).
 pub const BLOOM_HEADER_LEN: usize = 12;
 
 /// Maximum on-wire size for a single `BloomFilter` QUIC frame, matching
 /// `ol_quic::MAX_BULK_FRAME_BYTES`. Larger filters split across frames
 /// (Phase B-2 work; v1 caps at this limit).
 pub const MAX_FILTER_BYTES: usize = 1024 * 1024;
+
+/// Maximum bit count that still leaves room for the fixed header in a
+/// single bounded Bloom frame.
+pub const MAX_FILTER_BITS: u32 = 8_388_512;
 
 /// xxh3 seed for the Bloom double-hash. Domain-separation marker; the
 /// exact value is arbitrary but FROZEN — changing it changes which bits
@@ -41,7 +45,7 @@ const XXH3_BLOOM_SEED: u64 = 0xB100_F117_E000_0001;
 
 /// A Bloom filter sized for a target false-positive rate.
 ///
-/// Insert chunk_ids via [`Bloom::insert`]; query via [`Bloom::contains`].
+/// Insert `chunk_ids` via [`Bloom::insert`]; query via [`Bloom::contains`].
 /// Encode for transmission via [`Bloom::encode`]; decode at the
 /// receiver via [`Bloom::decode`].
 ///
@@ -54,18 +58,22 @@ pub struct Bloom {
 }
 
 impl Bloom {
-    /// Build an empty Bloom filter sized for `n` chunk_ids at a 1% FP
+    /// Build an empty Bloom filter sized for `n` `chunk_ids` at a 1% FP
     /// rate ([`crate::sizing::target_fp_rate`]).
     #[must_use]
     pub fn new(n: usize) -> Self {
         Self::with_target_fp(n, target_fp_rate())
     }
 
-    /// Build an empty Bloom filter sized for `n` chunk_ids at a custom
+    /// Build an empty Bloom filter sized for `n` `chunk_ids` at a custom
     /// target FP rate `p` (clamped to `[1e-10, 0.999]`).
     #[must_use]
     pub fn with_target_fp(n: usize, p: f64) -> Self {
-        let m_bits = optimal_m_bits(n, p);
+        // `optimal_m_bits` saturates at u32::MAX for enormous `n`, which
+        // would otherwise allocate roughly 512 MiB only for `encode()`
+        // to reject it later. Clamp construction to the transport's
+        // immutable 1 MiB envelope.
+        let m_bits = optimal_m_bits(n, p).min(MAX_FILTER_BITS);
         let k = optimal_k(n, m_bits);
         let bytes = m_bits.div_ceil(8) as usize;
         Self {
@@ -89,6 +97,12 @@ impl Bloom {
         }
         if k == 0 {
             return Err(BloomError::InvalidParameters("k must be > 0"));
+        }
+        if m_bits > MAX_FILTER_BITS {
+            return Err(BloomError::FilterTooLarge {
+                got: BLOOM_HEADER_LEN + m_bits.div_ceil(8) as usize,
+                max: MAX_FILTER_BYTES,
+            });
         }
         let bytes = m_bits.div_ceil(8) as usize;
         Ok(Self {
@@ -125,7 +139,7 @@ impl Bloom {
         self.bits.iter().map(|b| u64::from(b.count_ones())).sum()
     }
 
-    /// Insert a chunk_id into the filter.
+    /// Insert a `chunk_id` into the filter.
     pub fn insert(&mut self, chunk_id: &[u8; 32]) {
         let (h1, h2) = derive_hashes(chunk_id);
         for i in 0..self.k {
@@ -134,7 +148,7 @@ impl Bloom {
         }
     }
 
-    /// Test whether a chunk_id is (probably) in the filter.
+    /// Test whether a `chunk_id` is (probably) in the filter.
     ///
     /// `false` = definitely absent. `true` = probably present (FP rate
     /// determined by sizing).
@@ -150,7 +164,7 @@ impl Bloom {
         true
     }
 
-    /// Bulk-insert from an iterator of chunk_ids.
+    /// Bulk-insert from an iterator of `chunk_ids`.
     pub fn extend_from_iter<'a, I: IntoIterator<Item = &'a [u8; 32]>>(&mut self, iter: I) {
         for cid in iter {
             self.insert(cid);
@@ -161,7 +175,7 @@ impl Bloom {
     /// (h1, h2) hash derivation; the bit-set pass is serial because the
     /// bit array is single-writer.
     ///
-    /// Wins start above ~4K chunk_ids; below that the rayon dispatch
+    /// Wins start above ~4K `chunk_ids`; below that the rayon dispatch
     /// cost exceeds the per-id work. Falls back to the serial path for
     /// small inputs.
     pub fn extend_par(&mut self, ids: &[[u8; 32]]) {
@@ -191,7 +205,9 @@ impl Bloom {
                 let mut out = [0u32; 8];
                 let cap = (k as usize).min(8);
                 for (i, slot) in out.iter_mut().enumerate().take(cap) {
-                    *slot = double_hash_position(h1, h2, i as u32, m);
+                    let hash_index =
+                        u32::try_from(i).expect("parallel Bloom hash index is bounded to eight");
+                    *slot = double_hash_position(h1, h2, hash_index, m);
                 }
                 out
             })
@@ -210,13 +226,13 @@ impl Bloom {
         }
     }
 
-    /// Batch presence check: returns one `bool` per input chunk_id.
+    /// Batch presence check: returns one `bool` per input `chunk_id`.
     ///
     /// Faster than calling `contains` in a loop because:
     ///  - The hot loop is straight-line, helping branch prediction.
     ///  - The output `Vec<bool>` lets the compiler unroll cleanly.
     ///
-    /// Used by the server-side bloom-handshake's "for each chunk_id in
+    /// Used by the server-side bloom-handshake's "for each `chunk_id` in
     /// my memtable, does the peer have it?" scan.
     #[must_use]
     pub fn contains_many(&self, ids: &[[u8; 32]]) -> Vec<bool> {
@@ -295,17 +311,18 @@ impl Bloom {
 
 // ──────────────────── private helpers ────────────────────────────────
 
-/// Derive (h1, h2) — two independent 64-bit hashes from a chunk_id.
+/// Derive (`h1`, `h2`) — two independent 64-bit hashes from a `chunk_id`.
 ///
 /// One xxh3-128 pass with [`XXH3_BLOOM_SEED`]. Output is 128 bits;
 /// the low 64 become `h1`, the high 64 become `h2`. Domain separation
-/// against other uses of xxh3 on the same chunk_id is provided by the
+/// against other uses of xxh3 on the same `chunk_id` is provided by the
 /// seed value.
 #[inline]
 fn derive_hashes(chunk_id: &[u8; 32]) -> (u64, u64) {
     let out = xxhash_rust::xxh3::xxh3_128_with_seed(chunk_id, XXH3_BLOOM_SEED);
-    let h1 = out as u64;
-    let h2 = (out >> 64) as u64;
+    let h1 =
+        u64::try_from(out & u128::from(u64::MAX)).expect("masked xxh3 low half always fits in u64");
+    let h2 = u64::try_from(out >> 64).expect("shifted xxh3 high half always fits in u64");
     // Ensure h2 != 0; degenerate (h2 == 0) would map all k positions to
     // the same bit. Probability is 2^-64; we still guard.
     let h2 = if h2 == 0 { 1 } else { h2 };
@@ -316,7 +333,7 @@ fn derive_hashes(chunk_id: &[u8; 32]) -> (u64, u64) {
 fn double_hash_position(h1: u64, h2: u64, i: u32, m_bits: u32) -> u32 {
     let m = u64::from(m_bits);
     let pos = h1.wrapping_add(u64::from(i).wrapping_mul(h2)) % m;
-    pos as u32
+    u32::try_from(pos).expect("Bloom position is reduced modulo a u32 bit count")
 }
 
 #[inline]
@@ -396,7 +413,7 @@ mod tests {
                 fp_count += 1;
             }
         }
-        let fp_rate = (fp_count as f64) / 10_000.0;
+        let fp_rate = f64::from(fp_count) / 10_000.0;
         // Allow up to 2% to absorb the tail of the binomial distribution.
         assert!(fp_rate <= 0.02, "FP rate {fp_rate} too high");
     }
@@ -421,6 +438,18 @@ mod tests {
         let encoded = f.encode().unwrap();
         assert_eq!(encoded.len(), f.encoded_len());
         assert_eq!(encoded.len(), BLOOM_HEADER_LEN + f.bits.len());
+    }
+
+    #[test]
+    fn construction_is_bounded_before_allocation() {
+        let filter = Bloom::new(usize::MAX);
+        assert!(filter.encoded_len() <= MAX_FILTER_BYTES);
+        assert_eq!(filter.m_bits(), MAX_FILTER_BITS);
+
+        assert!(matches!(
+            Bloom::with_params(u32::MAX, 1),
+            Err(BloomError::FilterTooLarge { .. })
+        ));
     }
 
     #[test]
@@ -452,7 +481,9 @@ mod tests {
     fn rejects_too_large_encoded() {
         // Construct a header claiming a huge filter; decode should reject.
         let mut buf = vec![0u8; MAX_FILTER_BYTES + 1];
-        buf[0..4].copy_from_slice(&((MAX_FILTER_BYTES as u32) * 8).to_le_bytes());
+        let oversized_bit_count =
+            u32::try_from(MAX_FILTER_BYTES).expect("the one-MiB filter cap fits in u32") * 8;
+        buf[0..4].copy_from_slice(&oversized_bit_count.to_le_bytes());
         buf[4..8].copy_from_slice(&7u32.to_le_bytes());
         let result = Bloom::decode(&buf);
         assert!(matches!(result, Err(BloomError::FilterTooLarge { .. })));

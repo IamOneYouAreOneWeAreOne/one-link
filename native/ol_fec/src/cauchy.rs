@@ -22,7 +22,7 @@
 //!     [ C_(m,k)   ]   ← rows k..k+m: parity shards
 //! ```
 //!
-//! ## Choice of x_i, y_j
+//! ## Choice of `x_i`, `y_j`
 //!
 //! We use the disjoint sets `Y = {0, 1, 2, ..., k-1}` and
 //! `X = {k, k+1, ..., k+m-1}`. With `k + m ≤ 255` (per ADR-0016
@@ -53,7 +53,7 @@ impl CauchyMatrix {
     /// - [`FecError::InvalidParameters`] if `k == 0` or `m == 0` or
     ///   `k + m > 255`.
     pub fn new(k: usize, m: usize) -> Result<Self, FecError> {
-        if k == 0 || m == 0 || k + m > 255 {
+        if k == 0 || m == 0 || k.checked_add(m).is_none_or(|total| total > 255) {
             return Err(FecError::InvalidParameters { k, m });
         }
         let mut parity = Vec::with_capacity(m);
@@ -61,13 +61,13 @@ impl CauchyMatrix {
             let mut row = Vec::with_capacity(k);
             for j in 0..k {
                 // x_i = k + i; y_j = j. Both fit in u8.
-                let x_i = (k + i) as u8;
-                let y_j = j as u8;
+                let x_i = u8::try_from(k + i).map_err(|_| FecError::InvalidParameters { k, m })?;
+                let y_j = u8::try_from(j).map_err(|_| FecError::InvalidParameters { k, m })?;
                 // x_i + y_j = x_i ^ y_j (GF(2^8)). Guaranteed non-zero
                 // because x_i != y_j (disjoint sets).
                 let denom = x_i ^ y_j;
                 debug_assert!(denom != 0);
-                row.push(div(1, denom));
+                row.push(div(1, denom).ok_or(FecError::SingularMatrix)?);
             }
             parity.push(row);
         }
@@ -96,11 +96,11 @@ impl CauchyMatrix {
     }
 
     /// Borrow the parity coefficient row for parity shard `i`. Length
-    /// is `k`. Panics if `i >= m`.
+    /// is `k`, or `None` if `i >= m`.
     #[inline]
     #[must_use]
-    pub fn parity_row(&self, i: usize) -> &[u8] {
-        &self.parity[i]
+    pub fn parity_row(&self, i: usize) -> Option<&[u8]> {
+        self.parity.get(i).map(Vec::as_slice)
     }
 
     /// Build the full systematic generator matrix as a flat `(k+m) × k`
@@ -165,7 +165,7 @@ pub fn invert(mut m: Vec<Vec<u8>>) -> Option<Vec<Vec<u8>>> {
         m.swap(col, pivot);
         // Normalize pivot row so `m[col][col] = 1`.
         let pivot_val = m[col][col];
-        let pivot_inv = crate::gf256::inv(pivot_val);
+        let pivot_inv = crate::gf256::inv(pivot_val)?;
         for v in &mut m[col] {
             *v = mul(*v, pivot_inv);
         }
@@ -218,6 +218,14 @@ mod tests {
     }
 
     #[test]
+    fn rejects_overflowing_params_without_allocation() {
+        assert!(matches!(
+            CauchyMatrix::new(usize::MAX, 1),
+            Err(FecError::InvalidParameters { .. })
+        ));
+    }
+
+    #[test]
     fn standard_rs_10_4_constructs() {
         let c = CauchyMatrix::new(10, 4).unwrap();
         assert_eq!(c.k(), 10);
@@ -226,7 +234,7 @@ mod tests {
         // Parity entries are all nonzero (any zero would mean a
         // collision in (x_i ^ y_j) which can't happen with our scheme).
         for i in 0..4 {
-            for &v in c.parity_row(i) {
+            for &v in c.parity_row(i).unwrap() {
                 assert!(v != 0, "parity[{i}] has a zero entry");
             }
         }

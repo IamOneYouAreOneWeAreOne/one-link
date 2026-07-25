@@ -15,11 +15,11 @@ use crate::PROTOCOL_DOMAIN;
 
 // ── Constants ────────────────────────────────────────────────────
 
-/// Length of a routing-information slot: 32-byte hop_id +
+/// Length of a routing-information slot: 32-byte `hop_id` +
 /// 16-byte MAC = 48 bytes per relay slot.
 pub const SLOT_LEN: usize = 48;
 
-/// Bytes for the hop_id portion of a slot.
+/// Bytes for the `hop_id` portion of a slot.
 pub const SLOT_ID_LEN: usize = 32;
 
 /// Bytes for the MAC portion of a slot.
@@ -34,8 +34,8 @@ pub const HEADER_LEN: usize = MAX_HOPS * SLOT_LEN;
 /// Fixed payload length.
 pub const PAYLOAD_LEN: usize = 1024;
 
-/// Length of the per-layer ChaCha20 keystream we generate. We need
-/// HEADER_LEN bytes for the visible header XOR + SLOT_LEN bytes
+/// Length of the per-layer `ChaCha20` keystream we generate. We need
+/// `HEADER_LEN` bytes for the visible header XOR + `SLOT_LEN` bytes
 /// past the end for the trailing-slot padding after shift.
 pub const HEADER_KEYSTREAM_LEN: usize = HEADER_LEN + SLOT_LEN;
 
@@ -51,9 +51,9 @@ pub const LAYER_KEY_LEN: usize = 32;
 /// `(my_shared_secret, alpha_received)` at peel time.
 #[derive(Clone)]
 pub struct HopKeys {
-    /// 32-byte ChaCha20 key for the header stream cipher.
+    /// 32-byte `ChaCha20` key for the header stream cipher.
     pub header_stream: [u8; 32],
-    /// 32-byte ChaCha20 key for the payload stream cipher.
+    /// 32-byte `ChaCha20` key for the payload stream cipher.
     pub payload_stream: [u8; 32],
     /// 32-byte BLAKE3-keyed-MAC key for the per-hop header MAC.
     pub mac_key: [u8; 32],
@@ -140,7 +140,7 @@ pub fn verify_header_mac(key: &[u8; 32], header: &[u8], expected: &[u8; SLOT_MAC
 
 // ── ChaCha20 stream cipher helpers ───────────────────────────────
 
-/// Generate `len` bytes of ChaCha20 keystream with the given key.
+/// Generate `len` bytes of `ChaCha20` keystream with the given key.
 /// Uses an all-zero nonce — safe because each hop has a unique
 /// stream key per circuit.
 ///
@@ -153,7 +153,7 @@ pub fn chacha20_keystream(key: &[u8; 32], len: usize) -> Vec<u8> {
     buf
 }
 
-/// Generate ChaCha20 keystream directly into a caller-provided
+/// Generate `ChaCha20` keystream directly into a caller-provided
 /// buffer. The buffer MUST start at all zeros — `apply_keystream`
 /// XORs into the buffer, so a zero buffer yields pure keystream.
 /// Hot-path helper used by [`build_filler`] and
@@ -182,7 +182,7 @@ pub fn chacha20_keystream_into(key: &[u8; 32], out: &mut [u8]) {
     cipher.apply_keystream(out);
 }
 
-/// ChaCha20 XOR-decrypt / encrypt into the buffer in place (no
+/// `ChaCha20` XOR-decrypt / encrypt into the buffer in place (no
 /// pre-zero step). Same key + zero nonce semantics as
 /// [`chacha20_keystream`].
 ///
@@ -230,7 +230,7 @@ pub fn xor_in_place(buf: &mut [u8], keystream: &[u8]) {
 
 /// Build the cumulative filler for `n_relays` upstream hops.
 ///
-/// `relay_header_streams[i]` is the header-stream ChaCha20 key for
+/// `relay_header_streams[i]` is the header-stream `ChaCha20` key for
 /// the `i`-th relay in the circuit (the relays *before* the
 /// destination).
 pub fn build_filler(relay_header_streams: &[[u8; 32]]) -> Vec<u8> {
@@ -250,9 +250,7 @@ pub fn build_filler(relay_header_streams: &[[u8; 32]]) -> Vec<u8> {
         let new_len = (i + 1) * SLOT_LEN;
         // Zero keystream buffer (apply_keystream XORs into existing
         // bytes, so a zero buffer is needed for pure keystream).
-        for b in keystream.iter_mut() {
-            *b = 0;
-        }
+        keystream.fill(0);
         chacha20_keystream_into(key, &mut keystream);
         let tail_start = HEADER_KEYSTREAM_LEN - new_len;
         for j in 0..new_len {
@@ -348,7 +346,7 @@ mod tests {
     #[test]
     fn filler_length_n_times_slot_len() {
         for n in 1..=4 {
-            let keys: Vec<[u8; 32]> = (0..n).map(|i| [i as u8 + 1; 32]).collect();
+            let keys: Vec<[u8; 32]> = (0..n).map(|i| [u8::try_from(i).unwrap() + 1; 32]).collect();
             let filler = build_filler(&keys);
             assert_eq!(filler.len(), n * SLOT_LEN, "n={n}");
         }

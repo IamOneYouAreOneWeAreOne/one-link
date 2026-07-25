@@ -12,7 +12,7 @@
 //! 5. Terminate when no closer peers were discovered in the last
 //!    round — we've converged on the K closest.
 //!
-//! For FIND_VALUE: the same shape, except every query is FIND_VALUE.
+//! For `FIND_VALUE`: the same shape, except every query is `FIND_VALUE`.
 //! If any response carries `FindValueOutcome::Found`, return the
 //! record immediately (verify signature first).
 //!
@@ -21,10 +21,11 @@
 //! the algorithm. Pure-async; the executor (tokio) lives in the
 //! daemon, not in this crate.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 
+use futures_util::future::join_all;
 use thiserror::Error;
 
 use crate::node_id::{closer_to, NodeId};
@@ -44,12 +45,24 @@ pub const LOOKUP_K_DEFAULT: usize = 20;
 /// converge in O(log n) iterations; 64 is a generous cap.
 pub const MAX_LOOKUP_ITERS: usize = 64;
 
+/// Maximum simultaneous peer queries in one lookup round.
+pub const MAX_LOOKUP_ALPHA: usize = 32;
+
+/// Maximum final closest-peer set requested by a local caller.
+pub const MAX_LOOKUP_K: usize = 256;
+
+/// Maximum candidates retained by one iterative lookup.
+pub const MAX_LOOKUP_CANDIDATES: usize = 8_192;
+
+/// Reject records dated implausibly far ahead of the local clock.
+pub const MAX_LOOKUP_FUTURE_SKEW_SECS: u64 = 300;
+
 /// The result of a single peer query in a lookup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LookupQueryResult {
     /// Peer answered with closer peers it knows.
     CloserPeers(Vec<NodeId>),
-    /// Peer answered with the looked-up record (FIND_VALUE only).
+    /// Peer answered with the looked-up record (`FIND_VALUE` only).
     /// Caller verifies the signature before trusting.
     Found(SignedRecord),
     /// Peer timed out / failed. Caller continues with other peers.
@@ -59,9 +72,9 @@ pub enum LookupQueryResult {
 /// Lookup outcomes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LookupResult {
-    /// FIND_NODE: returns the K closest peers found.
+    /// `FIND_NODE`: returns the K closest peers found.
     Closest(Vec<NodeId>),
-    /// FIND_VALUE: returns the record (already verified by caller's
+    /// `FIND_VALUE`: returns the record (already verified by caller's
     /// transport layer; this just delivers the bytes).
     Value(SignedRecord),
 }
@@ -77,14 +90,14 @@ pub enum LookupError {
     DidNotConverge(usize),
 }
 
-/// Abstract transport for issuing one FIND_NODE / FIND_VALUE query
+/// Abstract transport for issuing one `FIND_NODE` / `FIND_VALUE` query
 /// to a peer and receiving its response.
 ///
 /// The daemon implements this against UDP / WebRTC / over-mesh-relay.
 /// Pure-async; returns a boxed future so the trait stays object-safe
 /// + works with any executor.
 pub trait Transport: Send + Sync {
-    /// Send a FIND_NODE or FIND_VALUE query to `peer` asking for
+    /// Send a `FIND_NODE` or `FIND_VALUE` query to `peer` asking for
     /// `target`. If `want_value` is true, the receiver should return
     /// `Found(record)` if it has the record; otherwise return closer
     /// peers either way.
@@ -107,9 +120,9 @@ pub struct Lookup<'a> {
     /// Peers we've heard of but not yet queried, sorted ascending
     /// by XOR distance to target.
     pending: Vec<NodeId>,
-    /// NodeIds we've already queried (success, failure, or in-flight).
+    /// `NodeIds` we've already queried (success, failure, or in-flight).
     /// Prevents duplicate queries.
-    queried: HashMap<NodeId, ()>,
+    queried: HashSet<NodeId>,
     /// Closest peers seen so far (the converging result). Sorted
     /// ascending by XOR distance to target.
     closest: Vec<NodeId>,
@@ -149,14 +162,15 @@ impl<'a> Lookup<'a> {
         sort_by_distance(&mut pending, &target);
         // Dedup (a bootstrap with duplicates would otherwise waste queries).
         pending.dedup();
+        pending.truncate(MAX_LOOKUP_CANDIDATES);
         let closest = pending.clone();
         Self {
             target,
             want_value,
-            alpha,
-            k,
+            alpha: alpha.clamp(1, MAX_LOOKUP_ALPHA),
+            k: k.clamp(1, MAX_LOOKUP_K),
             pending,
-            queried: HashMap::new(),
+            queried: HashSet::new(),
             closest,
             transport,
         }
@@ -178,7 +192,7 @@ impl<'a> Lookup<'a> {
             let to_query: Vec<NodeId> = self
                 .pending
                 .iter()
-                .filter(|p| !self.queried.contains_key(*p))
+                .filter(|p| !self.queried.contains(*p))
                 .take(self.alpha)
                 .copied()
                 .collect();
@@ -189,30 +203,44 @@ impl<'a> Lookup<'a> {
                 return Ok(LookupResult::Closest(self.closest));
             }
             for p in &to_query {
-                self.queried.insert(*p, ());
+                self.queried.insert(*p);
             }
-            // Issue α queries in parallel by polling each future
-            // sequentially. The Transport's caller (the daemon) can
-            // do real parallelism via the underlying I/O; this
-            // sequential await loop preserves correctness either way.
-            // A future optimization: poll all futures simultaneously
-            // via futures::future::join_all; punted to wiring time.
+            // Issue the alpha queries concurrently.  Awaiting them one by
+            // one makes every timeout additive (alpha × timeout), defeating
+            // Kademlia's core latency property on lossy links.
+            let target = self.target;
+            let want_value = self.want_value;
+            let transport = self.transport;
+            let replies = join_all(to_query.into_iter().map(|peer| async move {
+                (peer, transport.query(peer, target, want_value).await)
+            }))
+            .await;
             let mut any_new_closer = false;
-            for peer in to_query {
-                match self
-                    .transport
-                    .query(peer, self.target, self.want_value)
-                    .await
-                {
+            for (peer, reply) in replies {
+                match reply {
                     LookupQueryResult::Found(record) => {
-                        return Ok(LookupResult::Value(record));
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |duration| duration.as_secs());
+                        if self.want_value
+                            && record.node_id() == self.target
+                            && record.verify().is_ok()
+                            && record.record.is_fresh(now)
+                            && record.record.publish_time_unix
+                                <= now.saturating_add(MAX_LOOKUP_FUTURE_SKEW_SECS)
+                        {
+                            return Ok(LookupResult::Value(record));
+                        }
                     }
                     LookupQueryResult::CloserPeers(closer) => {
-                        for c in closer {
+                        for c in closer.into_iter().take(crate::rpc::MAX_FIND_RESULTS) {
                             if c == peer {
                                 continue; // peer returning itself: ignore
                             }
-                            if !self.queried.contains_key(&c) && !self.pending.contains(&c) {
+                            if self.pending.len() < MAX_LOOKUP_CANDIDATES
+                                && !self.queried.contains(&c)
+                                && !self.pending.contains(&c)
+                            {
                                 self.pending.push(c);
                                 any_new_closer = self.maybe_add_to_closest(c) || any_new_closer;
                             }
@@ -265,6 +293,8 @@ impl<'a> Lookup<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::PeerRecord;
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     fn id(b: u8) -> NodeId {
@@ -318,7 +348,7 @@ mod tests {
         loop {
             match fut.as_mut().poll(&mut cx) {
                 Poll::Ready(r) => return r,
-                Poll::Pending => continue,
+                Poll::Pending => {}
             }
         }
     }
@@ -344,31 +374,57 @@ mod tests {
             LookupResult::Closest(c) => {
                 assert_eq!(c, vec![peer]);
             }
-            other => panic!("expected Closest, got {other:?}"),
+            other @ LookupResult::Value(_) => panic!("expected Closest, got {other:?}"),
         }
     }
 
     #[test]
     fn find_value_short_circuits_on_found() {
         let mut t = StubTransport::new();
-        use crate::record::PeerRecord;
-        let dummy_record = SignedRecord {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let dummy_record = SignedRecord::sign(
+            PeerRecord {
+                publisher_pubkey: signing_key.verifying_key().to_bytes(),
+                endpoints: vec!["udp://1.2.3.4:5".into()],
+                publish_time_unix: now,
+                ttl_secs: 1000,
+            },
+            &signing_key,
+        )
+        .unwrap();
+        let peer = id(0x42);
+        t.set_response(peer, LookupQueryResult::Found(dummy_record.clone()));
+        let lookup = Lookup::new(dummy_record.node_id(), vec![peer], &t, true);
+        let result = block_on(lookup.run()).unwrap();
+        match result {
+            LookupResult::Value(r) => assert_eq!(r, dummy_record),
+            other @ LookupResult::Closest(_) => panic!("expected Value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forged_or_wrong_target_records_never_satisfy_lookup() {
+        let mut t = StubTransport::new();
+        let peer = id(0x42);
+        let forged = SignedRecord {
             record: PeerRecord {
                 publisher_pubkey: [0u8; 32],
                 endpoints: vec!["udp://1.2.3.4:5".into()],
-                publish_time_unix: 100,
+                publish_time_unix: u64::MAX,
                 ttl_secs: 1000,
             },
             signature: [0u8; 64],
         };
-        let peer = id(0x42);
-        t.set_response(peer, LookupQueryResult::Found(dummy_record.clone()));
+        t.set_response(peer, LookupQueryResult::Found(forged));
         let lookup = Lookup::new(id(0xFF), vec![peer], &t, true);
-        let result = block_on(lookup.run()).unwrap();
-        match result {
-            LookupResult::Value(r) => assert_eq!(r, dummy_record),
-            other => panic!("expected Value, got {other:?}"),
-        }
+        assert!(matches!(
+            block_on(lookup.run()),
+            Ok(LookupResult::Closest(_))
+        ));
     }
 
     #[test]
@@ -390,7 +446,7 @@ mod tests {
                 // First entry must be b (closer).
                 assert_eq!(c[0], b);
             }
-            other => panic!("expected Closest, got {other:?}"),
+            other @ LookupResult::Value(_) => panic!("expected Closest, got {other:?}"),
         }
         let queries = t.queries_seen.lock().unwrap();
         // Both a and b were queried.
@@ -436,5 +492,57 @@ mod tests {
         let queries = t.queries_seen.lock().unwrap();
         // Queried a exactly once; self-loop ignored.
         assert_eq!(queries.iter().filter(|(p, _)| *p == a).count(), 1);
+    }
+
+    #[test]
+    fn local_lookup_parameters_and_candidates_are_bounded() {
+        let t = StubTransport::new();
+        let bootstrap = (0..MAX_LOOKUP_CANDIDATES + 100)
+            .map(|n| {
+                let mut bytes = [0u8; 32];
+                bytes[..8].copy_from_slice(&(n as u64).to_be_bytes());
+                NodeId::from_bytes(bytes)
+            })
+            .collect();
+        let lookup = Lookup::with_params(id(0xFF), bootstrap, &t, false, usize::MAX, usize::MAX);
+        assert_eq!(lookup.alpha, MAX_LOOKUP_ALPHA);
+        assert_eq!(lookup.k, MAX_LOOKUP_K);
+        assert_eq!(lookup.pending.len(), MAX_LOOKUP_CANDIDATES);
+    }
+
+    struct ConcurrencyTransport {
+        active: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Transport for ConcurrencyTransport {
+        fn query<'a>(
+            &'a self,
+            _peer: NodeId,
+            _target: NodeId,
+            _want_value: bool,
+        ) -> Pin<Box<dyn Future<Output = LookupQueryResult> + Send + 'a>> {
+            Box::pin(async move {
+                use std::sync::atomic::Ordering;
+                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(active, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                LookupQueryResult::CloserPeers(Vec::new())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn alpha_queries_are_actually_concurrent() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let transport = ConcurrencyTransport {
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        };
+        let lookup =
+            Lookup::with_params(id(0xFF), vec![id(1), id(2), id(3)], &transport, false, 3, 3);
+        lookup.run().await.unwrap();
+        assert_eq!(transport.peak.load(Ordering::SeqCst), 3);
     }
 }

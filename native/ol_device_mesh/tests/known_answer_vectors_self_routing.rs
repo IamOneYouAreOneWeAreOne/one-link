@@ -4,6 +4,7 @@ use ol_device_mesh::self_routing::{
     PeerLink, RouteAnnouncement, MAX_LINKS_PER_ANNOUNCEMENT, ROUTE_ANNOUNCEMENT_DOMAIN,
 };
 use ol_device_mesh::DEVICE_ID_LEN;
+use std::fmt::Write as _;
 
 fn check_regen<F: FnOnce()>(label: &str, dump: F) {
     if std::env::var("OL_SELF_ROUTING_KAT_REGEN").as_deref() == Ok("1") {
@@ -13,7 +14,11 @@ fn check_regen<F: FnOnce()>(label: &str, dump: F) {
 }
 
 fn to_hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    let mut hex = String::with_capacity(b.len() * 2);
+    for byte in b {
+        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
 }
 
 #[test]
@@ -28,6 +33,23 @@ fn kat_bound_constants_pinned() {
 
 #[test]
 fn kat_announcement_canonical_transcript_pinned() {
+    const EXPECTED_HEX: &str = concat!(
+        "4f4c2d6d6573682d726f7574652d616e6e6f756e63656d656e742d7631", // "OL-mesh-route-announcement-v1"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",                           // announcer
+        "0000000000000003",                                           // day
+        "000000006553f100",                                           // announced_at
+        "00000002",                                                   // link count = 2
+        // link 1: peer, tau, seen, direct
+        "11111111111111111111111111111111",
+        "00000064",         // tau = 100
+        "000000006553f100", // last_seen
+        "01",               // direct
+        // link 2
+        "22222222222222222222222222222222",
+        "00000032",         // tau = 50
+        "000000006553f09c", // last_seen
+        "00",               // direct = false
+    );
     let announcer = [0xAA; DEVICE_ID_LEN];
     let day: u64 = 3;
     let announced_at: u64 = 1_700_000_000;
@@ -52,23 +74,6 @@ fn kat_announcement_canonical_transcript_pinned() {
     check_regen("route-announcement canonical_transcript", || {
         eprintln!("    EXPECTED_HEX = \"{hex}\"");
     });
-    const EXPECTED_HEX: &str = concat!(
-        "4f4c2d6d6573682d726f7574652d616e6e6f756e63656d656e742d7631", // "OL-mesh-route-announcement-v1"
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",                           // announcer
-        "0000000000000003",                                           // day
-        "000000006553f100",                                           // announced_at
-        "00000002",                                                   // link count = 2
-        // link 1: peer, tau, seen, direct
-        "11111111111111111111111111111111",
-        "00000064",         // tau = 100
-        "000000006553f100", // last_seen
-        "01",               // direct
-        // link 2
-        "22222222222222222222222222222222",
-        "00000032",         // tau = 50
-        "000000006553f09c", // last_seen
-        "00",               // direct = false
-    );
     assert_eq!(hex, EXPECTED_HEX, "route-announcement transcript drift");
 }
 

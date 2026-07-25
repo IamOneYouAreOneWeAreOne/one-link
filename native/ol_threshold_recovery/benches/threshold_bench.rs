@@ -1,4 +1,4 @@
-//! Criterion benchmark for ol_threshold_recovery.
+//! Criterion benchmark for `ol_threshold_recovery`.
 //!
 //! Establishes throughput baselines + per-operation cycle estimates.
 //! Re-run after any change to verify no regression.
@@ -136,12 +136,22 @@ fn bench_field_bound_reconstruct(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_gf_mul,
-    bench_shamir_split,
-    bench_shamir_reconstruct,
-    bench_field_bound_split,
-    bench_field_bound_reconstruct,
-);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{
+        bench_field_bound_reconstruct, bench_field_bound_split, bench_gf_mul,
+        bench_shamir_reconstruct, bench_shamir_split, criterion_group,
+    };
+
+    criterion_group!(
+        benches,
+        bench_gf_mul,
+        bench_shamir_split,
+        bench_shamir_reconstruct,
+        bench_field_bound_split,
+        bench_field_bound_reconstruct,
+    );
+}
+criterion_main!(criterion_benchmark_harness::benches);

@@ -37,8 +37,10 @@ pub mod peer;
 pub mod server;
 pub mod wire;
 
-pub use config::TransferConfig;
-pub use engine::TransferEngine;
+pub use config::{TransferConfig, MAX_INFLIGHT_PER_PEER};
+pub use engine::{
+    TransferEngine, MAX_BLOOM_INPUT_CHUNKS, MAX_FETCH_MANY_CHUNKS, MAX_REGISTERED_PEERS,
+};
 pub use error::TransferError;
 pub use outcome::FetchOutcome;
 pub use peer::PeerEntry;

@@ -15,11 +15,9 @@ Pin the contract:
 """
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -27,7 +25,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from one_link.daemon import Daemon
 from one_link.identity import Identity, fingerprint_of
 from one_link.state import State
-from one_link.wire import decode_msg, encode_msg, make_msg
+from one_link.wire import decode_msg, make_msg
 
 
 def _new_identity() -> Identity:
@@ -174,6 +172,8 @@ async def test_inbound_group_event_pinned_persists(tmp_path: Path):
     for ev_wire in a_state.list_group_events(gid):
         msg = make_msg("GROUP_EVENT", alice.short_id, event=ev_wire)
         await b_daemon._on_peer_message(chan, msg)
+        assert chan.sent[-1].get("durable") is True
+        assert not chan.sent[-1].get("rejected")
 
     # Bob now sees the same group + same events.
     bob_events = b_state.list_group_events(gid)
@@ -183,7 +183,7 @@ async def test_inbound_group_event_pinned_persists(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_inbound_group_event_non_pinned_silently_dropped(tmp_path: Path):
+async def test_inbound_group_event_non_pinned_gets_negative_receipt(tmp_path: Path):
     me = _new_identity()
     them = _new_identity()
     state = State(db_path=tmp_path / "s.db")
@@ -201,8 +201,48 @@ async def test_inbound_group_event_non_pinned_silently_dropped(tmp_path: Path):
     # _is_pinned before it gets to verify.
     msg = make_msg("GROUP_EVENT", them.short_id, event={"kind": "create"})
     await daemon._on_peer_message(chan, msg)
-    # No state mutation, no ACK sent (return-early path).
+    # No state mutation, but the sender receives a terminal negative receipt
+    # rather than timing out and retrying forever.
     assert state.list_group_ids() == []
+    assert chan.sent[-1]["rejected"] == "peer_not_pinned"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_inbound_group_event_persist_failure_never_acks_or_broadcasts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    from one_link import groups as gmod
+
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    event = gmod.sign_create_group(
+        private_key=them.private, pubkey=them.public_bytes, name="Durable",
+    )
+    broadcasts: list[dict] = []
+    daemon.ui_server = SimpleNamespace(broadcast=broadcasts.append)
+    monkeypatch.setattr(
+        state, "upsert_group_event",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    chan = _FakeChannel(
+        peer_ed_pub=them.public_bytes, peer_short_id=them.short_id,
+    )
+    msg = make_msg("GROUP_EVENT", them.short_id, event=event.to_wire())
+
+    await daemon._on_peer_message(chan, msg)
+
+    assert chan.sent[-1]["rejected"] == "message_persistence_failed"
+    assert chan.sent[-1].get("durable") is not True
+    assert broadcasts == []
     state.close()
 
 

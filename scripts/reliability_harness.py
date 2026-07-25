@@ -49,6 +49,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from one_link import app as app_mod
+from one_link import control_ipc
 
 # ── per-pair execution ─────────────────────────────────────────────
 
@@ -93,25 +95,33 @@ def _stop(proc: subprocess.Popen) -> None:
             proc.wait(timeout=5)
 
 
-def _wait_ready(home: Path, timeout: float) -> tuple[int | None, str | None]:
-    """Return (port, token) once both data files exist."""
+def _wait_ready(home: Path, timeout: float) -> tuple[int, str] | None:
+    """Return (port, token) only after control and UI mutual authentication."""
     deadline = time.time() + timeout
-    port_path = home / "data" / "server.port"
-    tok_path = home / "data" / "ui.token"
+    data = home / "data"
     while time.time() < deadline:
-        if (
-            port_path.is_file() and port_path.stat().st_size > 0
-            and tok_path.is_file() and tok_path.stat().st_size > 0
-        ):
-            try:
-                return (
-                    int(port_path.read_text().strip()),
-                    tok_path.read_text().strip(),
+        try:
+            control_port = int(
+                control_ipc.read_private_bytes_strict(
+                    data / "control.port",
+                    max_bytes=64,
+                    label="control port",
                 )
-            except (ValueError, OSError):
-                pass
+                .decode("ascii")
+                .strip()
+            )
+            secret = control_ipc.read_control_secret(data)
+            daemon = app_mod.resolve_authenticated_daemon(
+                control_port,
+                secret,
+                timeout=2.0,
+            )
+            if daemon is not None:
+                return daemon.server_port, daemon.token
+        except (ValueError, OSError, RuntimeError):
+            pass
         time.sleep(0.05)
-    return None, None
+    return None
 
 
 def _api_me(port: int, token: str, timeout: float = 5.0) -> dict | None:
@@ -120,7 +130,9 @@ def _api_me(port: int, token: str, timeout: float = 5.0) -> dict | None:
         headers={"Authorization": f"Bearer {token}"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        # The URL is constructed locally from an integer daemon port; no
+        # caller-controlled scheme can reach urlopen.
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310
             return json.loads(r.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
         return None
@@ -133,7 +145,8 @@ def _api_peers(port: int, token: str, timeout: float = 5.0) -> list | None:
         headers={"Authorization": f"Bearer {token}"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        # Fixed loopback HTTP request; see _api_me above.
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310
             data = json.loads(r.read().decode("utf-8"))
             return data.get("peers", [])
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
@@ -178,9 +191,10 @@ def run_one_pair(pair_id: int, tmpdir: Path) -> PairResult:
         t0 = _now_ms()
         try:
             a_proc = _spawn(a_home, a_log)
-            a_port, a_tok = _wait_ready(a_home, timeout=30.0)
-            if a_port is None:
+            a_ready = _wait_ready(a_home, timeout=30.0)
+            if a_ready is None:
                 raise RuntimeError("A never wrote ready files")
+            a_port, a_tok = a_ready
             result.steps.append(StepTrace("spawn_a", True, _now_ms() - t0))
         except Exception as e:
             result.steps.append(StepTrace("spawn_a", False, _now_ms() - t0, str(e)))
@@ -190,9 +204,10 @@ def run_one_pair(pair_id: int, tmpdir: Path) -> PairResult:
         t0 = _now_ms()
         try:
             b_proc = _spawn(b_home, b_log)
-            b_port, b_tok = _wait_ready(b_home, timeout=30.0)
-            if b_port is None:
+            b_ready = _wait_ready(b_home, timeout=30.0)
+            if b_ready is None:
                 raise RuntimeError("B never wrote ready files")
+            b_port, b_tok = b_ready
             result.steps.append(StepTrace("spawn_b", True, _now_ms() - t0))
         except Exception as e:
             result.steps.append(StepTrace("spawn_b", False, _now_ms() - t0, str(e)))

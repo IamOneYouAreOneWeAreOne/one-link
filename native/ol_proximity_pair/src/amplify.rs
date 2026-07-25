@@ -1,27 +1,23 @@
-//! Stage 4: privacy amplification via BLAKE3-keyed hash.
+//! Stage 4 research candidate extraction via BLAKE3 keyed hashing.
 //!
-//! After reconciliation both sides agree on a bit string, but an
-//! eavesdropper learned `syndrome_len` bits of it from the public
-//! syndrome exchange. To remove that leakage, hash the entire string
-//! down to a smaller fixed-size key. The result is information-
-//! theoretically secret as long as the input has more remaining
-//! entropy than the output size.
-//!
-//! BLAKE3 in keyed mode is the universal-hash family. Both sides
-//! use the SAME salt (typically a transcript hash of the Factor-1
-//! QR scan / bootstrap handshake), guaranteeing they produce the
-//! SAME output from the same reconciled input.
+//! The historical function name is retained, but callers must not infer an
+//! information-theoretic guarantee from it. BLAKE3 is a computational hash,
+//! not the independently seeded universal-hash construction required by a
+//! leftover-hash-lemma proof, and this crate does not estimate conditional
+//! min-entropy or account for all protocol leakage. Equal inputs and salt
+//! produce equal outputs; unequal inputs are intentionally avalanche-mapped
+//! to unrelated outputs.
 
 /// Final key size in bytes (256 bits — matches Ed25519 master seed,
-/// AES-256 key, ChaCha20 key, BLAKE3 output).
+/// AES-256 key, `ChaCha20` key, BLAKE3 output).
 pub const AMPLIFIED_KEY_BYTES: usize = 32;
 
-/// Privacy amplification: BLAKE3-keyed-hash `reconciled_bits` with `salt`
-/// to produce a 32-byte key.
+/// Compress candidate `reconciled_bits` with BLAKE3 keyed by `salt`.
 ///
 /// `reconciled_bits` is a packed bit string (one bit per byte, LSB).
-/// `salt` is a 32-byte universal-hash key — must be identical on
-/// both sides for the output to match.
+/// `salt` must be identical on both sides for the output to match. The return
+/// value is an unconfirmed candidate, not an authenticated or entropy-proven
+/// secret.
 #[must_use]
 pub fn privacy_amplify(reconciled_bits: &[u8], salt: &[u8; 32]) -> [u8; AMPLIFIED_KEY_BYTES] {
     // Pack the bit string into bytes (8 bits per byte) so BLAKE3

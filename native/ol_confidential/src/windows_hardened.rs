@@ -10,14 +10,15 @@
 //!
 //! ## What this gets us
 //!
-//! - **Peer-verifiable hardware root**: any peer that pins the
-//!   `master_vk` can ALSO validate that this doc was minted on a
-//!   process that holds the specific TPM key. Cross-platform
+//! - **Platform-key possession and continuity**: a peer can validate that
+//!   this document was signed by the private key matching the included CNG
+//!   public blob. Cross-platform
 //!   verifiers use the pure-Rust `p256` verifier in
 //!   [`crate::platform_quote`].
-//! - **Cross-host non-transferability**: the TPM identity is
-//!   bound to a single physical chip; an attestation captured on
-//!   host A can't be re-issued on host B.
+//! - **Explicit limit**: without a verified EK/vendor attestation chain, a
+//!   remote peer cannot prove that the key is TPM-resident or bound to one
+//!   physical chip. Pinning the public blob can detect a later key change;
+//!   it is not hardware provenance.
 //!
 //! ## What we explored but didn't ship
 //!
@@ -28,8 +29,8 @@
 //! require either a smart-card KSP, raw tss-esapi (heavy C
 //! dependency), or an NCryptSecretAgreement-based ECDH derivation
 //! (complex policy plumbing). For Phase 2 first ship, the
-//! attestation-key path closes the most valuable threat surface
-//! (remote impersonation) without those costs.
+//! attestation-key path adds a platform-key signature/continuity primitive
+//! without moving the master seal/sign operation out of software.
 
 use ol_pqsig::HybridVerifyingKey;
 use rand_core::{CryptoRng, RngCore};
@@ -156,11 +157,13 @@ impl ConfidentialProvider for WindowsHardenedProvider {
             &self.sw,
             &sw_sealed,
             &self.tpm,
-            peer_nonce,
-            issued_unix,
-            deadline_unix,
-            field_witness,
-            issuer_sdp_pubkey,
+            crate::windows_tpm::TpmAttestationClaims {
+                peer_nonce,
+                issued_unix,
+                deadline_unix,
+                field_witness,
+                issuer_sdp_pubkey,
+            },
         )
     }
 }
@@ -231,7 +234,16 @@ mod tests {
             )
             .expect("attest");
         assert!(!doc.platform_quote.is_empty(), "must carry TPM quote");
-        let tpm_pub = verify_attestation_with_tpm(&doc, &nonce, None, 1_010).expect("verify");
+        let expected_sdp = [0u8; crate::attestation::ISSUER_SDP_PUBKEY_LEN];
+        let tpm_pub = verify_attestation_with_tpm(
+            &doc,
+            &nonce,
+            None,
+            1_010,
+            crate::ConfidentialTier::HardwareBound,
+            &expected_sdp,
+        )
+        .expect("verify");
         assert!(!tpm_pub.is_empty());
     }
 }

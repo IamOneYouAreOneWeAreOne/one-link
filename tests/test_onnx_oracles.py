@@ -1,8 +1,8 @@
 """Tests for the ONNX-backed oracles.
 
 The whole point: byte-equivalent inference to the torch oracles
-within float-rounding noise. This lets us ship without torch and
-shrink the bundle by ~180 MB.
+within float-rounding noise. This lets an explicit preview engineering
+artifact omit torch; stable artifacts omit the entire ML substrate.
 
 Properties verified:
   - Parity vs torch oracle (mean_p within 1e-4)

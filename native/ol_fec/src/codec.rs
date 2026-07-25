@@ -3,6 +3,29 @@
 use crate::cauchy::{invert, CauchyMatrix};
 use crate::error::FecError;
 use crate::gf256::fma_into;
+use crate::{MAX_FEC_SHARD_BYTES, MAX_FEC_WORKING_SET_BYTES};
+
+fn validate_resource_shape(shard_len: usize, total_shards: usize) -> Result<(), FecError> {
+    if shard_len > MAX_FEC_SHARD_BYTES {
+        return Err(FecError::ShardTooLarge {
+            got: shard_len,
+            max: MAX_FEC_SHARD_BYTES,
+        });
+    }
+    let aggregate = shard_len
+        .checked_mul(total_shards)
+        .ok_or(FecError::WorkingSetTooLarge {
+            got: usize::MAX,
+            max: MAX_FEC_WORKING_SET_BYTES,
+        })?;
+    if aggregate > MAX_FEC_WORKING_SET_BYTES {
+        return Err(FecError::WorkingSetTooLarge {
+            got: aggregate,
+            max: MAX_FEC_WORKING_SET_BYTES,
+        });
+    }
+    Ok(())
+}
 
 /// Reed-Solomon Codec over GF(2^8) using a Cauchy systematic matrix.
 ///
@@ -64,6 +87,7 @@ impl Codec {
             });
         }
         let shard_len = data[0].len();
+        validate_resource_shape(shard_len, self.total_shards())?;
         for (i, d) in data.iter().enumerate() {
             if d.len() != shard_len {
                 return Err(FecError::InconsistentShardLen {
@@ -75,9 +99,9 @@ impl Codec {
         }
         let mut parity: Vec<Vec<u8>> = (0..self.m()).map(|_| vec![0u8; shard_len]).collect();
         for (i, parity_shard) in parity.iter_mut().enumerate() {
-            let row = self.cauchy.parity_row(i);
+            let row = self.cauchy.parity_row(i).ok_or(FecError::SingularMatrix)?;
             for (j, &coeff) in row.iter().enumerate() {
-                fma_into(parity_shard, data[j], coeff);
+                fma_into(parity_shard, data[j], coeff)?;
             }
         }
         Ok(parity)
@@ -131,31 +155,43 @@ impl Codec {
         }
         // Use the first k present shards.
         indices.truncate(self.k());
-        let shard_len = shard_len.expect("at least one present shard");
+        let shard_len = shard_len.ok_or(FecError::InsufficientShards {
+            needed: self.k(),
+            got: 0,
+        })?;
+        validate_resource_shape(shard_len, self.total_shards())?;
 
         // Fast path: all k data shards (indices 0..k) are present —
         // no recovery needed.
         if indices.iter().enumerate().all(|(i, &idx)| idx == i) {
-            return Ok((0..self.k())
-                .map(|i| present[i].expect("present").to_vec())
-                .collect());
+            let mut data = Vec::with_capacity(self.k());
+            for slot in present.iter().take(self.k()) {
+                data.push(
+                    slot.ok_or(FecError::InsufficientShards {
+                        needed: self.k(),
+                        got: indices.len(),
+                    })?
+                    .to_vec(),
+                );
+            }
+            return Ok(data);
         }
 
         // Build the k × k submatrix of the generator matrix
         // corresponding to the chosen indices.
         let gen = self.cauchy.generator();
         let sub: Vec<Vec<u8>> = indices.iter().map(|&i| gen[i].clone()).collect();
-        let inv = invert(sub).expect("Cauchy submatrices are always invertible");
+        let inv = invert(sub).ok_or(FecError::SingularMatrix)?;
 
         // Decode: data = inv * recv_data (matrix-vector across shards).
         let mut data: Vec<Vec<u8>> = (0..self.k()).map(|_| vec![0u8; shard_len]).collect();
         for (out_row, inv_row) in data.iter_mut().zip(inv.iter()) {
             for (j, &coeff) in inv_row.iter().enumerate() {
-                fma_into(
-                    out_row,
-                    present[indices[j]].expect("indexed present"),
-                    coeff,
-                );
+                let shard = present[indices[j]].ok_or(FecError::InsufficientShards {
+                    needed: self.k(),
+                    got: indices.len(),
+                })?;
+                fma_into(out_row, shard, coeff)?;
             }
         }
         Ok(data)
@@ -176,7 +212,7 @@ mod tests {
         let data: Vec<Vec<u8>> = (0..10)
             .map(|_| (0..shard_len).map(|_| rng.random::<u8>()).collect())
             .collect();
-        let data_refs: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
+        let data_refs: Vec<&[u8]> = data.iter().map(std::vec::Vec::as_slice).collect();
         let parity = codec.encode(&data_refs).unwrap();
         assert_eq!(parity.len(), 4);
         for p in &parity {
@@ -200,7 +236,7 @@ mod tests {
         let data: Vec<Vec<u8>> = (0..10)
             .map(|_| (0..shard_len).map(|_| rng.random::<u8>()).collect())
             .collect();
-        let data_refs: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
+        let data_refs: Vec<&[u8]> = data.iter().map(std::vec::Vec::as_slice).collect();
         let parity = codec.encode(&data_refs).unwrap();
 
         // Drop 4 specific shards: 0, 5, 11, 13 (mix of data + parity).
@@ -251,5 +287,16 @@ mod tests {
         let data: Vec<&[u8]> = vec![&a[..], &b[..], &c[..]];
         let result = codec.encode(&data);
         assert!(matches!(result, Err(FecError::InconsistentShardLen { .. })));
+    }
+
+    #[test]
+    fn encode_rejects_shard_resource_exhaustion() {
+        let codec = Codec::new(2, 1).unwrap();
+        let huge = vec![0u8; MAX_FEC_SHARD_BYTES + 1];
+        let data = [huge.as_slice(), huge.as_slice()];
+        assert!(matches!(
+            codec.encode(&data),
+            Err(FecError::ShardTooLarge { .. })
+        ));
     }
 }

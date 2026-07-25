@@ -22,6 +22,7 @@ Frontend:
 from __future__ import annotations
 
 import json as jsonlib
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -41,8 +42,12 @@ def _identity(host: str = "host") -> Identity:
     pub_bytes = pub_obj.public_bytes_raw()
     fp = fingerprint_of(pub_bytes)
     return Identity(
-        private=sk, public=pub_obj, public_bytes=pub_bytes,
-        fingerprint=fp, short_id=fp[:8], hostname=host,
+        private=sk,
+        public=pub_obj,
+        public_bytes=pub_bytes,
+        fingerprint=fp,
+        short_id=fp[:8],
+        hostname=host,
     )
 
 
@@ -53,8 +58,10 @@ async def http(tmp_path: Path, monkeypatch):
     state = State(db_path=tmp_path / "state.db")
     peer_fp = "aa" * 32
     state.upsert_peer(
-        fingerprint=peer_fp, short_id="alice",
-        pubkey=b"\x00" * 32, hostname="alice",
+        fingerprint=peer_fp,
+        short_id="alice",
+        pubkey=b"\x00" * 32,
+        hostname="alice",
     )
     state.set_peer_trust(peer_fp, "pinned")
     daemon = Daemon(me)
@@ -88,14 +95,18 @@ def _seed_messages(state: State, peer_fp: str, n: int = 3) -> None:
     real rows to operate on."""
     for i in range(n):
         state.record_message(
-            id=f"msg{i}", ts_ms=1_700_000_000_000 + i * 1000,
+            id=f"msg{i}",
+            ts_ms=1_700_000_000_000 + i * 1000,
             direction="out" if i % 2 == 0 else "in",
-            peer_fp=peer_fp, msg_type="text",
-            body=f"hello {i}", room_id=None,
+            peer_fp=peer_fp,
+            msg_type="text",
+            body=f"hello {i}",
+            room_id=None,
         )
 
 
 # ───────── Clear history ────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_clear_peer_history_deletes_local_rows(http):
@@ -103,7 +114,8 @@ async def test_clear_peer_history_deletes_local_rows(http):
     _seed_messages(state, peer_fp, 5)
     assert len(state.recent_messages(peer_fp=peer_fp)) == 5
     resp = await client.delete(
-        f"/api/peers/{peer_fp}/history", headers=_h(token),
+        f"/api/peers/{peer_fp}/history",
+        headers=_h(token),
     )
     assert resp.status == 200
     j = await resp.json()
@@ -115,7 +127,8 @@ async def test_clear_peer_history_deletes_local_rows(http):
 async def test_clear_peer_history_404_unknown_peer(http):
     client, _, _, token, _ = http
     resp = await client.delete(
-        f"/api/peers/{'00' * 32}/history", headers=_h(token),
+        f"/api/peers/{'00' * 32}/history",
+        headers=_h(token),
     )
     assert resp.status == 404
 
@@ -126,12 +139,18 @@ async def test_clear_peer_history_idempotent(http):
     call returns deleted=0 since nothing's left."""
     client, _, state, token, peer_fp = http
     _seed_messages(state, peer_fp, 2)
-    r1 = await (await client.delete(
-        f"/api/peers/{peer_fp}/history", headers=_h(token),
-    )).json()
-    r2 = await (await client.delete(
-        f"/api/peers/{peer_fp}/history", headers=_h(token),
-    )).json()
+    r1 = await (
+        await client.delete(
+            f"/api/peers/{peer_fp}/history",
+            headers=_h(token),
+        )
+    ).json()
+    r2 = await (
+        await client.delete(
+            f"/api/peers/{peer_fp}/history",
+            headers=_h(token),
+        )
+    ).json()
     assert r1["deleted"] == 2
     assert r2["deleted"] == 0
 
@@ -140,32 +159,97 @@ async def test_clear_peer_history_idempotent(http):
 async def test_clear_group_history_validates_hex(http):
     client, _, _, token, _ = http
     resp = await client.delete(
-        "/api/groups/not-hex/history", headers=_h(token),
+        "/api/groups/not-hex/history",
+        headers=_h(token),
     )
     assert resp.status == 400
 
 
 @pytest.mark.asyncio
 async def test_clear_group_history_safe_when_no_messages(http):
-    """Even on a build with the group_messages table missing, the
-    endpoint should return 0 rather than blowing up."""
+    """An empty current-schema group is an idempotent successful clear."""
     client, _, _, token, _ = http
     resp = await client.delete(
-        f"/api/groups/{'aa' * 16}/history", headers=_h(token),
+        f"/api/groups/{'aa' * 16}/history",
+        headers=_h(token),
     )
     assert resp.status == 200
     j = await resp.json()
     assert "deleted" in j
 
 
+@pytest.mark.asyncio
+async def test_clear_group_history_deletes_blob_keyed_rows(http):
+    client, _, state, token, _ = http
+    group_id = bytes.fromhex("ab" * 16)
+    state.insert_group_message(
+        id="group-secret",
+        group_id=group_id,
+        sender_pub=b"\x02" * 32,
+        epoch=1,
+        counter=1,
+        direction="in",
+        body="delete me",
+        ts_ms=1,
+    )
+
+    response = await client.delete(
+        f"/api/groups/{group_id.hex()}/history",
+        headers=_h(token),
+    )
+
+    assert response.status == 200
+    assert (await response.json())["deleted"] == 1
+    assert state.recent_group_messages(group_id=group_id) == []
+
+
+@pytest.mark.asyncio
+async def test_clear_group_history_database_failure_returns_500_and_preserves_rows(http):
+    client, _, state, token, _ = http
+    group_id = bytes.fromhex("cd" * 16)
+    state.insert_group_message(
+        id="group-must-survive",
+        group_id=group_id,
+        sender_pub=b"\x03" * 32,
+        epoch=1,
+        counter=1,
+        direction="in",
+        body="must survive",
+        ts_ms=1,
+    )
+    state._conn.execute(
+        """
+        CREATE TRIGGER inject_group_clear_failure
+        BEFORE DELETE ON group_messages
+        BEGIN
+            SELECT RAISE(ABORT, 'injected group clear failure');
+        END
+        """
+    )
+
+    response = await client.delete(
+        f"/api/groups/{group_id.hex()}/history",
+        headers=_h(token),
+    )
+
+    assert response.status == 500
+    assert (await response.json())["error"] == "internal server error"
+    rows = state.recent_group_messages(group_id=group_id)
+    assert [row["id"] for row in rows] == ["group-must-survive"]
+    with pytest.raises(sqlite3.IntegrityError, match="injected group clear failure"):
+        state.clear_group_history(group_id.hex())
+
+
 # ───────── Export ────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_export_peer_json_attachments(http):
     client, _, state, token, peer_fp = http
     _seed_messages(state, peer_fp, 4)
     resp = await client.get(
-        f"/api/peers/{peer_fp}/export?format=json", headers=_h(token),
+        f"/api/peers/{peer_fp}/export?format=json",
+        headers=_h(token),
     )
     assert resp.status == 200
     cd = resp.headers.get("Content-Disposition", "")
@@ -187,7 +271,8 @@ async def test_export_peer_markdown(http):
     client, _, state, token, peer_fp = http
     _seed_messages(state, peer_fp, 2)
     resp = await client.get(
-        f"/api/peers/{peer_fp}/export?format=md", headers=_h(token),
+        f"/api/peers/{peer_fp}/export?format=md",
+        headers=_h(token),
     )
     assert resp.status == 200
     cd = resp.headers.get("Content-Disposition", "")
@@ -202,7 +287,8 @@ async def test_export_peer_markdown(http):
 async def test_export_rejects_bad_format(http):
     client, _, _, token, peer_fp = http
     resp = await client.get(
-        f"/api/peers/{peer_fp}/export?format=xml", headers=_h(token),
+        f"/api/peers/{peer_fp}/export?format=xml",
+        headers=_h(token),
     )
     assert resp.status == 400
 
@@ -211,7 +297,8 @@ async def test_export_rejects_bad_format(http):
 async def test_export_404_unknown_peer(http):
     client, _, _, token, _ = http
     resp = await client.get(
-        f"/api/peers/{'00' * 32}/export?format=md", headers=_h(token),
+        f"/api/peers/{'00' * 32}/export?format=md",
+        headers=_h(token),
     )
     assert resp.status == 404
 
@@ -220,33 +307,51 @@ async def test_export_404_unknown_peer(http):
 async def test_export_group_validates_hex(http):
     client, _, _, token, _ = http
     resp = await client.get(
-        "/api/groups/zz-not-hex/export?format=md", headers=_h(token),
+        "/api/groups/zz-not-hex/export?format=md",
+        headers=_h(token),
     )
     assert resp.status == 400
 
 
 # ───────── Media gallery ────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_peer_media_lists_file_messages(http):
     client, _, state, token, peer_fp = http
     # Mix text + file rows; only file rows should come back.
     state.record_message(
-        id="t1", ts_ms=1, direction="out", peer_fp=peer_fp,
-        msg_type="text", body="hi", room_id=None,
+        id="t1",
+        ts_ms=1,
+        direction="out",
+        peer_fp=peer_fp,
+        msg_type="text",
+        body="hi",
+        room_id=None,
     )
     state.record_message(
-        id="f1", ts_ms=2, direction="out", peer_fp=peer_fp,
-        msg_type="file", body="document.pdf", room_id=None,
+        id="f1",
+        ts_ms=2,
+        direction="out",
+        peer_fp=peer_fp,
+        msg_type="file",
+        body="document.pdf",
+        room_id=None,
         metadata={"filename": "document.pdf", "size": 12345},
     )
     state.record_message(
-        id="f2", ts_ms=3, direction="in", peer_fp=peer_fp,
-        msg_type="file", body="photo.jpg", room_id=None,
+        id="f2",
+        ts_ms=3,
+        direction="in",
+        peer_fp=peer_fp,
+        msg_type="file",
+        body="photo.jpg",
+        room_id=None,
         metadata={"filename": "photo.jpg", "size": 99},
     )
     resp = await client.get(
-        f"/api/peers/{peer_fp}/media", headers=_h(token),
+        f"/api/peers/{peer_fp}/media",
+        headers=_h(token),
     )
     assert resp.status == 200
     j = await resp.json()
@@ -262,12 +367,14 @@ async def test_peer_media_lists_file_messages(http):
 async def test_peer_media_404_unknown_peer(http):
     client, _, _, token, _ = http
     resp = await client.get(
-        f"/api/peers/{'00' * 32}/media", headers=_h(token),
+        f"/api/peers/{'00' * 32}/media",
+        headers=_h(token),
     )
     assert resp.status == 404
 
 
 # ───────── State helpers ────────────────────────────────────────────
+
 
 def test_clear_peer_history_helper(tmp_path: Path):
     state = State(db_path=tmp_path / "h.db")
@@ -275,8 +382,13 @@ def test_clear_peer_history_helper(tmp_path: Path):
     state.upsert_peer(fingerprint=fp, short_id="x", pubkey=b"\x00" * 32, hostname="x")
     for i in range(3):
         state.record_message(
-            id=f"m{i}", ts_ms=i, direction="out", peer_fp=fp,
-            msg_type="text", body="hi", room_id=None,
+            id=f"m{i}",
+            ts_ms=i,
+            direction="out",
+            peer_fp=fp,
+            msg_type="text",
+            body="hi",
+            room_id=None,
         )
     assert state.clear_peer_history(fp) == 3
     assert state.recent_messages(peer_fp=fp) == []
@@ -288,12 +400,22 @@ def test_list_peer_files_returns_files_only(tmp_path: Path):
     fp = "cc" * 32
     state.upsert_peer(fingerprint=fp, short_id="y", pubkey=b"\x00" * 32, hostname="y")
     state.record_message(
-        id="t", ts_ms=1, direction="out", peer_fp=fp,
-        msg_type="text", body="hi", room_id=None,
+        id="t",
+        ts_ms=1,
+        direction="out",
+        peer_fp=fp,
+        msg_type="text",
+        body="hi",
+        room_id=None,
     )
     state.record_message(
-        id="f", ts_ms=2, direction="out", peer_fp=fp,
-        msg_type="file", body="doc.pdf", room_id=None,
+        id="f",
+        ts_ms=2,
+        direction="out",
+        peer_fp=fp,
+        msg_type="file",
+        body="doc.pdf",
+        room_id=None,
         metadata={"filename": "doc.pdf", "size": 100},
     )
     files = state.list_peer_files(fp)
@@ -302,6 +424,7 @@ def test_list_peer_files_returns_files_only(tmp_path: Path):
 
 
 # ───────── UI markup ────────────────────────────────────────────────
+
 
 def test_device_drawer_has_chat_tools(index_html: str):
     for marker in [
@@ -334,7 +457,7 @@ def test_clear_history_handler_calls_endpoint(index_html: str):
     quietly break the wiring."""
     idx = index_html.find('"#dev-clear-history"')
     assert idx > 0
-    snippet = index_html[idx:idx + 1500]
+    snippet = index_html[idx : idx + 1500]
     assert "/api/peers/" in snippet
     assert "/history" in snippet
     assert "api.del(" in snippet
@@ -345,8 +468,8 @@ def test_export_handlers_post_to_endpoints(index_html: str):
     md_idx = index_html.find('"#dev-export-md"')
     json_idx = index_html.find('"#dev-export-json"')
     assert md_idx > 0 and json_idx > 0
-    md_snippet = index_html[md_idx:md_idx + 400]
-    json_snippet = index_html[json_idx:json_idx + 400]
+    md_snippet = index_html[md_idx : md_idx + 400]
+    json_snippet = index_html[json_idx : json_idx + 400]
     assert "format=md" in md_snippet
     assert "format=json" in json_snippet
 
@@ -355,8 +478,8 @@ def test_download_helper_uses_anchor_click(index_html: str):
     """Pin the anchor.click() approach — fetch+blob is harder to
     get right with content-disposition."""
     idx = index_html.find("function _downloadConvoExport(url)")
-    snippet = index_html[idx:idx + 600]
-    assert "createElement(\"a\")" in snippet
+    snippet = index_html[idx : idx + 600]
+    assert 'createElement("a")' in snippet
     assert ".click()" in snippet
 
 
@@ -367,12 +490,12 @@ def test_media_gallery_function_present(index_html: str):
 def test_media_gallery_renders_items(index_html: str):
     idx = index_html.find("function _renderMediaGallery(host, items)")
     assert idx > 0
-    snippet = index_html[idx:idx + 1500]
+    snippet = index_html[idx : idx + 1500]
     # Both empty + populated paths present.
     assert "items.length === 0" in snippet
     assert "blocked-empty" in snippet
     # Direction-aware download for inbox files.
-    assert '/api/files/' in snippet
+    assert "/api/files/" in snippet
 
 
 def test_wallpaper_helpers_present(index_html: str):
@@ -387,14 +510,16 @@ def test_wallpaper_applied_on_select(index_html: str):
     sp = index_html.find("function selectPeer(shortId)")
     sg = index_html.find("async function selectGroup(gidHex)")
     assert sp > 0 and sg > 0
-    sp_block = index_html[sp:sp + 3000]
-    sg_block = index_html[sg:sg + 1500]
+    sp_block = index_html[sp : sp + 3000]
+    sg_block = index_html[sg : sg + 1500]
     assert "applyActiveChatWallpaper()" in sp_block
     assert "applyActiveChatWallpaper()" in sg_block
 
 
 # ───────── version pin ──────────────────────────────────────────────
 
+
 def test_page_version_bumped(index_html: str):
     from one_link import __version__
+
     assert f'PAGE_BUILT_FOR = "{__version__}"' in index_html

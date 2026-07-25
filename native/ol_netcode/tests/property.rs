@@ -5,7 +5,7 @@
 //! recover that exact participant from the rest.
 //!
 //! Iteration count configurable via ``OL_NETCODE_GATE_ITERS`` —
-//! default 10_000.
+//! default `10_000`.
 
 use ol_netcode::{decode_coded_packet, encode_coded_packet, ChunkId, NetcodeError};
 
@@ -51,7 +51,8 @@ fn property_recover_any_single_drop() {
 
         // Pick a random index to "drop" — the recipient is missing that
         // chunk. Hand the rest as known + verify we recover the drop.
-        let drop_idx = (next_rng(&mut state) % degree as u64) as usize;
+        let degree_u64 = u64::try_from(degree).unwrap_or(u64::MAX);
+        let drop_idx = usize::try_from(next_rng(&mut state) % degree_u64).unwrap_or_default();
         let known: Vec<(ChunkId, &[u8])> = chunks
             .iter()
             .enumerate()
@@ -85,7 +86,8 @@ fn property_tampered_manifest_always_caught() {
             chunks.iter().map(|(id, p)| (*id, p.as_slice())).collect();
         let mut packet = encode_coded_packet(&participants).unwrap();
         // Flip one bit in a random participant id.
-        let idx = (next_rng(&mut state) % degree as u64) as usize;
+        let degree_u64 = u64::try_from(degree).unwrap_or(u64::MAX);
+        let idx = usize::try_from(next_rng(&mut state) % degree_u64).unwrap_or_default();
         let byte = (next_rng(&mut state) % 32) as usize;
         packet.participants[idx][byte] ^= 0x01;
         // Decoding with the OLD ids should fail because the
@@ -98,8 +100,7 @@ fn property_tampered_manifest_always_caught() {
             .collect();
         match decode_coded_packet(&packet, &known) {
             Ok(_) => leaked += 1,
-            Err(NetcodeError::LengthMismatch { .. }) => { /* integrity rejection */ }
-            Err(NetcodeError::InsufficientKnown { .. }) => { /* tampered id flagged as unknown */ }
+            Err(NetcodeError::IntegrityMismatch) => { /* integrity rejection */ }
             Err(other) => panic!("unexpected error: {other:?}"),
         }
     }

@@ -1,4 +1,4 @@
-//! Property tests for ol_proximity_pair primitives.
+//! Property tests for `ol_proximity_pair` primitives.
 //! Matches the F1.1 bar: 1M iterations on the most-leveraged
 //! properties.
 
@@ -43,7 +43,9 @@ proptest! {
         let mut bits = vec![0u8; bits_count];
         let mut s = seed;
         for b in &mut bits {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             *b = ((s >> 33) & 1) as u8;
         }
         let s8 = block_syndrome(&bits, 8);
@@ -100,7 +102,9 @@ proptest! {
         let mut peer_bits = vec![0u8; total];
         let mut s = peer_bits_seed;
         for b in &mut peer_bits {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             *b = ((s >> 33) & 1) as u8;
         }
         let peer_parity = parity_bits_for_string(&peer_bits);
@@ -118,7 +122,9 @@ proptest! {
         let mut bits = vec![0u8; HAMMING_DATA_BITS];
         let mut s = seed;
         for b in &mut bits {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             *b = ((s >> 33) & 1) as u8;
         }
         let p1 = parity_bits_for_block(&bits);

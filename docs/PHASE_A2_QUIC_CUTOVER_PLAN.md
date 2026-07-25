@@ -1,14 +1,16 @@
 # Phase A2 QUIC Cutover — Deferred with Plan
 
-> **Status: deliberately deferred.** The `ol_quic` crate ships; the
-> daemon does NOT yet route daemon↔daemon traffic through it.
-> This document explains why the cutover hasn't happened and what
-> the cutover work actually looks like, so the next person to pick
-> it up has a clean target.
+> **Status: partial.** The `ol_quic` crate and identity-bound native endpoint
+> are wired into runtime-gated daemon file lanes. The daemon advertises the
+> capability only after its native ABI is usable and retains authenticated
+> peer-channel fallback. A universal whole-session cutover, physical
+> cellular/Wi-Fi migration, cross-network soak, and browser replacement remain
+> deliberately deferred. The plan below records that larger target.
 
 ## Why deferred
 
-The daemon's WebRTC/DTLS-SRTP transport works. Replacing it is
+The existing authenticated peer and browser WebRTC transports work. Replacing
+every daemon session with QUIC is
 a multi-day project where breakage is silent + catastrophic:
 
 1. **Pairing handshake** runs on the same socket as in-flight
@@ -30,6 +32,9 @@ doesn't catch.
 - `native/ol_quic/` crate exists with `quinn`-based transport.
 - pyo3 binding (`one_link_native.quic`) exposes encode/decode +
   bulk-frame helpers.
+- Capable daemons create identity-bound native endpoints, advertise the runtime
+  capability only after self-test, exchange endpoint metadata, and negotiate
+  QUIC file lanes with bounded fallback to the authenticated peer channel.
 - 6 native crate tests + perf benches passing.
 - Loopback throughput scaffold (`scripts/quic_measurement_scaffold.py`)
   reports 29.8 GiB/s encode.
@@ -130,5 +135,6 @@ When at least three conditions hold:
    in a focused multi-day window without other architectural
    work in flight.
 
-Until then, **the engine is production-ready on WebRTC.** The
-Phase A2 cutover is an upgrade, not a blocker.
+Until then, WebRTC remains a fallback transport in the alpha development tree.
+Neither that path nor the whole engine is represented as production-ready
+without the exact-commit physical-device and release gates described above.

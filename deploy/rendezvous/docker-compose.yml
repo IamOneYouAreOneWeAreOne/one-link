@@ -9,32 +9,68 @@ services:
     build:
       context: ../..
       dockerfile: deploy/rendezvous/Dockerfile
-    image: onelink/rendezvous:0.5.3
+      args:
+        ONE_LINK_VERSION: "0.21.0-alpha"
+        # Set this to `git rev-parse HEAD` when retaining/publishing an image.
+        VCS_REF: "${ONE_LINK_VCS_REF:-unrecorded-local-build}"
+    # Intentionally omit `image:`: this quickstart always builds the reviewed
+    # local source and never pulls an unrelated/squatted registry tag.
     container_name: one-link-rendezvous
     restart: unless-stopped
+    init: true
+    # Relay teardown can perform two ordered 30s-bounded connector writes plus
+    # one listener close. Leave margin before Docker escalates to KILL.
+    stop_grace_period: 120s
     ports:
-      - "7118:7118"
+      # Plain HTTP stays on the host loopback for the TLS reverse proxy.
+      - "127.0.0.1:7118:7118"
     environment:
       ONE_LINK_RDZ_HOST: "0.0.0.0"
       ONE_LINK_RDZ_PORT: "7118"
       ONE_LINK_RDZ_LOG_LEVEL: "INFO"
-      ONE_LINK_RDZ_MAX_REGISTRATIONS: "200000"
+      ONE_LINK_RDZ_MAX_REGISTRATIONS: "20000"
+      ONE_LINK_RDZ_MAX_ATTACKER_STATE_KEYS: "20000"
       ONE_LINK_RDZ_RATE_PER_IP_PER_MIN: "120"
       ONE_LINK_RDZ_RATE_REGISTER_PER_PUBKEY_PER_MIN: "30"
+      ONE_LINK_RDZ_RATE_LOOKUP_PER_IP_PER_MIN: "30"
+      ONE_LINK_RDZ_RATE_NEW_PUBKEY_PER_IP_PER_MIN: "10"
+      ONE_LINK_RDZ_RATE_LISTENER_REPLACE_PER_PUBKEY_PER_MIN: "2"
+      ONE_LINK_RDZ_MAX_CONCURRENT_CONNECTIONS: "64"
+      # Must equal the effective hard memory limit below. The server refuses
+      # to start when configured state/connection/relay ceilings exceed it.
+      ONE_LINK_RDZ_MEMORY_BUDGET_BYTES: "536870912"
+      # Relay is opt-in. Its process-wide payload budget remains below the
+      # container memory cap so enabling it cannot reserve the entire limit.
+      ONE_LINK_RDZ_ENABLE_RELAY: "false"
+      ONE_LINK_RDZ_RELAY_MAX_ROUTE_KEYS: "4096"
+      ONE_LINK_RDZ_RELAY_GLOBAL_BUDGET_BYTES: "134217728"
+      ONE_LINK_RDZ_RELAY_CONTROL_RESERVE_BYTES: "4194304"
+      # Safe here because the only published socket is host-loopback and the
+      # documented topology puts nginx directly in front of it.
+      ONE_LINK_RDZ_TRUST_PROXY_HEADERS: "true"
     # Hardening: rendezvous needs nothing but its socket.
     read_only: true
     tmpfs:
-      - /tmp:size=64m
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    pids_limit: 128
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     # Sane resource caps.
+    cpus: "1.0"
+    mem_limit: "512M"
+    mem_reservation: "128M"
     deploy:
       resources:
         limits:
           cpus: "1.0"
           memory: "512M"
+          pids: 128
         reservations:
           memory: "128M"
     healthcheck:

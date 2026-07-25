@@ -19,6 +19,7 @@ use ol_device_mesh::{
     derive_subkey_seed, master_pin_handle, DeviceClass, MasterIdentity, DEVICE_ID_LEN,
     MASTER_SEED_LEN, SUBKEY_SEED_LEN,
 };
+use std::fmt::Write as _;
 
 const MASTER_FIXED: [u8; MASTER_SEED_LEN] = [
     0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
@@ -37,11 +38,11 @@ const FIELD_SEED_FIXED: [u8; 32] = [0xEE; 32];
 const EXPECTED_SUBKEY_SEED_HEX: &str =
     "28a7edb78e81c7d24224c6430f03c70db4b5042c35391bf9aec7c2e2de180af422b628f13fe7b7603d6586c0c00384e5b135544e7d10d2120163dd74105f4383";
 
-/// Pinned field-bound subkey seed for same transcript + FIELD_SEED_FIXED.
+/// Pinned field-bound subkey seed for same transcript + `FIELD_SEED_FIXED`.
 const EXPECTED_FIELD_BOUND_SEED_HEX: &str =
     "972df180e415393bcf748ae3e07afe82a52f3ad2eb7b89b22dd33bdd1c4ad5616f5628d342daebd291922161bd1ab9f42b3a1d8c17359ba80ee86f3bbd4a5a24";
 
-/// Pinned master-pin handle for MASTER_FIXED.
+/// Pinned master-pin handle for `MASTER_FIXED`.
 const EXPECTED_MASTER_PIN_HEX: &str =
     "7a63d497d2029bf761090aeca010fcce80f6be57344c6e0f64658a15ce83955f";
 
@@ -53,7 +54,11 @@ fn check_regen<F: FnOnce()>(label: &str, dump: F) {
 }
 
 fn to_hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    let mut hex = String::with_capacity(b.len() * 2);
+    for byte in b {
+        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
 }
 
 // ── 1. Device-class tag bytes pinned ──────────────────────────────

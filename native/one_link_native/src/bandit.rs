@@ -10,7 +10,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 
 /// Python-visible bandit.
-#[pyclass(name = "Bandit", module = "one_link_native.bandit")]
+#[pyclass(from_py_object, name = "Bandit", module = "one_link_native.bandit")]
 #[derive(Debug, Clone)]
 pub struct PyBandit {
     inner: Bandit,
@@ -56,7 +56,7 @@ impl PyBandit {
 
     /// Per-arm `(alpha, beta)` tuples for diagnostics.
     fn arms<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let out = PyList::empty_bound(py);
+        let out = PyList::empty(py);
         for arm in self.inner.arms() {
             out.append((arm.alpha, arm.beta))?;
         }
@@ -89,6 +89,7 @@ fn bandit_err_to_py(err: BanditError) -> PyErr {
 /// Register the `bandit` submodule.
 pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", ol_bandit::VERSION)?;
+    m.add("MAX_ARMS", ol_bandit::MAX_ARMS)?;
     m.add_class::<PyBandit>()?;
     Ok(())
 }

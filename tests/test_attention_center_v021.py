@@ -14,7 +14,6 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.daemon import Daemon

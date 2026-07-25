@@ -24,11 +24,7 @@ proptest! {
     #[test]
     fn detect_format_total(bytes in prop::collection::vec(any::<u8>(), 0..256), ext_idx in 0u8..20) {
         let exts = ["zip", "txt", "mp4", "docx", "pem", "xlsx", "png", "unknown"];
-        let ext = if ext_idx < exts.len() as u8 {
-            Some(exts[ext_idx as usize])
-        } else {
-            None
-        };
+        let ext = exts.get(usize::from(ext_idx)).copied();
         let _ = detect_format(&bytes, ext);
     }
 

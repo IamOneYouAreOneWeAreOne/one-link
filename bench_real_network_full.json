@@ -1,0 +1,51 @@
+{
+  "quic_ping_rtt_ms": {
+    "median": 4.232,
+    "min": 3.688,
+    "max": 8.64,
+    "n": 20
+  },
+  "chat_latency_ms": {
+    "median": 75.59609413146973,
+    "p10": 67.76928901672363,
+    "p90": 95.44134140014648,
+    "min": 34.79313850402832,
+    "max": 159.13820266723633
+  },
+  "send_file": {
+    "1MiB": {
+      "median_sec": 0.3303077220916748,
+      "best_sec": 0.22979164123535156,
+      "mibps_med": 3.027479931947992,
+      "mibps_best": 4.351768387327041
+    },
+    "16MiB": {
+      "median_sec": 0.8225216865539551,
+      "best_sec": 0.8221209049224854,
+      "mibps_med": 19.4523746444106,
+      "mibps_best": 19.46185762239993
+    },
+    "64MiB": {
+      "median_sec": 2.9443325996398926,
+      "best_sec": 2.8182103633880615,
+      "mibps_med": 21.736674724800974,
+      "mibps_best": 22.709447396630463
+    }
+  },
+  "quic_status_post_transfer": {
+    "outbound_count": 1,
+    "outbound": [
+      {
+        "peer_fp": "fc9f0a5f1b91f3dd0acdbc1db709ddf0bbe3dd9bfaa549c71a3410c691eb2046",
+        "alive": false
+      }
+    ],
+    "advertised_ports": {
+      "fc9f0a5f1b91f3dd0acdbc1db709ddf0bbe3dd9bfaa549c71a3410c691eb2046": 57157
+    }
+  },
+  "share_link_mint": {
+    "ok": true,
+    "elapsed_ms": 2.958059310913086
+  }
+}

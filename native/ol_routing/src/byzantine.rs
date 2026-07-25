@@ -2,7 +2,7 @@
 //!
 //! Harvested from `OneField/onefield/mesh/byzantine.cl`. The BFT
 //! threshold math is identical; on top we add a tau-corroboration
-//! predicate that catches malicious peers reporting fake high τ_c.
+//! predicate that catches malicious peers reporting fake high `τ_c`.
 //!
 //! Per `FILE_ENGINE_V2_PLAN.md` Phase D item #2:
 //!
@@ -37,7 +37,7 @@ pub fn quorum_safe(n_total: i64, f_faulty: i64) -> bool {
 #[must_use]
 pub fn rgg_mean_degree(n_nodes: i64, radius: f64) -> f64 {
     let pi = std::f64::consts::PI;
-    let nf = n_nodes as f64;
+    let nf = i64_as_f64(n_nodes);
     let safe = if nf > 1.0 { nf - 1.0 } else { 0.0 };
     safe * pi * radius * radius
 }
@@ -48,9 +48,23 @@ pub fn rgg_mean_degree(n_nodes: i64, radius: f64) -> f64 {
 #[must_use]
 pub fn rgg_connectivity_radius(n_nodes: i64) -> f64 {
     let pi = std::f64::consts::PI;
-    let nf = n_nodes as f64;
+    let nf = i64_as_f64(n_nodes);
     let safe = if nf > 1.0001 { nf } else { 2.0 };
     (safe.ln() / (pi * safe)).sqrt()
+}
+
+/// Convert a signed 64-bit count to `f64` while making the intentional
+/// IEEE-754 rounding explicit instead of relying on an unchecked cast.
+fn i64_as_f64(value: i64) -> f64 {
+    let magnitude = value.unsigned_abs();
+    let high = u32::try_from(magnitude >> 32).expect("shifted high half fits in u32");
+    let low = u32::try_from(magnitude & u64::from(u32::MAX)).expect("masked low half fits in u32");
+    let magnitude_f64 = f64::from(high).mul_add(4_294_967_296.0, f64::from(low));
+    if value.is_negative() {
+        -magnitude_f64
+    } else {
+        magnitude_f64
+    }
 }
 
 /// Tau-corroboration check: a peer reports `claimed_tau_c_s` for a
@@ -58,7 +72,7 @@ pub fn rgg_connectivity_radius(n_nodes: i64) -> f64 {
 /// over that link in the recent window. If the claim is wildly out
 /// of line with observed reality, ignore it.
 ///
-/// Concretely: a peer claiming τ_c=10s on a link where we've watched
+/// Concretely: a peer claiming `τ_c=10s` on a link where we've watched
 /// 50% of chunks drop is lying. We expect roughly
 /// `observed_success_rate ≈ 1 - 1/(c * τ_c_s)` (RF heuristic), but
 /// the daemon-level check just looks for "claimed-high-but-observed-
@@ -68,9 +82,9 @@ pub fn rgg_connectivity_radius(n_nodes: i64) -> f64 {
 /// this metric); false iff the daemon should ignore the report.
 ///
 /// `tolerance` is the fraction of observed success rate the claim
-/// must clear. Default 0.5 means: if the peer claims very-high τ_c
+/// must clear. Default 0.5 means: if the peer claims very-high `τ_c`
 /// (>1s) but the link's observed success rate is less than half of
-/// what such a τ_c would predict, reject the claim.
+/// what such a `τ_c` would predict, reject the claim.
 #[must_use]
 pub fn tau_claim_corroborated(
     claimed_tau_c_s: f64,

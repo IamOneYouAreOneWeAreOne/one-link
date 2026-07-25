@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import shutil
 import socket
@@ -33,16 +34,39 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from one_link import app as app_mod
+from one_link import control_ipc
+from one_link.fault_observability import report_best_effort_failure
 from scripts.browser_call_media_soak_gate import (
     BrowserCandidate,
+    BrowserProcess,
     _cdp_send,
+    _launch_browser_process,
     _new_page_ws,
-    _wait_for_devtools_port,
+    _safe_exception,
     find_browser,
 )
 
 
 RESULTS_DIR = Path("benchmarks") / "results"
+log = logging.getLogger(__name__)
+
+
+def _e2e_temp_directory() -> tempfile.TemporaryDirectory[str]:
+    """Create disposable gate state without letting late Windows unlocks mask a result.
+
+    The two daemon processes close their encrypted SQLite instance locks during
+    shutdown.  Windows can retain one of those file handles for a few scheduler
+    ticks after the process has exited, so strict ``TemporaryDirectory`` cleanup
+    can replace a completed gate report with an unrelated ``PermissionError``.
+    The directory contains only synthetic test identities and data; normal
+    cleanup is still attempted, while a transient final unlink is advisory.
+    """
+
+    return tempfile.TemporaryDirectory(
+        prefix="ol_ui_call_e2e_",
+        ignore_cleanup_errors=True,
+    )
 
 
 @dataclass
@@ -72,11 +96,14 @@ def _wait_file(path: Path, timeout_s: float = 20.0) -> str:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
-            if path.exists():
-                text = path.read_text(encoding="utf-8").strip()
-                if text:
-                    return text
-        except OSError:
+            text = control_ipc.read_private_bytes_strict(
+                path,
+                max_bytes=64,
+                label=path.name,
+            ).decode("ascii").strip()
+            if text:
+                return text
+        except (OSError, RuntimeError, UnicodeError):
             pass
         time.sleep(0.05)
     raise RuntimeError(f"file did not appear: {path.name}")
@@ -145,12 +172,21 @@ async def _spawn_daemon(root: Path, name: str) -> DaemonHandle:
         data = home / "data"
         control_port = int(_wait_file(data / "control.port"))
         _wait_port(control_port)
-        ui_file = data / "server.port"
-        if not ui_file.exists() and (data / "ui_port.txt").exists():
-            ui_file = data / "ui_port.txt"
-        ui_port = int(_wait_file(ui_file))
-        _wait_port(ui_port)
-        token = _wait_file(data / "ui.token")
+        secret = control_ipc.read_control_secret(data)
+        resolved = None
+        ready_deadline = time.time() + 20.0
+        while time.time() < ready_deadline and resolved is None:
+            resolved = app_mod.resolve_authenticated_daemon(
+                control_port,
+                secret,
+                timeout=2.0,
+            )
+            if resolved is None:
+                await asyncio.sleep(0.1)
+        if resolved is None:
+            raise RuntimeError(f"{name} daemon/UI authentication failed")
+        ui_port = resolved.server_port
+        token = resolved.token
         status, me = await _http_json("GET", f"http://127.0.0.1:{ui_port}/api/me", token=token)
         if status != 200:
             raise RuntimeError(f"{name} /api/me failed {status}: {me}")
@@ -191,8 +227,8 @@ def _stop_daemon(handle: DaemonHandle) -> None:
     _stop_daemon_proc(handle.proc)
     try:
         handle.log_fh.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        report_best_effort_failure(log, "e2e_daemon_log_close", exc)
 
 
 async def _wait_discovery(a: DaemonHandle, b: DaemonHandle, timeout_s: float = 30.0) -> None:
@@ -233,51 +269,59 @@ async def _trust_both(a: DaemonHandle, b: DaemonHandle) -> None:
 class BrowserSession:
     def __init__(self, browser: BrowserCandidate, root: Path) -> None:
         self.browser = browser
-        self.profile = root / "browser-profile"
-        self.profile.mkdir(parents=True, exist_ok=True)
-        self.proc: subprocess.Popen | None = None
+        self.root = root
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.process: BrowserProcess | None = None
         self.port = 0
 
     async def __aenter__(self) -> "BrowserSession":
-        args = [
-            self.browser.path,
-            "--headless=new",
-            "--remote-debugging-port=0",
-            f"--user-data-dir={self.profile}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--autoplay-policy=no-user-gesture-required",
-            "--use-fake-device-for-media-stream",
-            "--use-fake-ui-for-media-stream",
-            "--disable-background-timer-throttling",
-            "--disable-renderer-backgrounding",
-            "about:blank",
-        ]
-        if os.name != "nt":
-            args.insert(1, "--no-sandbox")
-        self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.port, _ = await _wait_for_devtools_port(self.profile, 15)
-        return self
+        try:
+            self.process = await _launch_browser_process(
+                self.browser,
+                self.root,
+                browser_args=[
+                    "--autoplay-policy=no-user-gesture-required",
+                    "--use-fake-device-for-media-stream",
+                    "--use-fake-ui-for-media-stream",
+                    "--disable-background-timer-throttling",
+                    "--disable-renderer-backgrounding",
+                ],
+            )
+            self.port = self.process.port
+            return self
+        except Exception:
+            if self.process is not None:
+                self.process.close()
+                self.process = None
+            self.port = 0
+            raise
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        if self.proc is None:
-            return
-        self.proc.terminate()
-        try:
-            self.proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
+        if self.process is not None:
+            self.process.close()
+            self.process = None
+        self.port = 0
 
     async def open_page(self, url: str) -> "Page":
         ws_url = await _new_page_ws(self.port, url)
         session = aiohttp.ClientSession()
-        ws = await session.ws_connect(ws_url, timeout=30)
-        page = Page(session, ws)
-        await page.send("Runtime.enable")
-        await page.send("Page.enable")
-        await page.send("Page.navigate", {"url": url})
-        await page.wait_expr("document.readyState === 'complete'", timeout_s=15)
-        return page
+        ws: aiohttp.ClientWebSocketResponse | None = None
+        try:
+            ws = await session.ws_connect(
+                ws_url,
+                timeout=aiohttp.ClientWSTimeout(ws_close=10.0),
+            )
+            page = Page(session, ws)
+            await page.send("Runtime.enable")
+            await page.send("Page.enable")
+            await page.send("Page.navigate", {"url": url})
+            await page.wait_expr("document.readyState === 'complete'", timeout_s=15)
+            return page
+        except Exception:
+            if ws is not None:
+                await ws.close()
+            await session.close()
+            raise
 
 
 class Page:
@@ -287,8 +331,10 @@ class Page:
         self.counter = [0]
 
     async def close(self) -> None:
-        await self.ws.close()
-        await self.session.close()
+        try:
+            await self.ws.close()
+        finally:
+            await self.session.close()
 
     async def send(self, method: str, params: dict[str, Any] | None = None, *, timeout_s: float = 30.0) -> Any:
         return await _cdp_send(self.ws, self.counter, method, params, timeout=timeout_s)
@@ -454,7 +500,16 @@ def evaluate_report(report: dict[str, Any]) -> list[str]:
     failures: list[str] = []
     if not report.get("ok"):
         failures.append("browser UI call gate reported not ok")
-    for side in ("caller", "receiver"):
+    phase = str(report.get("phase") or "")
+    if phase and phase != "complete" and not report.get("ok"):
+        failures.append(f"browser UI call gate stopped during {phase}")
+    validate_media = (
+        phase in {"media_wait", "complete"}
+        if phase
+        else "caller" in report or "receiver" in report
+    )
+    sides = ("caller", "receiver") if validate_media else ()
+    for side in sides:
         summary = report.get(side) or {}
         if summary.get("iceConnectionState") not in {"connected", "completed"}:
             failures.append(f"{side} ICE did not connect")
@@ -484,26 +539,40 @@ async def run_gate(
     min_video_frames: int,
 ) -> dict[str, Any]:
     started = time.time()
-    with tempfile.TemporaryDirectory(prefix="ol_ui_call_e2e_") as td:
+    with _e2e_temp_directory() as td:
         root = Path(td)
-        a = await _spawn_daemon(root, "A")
-        b = await _spawn_daemon(root, "B")
+        a: DaemonHandle | None = None
+        b: DaemonHandle | None = None
+        caller: dict[str, Any] = {}
+        receiver: dict[str, Any] = {}
+        phase = "daemon_a_startup"
         try:
+            a = await _spawn_daemon(root, "A")
+            phase = "daemon_b_startup"
+            b = await _spawn_daemon(root, "B")
+            phase = "discovery"
             await _wait_discovery(a, b)
+            phase = "trust"
             await _trust_both(a, b)
+            phase = "browser_startup"
             async with BrowserSession(browser, root / "browser-a") as browser_a, BrowserSession(browser, root / "browser-b") as browser_b:
-                page_a = await browser_a.open_page(f"http://127.0.0.1:{a.ui_port}/?t={a.token}")
-                page_b = await browser_b.open_page(f"http://127.0.0.1:{b.ui_port}/?t={b.token}")
+                page_a: Page | None = None
+                page_b: Page | None = None
                 try:
+                    phase = "page_startup"
+                    page_a = await browser_a.open_page(f"http://127.0.0.1:{a.ui_port}/?t={a.token}")
+                    page_b = await browser_b.open_page(f"http://127.0.0.1:{b.ui_port}/?t={b.token}")
                     await page_a.eval(MEDIA_PATCH_JS)
                     await page_b.eval(MEDIA_PATCH_JS)
                     await page_a.eval(PAGE_SUMMARY_JS)
                     await page_b.eval(PAGE_SUMMARY_JS)
+                    phase = "ui_ready"
                     await page_a.wait_expr("typeof window.startLivingPresenceCall === 'function'", timeout_s=20)
                     await page_b.wait_expr("typeof window.backfillLivingPresenceCalls === 'function'", timeout_s=20)
                     await page_a.wait_expr("fetch('/api/me', {credentials:'include'}).then(r => r.ok)", timeout_s=10)
                     await page_b.wait_expr("fetch('/api/me', {credentials:'include'}).then(r => r.ok)", timeout_s=10)
 
+                    phase = "call_start"
                     await page_a.eval(
                         "(async () => { await window.startLivingPresenceCall("
                         + json.dumps(b.fingerprint)
@@ -511,20 +580,28 @@ async def run_gate(
                         await_promise=True,
                         timeout_s=20,
                     )
+                    phase = "incoming_call"
                     await page_b.wait_expr(
-                        "(async () => document.getElementById('call-incoming-overlay')?.classList.contains('show') || "
-                        "(window._oneLinkCallDebug && (await window._oneLinkCallDebug())?.call_id))()",
+                        "(() => { const overlay = document.getElementById('call-incoming-overlay'); "
+                        "const button = document.getElementById('btn-call-accept'); "
+                        "return !!(overlay?.classList.contains('show') && button && !button.disabled); })()",
                         timeout_s=20,
                     )
-                    await page_b.eval("document.getElementById('btn-call-accept')?.click()")
+                    phase = "call_accept"
+                    accepted = await page_b.eval(
+                        "(() => { const button = document.getElementById('btn-call-accept'); "
+                        "if (!button || button.disabled) return false; button.click(); return true; })()"
+                    )
+                    if accepted is not True:
+                        raise RuntimeError("incoming call accept control was not actionable")
+                    phase = "media_wait"
                     deadline = time.time() + wait_media_s
-                    caller: dict[str, Any] = {}
-                    receiver: dict[str, Any] = {}
                     while time.time() < deadline:
                         caller = await page_a.eval("window._oneLinkE2ESummary()", await_promise=True, timeout_s=10)
                         receiver = await page_b.eval("window._oneLinkE2ESummary()", await_promise=True, timeout_s=10)
                         candidate = {
                             "ok": True,
+                            "phase": "media_wait",
                             "caller": caller,
                             "receiver": receiver,
                             "min_audio_packets": min_audio_packets,
@@ -535,17 +612,19 @@ async def run_gate(
                         if not evaluate_report(candidate):
                             report = {
                                 **candidate,
+                                "phase": "complete",
                                 "elapsed_s": round(time.time() - started, 3),
                                 "browser": {"name": browser.name, "path": Path(browser.path).name},
                             }
                             try:
                                 await page_a.eval("document.getElementById('btn-call-end')?.click()")
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                report_best_effort_failure(log, "e2e_call_end_cleanup", exc)
                             return report
                         await asyncio.sleep(0.5)
                     return {
                         "ok": False,
+                        "phase": "media_wait",
                         "caller": caller,
                         "receiver": receiver,
                         "min_audio_packets": min_audio_packets,
@@ -556,11 +635,37 @@ async def run_gate(
                         "privacy": _privacy_flags(),
                     }
                 finally:
-                    await page_a.close()
-                    await page_b.close()
+                    if page_a is not None:
+                        try:
+                            await page_a.close()
+                        except Exception as exc:
+                            report_best_effort_failure(log, "e2e_page_a_close", exc)
+                    if page_b is not None:
+                        try:
+                            await page_b.close()
+                        except Exception as exc:
+                            report_best_effort_failure(log, "e2e_page_b_close", exc)
+        except Exception as exc:
+            report = {
+                "ok": False,
+                "phase": phase,
+                "error": _safe_exception(exc, redactions=(str(root),)),
+                "elapsed_s": round(time.time() - started, 3),
+                "browser": {"name": browser.name, "path": Path(browser.path).name},
+                "privacy": _privacy_flags(),
+            }
+            if phase == "media_wait":
+                report["caller"] = caller
+                report["receiver"] = receiver
+                report["min_audio_packets"] = min_audio_packets
+                report["min_video_packets"] = min_video_packets
+                report["min_video_frames"] = min_video_frames
+            return report
         finally:
-            _stop_daemon(a)
-            _stop_daemon(b)
+            if a is not None:
+                _stop_daemon(a)
+            if b is not None:
+                _stop_daemon(b)
 
 
 def _privacy_flags() -> dict[str, bool]:
@@ -623,7 +728,8 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         report = {
             "ok": False,
-            "error": repr(exc),
+            "phase": "gate_exception",
+            "error": _safe_exception(exc),
             "browser": {"name": browser.name, "path": Path(browser.path).name},
             "privacy": _privacy_flags(),
         }

@@ -12,8 +12,8 @@
 //! 4. Repeat until no degree-1 encoded symbols exist or all sources
 //!    are resolved.
 //!
-//! This is O((K + N) × d_avg) per ingest in the worst case, where N is
-//! the number of encoded symbols held. For K ≤ 256 and d_avg ≈ 4, this
+//! This is O((K + N) × `d_avg`) per ingest in the worst case, where N is
+//! the number of encoded symbols held. For K ≤ 256 and `d_avg` ≈ 4, this
 //! is microseconds per ingest.
 
 use std::collections::{HashMap, VecDeque};
@@ -24,14 +24,34 @@ use crate::rng::SplitMix64;
 use crate::xor::xor_into;
 
 /// Maximum encoded-symbol count the decoder will hold per chunk. Caps
-/// memory at symbol_len * MAX_ENCODED_PER_CHUNK bytes ≈ 2 MiB for
-/// symbol_len=1024. Sized to give K=1024 source symbols a 2× headroom
+/// memory at `symbol_len * MAX_ENCODED_PER_CHUNK` bytes ≈ 2 MiB for
+/// `symbol_len=1024`. Sized to give K=1024 source symbols a 2× headroom
 /// over loss (Phase B acceptance gate: K=1024 at 5% loss across ≥1000
 /// random seeds — needs ~1.25K received, this gives 2K).
 pub const MAX_ENCODED_PER_CHUNK: u32 = 2048;
 
+/// Maximum number of source symbols in one chunk. The production
+/// profile uses 1 KiB symbols over at most 1 MiB of source data, so
+/// K=1024 is the largest canonical shape. This also prevents an
+/// attacker-controlled packet header from driving a multi-gigabyte
+/// `sources` allocation before any payload is authenticated.
+pub const MAX_SOURCE_SYMBOLS_PER_CHUNK: u32 = 1024;
+
+/// Maximum original source size accepted by one fountain codec.
+/// Matches the bulk-frame/WAL resource envelope.
+pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
+
+/// Maximum bytes in a single encoded symbol. The 44-byte packet header
+/// must still fit beside it in a 1 MiB bulk frame.
+pub const MAX_SYMBOL_LEN: usize = MAX_SOURCE_BYTES - crate::packet::PACKET_HEADER_LEN;
+
+/// Aggregate encoded-payload bytes retained by one decoder. Normal
+/// K=1024 / 1 KiB-symbol decoding peaks near 2 MiB; 8 MiB leaves ample
+/// loss headroom while bounding adversarial sparse equations.
+pub const MAX_DECODER_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+
 /// Per-packet state inside the decoder: payload + remaining-unresolved
-/// neighbors. As neighbors are recovered they get XORed out of `payload`
+/// neighbors. As neighbors are recovered they get `XORed` out of `payload`
 /// and removed from `neighbors`.
 struct PendingPacket {
     payload: Vec<u8>,
@@ -45,10 +65,10 @@ pub struct LtDecoder {
     source_len: usize,
     /// Resolved source symbols. `None` until decoded.
     sources: Vec<Option<Vec<u8>>>,
-    /// Pending encoded packets keyed by symbol_id (so duplicates are
+    /// Pending encoded packets keyed by `symbol_id` (so duplicates are
     /// dropped silently).
     pending: HashMap<u32, PendingPacket>,
-    /// Reverse index: source-symbol index → set of symbol_ids whose
+    /// Reverse index: source-symbol index → set of `symbol_ids` whose
     /// neighbor sets currently include it. Used for fast propagation.
     inverse: HashMap<u32, std::collections::BTreeSet<u32>>,
     /// Queue of packets currently at degree-1, ready to resolve. We
@@ -66,8 +86,14 @@ impl std::fmt::Debug for LtDecoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LtDecoder")
             .field("k", &self.k)
+            .field("symbol_len", &self.symbol_len)
+            .field("source_len", &self.source_len)
+            .field("sources", &self.sources.len())
             .field("resolved", &self.resolved)
             .field("pending", &self.pending.len())
+            .field("inverse", &self.inverse.len())
+            .field("degree1_queue", &self.degree1_queue.len())
+            .field("cdf", &self.cdf.len())
             .finish()
     }
 }
@@ -81,10 +107,27 @@ impl LtDecoder {
     ///
     /// [`FountainError::InvalidSymbolLen`] if `symbol_len == 0`.
     pub fn new(k: u32, symbol_len: usize, source_len: usize) -> Result<Self, FountainError> {
-        if symbol_len == 0 {
-            return Err(FountainError::InvalidSymbolLen("must be > 0"));
+        if k == 0 || k > MAX_SOURCE_SYMBOLS_PER_CHUNK {
+            return Err(FountainError::InvalidSourceSymbolCount {
+                got: k,
+                max: MAX_SOURCE_SYMBOLS_PER_CHUNK,
+            });
         }
-        if source_len > (k as usize) * symbol_len {
+        if symbol_len == 0 || symbol_len > MAX_SYMBOL_LEN {
+            return Err(FountainError::InvalidSymbolLen(
+                "must be in 1..=MAX_SYMBOL_LEN",
+            ));
+        }
+        if source_len > MAX_SOURCE_BYTES {
+            return Err(FountainError::SourceTooLarge {
+                got: source_len,
+                max: MAX_SOURCE_BYTES,
+            });
+        }
+        let padded_len = (k as usize)
+            .checked_mul(symbol_len)
+            .ok_or(FountainError::InvalidSymbolLen("k * symbol_len overflow"))?;
+        if source_len > padded_len {
             return Err(FountainError::InvalidSymbolLen(
                 "source_len > k * symbol_len",
             ));
@@ -159,6 +202,21 @@ impl LtDecoder {
             // Duplicate; drop.
             return Ok(self.is_complete());
         }
+        let retained_after = self
+            .pending
+            .len()
+            .checked_add(1)
+            .and_then(|count| count.checked_mul(self.symbol_len))
+            .ok_or(FountainError::DecoderMemoryLimit {
+                got: usize::MAX,
+                max: MAX_DECODER_BUFFER_BYTES,
+            })?;
+        if retained_after > MAX_DECODER_BUFFER_BYTES {
+            return Err(FountainError::DecoderMemoryLimit {
+                got: retained_after,
+                max: MAX_DECODER_BUFFER_BYTES,
+            });
+        }
 
         let mut rng = SplitMix64::for_symbol(self.k, symbol_id);
         let d = sample_degree(&self.cdf, &mut rng);
@@ -169,7 +227,12 @@ impl LtDecoder {
         let mut unresolved = Vec::with_capacity(neighbors.len());
         for n in &neighbors {
             if let Some(src) = &self.sources[*n as usize] {
-                xor_into(&mut working_payload, src);
+                if !xor_into(&mut working_payload, src) {
+                    return Err(FountainError::SymbolLenMismatch {
+                        expected: self.symbol_len,
+                        got: src.len(),
+                    });
+                }
             } else {
                 unresolved.push(*n);
             }
@@ -198,7 +261,7 @@ impl LtDecoder {
         }
 
         // Propagate any degree-1 packets.
-        self.propagate();
+        self.propagate()?;
         Ok(self.is_complete())
     }
 
@@ -207,11 +270,11 @@ impl LtDecoder {
     /// degree-1 packets discovered during cascade are pushed to the
     /// queue and picked up in the same drain.
     ///
-    /// Complexity: O(N_resolved × d_avg × symbol_len) where N_resolved
+    /// Complexity: `O(N_resolved × d_avg × symbol_len)` where `N_resolved`
     /// is at most K. The previous implementation scanned all pending
     /// packets per resolution (O(K × pending)) — this version is
-    /// O(K × d_avg).
-    fn propagate(&mut self) {
+    /// O(K × `d_avg`).
+    fn propagate(&mut self) -> Result<(), FountainError> {
         while let Some(sid) = self.degree1_queue.pop_front() {
             // Stale entry — the packet may have been resolved (and
             // removed) via cascade since it was queued, or its degree
@@ -240,7 +303,12 @@ impl LtDecoder {
                 if let Some(dep) = self.pending.get_mut(&dep_sid) {
                     if let Some(pos) = dep.neighbors.iter().position(|n| *n == target) {
                         dep.neighbors.remove(pos);
-                        xor_into(&mut dep.payload, &pkt.payload);
+                        if !xor_into(&mut dep.payload, &pkt.payload) {
+                            return Err(FountainError::SymbolLenMismatch {
+                                expected: dep.payload.len(),
+                                got: pkt.payload.len(),
+                            });
+                        }
                         if dep.neighbors.len() == 1 {
                             self.degree1_queue.push_back(dep_sid);
                         }
@@ -254,6 +322,7 @@ impl LtDecoder {
                 break;
             }
         }
+        Ok(())
     }
 
     /// Consume the decoder + return the reconstructed source bytes.
@@ -269,12 +338,15 @@ impl LtDecoder {
                 k: self.k,
             });
         }
-        let mut out = Vec::with_capacity(self.source_len);
-        for i in 0..self.k as usize {
-            let s = self.sources[i].as_ref().expect("resolved");
-            out.extend_from_slice(s);
+        let source_len = self.source_len;
+        let k = self.k;
+        let resolved = self.resolved;
+        let mut out = Vec::with_capacity(source_len);
+        for source in self.sources {
+            let source = source.ok_or(FountainError::IncompleteDecode { resolved, k })?;
+            out.extend_from_slice(&source);
         }
-        out.truncate(self.source_len);
+        out.truncate(source_len);
         Ok(out)
     }
 }
@@ -286,7 +358,11 @@ mod tests {
 
     fn deterministic_buf(seed: u8, len: usize) -> Vec<u8> {
         (0..len)
-            .map(|i| ((i as u32).wrapping_mul(0x9E3779B9) ^ u32::from(seed)) as u8)
+            .map(|i| {
+                let index = u32::try_from(i).expect("test buffer index fits in u32");
+                let mixed = index.wrapping_mul(0x9E37_79B9) ^ u32::from(seed);
+                u8::try_from(mixed & 0xFF).expect("masked mixer output fits in u8")
+            })
             .collect()
     }
 
@@ -374,6 +450,22 @@ mod tests {
         let bad = vec![0u8; 1024];
         let r = dec.ingest(MAX_ENCODED_PER_CHUNK + 100, &bad);
         assert!(matches!(r, Err(FountainError::SymbolIdOverflow { .. })));
+    }
+
+    #[test]
+    fn adversarial_constructor_limits_fail_before_allocation() {
+        assert!(matches!(
+            LtDecoder::new(u32::MAX, 1, 0),
+            Err(FountainError::InvalidSourceSymbolCount { .. })
+        ));
+        assert!(matches!(
+            LtDecoder::new(1, MAX_SYMBOL_LEN + 1, 1),
+            Err(FountainError::InvalidSymbolLen(_))
+        ));
+        assert!(matches!(
+            LtDecoder::new(1, 1, MAX_SOURCE_BYTES + 1),
+            Err(FountainError::SourceTooLarge { .. })
+        ));
     }
 
     #[test]

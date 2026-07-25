@@ -21,7 +21,7 @@ pub const HOP_ID_LEN: usize = 32;
 ///
 /// [`PartialEq`] is constant-time via `subtle::ConstantTimeEq` to
 /// avoid leaking which hop a packet is bound to by comparing
-/// hop_ids on a hot path (e.g. when the daemon's routing table
+/// `hop_ids` on a hot path (e.g. when the daemon's routing table
 /// dispatches forwarded packets).
 ///
 /// # Example

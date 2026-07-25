@@ -1,0 +1,209 @@
+{
+  "control_port": 49686,
+  "peer": "fc9f0a5f",
+  "started_at": 1779394597.4652228,
+  "pin_peer": {
+    "ok": true,
+    "peer_fp": "fc9f0a5f1b91f3dd0acdbc1db709ddf0bbe3dd9bfaa549c71a3410c691eb2046",
+    "trust": "pinned"
+  },
+  "chat": {
+    "ok": 20,
+    "total": 20,
+    "times_ms": [
+      133.565300000555,
+      261.67269999950804,
+      116.17260000002716,
+      141.07349999994767,
+      129.4320000006337,
+      127.99899999936315,
+      110.19179999948392,
+      123.1340000003911,
+      119.3223999998736,
+      118.0134000005637,
+      115.88949999986653,
+      112.98979999992298,
+      143.49640000000363,
+      131.02660000004107,
+      116.98189999970054,
+      122.66160000035597,
+      111.39840000032564,
+      126.09700000029989,
+      129.09729999955744,
+      112.37070000061067
+    ],
+    "failures": []
+  },
+  "quic_ping": {
+    "ok": 20,
+    "total": 20,
+    "rtt_ms": [
+      11.003,
+      5.668,
+      3.961,
+      6.319,
+      4.136,
+      3.977,
+      6.62,
+      4.314,
+      4.085,
+      3.798,
+      4.279,
+      5.076,
+      3.96,
+      3.878,
+      5.821,
+      3.793,
+      5.27,
+      3.882,
+      4.859,
+      6.88
+    ],
+    "failures": []
+  },
+  "files": {
+    "4KiB": {
+      "ok": 5,
+      "total": 5,
+      "times_ms": [
+        67.7136000003884,
+        150.6109000001743,
+        150.88070000001608,
+        139.7994999997536,
+        164.54889999931765
+      ],
+      "median_mibps": null,
+      "failures": []
+    },
+    "512KiB": {
+      "ok": 5,
+      "total": 5,
+      "times_ms": [
+        339.73990000049525,
+        258.4442000006675,
+        267.15060000060475,
+        323.67189999968105,
+        246.85020000015356
+      ],
+      "median_mibps": null,
+      "failures": []
+    },
+    "2MiB": {
+      "ok": 3,
+      "total": 3,
+      "times_ms": [
+        483.682700000827,
+        419.8995000006107,
+        462.0935000002646
+      ],
+      "median_mibps": 4.328128398254584,
+      "failures": []
+    },
+    "16MiB": {
+      "ok": 2,
+      "total": 2,
+      "times_ms": [
+        616.5909999999712,
+        673.12850000053
+      ],
+      "median_mibps": 24.811596630110316,
+      "failures": []
+    }
+  },
+  "quic_status": {
+    "ok": true,
+    "native_quic_available": true,
+    "server_up": true,
+    "local_port": 49685,
+    "outbound": [
+      {
+        "peer_fp": "fc9f0a5f1b91f3dd0acdbc1db709ddf0bbe3dd9bfaa549c71a3410c691eb2046",
+        "alive": false
+      }
+    ],
+    "inbound": [],
+    "advertised_ports": {
+      "fc9f0a5f1b91f3dd0acdbc1db709ddf0bbe3dd9bfaa549c71a3410c691eb2046": 61453
+    },
+    "recent_paired_count": 0
+  },
+  "transfer_diagnostics": {
+    "ok": true,
+    "degradation_events": [],
+    "count": 0
+  },
+  "status": {
+    "ok": true,
+    "pid": 16988,
+    "app_version": "0.21.0-alpha",
+    "package_root": "C:\\Users\\Josh\\Projects\\Coherence\\One_link\\src\\one_link",
+    "source_fingerprint": "e66366ff840af9b9c55932f568272cf3",
+    "protocol_version": "OL1.2",
+    "schema_version": 21,
+    "python": "C:\\Users\\Josh\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+    "home": "C:\\Users\\Josh\\AppData\\Local\\Coherence\\One_link",
+    "ui_server_port": 7121,
+    "ui_https_port": 7122,
+    "me": {
+      "short_id": "f815dc8e",
+      "fingerprint": "f815dc8e2e3d83e34d87133ae030fe5a16f1b06f5d9644a1496a6c1942185c31",
+      "hostname": "WeareOne"
+    },
+    "peer_rtc_attestation": {
+      "require_attested_peers": false,
+      "gate_drop_count": 0,
+      "scope": "webrtc-dc"
+    },
+    "native_status": {
+      "prefetch": {
+        "available": true,
+        "storage_entries": 29
+      },
+      "routing": {
+        "available": true
+      },
+      "homology": {
+        "available": true
+      },
+      "coherence_field": {
+        "available": true,
+        "calibration": {
+          "d": 100.0,
+          "gamma": 0.01,
+          "screening_length": 100.0,
+          "apparent_horizon_anchor": 1591549.4309189534
+        },
+        "snapshot_metrics": {
+          "field_solve_count": 0,
+          "field_solve_failures": 0,
+          "field_last_solve_ns": 0,
+          "field_topology_edge_count": 0,
+          "field_source_peer_count": 0,
+          "field_snapshot_peer_count": 0,
+          "field_snapshot_age_ms": -1.0
+        }
+      },
+      "bloom_init": {
+        "available": true,
+        "advertised": true
+      },
+      "quic_transport": {
+        "available": true,
+        "advertised": true,
+        "endpoint_up": true,
+        "local_port": 49685,
+        "known_peer_ports": 1
+      },
+      "native_transfer_v1": {
+        "advertised": false
+      },
+      "native_transfer_indexed_v1": {
+        "advertised": true
+      },
+      "macaroon_dual_issue": {
+        "last_minted": false,
+        "last_minted_len": 0
+      }
+    }
+  }
+}

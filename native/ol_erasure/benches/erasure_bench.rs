@@ -10,7 +10,7 @@ use rand::{Rng, SeedableRng};
 
 fn make_plaintext(seed: u64, len: usize) -> Vec<u8> {
     let mut rng = StdRng::seed_from_u64(seed);
-    (0..len).map(|_| rng.r#gen::<u8>()).collect()
+    (0..len).map(|_| rng.random::<u8>()).collect()
 }
 
 fn bench_encode(c: &mut Criterion) {
@@ -71,10 +71,17 @@ fn bench_decode_with_erasures(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_encode,
-    bench_decode_no_loss,
-    bench_decode_with_erasures,
-);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{bench_decode_no_loss, bench_decode_with_erasures, bench_encode, criterion_group};
+
+    criterion_group!(
+        benches,
+        bench_encode,
+        bench_decode_no_loss,
+        bench_decode_with_erasures,
+    );
+}
+criterion_main!(criterion_benchmark_harness::benches);

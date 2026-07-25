@@ -41,10 +41,12 @@ fn arb_ring_with_chords() -> impl Strategy<Value = GraphLaplacian> {
         let mut s = seed.wrapping_mul(0x9E37_79B9);
         for i in 0..n {
             s = s
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             if (s >> 56) < 64 {
-                let j = ((s >> 32) as usize) % n;
+                let node_count = u64::try_from(n).expect("the bounded fixture size fits u64");
+                let j = usize::try_from((s >> 32) % node_count)
+                    .expect("a value reduced modulo the node count fits usize");
                 if i != j {
                     let _ = g.add_edge(i, j, 0.5);
                 }
@@ -82,8 +84,11 @@ proptest! {
         let n = graph.n();
         let mut prng = seed;
         let mut next = || {
-            prng = prng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ((prng >> 32) as i64 as f64) / (i32::MAX as f64) * 5.0
+            prng = prng
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let upper = u32::try_from(prng >> 32).expect("the upper half of u64 fits u32");
+            f64::from(upper) / f64::from(i32::MAX) * 5.0
         };
         let s1: Vec<f64> = (0..n).map(|_| next()).collect();
         let s2: Vec<f64> = (0..n).map(|_| next()).collect();
@@ -113,8 +118,11 @@ proptest! {
         j_seed in 0u64..u64::MAX,
     ) {
         let n = graph.n();
-        let i = (i_seed as usize) % n;
-        let j = (j_seed as usize) % n;
+        let node_count = u64::try_from(n).expect("the bounded fixture size fits u64");
+        let i = usize::try_from(i_seed % node_count)
+            .expect("a value reduced modulo the node count fits usize");
+        let j = usize::try_from(j_seed % node_count)
+            .expect("a value reduced modulo the node count fits usize");
         prop_assume!(i != j);
         let mut s_i = vec![0.0; n];
         let mut s_j = vec![0.0; n];
@@ -142,17 +150,20 @@ proptest! {
         let n = graph.n();
         let mut prng = s_seed;
         let s: Vec<f64> = (0..n).map(|_| {
-            prng = prng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ((prng >> 32) as u32 as f64) / (u32::MAX as f64) * 5.0
+            prng = prng
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let upper = u32::try_from(prng >> 32).expect("the upper half of u64 fits u32");
+            f64::from(upper) / f64::from(u32::MAX) * 5.0
         }).collect();
         let x = solve_for(&graph, 1.0, 0.5, &s);
-        #[allow(clippy::needless_range_loop)] // indexed node access reads naturally for this field-positivity invariant
-        for i in 0..n {
+        let source_max = s.iter().copied().fold(0.0_f64, f64::max);
+        for (i, &field_value) in x.iter().enumerate() {
             prop_assert!(
-                x[i] >= -1e-9,
+                field_value >= -1e-9,
                 "negative field at node {i}: x={:.6e} (source max = {:.3})",
-                x[i],
-                s.iter().cloned().fold(0.0_f64, f64::max),
+                field_value,
+                source_max,
             );
         }
     }
@@ -253,7 +264,7 @@ fn solve_round_trips_through_operator() {
     );
 }
 
-/// HelmholtzSolver invariant: identical (graph, d, gamma, source)
+/// `HelmholtzSolver` invariant: identical (graph, d, gamma, source)
 /// inputs must produce identical field outputs across calls, even
 /// after warm-start has been triggered. (Numerical equality, not
 /// just convergence equality.)
@@ -279,7 +290,7 @@ fn solver_repeated_solve_idempotent_after_warm_start() {
     }
 }
 
-/// HelmholtzSolver dimension-mismatch error path. The solver must
+/// `HelmholtzSolver` dimension-mismatch error path. The solver must
 /// reject sources of the wrong length without panicking.
 #[test]
 fn solver_rejects_source_length_mismatch() {

@@ -22,7 +22,6 @@ fall-through still produces a usable path.
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
 import pytest

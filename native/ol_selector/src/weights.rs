@@ -1,4 +1,4 @@
-//! Tunable weights for the UnifiedMin selector.
+//! Tunable weights for the `UnifiedMin` selector.
 //!
 //! These are the constants the continuous energy-minimization
 //! objective uses to weigh per-event trade-offs. They start at
@@ -10,22 +10,24 @@
 /// Each field corresponds to one term in the Equation-of-ONE
 /// objective:
 ///
-///   E_total = C_dynamic · (E_quantum + α·|∇τ_c|² + (ΔC/ΔS)·A(x,t) + E_dark)
+/// ```text
+/// E_total = C_dynamic · (E_quantum + α·|∇τ_c|² + (ΔC/ΔS)·A(x,t) + E_dark)
+/// ```
 ///
 /// where the per-term coefficients (`alpha_coherence`, `privacy_weight`,
 /// etc.) live here. The defaults are the values that performed best
-/// in the forge_shootouts Gap 22 simulations after a single tuning
+/// in the `forge_shootouts` Gap 22 simulations after a single tuning
 /// pass.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Weights {
-    /// `α` coefficient on coherence gradient |∇τ_c|². Higher → more
+    /// `α` coefficient on coherence gradient `|∇τ_c|²`. Higher → more
     /// stabilization preference (anchors get cheaper, coherence path
     /// preferred even for small payloads).
     pub alpha_coherence: f32,
     /// Multiplier on the alignment-energy "privacy must" term.
     /// Higher → stronger preference for onion + cover even at cost.
     pub privacy_weight: f32,
-    /// Fixed penalty when cover_traffic is OFF and the user mode
+    /// Fixed penalty when `cover_traffic` is OFF and the user mode
     /// expects it (paranoid). Triggered when alignment can't reach
     /// the target without cover.
     pub cover_penalty: f32,
@@ -38,7 +40,7 @@ pub struct Weights {
     /// Multiplier applied to base RTT when the decision picks Relay
     /// (relay path adds ~1 extra RTT vs direct).
     pub relay_rtt_multiplier: f32,
-    /// λ — exponent in C_dynamic = e^{-λD}. Higher → smaller events
+    /// `λ` — exponent in `C_dynamic = e^{-λD}`. Higher → smaller events
     /// dominate the objective (perf-focused); lower → larger events
     /// dominate (coherence-focused).
     pub lambda_dynamic: f32,

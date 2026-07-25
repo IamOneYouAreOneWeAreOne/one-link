@@ -202,7 +202,12 @@ def test_api_wrappers_call_maybe401(index_html: str):
     + upload (the 4 verbs that actually hit the network)."""
     idx = index_html.find("const api = {")
     assert idx > 0
-    snippet = index_html[idx:idx + 4000]
+    # Bound the four network primitives structurally. A fixed character
+    # window became a false negative as upload recovery/idempotency handling
+    # grew, even though all four wrappers still invoked the guard.
+    end = index_html.find("\n    folders()", idx)
+    assert end > idx
+    snippet = index_html[idx:end]
     # Each network-touching verb (get, post, del, upload) calls _maybe401.
     assert snippet.count("_maybe401(r.status)") >= 4
 

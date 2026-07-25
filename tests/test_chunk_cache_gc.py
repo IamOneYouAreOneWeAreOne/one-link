@@ -10,13 +10,8 @@ import os
 import time
 from pathlib import Path
 
-import pytest
 
 from one_link.chunk_cache_gc import (
-    CacheEntry,
-    DEFAULT_MAX_BYTES,
-    DEFAULT_TARGET_RATIO,
-    EvictionReport,
     evict_to_target,
     gather_protected_hashes,
     scan_cache,

@@ -1,7 +1,22 @@
 # One Link Roadmap
 
-Status: living document. Updated as releases ship.
-Last updated: 2026-05-23.
+Status: planning-of-record plus historical implementation ledger; not a
+production capability inventory.
+Last truth review: 2026-07-24.
+
+> **Current boundary:** exact current truth comes from `/api/audit` and the
+> in-app feature matrix. Current capable native daemons use signed,
+> key-confirmed X25519 + ML-KEM-768 session establishment; Ed25519 identity and
+> browser/WebRTC channels are outside that PQ-KEM claim. The optional v2 native
+> relay uses rotating pairwise route tags and seals both identity-bearing first
+> flights, but a relay still sees endpoints, timing, sizes, counts, and tag
+> linkage; this is not sender anonymity. Onion/mix-net message routing and
+> constant-rate cover traffic are not live product paths. Explicit
+> owner-confirmed one-click transactional installation is implemented but is
+> dynamically available only after the local frozen standalone bundle and its
+> external A/B helper validate completely. Unattended/background automatic
+> installation remains disabled, and no verified public stable production tag
+> exists.
 
 > **File engine v2 status (2026-05-11)**: All four phases of
 > [`FILE_ENGINE_V2_PLAN.md`](./FILE_ENGINE_V2_PLAN.md) are structurally
@@ -91,7 +106,7 @@ tracks; the four principles gate every ship.
 
 ---
 
-## What's already shipped (post-Tier audit, 2026-05-08)
+## Historical post-Tier source ledger (2026-05-08; not release qualification)
 
 The original Tier 1–3 plan from the v0.7.2 audit is essentially
 complete. Tier 4 is barely started.
@@ -236,14 +251,16 @@ Ordered by leverage:
    identity, OPFS storage, Passkey-aware unlock, Service Worker
    background, PWA install. Detailed sequence:
 
-   - v0.15.0 — PWA shell + manifest + Web Crypto identity foundation
-   - v0.16.0 — OPFS storage layer + at-rest encryption
-   - v0.17.0 — Passkey / WebAuthn integration for identity unlock
-   - v0.18.0 — WebRTC DataChannel transport
-   - v0.19.0 — WebTransport bulk path + adaptive transport selector
-   - v0.20.0 — BLE proximity pairing on Android, ultrasonic on iOS fallback
-   - v0.21.0 — MLS group ratchet
-   - v0.22.0 — Sealed sender + cover traffic
+   - v0.15.0 — PWA shell + manifest + Web Crypto identity foundation (`partial`)
+   - v0.16.0 — OPFS storage layer + at-rest encryption (`planned`)
+   - v0.17.0 — Passkey / WebAuthn integration for identity unlock (`planned`)
+   - v0.18.0 — WebRTC DataChannel foundation (`partial`; manual/QR direct paths)
+   - v0.19.0 — WebTransport/selector experiment (`partial`; not in the send path)
+   - planned — BLE proximity pairing on Android and evaluated iOS fallback;
+     no shipped BLE/ultrasonic implementation or E2E hardware evidence yet
+   - v0.21.0 — MLS group ratchet (`planned`; TreeKEM primitive only)
+   - v0.22.0 — Sealed sender + cover traffic (`partial`; v2 native-relay
+     pairwise tag and first-flight blinding only, not cover/mix anonymity)
    - v0.23.0 — Yjs/Automerge CRDT layer
    - v0.24.0 — WebGPU + on-device model for semantic search
    - v0.25.0 — Federated learning across the user's devices
@@ -280,8 +297,8 @@ Ordered by leverage:
    stranger" use case from "fall back to WeTransfer" to "always
    use One Link."
 
-6. **Defang ladder.** Per-ship corporate-substrate mitigations
-   shipped alongside the PWA pivot:
+6. **Target defang ladder.** These are required alongside the PWA pivot; list
+   membership is not evidence that the mitigation is currently deployed:
 
    - Multi-org STUN endpoints + LAN-only mode (defangs single-
      STUN observation)
@@ -473,11 +490,11 @@ Ordered by leverage:
    Frontier: rotation is automatic + driven by entropy/usage
    thresholds; the user never knows. Surface: zero new buttons.
 
-5. **Tighter supply-chain gates.** pip-audit / bandit currently
-   report-only; promote to fail-the-build after triage. Frontier:
-   reproducible builds verified in CI; SBOM auto-published.
-   Surface: zero. The kind of safety the user shouldn't think
-   about.
+5. **Tighter supply-chain gates.** pip-audit and medium-or-higher Bandit
+   findings now fail CI. Remaining frontier: independently compared,
+   reproducible builds across every supported artifact plus a complete SBOM
+   that is checksummed, signed, attested, and published with each approved
+   release. Surface: zero. The kind of safety the user shouldn't think about.
 
 6. **Daemon corruption self-healing.** Production messengers
    eat the cost of partial-sync / ratchet-out-of-sync / DB-wipe /
@@ -534,14 +551,14 @@ Ordered by leverage:
 
 Canonical plan: [`COHERENCE_MESH_PLAN.md`](./COHERENCE_MESH_PLAN.md)
 
-**The load-bearing insight:** three trust tiers, three default
+**Target load-bearing insight:** three trust tiers, three default
 privacy modes. Self-traffic (your own devices talking to each
-other) is direct + fast because there's no metadata to hide.
-Friend-traffic is 1-hop-onion + sealed-sender by default.
-Paranoid mode is 3-hop-onion + Loopix-class cover traffic for
-users in hostile environments. The user never picks; pair-by-QR
-puts your devices in self-mesh, friends in pinned-contact, and
-paranoid is an explicit opt-in.
+other) is direct-first for speed, accepting that endpoint/timing/location
+metadata remains observable. Friend traffic targets independently operated
+multi-hop identifier blinding plus shape-matched cover; a single relay or one
+“onion” hop is not an anonymity set. Hardened mode targets a larger multi-hop
+set and measured Loopix-class cover for hostile environments. These remain
+targets, not current anonymity claims.
 
 Phase F ships in 8 sub-phases (F1–F8); see the plan for
 acceptance gates per phase. Ordered by leverage:
@@ -553,16 +570,23 @@ acceptance gates per phase. Ordered by leverage:
    reciprocity pair-trust). All three are pre-built in OneField
    Mesh and harvest directly into Rust crates.
 
-2. **F2 — Pair-by-QR.** Ed25519 + Dilithium handshake + optional
-   channel-reciprocity Factor-2. Replaces the `--lan` token URL
-   entirely. Eliminates remote-pair vulnerabilities.
+2. **F2 — Pair-by-QR.** The active daemon, direct-browser, and One Setup
+   ceremonies use signed identity possession plus a transcript-bound five-word
+   confirmation. The separate native `ol_pair_qr` state machine is not the
+   authoritative daemon caller. ML-DSA/Dilithium identity, replacement of the
+   `--lan` token URL, and a hardware-validated channel-reciprocity factor remain
+   planned; the proximity research pipeline is not authentication evidence.
 
-3. **F3 — Onion circuits.** 1-hop default for pinned-contact friend
-   traffic; 3-hop for paranoid mode. Path selection via Phase E
-   coherence-field routing (already shipped).
+3. **F3 — Onion circuits (`partial`: primitive only).** A one-relay route may
+   blind a stable recipient identifier but is not an anonymity set. The
+   hardened target therefore requires at least two independently operated hops
+   plus measured cover/latency behavior. No live message/file route, circuit
+   manager, independent deployment, or physical path evidence exists.
 
-4. **F4 — Sealed sender + cover traffic.** Loopix-style constant-
-   rate background between pinned contacts. Defeats timing analysis.
+4. **F4 — Sealed sender + cover traffic (`partial`).** The native v2 relay
+   blinds its pairwise route tags and seals channel identity first flights.
+   Loopix-style constant-rate traffic, independent multi-hop mixing, and
+   timing-analysis resistance remain target work.
 
 5. **F5 — Personal Device Mesh.** Master identity + per-device
    subkeys + device-presence CRDT + remote-instruct command channel.

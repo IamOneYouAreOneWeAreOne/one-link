@@ -153,7 +153,8 @@ def test_one_health_refreshes_on_startup_poll_and_mesh_events() -> None:
     html = _index_html()
     init_idx = html.find("async function init()")
     init = html[init_idx:init_idx + 5000]
-    assert "await refreshOneHealth()" in init
+    assert '["health", refreshOneHealth()]' in init
+    assert "await Promise.allSettled" in init
     assert "setInterval(refreshOneHealth, 15000)" in init
     ws_idx = html.find('m.type === "self_mesh_changed"')
     ws = html[ws_idx:ws_idx + 300]

@@ -26,11 +26,14 @@ Companion: docs/LIVING_PRESENCE_ARCHITECTURE.md §3 (flow diagram)
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import threading
+import time
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Optional
+from typing import Callable, Optional
 
 from one_link.async_capsule import (
     AsyncCapsule,
@@ -62,6 +65,83 @@ from one_link.recording_consent import (
 )
 
 log = logging.getLogger(__name__)
+
+
+# Call identifiers cross an authenticated network boundary and are used as
+# dictionary keys in several daemon-owned registries.  Keep the accepted
+# alphabet deliberately boring (wire-compatible with every historical One
+# Link id) and bound it before any lookup/allocation/log slicing occurs.
+MAX_CALL_ID_LENGTH = 128
+MAX_CALL_PEER_ID_LENGTH = 256
+MAX_ACTIVE_CALLS = 128
+MAX_ACTIVE_CALLS_PER_PEER = 8
+STALE_PENDING_CALL_SECONDS = 120.0
+_CALL_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_CALL_KINDS = frozenset({"voice", "video"})
+
+
+def _capsule_id_for_call(call_id: str) -> str:
+    """Return a deterministic, wire-safe id for any valid call id."""
+
+    digest = hashlib.sha256(
+        b"one-link-async-capsule-v1\x00" + call_id.encode("ascii")
+    ).hexdigest()
+    return f"capsule-{digest}"
+
+
+class CallRegistryError(RuntimeError):
+    """Base class for registry admission/identity failures."""
+
+
+class InvalidCallIdError(CallRegistryError, ValueError):
+    """A call identifier is malformed or too large for safe indexing."""
+
+
+class CallIdentityMismatchError(CallRegistryError):
+    """An existing call id was presented under a different identity."""
+
+
+class CallCapacityError(CallRegistryError):
+    """The bounded active-call registry has reached an admission limit."""
+
+
+def is_valid_call_id(value: object) -> bool:
+    """Return whether *value* is a bounded, canonical wire call id."""
+
+    return isinstance(value, str) and _CALL_ID_RE.fullmatch(value) is not None
+
+
+def validate_call_id(value: object) -> str:
+    """Return a valid call id or raise before it can become a map key."""
+
+    if not is_valid_call_id(value):
+        raise InvalidCallIdError("invalid call identifier")
+    assert isinstance(value, str)
+    return value
+
+
+def normalize_call_kind(value: object, *, default: str = "voice") -> str:
+    """Normalize the wire/UI call kind using voice as the legacy minimum."""
+
+    if value is None:
+        value = default
+    if not isinstance(value, str):
+        raise ValueError("call kind must be voice or video")
+    normalized = value.strip().lower()
+    if normalized not in _CALL_KINDS:
+        raise ValueError("call kind must be voice or video")
+    return normalized
+
+
+def _validate_registry_identity(value: object, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > MAX_CALL_PEER_ID_LENGTH
+        or any(ord(ch) < 0x21 or ord(ch) > 0x7e for ch in value)
+    ):
+        raise ValueError(f"invalid {label}")
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +246,7 @@ class CallManagerState:
     call_id: str
     peer_master_vk_hex: str
     local_role: str                # "originator" or "recipient"
+    call_kind: str                  # "voice" or "video"
 
     # FSM cells
     lifecycle: CallState
@@ -201,7 +282,20 @@ class CallManager:
         started_at_ms: int,
         negotiated_capabilities: frozenset[str] = frozenset(),
         model_pack_hash: Optional[str] = None,
+        call_kind: str = "voice",
     ) -> None:
+        call_id = validate_call_id(call_id)
+        peer_master_vk_hex = _validate_registry_identity(
+            peer_master_vk_hex,
+            label="peer identity",
+        )
+        local_master_vk_hex = _validate_registry_identity(
+            local_master_vk_hex,
+            label="local identity",
+        )
+        if local_role not in {"originator", "recipient"}:
+            raise ValueError("invalid local call role")
+        call_kind = normalize_call_kind(call_kind)
         # RLock so any internal helper that reads a thread-safe
         # property from inside an already-held critical section
         # doesn't deadlock. The CallManager's transition handlers
@@ -234,6 +328,7 @@ class CallManager:
             call_id=call_id,
             peer_master_vk_hex=peer_master_vk_hex,
             local_role=local_role,
+            call_kind=call_kind,
             lifecycle=CallLifecycle.initial_state(
                 call_id=call_id,
                 peer_master_vk_hex=peer_master_vk_hex,
@@ -447,12 +542,18 @@ class CallManager:
                     else:
                         cap_rec_state = RecordingState.NOT_RECORDING
                     self.state.capsule_builder = CapsuleBuilder(
-                        capsule_id=f"capsule-{self.state.call_id}",
+                        capsule_id=_capsule_id_for_call(self.state.call_id),
                         call_id=self.state.call_id,
                         sender_master_vk_hex=self._writer_id,
                         recipient_master_vk_hex=self.state.peer_master_vk_hex,
                         kind=CapsuleKind.VOICE_NOTE_OUTGOING,
-                        started_at_ms=self.state.lifecycle.started_at_ms,
+                        # Capsule time starts at the representation change,
+                        # not at the beginning of the preceding live call.
+                        # Otherwise a long call converted near the end can
+                        # immediately violate the capsule duration bound and
+                        # every media timestamp is measured against the wrong
+                        # clock origin.
+                        started_at_ms=manager_event.occurred_at_ms,
                         recording_state_at_conversion=cap_rec_state,
                     )
             elif result.state.phase == CallPhase.RESUMABLE:
@@ -536,7 +637,11 @@ class CallManager:
     def _capture_audio_segment(self, event: ManagerEvent) -> ManagerOutput:
         """Daemon hands one audio segment to the capsule builder
         during ASYNC_CAPTURE."""
-        if self.state.capsule_builder is None:
+        if (
+            self.state.lifecycle.phase != CallPhase.ASYNC_CAPTURE
+            or self.state.capsule_builder is None
+            or self.state.finalized_capsule is not None
+        ):
             return ManagerOutput()
         chunk = event.data.get("chunk")
         provenance = event.data.get("provenance")
@@ -553,8 +658,16 @@ class CallManager:
         """Daemon signals it's done feeding segments; finalise +
         emit ASYNC_CAPSULE_FINALIZED to the lifecycle so RESUMABLE
         opens."""
+        # HTTP retries and duplicate browser completion events must be exact
+        # idempotent reads, not a second finalization with a later timestamp.
+        # Re-finalizing under the same capsule id would conflict with the
+        # already durable outbox record and could strand an otherwise valid
+        # voice note in pending state.
+        if self.state.finalized_capsule is not None:
+            return ManagerOutput(finalized_capsule=self.state.finalized_capsule)
         if (
-            self.state.capsule_builder is None
+            self.state.lifecycle.phase != CallPhase.ASYNC_CAPTURE
+            or self.state.capsule_builder is None
             or self.state.capsule_builder.is_empty()
         ):
             return ManagerOutput()
@@ -619,12 +732,31 @@ def _lifecycle_end_to_session_end(end_cause: EndCause):
 # ---------------------------------------------------------------------------
 
 class CallManagerRegistry:
-    """Thread-safe ``dict[call_id, CallManager]`` plus convenience
-    lookups + cleanup of completed calls."""
+    """Bounded, identity-bound registry for live call managers.
 
-    def __init__(self) -> None:
+    Network-provided identifiers are validated before lookup.  A call id can
+    never be rebound to another peer/role, and stale pre-answer calls are
+    expired using a monotonic clock so wall-clock jumps cannot retain or reap
+    them unexpectedly.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_calls: int = MAX_ACTIVE_CALLS,
+        max_calls_per_peer: int = MAX_ACTIVE_CALLS_PER_PEER,
+        pending_ttl_s: float = STALE_PENDING_CALL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if max_calls <= 0 or max_calls_per_peer <= 0 or pending_ttl_s <= 0:
+            raise ValueError("call registry limits must be positive")
         self._calls: dict[str, CallManager] = {}
+        self._admitted_monotonic: dict[str, float] = {}
         self._lock = threading.Lock()
+        self._max_calls = int(max_calls)
+        self._max_calls_per_peer = int(max_calls_per_peer)
+        self._pending_ttl_s = float(pending_ttl_s)
+        self._clock = clock
 
     def open(
         self,
@@ -635,10 +767,45 @@ class CallManagerRegistry:
         local_master_vk_hex: str,
         started_at_ms: int,
         negotiated_capabilities: frozenset[str] = frozenset(),
+        call_kind: str = "voice",
     ) -> CallManager:
+        call_id = validate_call_id(call_id)
+        peer_master_vk_hex = _validate_registry_identity(
+            peer_master_vk_hex,
+            label="peer identity",
+        )
+        local_master_vk_hex = _validate_registry_identity(
+            local_master_vk_hex,
+            label="local identity",
+        )
+        if local_role not in {"originator", "recipient"}:
+            raise ValueError("invalid local call role")
+        call_kind = normalize_call_kind(call_kind)
         with self._lock:
-            if call_id in self._calls:
-                return self._calls[call_id]
+            now = self._clock()
+            self._reap_stale_pending_locked(now)
+            existing = self._calls.get(call_id)
+            if existing is not None:
+                state = existing.state
+                if (
+                    state.peer_master_vk_hex != peer_master_vk_hex
+                    or state.local_role != local_role
+                    or existing._writer_id != local_master_vk_hex  # noqa: SLF001
+                    or state.call_kind != call_kind
+                ):
+                    raise CallIdentityMismatchError(
+                        "call identifier is already bound to another call"
+                    )
+                return existing
+            if len(self._calls) >= self._max_calls:
+                raise CallCapacityError("active call capacity reached")
+            peer_calls = sum(
+                1
+                for candidate in self._calls.values()
+                if candidate.state.peer_master_vk_hex == peer_master_vk_hex
+            )
+            if peer_calls >= self._max_calls_per_peer:
+                raise CallCapacityError("peer active call capacity reached")
             mgr = CallManager(
                 call_id=call_id,
                 peer_master_vk_hex=peer_master_vk_hex,
@@ -646,17 +813,50 @@ class CallManagerRegistry:
                 local_master_vk_hex=local_master_vk_hex,
                 started_at_ms=started_at_ms,
                 negotiated_capabilities=negotiated_capabilities,
+                call_kind=call_kind,
             )
             self._calls[call_id] = mgr
+            self._admitted_monotonic[call_id] = now
             return mgr
 
     def get(self, call_id: str) -> Optional[CallManager]:
+        if not is_valid_call_id(call_id):
+            return None
         with self._lock:
             return self._calls.get(call_id)
 
+    def get_for_peer(
+        self,
+        call_id: str,
+        peer_master_vk_hex: str,
+    ) -> Optional[CallManager]:
+        """Return a manager only under the peer identity that owns it.
+
+        A mismatch raises instead of looking like an unknown call so callers
+        can audit collision/hijack attempts distinctly.
+        """
+
+        call_id = validate_call_id(call_id)
+        peer_master_vk_hex = _validate_registry_identity(
+            peer_master_vk_hex,
+            label="peer identity",
+        )
+        with self._lock:
+            mgr = self._calls.get(call_id)
+            if mgr is None:
+                return None
+            if mgr.state.peer_master_vk_hex != peer_master_vk_hex:
+                raise CallIdentityMismatchError(
+                    "call identifier does not belong to this peer"
+                )
+            return mgr
+
     def close(self, call_id: str) -> None:
+        if not is_valid_call_id(call_id):
+            return
         with self._lock:
             self._calls.pop(call_id, None)
+            self._admitted_monotonic.pop(call_id, None)
 
     def active_call_ids(self) -> tuple[str, ...]:
         with self._lock:
@@ -667,12 +867,36 @@ class CallManagerRegistry:
         removed call_ids so the daemon can release any pinned
         resources (media tracks, etc.)."""
         with self._lock:
-            to_remove = [
-                cid for cid, mgr in self._calls.items() if mgr.is_complete
-            ]
-            for cid in to_remove:
-                del self._calls[cid]
-            return tuple(to_remove)
+            return self._reap_completed_locked()
+
+    def reap_stale_pending(self) -> tuple[str, ...]:
+        """Remove unanswered calls whose monotonic admission TTL elapsed."""
+
+        with self._lock:
+            return self._reap_stale_pending_locked(self._clock())
+
+    def _reap_completed_locked(self) -> tuple[str, ...]:
+        to_remove = [
+            cid for cid, mgr in self._calls.items() if mgr.is_complete
+        ]
+        for cid in to_remove:
+            self._calls.pop(cid, None)
+            self._admitted_monotonic.pop(cid, None)
+        return tuple(to_remove)
+
+    def _reap_stale_pending_locked(self, now: float) -> tuple[str, ...]:
+        pending_phases = {CallPhase.INVITING, CallPhase.RINGING}
+        to_remove = [
+            cid
+            for cid, mgr in self._calls.items()
+            if mgr.phase in pending_phases
+            and max(0.0, now - self._admitted_monotonic.get(cid, now))
+            >= self._pending_ttl_s
+        ]
+        for cid in to_remove:
+            self._calls.pop(cid, None)
+            self._admitted_monotonic.pop(cid, None)
+        return tuple(to_remove)
 
     def __len__(self) -> int:
         with self._lock:

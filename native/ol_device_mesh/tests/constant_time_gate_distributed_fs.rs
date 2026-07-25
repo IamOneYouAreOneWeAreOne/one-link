@@ -2,7 +2,7 @@
 //! path. 30 % rel-stddev gate matches the other ct gates in the
 //! crate (all delegate to `ol_pqsig` verify).
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[path = "../../test_support/timing_gate.rs"]
 mod timing_gate;
@@ -15,17 +15,19 @@ use rand::rngs::OsRng;
 const SAMPLES_PER_BUCKET: usize = 200;
 
 fn relative_stddev(samples: &[f64]) -> f64 {
-    let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
-    let var: f64 = samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+    let sample_count =
+        f64::from(u32::try_from(samples.len()).expect("the timing gate has five buckets"));
+    let mean: f64 = samples.iter().sum::<f64>() / sample_count;
+    let var: f64 = samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / sample_count;
     var.sqrt() / mean
 }
 
-fn measure<F: FnMut()>(mut work: F, iters: usize) -> u128 {
+fn measure<F: FnMut()>(mut work: F, iters: usize) -> Duration {
     let start = Instant::now();
     for _ in 0..iters {
         work();
     }
-    start.elapsed().as_nanos()
+    start.elapsed()
 }
 
 #[test]
@@ -65,13 +67,17 @@ fn storage_attest_verify_constant_time_across_tamper_positions() {
                 let _ = std::hint::black_box(att.verify(std::hint::black_box(&vk)));
             },
             SAMPLES_PER_BUCKET,
-        ) as f64;
+        )
+        .as_secs_f64()
+            * 1_000_000_000.0;
         totals.push(ns);
     }
-    let rel = relative_stddev(&totals);
-    eprintln!("storage-attest verify timing totals (ns) = {totals:?}, rel_stddev = {rel:.4}");
+    let rel_stddev = relative_stddev(&totals);
+    eprintln!(
+        "storage-attest verify timing totals (ns) = {totals:?}, rel_stddev = {rel_stddev:.4}"
+    );
     timing_gate!(
-        rel < 0.30,
-        "storage-attest verify relative stddev {rel:.4} exceeds 30% gate"
+        rel_stddev < 0.30,
+        "storage-attest verify relative stddev {rel_stddev:.4} exceeds 30% gate"
     );
 }

@@ -17,6 +17,7 @@ Sending a message: just type `<peer>: <message>` and press Enter.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import socket
@@ -26,12 +27,18 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import BinaryIO, Optional
 
 import click
 
+from one_link import control_ipc
 from one_link import daemon as daemon_mod
 from one_link.paths import data_dir
+from one_link.process_security import (
+    hidden_creationflags,
+    resolve_explicit_executable,
+    sanitized_process_env,
+)
 
 
 def _ts(ms: Optional[int] = None) -> str:
@@ -40,53 +47,55 @@ def _ts(ms: Optional[int] = None) -> str:
 
 
 def _request(port: int, *, timeout: float = 30.0, **req) -> dict:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    s.connect(("127.0.0.1", port))
-    try:
-        s.sendall((json.dumps(req) + "\n").encode("utf-8"))
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf.decode("utf-8").strip() or "{}")
-    finally:
-        s.close()
+    return control_ipc.request_control(port, req, timeout=timeout)
 
 
 def _daemon_alive() -> Optional[int]:
     """If a running daemon is reachable, return its control port. Else None."""
     try:
         port_path = data_dir() / daemon_mod.CONTROL_PORT_FILE
-        if not port_path.is_file():
-            return None
-        port = int(port_path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+        port = int(
+            control_ipc.read_private_bytes_strict(
+                port_path,
+                max_bytes=64,
+                label="control port",
+            )
+            .decode("ascii")
+            .strip()
+        )
+    except (OSError, RuntimeError, UnicodeError, ValueError):
         return None
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(0.5)
-    try:
-        s.connect(("127.0.0.1", port))
-        return port
-    except OSError:
-        return None
-    finally:
-        s.close()
+    return port if daemon_mod.is_daemon_alive(port, timeout=0.5) else None
 
 
 def _spawn_daemon() -> tuple[subprocess.Popen, int]:
     """Spawn a daemon as a child of this chat process. Wait until reachable."""
     flags = 0
     if os.name == "nt":
-        # Detach from any console; keep stdio piped so we can join.
-        flags = subprocess.CREATE_NO_WINDOW
+        # Isolate console signals while retaining a child handle for cleanup.
+        flags = hidden_creationflags() | getattr(
+            subprocess,
+            "CREATE_NEW_PROCESS_GROUP",
+            0x00000200,
+        )
     proc = subprocess.Popen(
-        [sys.executable, "-m", "one_link.cli", "daemon", "--no-tray"],
+        [
+            resolve_explicit_executable(sys.executable),
+            "-P",
+            "-m",
+            "one_link.cli",
+            "daemon",
+            "--no-tray",
+        ],
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         creationflags=flags,
+        start_new_session=os.name != "nt",
+        close_fds=True,
+        env=sanitized_process_env(),
+        cwd=str(Path(sys.executable).resolve().parent),
+        shell=False,
     )
     # Wait long enough for slower Windows machines, but only return once the
     # control protocol itself answers. A port file alone is not readiness.
@@ -98,6 +107,40 @@ def _spawn_daemon() -> tuple[subprocess.Popen, int]:
         time.sleep(0.1)
     proc.terminate()
     raise RuntimeError("could not start daemon (timed out waiting for control port)")
+
+
+def _stop_spawned_daemon(proc: subprocess.Popen, control_port: int) -> None:
+    """Stop the exact daemon this REPL started, preferring authenticated IPC.
+
+    Virtual-environment launchers can remain as a wrapper process around the
+    real interpreter.  Terminating only the wrapper can orphan the daemon, so
+    ask the authenticated daemon itself to shut down and wait for the complete
+    child chain to unwind before using the process handle as a last resort.
+    """
+    if proc.poll() is not None:
+        return
+    try:
+        response = _request(control_port, timeout=3.0, cmd="shutdown")
+        if response.get("ok") is True:
+            try:
+                proc.wait(timeout=8.0)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+    except (OSError, RuntimeError, ValueError):
+        pass
+
+    with contextlib.suppress(OSError):
+        proc.terminate()
+    try:
+        proc.wait(timeout=5.0)
+        return
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    with contextlib.suppress(OSError):
+        proc.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+        proc.wait(timeout=2.0)
 
 
 def _format_event(ev: dict) -> Optional[str]:
@@ -133,6 +176,7 @@ class ChatSession:
         self.control_port = control_port
         self._stop = threading.Event()
         self._tail_socket: Optional[socket.socket] = None
+        self._tail_stream: Optional[BinaryIO] = None
         self._tail_thread: Optional[threading.Thread] = None
         self.me_short_id: str = "?"
         self.me_hostname: str = "?"
@@ -162,9 +206,30 @@ class ChatSession:
     # ─── tail (background incoming-event printer) ─────────────────────
     def start_tail(self) -> None:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(None)
+        s.settimeout(5.0)
         s.connect(("127.0.0.1", self.control_port))
-        s.sendall((json.dumps({"cmd": "tail"}) + "\n").encode("utf-8"))
+        secret = control_ipc.read_control_secret()
+        credential, exchange = control_ipc.begin_authenticated_request(
+            s,
+            {"cmd": "tail"},
+            secret=secret,
+        )
+        stream = s.makefile("rb")
+        first = stream.readline(control_ipc.CONTROL_RESPONSE_MAX_BYTES + 2)
+        if len(first) > control_ipc.CONTROL_RESPONSE_MAX_BYTES or not first.endswith(b"\n"):
+            stream.close()
+            s.close()
+            raise RuntimeError("daemon returned an oversized tail response")
+        envelope = json.loads(first.decode("utf-8"))
+        ack = control_ipc.verify_server_response(envelope, credential, exchange)
+        if ack.get("ok") is not True or not ack.get("tailing"):
+            stream.close()
+            s.close()
+            raise RuntimeError(ack.get("error") or "daemon refused tail stream")
+        # Keep the buffered reader so a tail event coalesced with the signed
+        # acknowledgement is not lost between raw socket recv() calls.
+        self._tail_stream = stream
+        s.settimeout(None)
         self._tail_socket = s
         self._tail_thread = threading.Thread(target=self._tail_loop, daemon=True)
         self._tail_thread.start()
@@ -173,33 +238,38 @@ class ChatSession:
         s = self._tail_socket
         if s is None:
             return
-        buf = b""
         try:
             while not self._stop.is_set():
                 try:
-                    chunk = s.recv(65536)
+                    stream = getattr(self, "_tail_stream", None)
+                    if stream is None:
+                        break
+                    line = stream.readline(control_ipc.CONTROL_RESPONSE_MAX_BYTES + 2)
                 except OSError:
                     break
-                if not chunk:
+                if not line:
                     break
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    if not line.strip():
-                        continue
-                    try:
-                        ev = json.loads(line.decode("utf-8"))
-                    except json.JSONDecodeError:
-                        continue
-                    text = _format_event(ev)
-                    if text:
-                        # Print event on its own line. Re-emit the prompt so
-                        # the user knows where their cursor is. Plain print
-                        # is acceptable; not perfectly redrawn while typing.
-                        click.echo("\n" + text)
-                        sys.stdout.write(">>> ")
-                        sys.stdout.flush()
+                if len(line) > control_ipc.CONTROL_RESPONSE_MAX_BYTES or not line.endswith(b"\n"):
+                    break
+                if not line.strip():
+                    continue
+                try:
+                    ev = json.loads(line.decode("utf-8"))
+                except json.JSONDecodeError:
+                    continue
+                text = _format_event(ev)
+                if text:
+                    # Print event on its own line. Re-emit the prompt so
+                    # the user knows where their cursor is. Plain print
+                    # is acceptable; not perfectly redrawn while typing.
+                    click.echo("\n" + text)
+                    sys.stdout.write(">>> ")
+                    sys.stdout.flush()
         finally:
+            stream = getattr(self, "_tail_stream", None)
+            if stream is not None:
+                with contextlib.suppress(OSError):
+                    stream.close()
             try:
                 s.close()
             except OSError:
@@ -230,11 +300,33 @@ class ChatSession:
     # ─── lifecycle ────────────────────────────────────────────────────
     def stop(self) -> None:
         self._stop.set()
-        try:
-            if self._tail_socket:
-                self._tail_socket.close()
-        except OSError:
-            pass
+        # Do not close the buffered stream first.  The tail thread can hold
+        # BufferedReader's internal lock while blocked in ``readline()``;
+        # closing it from the REPL thread then deadlocks before the socket is
+        # ever closed.  Shutting down the transport wakes the reader, after
+        # which that thread owns normal stream cleanup in ``_tail_loop``.
+        tail_socket = self._tail_socket
+        if tail_socket is not None:
+            with contextlib.suppress(OSError):
+                tail_socket.shutdown(socket.SHUT_RDWR)
+            with contextlib.suppress(OSError):
+                tail_socket.close()
+
+        tail_thread = self._tail_thread
+        if tail_thread is not None and tail_thread is not threading.current_thread():
+            tail_thread.join(timeout=2.0)
+
+        # A thread that exited before entering its ``finally`` block cannot
+        # retain the stream lock.  Close any residual handle only after the
+        # join; never reintroduce the cross-thread BufferedReader deadlock.
+        if tail_thread is None or not tail_thread.is_alive():
+            tail_stream = self._tail_stream
+            if tail_stream is not None:
+                with contextlib.suppress(OSError):
+                    tail_stream.close()
+            self._tail_socket = None
+            self._tail_stream = None
+            self._tail_thread = None
 
 
 def _print_help() -> None:
@@ -328,9 +420,5 @@ def run_chat() -> int:
         session.stop()
         if spawned is not None:
             click.echo("  stopping auto-started daemon …")
-            try:
-                spawned.terminate()
-                spawned.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                spawned.kill()
+            _stop_spawned_daemon(spawned, port)
     return 0

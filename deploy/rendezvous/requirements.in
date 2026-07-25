@@ -1,0 +1,13 @@
+# Rendezvous-only runtime. Keep this surface intentionally smaller than the
+# desktop application graph; update exact versions together with uv.lock, then
+# regenerate requirements.lock with:
+#
+#   uv pip compile deploy/rendezvous/requirements.in \
+#     --python-version 3.12 --universal --generate-hashes \
+#     --output-file deploy/rendezvous/requirements.lock
+#
+# The generated lock is consumed with `uv pip install --require-hashes
+# --no-build`, so an index mutation or platform without an audited wheel fails
+# the image build instead of compiling or selecting an unreviewed artifact.
+aiohttp==3.14.3
+cryptography==49.0.0

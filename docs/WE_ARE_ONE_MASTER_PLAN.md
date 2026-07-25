@@ -1,7 +1,16 @@
 # We Are One: One Link Master Plan
 
-Status: in_progress
-Last updated: 2026-05-07
+Status: long-term vision and implementation plan; not a current product or
+release capability inventory.
+Last truth review: 2026-07-24
+
+> **Current boundary:** see `/api/audit` for executable truth. The alpha source
+> has direct-first encrypted chat/file/call paths, optional discovery and
+> single-relay infrastructure, signed five-word pairing, and conditional
+> X25519 + ML-KEM-768 daemon sessions. It does not have product-wide PQ
+> identity, onion/mix-net routing, metadata anonymity, a universal transport
+> fabric, or a verified production release. “Should”, “will”, and unqualified
+> north-star bullets below are targets.
 
 This document captures the long-term doctrine for One Link so the vision does not get diluted into "another chat app." One Link is meant to become a free, open, user-owned mesh layer where people can communicate, move files, preserve data, sync devices, and eventually share compute without being dependent on corporate accounts, corporate clouds, or platform gatekeepers.
 

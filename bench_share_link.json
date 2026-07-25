@@ -1,0 +1,13 @@
+{
+  "started_at": "2026-05-19T16:09:11",
+  "share_link": {
+    "scenario": "share_link_round_trip",
+    "size_bytes": 1048576,
+    "mint_elapsed_sec": 0.0034,
+    "total_elapsed_sec": 0.0632,
+    "delivery_elapsed_sec": 0.0599,
+    "throughput_bps": 16578822.12,
+    "completed": true
+  },
+  "finished_at": "2026-05-19T16:09:14"
+}

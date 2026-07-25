@@ -2,7 +2,7 @@
 //!
 //! Exposes the Smart-Rules per-event selector. The daemon's `send_file`
 //! decision point (daemon.py:14020-14080) consumes this via a Decision
-//! dict; future selector variants (UnifiedMin in Phase H) plug in
+//! dict; future selector variants (`UnifiedMin` in Phase H) plug in
 //! through the same `Decide<Decision>` trait without disturbing this
 //! Python surface.
 
@@ -17,8 +17,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 /// Python-visible Smart-Rules selector.
-#[pyclass(name = "SmartRules", module = "one_link_native.selector")]
-#[derive(Debug, Clone, Copy, Default)]
+#[pyclass(
+    from_py_object,
+    name = "SmartRules",
+    module = "one_link_native.selector"
+)]
+#[derive(Debug, Clone, Default)]
 pub struct PySmartRules {
     inner: SmartRules,
 }
@@ -48,13 +52,13 @@ impl PySmartRules {
     /// to "normal"; `observed_loss` and `pattern_strength` default to 0.
     ///
     /// Returns a dict with the 7 decision fields:
-    ///   transport: "quic_stream" | "quic_datagram" | "webrtc" | "relay"
+    ///   transport: "`quic_stream`" | "`quic_datagram`" | "webrtc" | "relay"
     ///   path: "classical" | "coherence"
-    ///   onion_hops: 1 | 3 | 5
-    ///   cover_traffic: bool
-    ///   batch_decision: "emit_now" | "batch" | "urgent_bypass"
-    ///   anchor_lay: bool
-    ///   predictor_warm: bool
+    ///   `onion_hops`: 1 | 3 | 5
+    ///   `cover_traffic`: bool
+    ///   `batch_decision`: "`emit_now`" | "batch" | "`urgent_bypass`"
+    ///   `anchor_lay`: bool
+    ///   `predictor_warm`: bool
     #[pyo3(signature = (
         *,
         kind,
@@ -99,6 +103,7 @@ impl PySmartRules {
     /// The "safe-default" decision used as a fallback. Independent of
     /// context but accepts context-shape args for parity with `decide`.
     fn safe_default<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let _ = self.inner.name();
         decision_to_dict(py, Decision::safe_default())
     }
 
@@ -108,7 +113,7 @@ impl PySmartRules {
     }
 
     fn __repr__(&self) -> String {
-        "SmartRules()".to_owned()
+        format!("{}()", self.inner.name())
     }
 }
 
@@ -124,19 +129,29 @@ fn build_context_or_err(
     observed_loss: f32,
     pattern_strength: f32,
 ) -> PyResult<Context> {
-    let k =
+    let event_kind =
         EventKind::from_wire_type(kind).map_err(|e| PyValueError::new_err(format!("kind: {e}")))?;
-    let p = PeerRelationship::from_label(peer)
+    let peer_relationship = PeerRelationship::from_label(peer)
         .map_err(|e| PyValueError::new_err(format!("peer: {e}")))?;
-    let u = match urgency {
-        None => Urgency::from_kind(k),
-        Some(s) => parse_urgency(s)?,
+    let event_urgency = match urgency {
+        None => Urgency::from_kind(event_kind),
+        Some(label) => parse_urgency(label)?,
     };
-    let r = parse_radio(radio_state)?;
-    let n = parse_network(network)?;
-    let m = UserMode::from_label_or_default(user_mode);
-    Context::build(k, size, p, u, r, n, m, observed_loss, pattern_strength)
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+    let radio = parse_radio(radio_state)?;
+    let network_type = parse_network(network)?;
+    let mode = UserMode::from_label_or_default(user_mode);
+    Context::build(
+        event_kind,
+        size,
+        peer_relationship,
+        event_urgency,
+        radio,
+        network_type,
+        mode,
+        observed_loss,
+        pattern_strength,
+    )
+    .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 fn parse_urgency(s: &str) -> PyResult<Urgency> {
@@ -171,8 +186,8 @@ fn parse_network(s: &str) -> PyResult<NetworkType> {
     }
 }
 
-fn decision_to_dict<'py>(py: Python<'py>, d: Decision) -> PyResult<Bound<'py, PyDict>> {
-    let out = PyDict::new_bound(py);
+fn decision_to_dict(py: Python<'_>, d: Decision) -> PyResult<Bound<'_, PyDict>> {
+    let out = PyDict::new(py);
     out.set_item("transport", transport_str(d.transport))?;
     out.set_item("path", path_str(d.path))?;
     out.set_item("onion_hops", d.onion_hops.as_u8())?;
@@ -207,13 +222,17 @@ fn batch_str(b: BatchDecision) -> &'static str {
     }
 }
 
-/// Phase H — Python-visible UnifiedMin selector.
+/// Phase H — Python-visible `UnifiedMin` selector.
 ///
 /// Continuous energy-minimization variant: enumerates a small candidate
 /// grid filtered through F4 contract validation, then picks the one
 /// that minimizes the parameterized energy objective. Same Decide<Decision>
-/// surface as SmartRules; daemon swap is a one-line change.
-#[pyclass(name = "UnifiedMin", module = "one_link_native.selector")]
+/// surface as `SmartRules`; daemon swap is a one-line change.
+#[pyclass(
+    from_py_object,
+    name = "UnifiedMin",
+    module = "one_link_native.selector"
+)]
 #[derive(Debug, Clone, Copy)]
 pub struct PyUnifiedMin {
     inner: UnifiedMin,
@@ -304,7 +323,7 @@ impl PyUnifiedMin {
     /// Read the current weights as a dict.
     fn weights<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let w = &self.inner.weights;
-        let d = PyDict::new_bound(py);
+        let d = PyDict::new(py);
         d.set_item("alpha_coherence", w.alpha_coherence)?;
         d.set_item("privacy_weight", w.privacy_weight)?;
         d.set_item("cover_penalty", w.cover_penalty)?;
@@ -363,12 +382,13 @@ impl PyUnifiedMin {
         decision_to_dict(py, d)
     }
 
-    /// safe_default — for parity with SmartRules.
+    /// `safe_default` — for parity with `SmartRules`.
     fn safe_default<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let _ = self.inner.name();
         decision_to_dict(py, Decision::safe_default())
     }
 
-    /// Stable name for telemetry: "UnifiedMin".
+    /// Stable name for telemetry: "`UnifiedMin`".
     fn name(&self) -> &'static str {
         self.inner.name()
     }
@@ -381,12 +401,12 @@ impl PyUnifiedMin {
     }
 }
 
-/// Phase I — Python-visible OnlineLearner.
+/// Phase I — Python-visible `OnlineLearner`.
 ///
-/// Wraps UnifiedMin with an `observe(ctx, decision, regret)` method
+/// Wraps `UnifiedMin` with an `observe(ctx, decision, regret)` method
 /// that runs analytic gradient descent on the per-term weights from
 /// production feedback. Designed as opt-in: production daemons run
-/// with a fresh OnlineLearner only when ONE_LINK_ONLINE_LEARN=1.
+/// with a fresh `OnlineLearner` only when `ONE_LINK_ONLINE_LEARN=1`.
 #[pyclass(name = "OnlineLearner", module = "one_link_native.selector")]
 pub struct PyOnlineLearner {
     inner: OnlineLearner,
@@ -415,7 +435,7 @@ impl PyOnlineLearner {
     /// Read the current learned weights as a dict.
     fn weights<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let w = self.inner.weights();
-        let d = PyDict::new_bound(py);
+        let d = PyDict::new(py);
         d.set_item("alpha_coherence", w.alpha_coherence)?;
         d.set_item("privacy_weight", w.privacy_weight)?;
         d.set_item("cover_penalty", w.cover_penalty)?;
@@ -433,7 +453,7 @@ impl PyOnlineLearner {
     /// Frozen factory defaults (the regularization anchor).
     fn defaults<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let w = self.inner.defaults();
-        let d = PyDict::new_bound(py);
+        let d = PyDict::new(py);
         d.set_item("alpha_coherence", w.alpha_coherence)?;
         d.set_item("privacy_weight", w.privacy_weight)?;
         d.set_item("cover_penalty", w.cover_penalty)?;
@@ -448,7 +468,7 @@ impl PyOnlineLearner {
         Ok(d)
     }
 
-    /// Decide as the underlying UnifiedMin would.
+    /// Decide as the underlying `UnifiedMin` would.
     #[pyo3(signature = (
         *,
         kind,
@@ -496,8 +516,8 @@ impl PyOnlineLearner {
     /// = better than expected).
     ///
     /// `decision` accepts a dict matching the shape returned by
-    /// `decide(...)`. Fields used: transport, path, onion_hops,
-    /// cover_traffic, batch_decision, anchor_lay, predictor_warm.
+    /// `decide(...)`. Fields used: transport, path, `onion_hops`,
+    /// `cover_traffic`, `batch_decision`, `anchor_lay`, `predictor_warm`.
     #[pyo3(signature = (
         regret,
         decision,
@@ -546,7 +566,7 @@ impl PyOnlineLearner {
     /// Lifetime statistics dict.
     fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let s = self.inner.stats();
-        let d = PyDict::new_bound(py);
+        let d = PyDict::new(py);
         d.set_item("n_observations", s.n_observations)?;
         d.set_item("sum_abs_regret", s.sum_abs_regret)?;
         d.set_item("mean_abs_regret", s.mean_abs_regret)?;
@@ -557,6 +577,7 @@ impl PyOnlineLearner {
     }
 
     fn name(&self) -> &'static str {
+        let _ = self.inner.selector();
         "OnlineLearner"
     }
 
@@ -569,38 +590,38 @@ impl PyOnlineLearner {
     }
 }
 
-fn decision_from_dict(d: &Bound<'_, PyDict>) -> PyResult<Decision> {
+fn decision_from_dict(decision: &Bound<'_, PyDict>) -> PyResult<Decision> {
     use ol_selector::OnionHops;
-    let transport = d
+    let transport = decision
         .get_item("transport")?
         .ok_or_else(|| PyValueError::new_err("decision missing 'transport'"))?
         .extract::<String>()?;
-    let path = d
+    let path = decision
         .get_item("path")?
         .ok_or_else(|| PyValueError::new_err("decision missing 'path'"))?
         .extract::<String>()?;
-    let onion_hops = d
+    let onion_hops = decision
         .get_item("onion_hops")?
         .ok_or_else(|| PyValueError::new_err("decision missing 'onion_hops'"))?
         .extract::<u8>()?;
-    let cover_traffic = d
+    let cover_traffic = decision
         .get_item("cover_traffic")?
         .ok_or_else(|| PyValueError::new_err("decision missing 'cover_traffic'"))?
         .extract::<bool>()?;
-    let batch_decision = d
+    let batch_decision = decision
         .get_item("batch_decision")?
         .ok_or_else(|| PyValueError::new_err("decision missing 'batch_decision'"))?
         .extract::<String>()?;
-    let anchor_lay = d
+    let anchor_lay = decision
         .get_item("anchor_lay")?
         .ok_or_else(|| PyValueError::new_err("decision missing 'anchor_lay'"))?
         .extract::<bool>()?;
-    let predictor_warm = d
+    let predictor_warm = decision
         .get_item("predictor_warm")?
         .ok_or_else(|| PyValueError::new_err("decision missing 'predictor_warm'"))?
         .extract::<bool>()?;
 
-    let t = match transport.to_ascii_lowercase().as_str() {
+    let transport_choice = match transport.to_ascii_lowercase().as_str() {
         "quic_stream" => Transport::QuicStream,
         "quic_datagram" => Transport::QuicDatagram,
         "webrtc" => Transport::WebRtc,
@@ -611,13 +632,14 @@ fn decision_from_dict(d: &Bound<'_, PyDict>) -> PyResult<Decision> {
             )))
         }
     };
-    let p = match path.to_ascii_lowercase().as_str() {
+    let path_choice = match path.to_ascii_lowercase().as_str() {
         "classical" => Path::Classical,
         "coherence" => Path::Coherence,
         other => return Err(PyValueError::new_err(format!("unknown path: {other:?}"))),
     };
-    let h = OnionHops::from_u8(onion_hops).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let b = match batch_decision.to_ascii_lowercase().as_str() {
+    let hop_count =
+        OnionHops::from_u8(onion_hops).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let batch_choice = match batch_decision.to_ascii_lowercase().as_str() {
         "emit_now" => BatchDecision::EmitNow,
         "batch" => BatchDecision::Batch,
         "urgent_bypass" => BatchDecision::UrgentBypass,
@@ -628,11 +650,11 @@ fn decision_from_dict(d: &Bound<'_, PyDict>) -> PyResult<Decision> {
         }
     };
     Ok(Decision {
-        transport: t,
-        path: p,
-        onion_hops: h,
+        transport: transport_choice,
+        path: path_choice,
+        onion_hops: hop_count,
         cover_traffic,
-        batch_decision: b,
+        batch_decision: batch_choice,
         anchor_lay,
         predictor_warm,
     })

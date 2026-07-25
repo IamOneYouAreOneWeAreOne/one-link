@@ -6,7 +6,6 @@ import random
 import pytest
 
 from one_link.cdc import (
-    AVG_CHUNK_BYTES,
     MAX_CHUNK_BYTES,
     MIN_CHUNK_BYTES,
     build_dedup_plan,

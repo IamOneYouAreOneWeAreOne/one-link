@@ -10,6 +10,15 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
+/// Maximum outer frame accepted as a single queued payload.
+const MAX_ENTRY_PAYLOAD_BYTES: usize = 1024 * 1024;
+/// Maximum peer label accepted at the Python trust boundary.
+const MAX_PEER_FP_BYTES: usize = 256;
+/// Default aggregate memory budget for queued payload bytes.
+const DEFAULT_MAX_QUEUE_BYTES: usize = 64 * 1024 * 1024;
+/// Absolute aggregate queue memory ceiling.
+const MAX_QUEUE_BYTES_LIMIT: usize = 1024 * 1024 * 1024;
+
 /// Python-visible radio batcher with bytes payloads.
 ///
 /// One instance per daemon is the intended usage; the daemon caches
@@ -17,6 +26,8 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 #[pyclass(name = "RadioBatcher", module = "one_link_native.radio_batcher")]
 pub struct PyRadioBatcher {
     inner: Batcher<Vec<u8>>,
+    queued_bytes: usize,
+    max_queue_bytes: usize,
 }
 
 #[pymethods]
@@ -24,11 +35,25 @@ impl PyRadioBatcher {
     /// Construct with default tuning: 50ms DRX window, 4096 queue cap,
     /// 20s force-age.
     #[new]
-    #[pyo3(signature = (drx_window_ms = 50, max_queue_size = 4096, max_age_ms = 20_000))]
-    fn new(drx_window_ms: u32, max_queue_size: usize, max_age_ms: u32) -> PyResult<Self> {
+    #[pyo3(signature = (drx_window_ms = 50, max_queue_size = 4096, max_age_ms = 20_000, max_queue_bytes = DEFAULT_MAX_QUEUE_BYTES))]
+    fn new(
+        drx_window_ms: u32,
+        max_queue_size: usize,
+        max_age_ms: u32,
+        max_queue_bytes: usize,
+    ) -> PyResult<Self> {
+        if !(1..=MAX_QUEUE_BYTES_LIMIT).contains(&max_queue_bytes) {
+            return Err(PyValueError::new_err(format!(
+                "max_queue_bytes must be in 1..={MAX_QUEUE_BYTES_LIMIT}, got {max_queue_bytes}"
+            )));
+        }
         let inner = Batcher::with_config(drx_window_ms, max_queue_size, max_age_ms)
             .map_err(batcher_err_to_py)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            queued_bytes: 0,
+            max_queue_bytes,
+        })
     }
 
     /// Enqueue a payload for batched delivery.
@@ -44,34 +69,64 @@ impl PyRadioBatcher {
     fn enqueue(
         &mut self,
         peer_fp: &str,
-        payload: Vec<u8>,
+        payload: &[u8],
         priority: &str,
         now_ms: u64,
     ) -> PyResult<()> {
         let p = parse_priority(priority)?;
+        if peer_fp.len() > MAX_PEER_FP_BYTES {
+            return Err(PyValueError::new_err(format!(
+                "peer_fp too long: {} > {MAX_PEER_FP_BYTES}",
+                peer_fp.len()
+            )));
+        }
+        if payload.len() > MAX_ENTRY_PAYLOAD_BYTES {
+            return Err(PyValueError::new_err(format!(
+                "payload too large: {} > {MAX_ENTRY_PAYLOAD_BYTES}",
+                payload.len()
+            )));
+        }
+        let projected = self
+            .queued_bytes
+            .checked_add(payload.len())
+            .ok_or_else(|| PyValueError::new_err("queue byte count overflow"))?;
+        if projected > self.max_queue_bytes {
+            return Err(PyValueError::new_err(format!(
+                "queue_bytes_full: projected={projected}, max={}",
+                self.max_queue_bytes
+            )));
+        }
         self.inner
-            .enqueue(peer_fp.to_owned(), payload, p, now_ms)
-            .map_err(batcher_err_to_py)
+            .enqueue(peer_fp.to_owned(), payload.to_vec(), p, now_ms)
+            .map_err(batcher_err_to_py)?;
+        self.queued_bytes = projected;
+        Ok(())
     }
 
     /// Drain all entries eligible to send at `now_ms`.
     ///
     /// Returns a tuple `(entries, outcome)` where:
-    ///   - entries: list of dicts with keys "peer_fp", "payload",
-    ///     "priority", "enqueued_at_ms"
+    ///   - entries: list of dicts with keys "`peer_fp`", "payload",
+    ///     "priority", "`enqueued_at_ms`"
     ///   - outcome: dict with keys "drained", "remaining",
-    ///     "force_drained_due_to_age"
+    ///     "`force_drained_due_to_age`"
     fn drain<'py>(
         &mut self,
         py: Python<'py>,
         now_ms: u64,
     ) -> PyResult<(Bound<'py, PyList>, Bound<'py, PyDict>)> {
         let (drained, outcome) = self.inner.drain(now_ms);
-        let list = PyList::empty_bound(py);
+        let drained_bytes = drained.iter().try_fold(0usize, |total, entry| {
+            total
+                .checked_add(entry.payload.len())
+                .ok_or_else(|| PyValueError::new_err("drained payload byte count overflow"))
+        })?;
+        self.queued_bytes = self.queued_bytes.saturating_sub(drained_bytes);
+        let list = PyList::empty(py);
         for entry in drained {
-            let d = PyDict::new_bound(py);
+            let d = PyDict::new(py);
             d.set_item("peer_fp", entry.peer_fp)?;
-            d.set_item("payload", PyBytes::new_bound(py, &entry.payload))?;
+            d.set_item("payload", PyBytes::new(py, &entry.payload))?;
             d.set_item("priority", priority_str(entry.priority))?;
             d.set_item("enqueued_at_ms", entry.enqueued_at_ms)?;
             list.append(d)?;
@@ -82,11 +137,12 @@ impl PyRadioBatcher {
     /// Force-drain everything regardless of age. Used at shutdown.
     fn drain_all<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let drained = self.inner.drain_all();
-        let list = PyList::empty_bound(py);
+        self.queued_bytes = 0;
+        let list = PyList::empty(py);
         for entry in drained {
-            let d = PyDict::new_bound(py);
+            let d = PyDict::new(py);
             d.set_item("peer_fp", entry.peer_fp)?;
-            d.set_item("payload", PyBytes::new_bound(py, &entry.payload))?;
+            d.set_item("payload", PyBytes::new(py, &entry.payload))?;
             d.set_item("priority", priority_str(entry.priority))?;
             d.set_item("enqueued_at_ms", entry.enqueued_at_ms)?;
             list.append(d)?;
@@ -123,6 +179,18 @@ impl PyRadioBatcher {
         self.inner.is_empty()
     }
 
+    /// Aggregate queued payload bytes.
+    #[getter]
+    fn queued_bytes(&self) -> usize {
+        self.queued_bytes
+    }
+
+    /// Configured aggregate payload-byte budget.
+    #[getter]
+    fn max_queue_bytes(&self) -> usize {
+        self.max_queue_bytes
+    }
+
     /// Configured DRX window in milliseconds.
     #[getter]
     fn drx_window_ms(&self) -> u32 {
@@ -137,8 +205,10 @@ impl PyRadioBatcher {
 
     fn __repr__(&self) -> String {
         format!(
-            "RadioBatcher(len={}, drx_window_ms={}, radio_state={:?})",
+            "RadioBatcher(len={}, queued_bytes={}, max_queue_bytes={}, drx_window_ms={}, radio_state={:?})",
             self.inner.len(),
+            self.queued_bytes,
+            self.max_queue_bytes,
             self.inner.drx_window_ms(),
             self.inner.radio_state().as_str(),
         )
@@ -174,16 +244,16 @@ fn batcher_err_to_py(err: BatcherError) -> PyErr {
     }
 }
 
-fn drain_outcome_to_dict<'py>(py: Python<'py>, o: DrainOutcome) -> PyResult<Bound<'py, PyDict>> {
-    let d = PyDict::new_bound(py);
+fn drain_outcome_to_dict(py: Python<'_>, o: DrainOutcome) -> PyResult<Bound<'_, PyDict>> {
+    let d = PyDict::new(py);
     d.set_item("drained", o.drained)?;
     d.set_item("remaining", o.remaining)?;
     d.set_item("force_drained_due_to_age", o.force_drained_due_to_age)?;
     Ok(d)
 }
 
-fn stats_to_dict<'py>(py: Python<'py>, s: BatcherStats) -> PyResult<Bound<'py, PyDict>> {
-    let d = PyDict::new_bound(py);
+fn stats_to_dict(py: Python<'_>, s: BatcherStats) -> PyResult<Bound<'_, PyDict>> {
+    let d = PyDict::new(py);
     d.set_item("enqueued_total", s.enqueued_total)?;
     d.set_item("drained_total", s.drained_total)?;
     d.set_item("rejected_full", s.rejected_full)?;
@@ -203,6 +273,13 @@ pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()>
         ol_radio_batcher::DEFAULT_MAX_QUEUE_SIZE,
     )?;
     m.add("DEFAULT_MAX_AGE_MS", ol_radio_batcher::DEFAULT_MAX_AGE_MS)?;
+    m.add(
+        "MAX_QUEUE_SIZE_LIMIT",
+        ol_radio_batcher::MAX_QUEUE_SIZE_LIMIT,
+    )?;
+    m.add("MAX_ENTRY_PAYLOAD_BYTES", MAX_ENTRY_PAYLOAD_BYTES)?;
+    m.add("DEFAULT_MAX_QUEUE_BYTES", DEFAULT_MAX_QUEUE_BYTES)?;
+    m.add("MAX_QUEUE_BYTES_LIMIT", MAX_QUEUE_BYTES_LIMIT)?;
     m.add_class::<PyRadioBatcher>()?;
     Ok(())
 }

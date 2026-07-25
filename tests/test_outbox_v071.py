@@ -22,15 +22,15 @@ import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import one_link.state as state_module
 from one_link.daemon import Daemon
 from one_link.discovery import Peer
 from one_link.identity import Identity, fingerprint_of
-from one_link.state import OutboxEntry, State
+from one_link.state import MessageIdConflict, MessageQuotaExceeded, State
 
 
 def _new_identity() -> Identity:
@@ -63,8 +63,7 @@ def test_enqueue_and_list_outbox(tmp_path: Path):
 
 
 def test_enqueue_outbox_idempotent_on_same_msg_id(tmp_path: Path):
-    """The same (peer_fp, msg_id) should never duplicate in the outbox.
-    Idempotent enqueue is what makes a UI retry safe."""
+    """An exact retry is idempotent; conflicting content is rejected."""
     state = State(db_path=tmp_path / "s.db")
     fp = "aa" * 32
     eid1 = state.enqueue_outbox(
@@ -73,9 +72,14 @@ def test_enqueue_outbox_idempotent_on_same_msg_id(tmp_path: Path):
     )
     eid2 = state.enqueue_outbox(
         peer_fp=fp, msg_id="m1",
-        msg_body={"t": "TEXT", "body": "different"},  # ignored
+        msg_body={"body": "hi", "t": "TEXT"},
     )
     assert eid1 == eid2
+    with pytest.raises(MessageIdConflict):
+        state.enqueue_outbox(
+            peer_fp=fp, msg_id="m1",
+            msg_body={"t": "TEXT", "body": "different"},
+        )
     rows = state.list_outbox(peer_fp=fp)
     assert len(rows) == 1
     # Original body preserved.
@@ -186,6 +190,45 @@ def test_prune_outbox_drops_delivered_only(tmp_path: Path):
     assert removed == 1
     rows = state.list_outbox(peer_fp=fp, pending_only=False)
     assert [r.msg_id for r in rows] == ["m2"]
+    state.close()
+
+
+def test_outbox_pending_quota_allows_exact_retry_and_recovers_after_cancel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(state_module, "MAX_OUTBOX_PENDING_PER_PEER", 1)
+    state = State(db_path=tmp_path / "s.db")
+    fp = "aa" * 32
+    body = {"t": "TEXT", "body": "first"}
+    entry_id = state.enqueue_outbox(peer_fp=fp, msg_id="m1", msg_body=body)
+
+    assert state.enqueue_outbox(peer_fp=fp, msg_id="m1", msg_body=body) == entry_id
+    with pytest.raises(MessageQuotaExceeded):
+        state.enqueue_outbox(
+            peer_fp=fp, msg_id="m2", msg_body={"t": "TEXT", "body": "second"},
+        )
+
+    assert state.cancel_outbox(entry_id) is True
+    state.enqueue_outbox(
+        peer_fp=fp, msg_id="m2", msg_body={"t": "TEXT", "body": "second"},
+    )
+    state.close()
+
+
+def test_outbox_row_quota_prunes_delivered_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(state_module, "MAX_OUTBOX_ROWS_PER_PEER", 2)
+    state = State(db_path=tmp_path / "s.db")
+    fp = "aa" * 32
+    first = state.enqueue_outbox(peer_fp=fp, msg_id="m1", msg_body={})
+    second = state.enqueue_outbox(peer_fp=fp, msg_id="m2", msg_body={})
+    assert state.mark_outbox_delivered(first)
+    assert state.mark_outbox_delivered(second)
+
+    state.enqueue_outbox(peer_fp=fp, msg_id="m3", msg_body={})
+    rows = state.list_outbox(peer_fp=fp, pending_only=False)
+    assert [row.msg_id for row in rows] == ["m3"]
     state.close()
 
 

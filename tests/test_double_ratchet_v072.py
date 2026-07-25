@@ -33,7 +33,6 @@ from one_link.capabilities import DOUBLE_RATCHET_V1, LOCAL_CAPABILITIES
 from one_link.double_ratchet import (
     Header,
     MAX_SKIP_KEYS,
-    RatchetState,
     decrypt,
     encrypt,
     init_alice,
@@ -209,7 +208,6 @@ def test_post_compromise_security_after_full_ratchet():
     Alice + Bob through a DH round-trip, then attempt to decrypt
     Bob's next message using the COPY. That copy lacks the new
     dh_send private key Alice rotates into — decryption fails."""
-    import copy
     alice, bob = init_pair(_ss())
     # Get past the very first message so Alice has a fully-derived
     # state with both send + recv chains.
@@ -259,6 +257,21 @@ def test_out_of_order_delivery_within_chain():
     # Now m1 and m2 are in skipped table.
     assert decrypt(bob, h1, ct1) == b"m1"
     assert decrypt(bob, h2, ct2) == b"m2"
+
+
+def test_invalid_tag_does_not_consume_skipped_key():
+    alice, bob = init_pair(_ss())
+    h1, ct1 = encrypt(alice, b"delayed-authenticated")
+    h2, ct2 = encrypt(alice, b"arrives-first")
+    assert decrypt(bob, h2, ct2) == b"arrives-first"
+    assert (h1.dh, h1.n) in bob.skipped
+
+    forged = bytearray(ct1)
+    forged[-1] ^= 1
+    with pytest.raises(InvalidTag):
+        decrypt(bob, h1, bytes(forged))
+    assert (h1.dh, h1.n) in bob.skipped
+    assert decrypt(bob, h1, ct1) == b"delayed-authenticated"
 
 
 def test_out_of_order_across_dh_ratchet():

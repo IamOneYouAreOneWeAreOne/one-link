@@ -30,18 +30,18 @@ use ol_pair_qr::ChainKey;
 const SAMPLES_PER_BUCKET: usize = 50_000;
 
 fn relative_stddev(samples: &[f64]) -> f64 {
-    let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
-    let variance: f64 =
-        samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+    let sample_count = samples.iter().fold(0.0, |count, _| count + 1.0);
+    let mean: f64 = samples.iter().sum::<f64>() / sample_count;
+    let variance: f64 = samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / sample_count;
     variance.sqrt() / mean
 }
 
-fn measure<F: FnMut()>(mut work: F, iterations: usize) -> u128 {
+fn measure<F: FnMut()>(mut work: F, iterations: usize) -> f64 {
     let start = Instant::now();
     for _ in 0..iterations {
         work();
     }
-    start.elapsed().as_nanos()
+    start.elapsed().as_secs_f64() * 1_000_000_000.0
 }
 
 // ── TranscriptHash::ct_eq ─────────────────────────────────────────
@@ -91,7 +91,7 @@ fn transcript_hash_ct_eq_constant_time() {
                 std::hint::black_box(base.ct_eq(std::hint::black_box(cand)));
             },
             SAMPLES_PER_BUCKET,
-        ) as f64;
+        );
         totals.push(ns);
     }
     let rel = relative_stddev(&totals);
@@ -110,10 +110,11 @@ fn sas_ct_eq_constant_time() {
     // against a fixed reference should take roughly the same
     // wall-clock time regardless of where the bits differ.
     let reference = Sas::derive(&TranscriptHash::from_bytes([0u8; TRANSCRIPT_LEN]));
-    let candidates: Vec<Sas> = (0..5)
-        .map(|i| {
+    let candidates: Vec<Sas> = (1u8..=5)
+        .enumerate()
+        .map(|(index, value)| {
             let mut bytes = [0u8; TRANSCRIPT_LEN];
-            bytes[i] = i as u8 + 1;
+            bytes[index] = value;
             Sas::derive(&TranscriptHash::from_bytes(bytes))
         })
         .collect();
@@ -134,7 +135,7 @@ fn sas_ct_eq_constant_time() {
                 std::hint::black_box(reference.ct_eq(std::hint::black_box(cand)));
             },
             SAMPLES_PER_BUCKET,
-        ) as f64;
+        );
         totals.push(ns);
     }
     let rel = relative_stddev(&totals);
@@ -186,7 +187,7 @@ fn chain_key_eq_constant_time() {
                 std::hint::black_box(base == *std::hint::black_box(cand));
             },
             SAMPLES_PER_BUCKET,
-        ) as f64;
+        );
         totals.push(ns);
     }
     let rel = relative_stddev(&totals);
@@ -240,7 +241,7 @@ fn pair_confirm_decode_and_verify_constant_time_on_mismatched_pubkey() {
                 ));
             },
             5_000,
-        ) as f64;
+        );
         totals.push(ns);
     }
     let rel = relative_stddev(&totals);

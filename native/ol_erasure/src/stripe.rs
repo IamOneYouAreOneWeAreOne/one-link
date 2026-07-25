@@ -1,12 +1,12 @@
 //! Stripe encode + decode operating on whole chunks.
 
-use ol_fec::Codec;
+use ol_fec::{Codec, FecError};
 
 use crate::error::ErasureError;
 
 /// Per-shard role within a stripe. Mirrors `ol_chunk_store::StripeRole`
 /// but is local to this crate (we don't want a runtime dep on
-/// chunk_store; the daemon glues the two when it stores shards on
+/// `chunk_store`; the daemon glues the two when it stores shards on
 /// disk).
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum ShardRole {
@@ -18,7 +18,7 @@ pub enum ShardRole {
 
 /// Stripe identity: 32-byte BLAKE3 of the **canonical stripe context**
 /// (plaintext length || k || m || plaintext-content-id). Two senders
-/// of the same plaintext at the same (k, m) produce the same StripeId
+/// of the same plaintext at the same (k, m) produce the same `StripeId`
 /// — that's the cross-sender dedup property for data shards.
 pub type StripeId = [u8; 32];
 
@@ -44,7 +44,22 @@ impl StripeParams {
     /// Ephemeral config: 9 data + 1 parity = 10 shards, any 9 recover.
     /// ~1.11× storage; tolerates one device loss only.
     pub const EPHEMERAL: Self = Self { k: 9, m: 1 };
+
+    /// Validate the field-size and non-zero invariants without
+    /// allocating a stripe.
+    pub fn validate(self) -> Result<(), ErasureError> {
+        Codec::new(self.k, self.m).map(|_| ()).map_err(Into::into)
+    }
 }
+
+/// Maximum plaintext bytes in one erasure stripe. One Link stripes
+/// whole CDC chunks (normally <=256 KiB); the 1 MiB ceiling matches the
+/// bulk-frame/WAL envelope while preventing multiplicative allocation
+/// from unbounded FFI callers.
+pub const MAX_STRIPE_PLAINTEXT_BYTES: usize = 1024 * 1024;
+
+/// Maximum bytes in one externally reconstructed shard.
+pub const MAX_SHARD_BYTES: usize = MAX_STRIPE_PLAINTEXT_BYTES;
 
 /// One shard of a stripe — bytes + role + position. The daemon wraps
 /// this in a `ChunkRecord` with the matching `StripeDescriptor` when
@@ -65,25 +80,46 @@ pub struct Shard {
     pub stripe_id: StripeId,
 }
 
-/// BLAKE3 derive_key context for stripe IDs. Domain-separated against
+/// BLAKE3 `derive_key` context for stripe IDs. Domain-separated against
 /// other BLAKE3 derivations on the same plaintext (ADR-0006 registry).
 const STRIPE_ID_CONTEXT: &str = "ol-erasure-stripe-id-v1";
 
 /// Compute the canonical [`StripeId`] for a (plaintext, k, m) tuple.
 ///
-/// Same plaintext + same params → same StripeId. Different params →
-/// different StripeId (so RS(10,4) and RS(6,6) stripes of the same
+/// Same plaintext + same params → same `StripeId`. Different params →
+/// different `StripeId` (so RS(10,4) and RS(6,6) stripes of the same
 /// plaintext do NOT collide).
 #[must_use]
 pub fn stripe_id_of(plaintext: &[u8], params: StripeParams) -> StripeId {
     // BLAKE3 derive_key over a length-prefixed canonical concatenation:
     //   [u64 plaintext_len][u8 k][u8 m][plaintext bytes]
-    let mut input = Vec::with_capacity(plaintext.len() + 10);
-    input.extend_from_slice(&(plaintext.len() as u64).to_le_bytes());
-    input.push(params.k as u8);
-    input.push(params.m as u8);
-    input.extend_from_slice(plaintext);
-    blake3::derive_key(STRIPE_ID_CONTEXT, &input)
+    // Stream the canonical concatenation directly into BLAKE3. This
+    // is byte-identical to `derive_key(context, concatenation)` and
+    // avoids a second plaintext-sized allocation and memcpy.
+    let mut hasher = blake3::Hasher::new_derive_key(STRIPE_ID_CONTEXT);
+    hasher.update(&(plaintext.len() as u64).to_le_bytes());
+    match (u8::try_from(params.k), u8::try_from(params.m)) {
+        (Ok(k), Ok(m))
+            if k > 0
+                && m > 0
+                && params
+                    .k
+                    .checked_add(params.m)
+                    .is_some_and(|total| total <= 255) =>
+        {
+            hasher.update(&[k, m]);
+        }
+        _ => {
+            // Valid stripes retain the frozen `[u8 k][u8 m]` encoding.
+            // Invalid public inputs get a collision-resistant diagnostic ID
+            // instead of silently truncating large parameters into that space.
+            hasher.update(&[0, 0]);
+            hasher.update(&params.k.to_le_bytes());
+            hasher.update(&params.m.to_le_bytes());
+        }
+    }
+    hasher.update(plaintext);
+    *hasher.finalize().as_bytes()
 }
 
 /// Encode `plaintext` into a stripe of `k + m` shards.
@@ -101,9 +137,15 @@ pub fn encode_stripe(plaintext: &[u8], params: StripeParams) -> Result<Vec<Shard
     if plaintext.is_empty() {
         return Err(ErasureError::EmptyPlaintext);
     }
+    if plaintext.len() > MAX_STRIPE_PLAINTEXT_BYTES {
+        return Err(ErasureError::PlaintextTooLarge {
+            got: plaintext.len(),
+            max: MAX_STRIPE_PLAINTEXT_BYTES,
+        });
+    }
     let codec = Codec::new(params.k, params.m)?;
     let stripe_id = stripe_id_of(plaintext, params);
-    let plaintext_len = plaintext.len() as u64;
+    let plaintext_len = u64::try_from(plaintext.len()).expect("supported usize fits in u64");
 
     // Pad to a multiple of k, then split into k equal-sized shards.
     let shard_len = plaintext.len().div_ceil(params.k);
@@ -114,7 +156,7 @@ pub fn encode_stripe(plaintext: &[u8], params: StripeParams) -> Result<Vec<Shard
         .collect();
 
     // Encode parity.
-    let data_refs: Vec<&[u8]> = data_shards.iter().map(|d| d.as_slice()).collect();
+    let data_refs: Vec<&[u8]> = data_shards.iter().map(std::vec::Vec::as_slice).collect();
     let parity_shards = codec.encode(&data_refs)?;
 
     // Build typed Shard values.
@@ -123,7 +165,7 @@ pub fn encode_stripe(plaintext: &[u8], params: StripeParams) -> Result<Vec<Shard
         out.push(Shard {
             bytes,
             role: ShardRole::Data,
-            index: i as u8,
+            index: validated_shard_index(i, params)?,
             plaintext_len,
             stripe_id,
         });
@@ -132,7 +174,7 @@ pub fn encode_stripe(plaintext: &[u8], params: StripeParams) -> Result<Vec<Shard
         out.push(Shard {
             bytes,
             role: ShardRole::Parity,
-            index: i as u8,
+            index: validated_shard_index(i, params)?,
             plaintext_len,
             stripe_id,
         });
@@ -158,7 +200,8 @@ pub fn decode_stripe(
     params: StripeParams,
     present: &[Option<&Shard>],
 ) -> Result<Vec<u8>, ErasureError> {
-    let total = params.k + params.m;
+    let codec = Codec::new(params.k, params.m)?;
+    let total = codec.total_shards();
     if present.len() != total {
         return Err(ErasureError::PresentSlotCount {
             expected: total,
@@ -166,14 +209,18 @@ pub fn decode_stripe(
         });
     }
     // Sanity-check role + index per slot.
+    let mut expected_metadata: Option<(StripeId, u64, usize)> = None;
     for (pos, slot) in present.iter().enumerate() {
         let Some(shard) = slot else {
             continue;
         };
         let (expected_role, expected_index) = if pos < params.k {
-            (ShardRole::Data, pos as u8)
+            (ShardRole::Data, validated_shard_index(pos, params)?)
         } else {
-            (ShardRole::Parity, (pos - params.k) as u8)
+            (
+                ShardRole::Parity,
+                validated_shard_index(pos - params.k, params)?,
+            )
         };
         if shard.role != expected_role || shard.index != expected_index {
             return Err(ErasureError::ShardDescriptorMismatch {
@@ -184,27 +231,81 @@ pub fn decode_stripe(
                 expected_index,
             });
         }
+        if let Some((stripe_id, plaintext_len, shard_len)) = expected_metadata {
+            if shard.stripe_id != stripe_id {
+                return Err(ErasureError::ShardMetadataMismatch {
+                    pos,
+                    field: "stripe_id",
+                });
+            }
+            if shard.plaintext_len != plaintext_len {
+                return Err(ErasureError::ShardMetadataMismatch {
+                    pos,
+                    field: "plaintext_len",
+                });
+            }
+            if shard.bytes.len() != shard_len {
+                return Err(ErasureError::ShardMetadataMismatch {
+                    pos,
+                    field: "shard length",
+                });
+            }
+        } else {
+            expected_metadata = Some((shard.stripe_id, shard.plaintext_len, shard.bytes.len()));
+        }
     }
 
-    let codec = Codec::new(params.k, params.m)?;
     let raw_present: Vec<Option<&[u8]>> = present
         .iter()
         .map(|s| s.as_ref().map(|shard| shard.bytes.as_slice()))
         .collect();
     let data_shards = codec.decode(&raw_present)?;
 
-    // Determine plaintext_len from any present shard.
-    let plaintext_len = present
-        .iter()
-        .find_map(|s| s.as_ref().map(|shard| shard.plaintext_len as usize))
-        .expect("at least one present shard ensures we have plaintext_len");
+    // Successful FEC decode proves at least K shards were present, so
+    // metadata must exist. Keep the failure path explicit rather than
+    // relying on an invariant `expect` in production code.
+    let (expected_stripe_id, plaintext_len_u64, shard_len) =
+        expected_metadata.ok_or(ErasureError::InvalidPlaintextLength { got: 0, max: 0 })?;
+    let max_plaintext_len =
+        shard_len
+            .checked_mul(params.k)
+            .ok_or(ErasureError::InvalidPlaintextLength {
+                got: plaintext_len_u64,
+                max: usize::MAX,
+            })?;
+    let plaintext_len =
+        usize::try_from(plaintext_len_u64).map_err(|_| ErasureError::InvalidPlaintextLength {
+            got: plaintext_len_u64,
+            max: max_plaintext_len,
+        })?;
+    if plaintext_len == 0
+        || plaintext_len > max_plaintext_len
+        || plaintext_len > MAX_STRIPE_PLAINTEXT_BYTES
+    {
+        return Err(ErasureError::InvalidPlaintextLength {
+            got: plaintext_len_u64,
+            max: max_plaintext_len.min(MAX_STRIPE_PLAINTEXT_BYTES),
+        });
+    }
 
-    let mut plaintext = Vec::with_capacity(plaintext_len);
+    let mut plaintext = Vec::with_capacity(max_plaintext_len);
     for shard in &data_shards {
         plaintext.extend_from_slice(shard);
     }
     plaintext.truncate(plaintext_len);
+    if stripe_id_of(&plaintext, params) != expected_stripe_id {
+        return Err(ErasureError::StripeIdMismatch);
+    }
     Ok(plaintext)
+}
+
+fn validated_shard_index(index: usize, params: StripeParams) -> Result<u8, ErasureError> {
+    u8::try_from(index).map_err(|_| {
+        ErasureError::InvalidParameters(FecError::InvalidParameters {
+            k: params.k,
+            m: params.m,
+        })
+    })
 }
 
 #[cfg(test)]
@@ -271,9 +372,68 @@ mod tests {
     }
 
     #[test]
+    fn streamed_stripe_id_preserves_frozen_canonical_bytes() {
+        let plaintext = b"canonical stripe id regression";
+        let params = StripeParams::STANDARD;
+        let mut canonical = Vec::new();
+        canonical.extend_from_slice(&(plaintext.len() as u64).to_le_bytes());
+        canonical.push(u8::try_from(params.k).expect("validated k fits u8"));
+        canonical.push(u8::try_from(params.m).expect("validated m fits u8"));
+        canonical.extend_from_slice(plaintext);
+        assert_eq!(
+            stripe_id_of(plaintext, params),
+            blake3::derive_key(STRIPE_ID_CONTEXT, &canonical)
+        );
+    }
+
+    #[test]
+    fn rejects_inconsistent_or_forged_shard_metadata() {
+        let plaintext = b"metadata integrity must be enforced";
+        let mut shards = encode_stripe(plaintext, StripeParams::STANDARD).unwrap();
+        shards[1].plaintext_len += 1;
+        let present: Vec<Option<&Shard>> = shards.iter().map(Some).collect();
+        assert!(matches!(
+            decode_stripe(StripeParams::STANDARD, &present),
+            Err(ErasureError::ShardMetadataMismatch {
+                field: "plaintext_len",
+                ..
+            })
+        ));
+
+        let mut shards = encode_stripe(plaintext, StripeParams::STANDARD).unwrap();
+        for shard in &mut shards {
+            shard.plaintext_len = u64::MAX;
+        }
+        let present: Vec<Option<&Shard>> = shards.iter().map(Some).collect();
+        assert!(matches!(
+            decode_stripe(StripeParams::STANDARD, &present),
+            Err(ErasureError::InvalidPlaintextLength { .. })
+        ));
+
+        let mut shards = encode_stripe(plaintext, StripeParams::STANDARD).unwrap();
+        for shard in &mut shards {
+            shard.stripe_id = [0xFF; 32];
+        }
+        let present: Vec<Option<&Shard>> = shards.iter().map(Some).collect();
+        assert!(matches!(
+            decode_stripe(StripeParams::STANDARD, &present),
+            Err(ErasureError::StripeIdMismatch)
+        ));
+    }
+
+    #[test]
     fn rejects_empty_plaintext() {
         let r = encode_stripe(&[], StripeParams::STANDARD);
         assert!(matches!(r, Err(ErasureError::EmptyPlaintext)));
+    }
+
+    #[test]
+    fn rejects_oversized_plaintext() {
+        let plaintext = vec![0u8; MAX_STRIPE_PLAINTEXT_BYTES + 1];
+        assert!(matches!(
+            encode_stripe(&plaintext, StripeParams::STANDARD),
+            Err(ErasureError::PlaintextTooLarge { .. })
+        ));
     }
 
     #[test]

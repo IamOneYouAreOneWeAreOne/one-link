@@ -31,7 +31,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
 
 from one_link import double_ratchet as py_dr
 

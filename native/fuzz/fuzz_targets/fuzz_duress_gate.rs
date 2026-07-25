@@ -18,11 +18,21 @@ fn take_array<const N: usize>(input: &mut &[u8]) -> Option<[u8; N]> {
 
 fuzz_target!(|data: &[u8]| {
     let mut input = data;
-    let Some(real_root) = take_array::<32>(&mut input) else { return };
-    let Some(duress_root) = take_array::<32>(&mut input) else { return };
-    let Some(pair_secret) = take_array::<32>(&mut input) else { return };
-    let Some(expected_real) = take_array::<32>(&mut input) else { return };
-    let Some(expected_duress) = take_array::<32>(&mut input) else { return };
+    let Some(real_root) = take_array::<32>(&mut input) else {
+        return;
+    };
+    let Some(duress_root) = take_array::<32>(&mut input) else {
+        return;
+    };
+    let Some(pair_secret) = take_array::<32>(&mut input) else {
+        return;
+    };
+    let Some(expected_real) = take_array::<32>(&mut input) else {
+        return;
+    };
+    let Some(expected_duress) = take_array::<32>(&mut input) else {
+        return;
+    };
     let gate = DuressGate::new(real_root, duress_root, pair_secret);
     // Remaining input is the passphrase.
     let _ = gate.open(input, &expected_real, &expected_duress);

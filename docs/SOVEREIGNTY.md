@@ -1,8 +1,22 @@
 # Sovereignty — corporate-substrate defang specification
 
-Status: living document. Implementation contract for principle #5
-of [`PRINCIPLES.md`](./PRINCIPLES.md).
-Last updated: 2026-05-08.
+Status: roadmap/design specification; not a current capability inventory.
+Last truth review: 2026-07-22.
+
+> **Current runtime boundary:** the daemon implements three policy presets and
+> direct-first operation with optional STUN/TURN, rendezvous, encrypted relay,
+> and GitHub release checks. This document also describes unimplemented target
+> mitigations (including IPFS/Tor mirrors, push, store distribution, standalone
+> PWA identity, and several air-gap transports). In the sections below,
+> “ship” describes the design requirement unless an exact current source path
+> and release-gate result are cited; it is not evidence that a production
+> release provides the feature.
+> The standalone bundle contract includes authenticated update metadata and an
+> external crash-safe A/B helper. Explicit owner-confirmed one-click
+> installation is dynamically available only after the complete local frozen
+> bundle validates; source/pip/development and incomplete or modified installs
+> fail closed. Unattended/background automatic installation remains disabled,
+> and no verified public stable tagged release exists.
 
 > "For the people" means free of corporations, by default.
 
@@ -30,9 +44,10 @@ There are two shapes of mitigation:
   it doesn't yield useful access. Example: encrypted Web Push payloads
   mean Apple/Google see "blob arrived," nothing more.
 
-The default user gets convenience. The hardened user gets paranoia.
-The air-gap user gets neither corporate nor internet involvement at
-all. All three tiers are real, tested, and shipped.
+The source tree exposes three selectable policy presets. Their individual
+network gates have tests, but there is no production release or whole-product
+proof that every process, browser, OS service, and dependency obeys the full
+design below.
 
 ---
 
@@ -42,7 +57,7 @@ Every layer One Link touches, paired with mitigation strategy:
 
 ### Browser engine
 
-| What corporations see | Where it lives | Mitigations we ship |
+| What corporations see | Where it lives | Target mitigation (current exceptions are explicitly labelled) |
 |---|---|---|
 | Page load events, JS execution, storage access | Apple WebKit on iOS (forced), Google Blink on Chrome, Mozilla Gecko on Firefox | Avoid fingerprinting APIs (canvas, audio context, fonts, hardware concurrency). Use feature-detection over UA-sniffing. **Capacitor wrapper for Android sideloading + EU alternative app stores.** **Single signed `.html` archive** that runs from `file://` for fully engine-version-pinned deployments. Detect WebKit; degrade gracefully on iOS-specific quirks. |
 
@@ -98,13 +113,13 @@ Every layer One Link touches, paired with mitigation strategy:
 
 | What corporations see | Where it lives | Mitigations we ship |
 |---|---|---|
-| Your public IP, that you're attempting a P2P connection at this moment. Does NOT see who you connect to or what content | Public STUN servers (Google, Cloudflare, Mozilla, Twilio, etc.) | **Multi-vendor STUN list** (6+ from 6 different orgs) shipped by default; rotated per session. **User-overridable** via Settings → Network → "Use my own STUN servers." **Same-LAN mode skips STUN entirely** (mDNS-equivalent local-only ICE candidates). **Manual-signaling QR mode**: zero servers, peer A scans peer B's QR-encoded WebRTC offer, B scans A's answer; pure local handshake. |
+| Your public IP and the timing of an ICE query; a public STUN operator does not receive One Link message/file plaintext | The active preset's configured public STUN servers | **Current:** Just Works resolves a fixed, disclosed three-server community list (Nextcloud, Sipgate, Antisip); it is not rotated. Quiet and Off-grid resolve an empty **outside** list. The daemon also runs a bounded local RFC 8489 Binding responder for same-device/LAN Firefox interoperability; it sees only the source address already visible on the browser's HTTPS connection, never relays bytes, refuses non-local clients, and creates no outside request. The same-origin, no-store ICE config returns that observed address to its own client; for a loopback client only, it can also return at most eight assigned non-link-local interface addresses so isolated same-host Firefox profiles remain reachable. A state/env override can replace or clear the public list. STUN discovers an address; it is not signaling. |
 
 ### Rendezvous (signaling) servers
 
 | What corporations see | Where it lives | Mitigations we ship |
 |---|---|---|
-| WebRTC offer/answer exchange; presence pings; metadata (who's online when) | Project-hosted rendezvous, self-hosted rendezvous, or none (LAN-only) | **Mix-net cover routing**: signaling messages route through 2-3 hops of volunteer peers, each hop sees only previous + next. Even rendezvous can't profile contact graphs. **Decentralized rendezvous via DHT + gossip** (long-term goal): no central signaling server at all; the network is the rendezvous. **Fixed-rate cover traffic + padded packet sizes**: even an observer with full traffic visibility can't tell when you actually sent something. **Tor routing for hardened tier**: signaling routes through Tor SOCKS proxy. |
+| Native-daemon presence metadata and, when enabled, encrypted-relay socket/timing/size/rotating-tag metadata | User-configured or self-hosted rendezvous; none in LAN-only modes | **Current:** the stock `DEFAULT_RENDEZVOUS_URLS` list is empty. A user/operator/distributor must configure a route before signed bounded register/lookup or the optional native encrypted byte relay can run. Production relay clients use authenticated pairwise-blinded tags and seal both identity-bearing channel first flights, putting neither identity public key on the relay wire; the explicit legacy migration route exposes the destination public key and raw channel identities. A single relay still correlates sockets, timing, byte counts, and tag/refresh activity, including rotations on a persistent listener; route-set cardinality reveals an approximate paired-peer count. Because the same service can handle signed presence, its operator can attempt IP/timing correlation between relay sockets and presence identities despite the v2 wire blinding. Browser register/lookup publishes presence only; it does not carry WebRTC offer/answer signaling or make the browser reachable. Independent multi-hop relay deployment, traffic-analysis resistance, and Tor signaling are not implied. |
 
 ---
 
@@ -121,15 +136,18 @@ toggles override.
 Apple/Google are visible at the metadata layer (timing of pushes,
 that you connect to the internet) but never at the content layer.
 
-**Active corporate-touching paths:**
+**Target hardened corporate-touching paths (not all implemented):**
 - CDN-served PWA from `https://one-link.example/` (Let's Encrypt cert)
-- Multi-vendor STUN for NAT traversal (6 orgs rotated)
+- Three disclosed community STUN endpoints from the Just Works preset (fixed, not rotated)
+- No bundled rendezvous or TURN endpoint; cross-network operation requires a configured signaling/rendezvous route and, where direct traversal fails, a configured relay
 - Optional encrypted Web Push (off until user opts in)
-- Project-hosted rendezvous for cross-network reach (with cover traffic)
+- Optional configured rendezvous/native encrypted relay; no cover-traffic claim
 
 **Inactive:**
-- No analytics, no SDK, no fingerprinting, no third-party login,
-  no tracking pixel, no telemetry — same as every other tier.
+- No product analytics SDK, third-party login, advertising fingerprinting, or
+  tracking pixel. Local health/transfer measurements and ordinary metadata at
+  configured network infrastructure are separate, disclosed surfaces rather
+  than an absolute “no telemetry or metadata” claim.
 
 **Use case:** the friend, family member, casual user. They want to
 chat with people. They don't care about state-actor adversaries.
@@ -144,7 +162,8 @@ corporate. Slower. Battery cost. Fully usable.
 **Active corporate-touching paths:**
 - Loaded from local `.html` archive (downloaded once, run from disk)
   OR `.onion` mirror via Tor browser
-- Self-hosted STUN OR LAN-only mode (no STUN at all)
+- The bundled daemon-local STUN Binding responder for LAN-only mode, or an
+  operator-controlled STUN service when public address discovery is desired
 - No Web Push — open the app to see new messages
 - Tor-routed signaling
 - Threshold identity across user's devices (no Passkeys, no OS keychain)
@@ -169,7 +188,7 @@ a hostile country, the professional handling sensitive client data.
 - Internet entirely. The app refuses to make any network request
   outside the local network.
 
-**Available channels:**
+**Target available channels (not a current inventory):**
 - BLE proximity pairing (Android web; iOS falls back to QR + ultrasonic)
 - LAN mDNS-equivalent peer discovery
 - USB transfer of message bundles (export → physical media → import)
@@ -220,15 +239,16 @@ overrides taking priority.
 
 ---
 
-## Tier behavior matrix
+## Target tier behavior matrix
 
-For implementers: exact behavioral differences across tiers.
+For implementers: required behavioral differences across tiers. Only rows
+marked current in the implementation-hook table are active product claims.
 
 | Capability | Default | Hardened | Air-gap |
 |---|---|---|---|
 | PWA bundle source | CDN (HTTPS) | `.onion` or local `.html` | Local `.html` only |
-| STUN servers | Multi-vendor (6 orgs) | Self-hosted or LAN-only | None (LAN-only) |
-| Rendezvous | Project-hosted + cover traffic | Tor-routed + cover traffic | None |
+| Outside STUN servers | Fixed disclosed three-server address-discovery list; not signaling | Operator-controlled | None; daemon-local Binding only |
+| Rendezvous | None bundled; configured/self-hosted routes only, without cover traffic | Tor-routed + cover traffic (target) | None |
 | Cover traffic | Off (battery cost named at opt-in) | On | N/A |
 | Web Push | Off until opted in (encrypted, rotating pseudonym) | Always off | N/A |
 | Identity storage | OPFS, AES-GCM at rest | OPFS, AES-GCM at rest, plausibly deniable | OPFS, AES-GCM at rest, plausibly deniable |
@@ -249,15 +269,15 @@ Each defang lands as part of an architectural ship:
 
 | Defang | Ship | Notes |
 |---|---|---|
-| Multi-vendor STUN list | v0.18.0 | Lands with WebRTC DataChannel transport |
-| Same-LAN mode + manual QR signaling | v0.18.0 | Lands with WebRTC |
-| Mix-net cover routing | v0.22.0 | Lands with sealed sender + cover traffic ship |
+| Preset-resolved community STUN list | current (`partial`) | Fixed three-provider Just Works list; Quiet/Off-grid empty; no rotation proof |
+| Same-LAN mode + WebRTC signaling | current (`partial`) | Signed one-blob offer/answer and bidirectional control-channel probes pass in real Chromium and Firefox with outside STUN disabled; the authenticated call UI also proves its daemon-observed numeric fallback against real browser-gathered mDNS ICE. Cross-network use still requires configured signaling/relay routes plus a physical NAT/browser matrix |
+| Mix-net cover routing | target | Not a current rendezvous or browser capability |
 | OPFS identity (no OS keychain default) | v0.16.0 | Lands with OPFS storage layer |
 | Threshold-of-N device bootstrap | v0.17.0 | Lands with Passkey integration ship |
 | Encrypted optional Web Push | v0.19.0+ | Lands as bg-sync extension |
 | HLC for message ordering | v0.23.0 | Lands with CRDT layer; reuses Coherence stdlib HLC |
 | Multi-source entropy mixing | v0.16.0 | Lands with at-rest encryption (entropy needed for keys) |
-| Signed updates / SW verification | v0.15.0 | Lands with PWA shell |
+| Signed updates / SW verification | current (`partial`) | Explicit owner-confirmed one-click handoff to the authenticated external A/B helper is live only for a completely validated frozen standalone bundle; unattended/background automatic install and Service Worker release verification are not live, source/pip/development installs fail closed, and no verified public stable tag exists |
 | IPFS distribution + `.onion` mirror | v0.15.0+ | Build pipeline change; can land alongside any v0.15.x |
 | Reproducible builds + SLSA-3 attestation | v0.15.0 | Build pipeline; one-time setup |
 | Tor-aware build / Hardened tier | v0.20.0+ | Lands with paranoia tier UX |

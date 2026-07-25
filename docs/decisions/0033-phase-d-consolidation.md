@@ -78,15 +78,18 @@ This ADR records the seven Phase D items as they landed across commits `354cc18 
 
 ### #7 Formal verification of safety-critical state machines (`docs/formal/`)
 
-**Implementation**: TLA+ specification of the capability grant + revoke + attenuation state machine at `docs/formal/Capability.tla`. Models constants (Granters, Subjects, Scopes, RootKeys, MaxClock) + variables (grants, revoked, cap_ids, clock) + actions (IssueGrant, RevokeTuple, Tick).
+**Implementation (strengthened 2026-07-23)**: TLA+ specification of capability minting, attenuation, root-key rotation, revocation, and validation at `docs/formal/Capability.tla`. The release gate now executes every inventoried formal model with a digest-pinned TLC binary rather than treating the files as documentation.
 
 **Verified safety invariants**:
-- `NoKeyReuse`: every granter's cap_ids are distinct.
-- `NoDoubleGrant`: no two grant records share `(granter, cap_id)`.
-- `NoReplay`: revoked tuples never appear in ActiveGrants.
-- `ClockMonotonic`: logical clock is non-decreasing.
+- `NoDoubleGrant`: two live IDs cannot encode the same granter/subject/root-rights grant.
+- `NoKeyReuse`: active key epochs are unique and retired keys cannot reactivate.
+- `NoDowngrade`: attenuation never expands effective rights.
+- `NoReplay`: revoked or never-minted IDs cannot validate, including after a prior acceptance.
 
-**Verification**: TLC config at `docs/formal/Capability.cfg` runs over a finite state space (2 granters × 3 subjects × 2 scopes × 5 clock ticks). Production usage: run TLC on every change to the capability state machine. `docs/formal/README.md` covers what's verified vs what stays in property tests.
+**Verification**: `Capability.cfg` documents its finite instance and
+`docs/formal/models.json` inventories all committed models. The pinned runner
+executes that inventory on every push, pull request, and tagged-release gate;
+`docs/formal/README.md` states the finite bounds and proof exclusions.
 
 ### Coherence ↔ Rust codegen scaffold (`ol_codegen`)
 

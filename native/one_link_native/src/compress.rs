@@ -11,8 +11,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 /// Python-visible dispatcher. Stateless; one instance for the daemon.
-#[pyclass(name = "Compressor", module = "one_link_native.compress")]
-#[derive(Debug, Default, Clone, Copy)]
+#[pyclass(
+    from_py_object,
+    name = "Compressor",
+    module = "one_link_native.compress"
+)]
+#[derive(Debug, Default, Clone)]
 pub struct PyCompressor {
     inner: Dispatcher,
 }
@@ -33,7 +37,7 @@ impl PyCompressor {
     /// (zip/mp4/jpg/etc) so the dispatcher returns "none".
     ///
     /// Returns a string codec name:
-    ///   "none" | "lz4" | "zstd_balanced" | "zstd_aggressive"
+    ///   "none" | "lz4" | "`zstd_balanced`" | "`zstd_aggressive`"
     #[pyo3(signature = (kind, size, precompressed = false))]
     fn pick(&self, kind: &str, size: usize, precompressed: bool) -> PyResult<&'static str> {
         let k = parse_event_kind(kind)?;
@@ -45,8 +49,8 @@ impl PyCompressor {
         Ok(algo_str(self.inner.pick(k, size, pc)))
     }
 
-    /// Compress `bytes` using `algo` ("none" | "lz4" | "zstd_balanced"
-    /// | "zstd_aggressive"). Returns the tag-prefixed compressed bytes.
+    /// Compress `bytes` using `algo` ("none" | "lz4" | "`zstd_balanced`"
+    /// | "`zstd_aggressive`"). Returns the tag-prefixed compressed bytes.
     #[pyo3(signature = (algo, payload))]
     fn compress<'py>(
         &self,
@@ -58,8 +62,8 @@ impl PyCompressor {
         let out = self
             .inner
             .compress(a, payload)
-            .map_err(compress_err_to_py)?;
-        Ok(PyBytes::new_bound(py, &out))
+            .map_err(|err| compress_err_to_py(&err))?;
+        Ok(PyBytes::new(py, &out))
     }
 
     /// Decompress a tag-prefixed payload. `max_size` is a defensive
@@ -75,11 +79,12 @@ impl PyCompressor {
         let out = self
             .inner
             .decompress(payload, max_size)
-            .map_err(compress_err_to_py)?;
-        Ok(PyBytes::new_bound(py, &out))
+            .map_err(|err| compress_err_to_py(&err))?;
+        Ok(PyBytes::new(py, &out))
     }
 
     fn __repr__(&self) -> &'static str {
+        let _ = &self.inner;
         "Compressor()"
     }
 }
@@ -118,13 +123,21 @@ fn algo_str(a: Algorithm) -> &'static str {
     }
 }
 
-fn compress_err_to_py(err: CompressError) -> PyErr {
+fn compress_err_to_py(err: &CompressError) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
 /// Register the `compress` submodule.
 pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", ol_compress::VERSION)?;
+    m.add(
+        "MAX_DECOMPRESSED_BYTES",
+        ol_compress::MAX_DECOMPRESSED_BYTES,
+    )?;
+    m.add(
+        "MAX_COMPRESSED_PAYLOAD_BYTES",
+        ol_compress::MAX_COMPRESSED_PAYLOAD_BYTES,
+    )?;
     m.add_class::<PyCompressor>()?;
     Ok(())
 }

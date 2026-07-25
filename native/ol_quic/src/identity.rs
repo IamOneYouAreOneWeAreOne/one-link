@@ -47,7 +47,9 @@ impl std::fmt::Debug for Identity {
         f.debug_struct("Identity")
             .field("fingerprint_hex", &hex_lower(&self.fingerprint))
             .field("cert_der_len", &self.der_cert.len())
-            .finish()
+            // Deliberately omit the private signing key while making the
+            // redaction explicit to both readers and structural lints.
+            .finish_non_exhaustive()
     }
 }
 
@@ -122,7 +124,7 @@ impl Identity {
         self.fingerprint
     }
 
-    /// Lower-32-byte raw Ed25519 public key (the SubjectPublicKey bits
+    /// Lower-32-byte raw Ed25519 public key (the `SubjectPublicKey` bits
     /// our cert advertises).
     #[inline]
     #[must_use]

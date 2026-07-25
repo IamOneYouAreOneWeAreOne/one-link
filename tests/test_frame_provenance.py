@@ -20,7 +20,6 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.frame_provenance import (
-    DEVICE_ID_LEN,
     ED25519_SIG_LEN,
     SCHEMA_V1,
     SEGMENT_HASH_LEN,
@@ -338,6 +337,57 @@ def test_wire_malformed_field_raises() -> None:
         from_wire_dict(wire)
 
 
+def test_wire_rejects_unknown_fields(
+    sample_provenance: FrameProvenance,
+) -> None:
+    wire = to_wire_dict(sample_provenance)
+    wire["shadow"] = "unsigned parser confusion"
+    with pytest.raises(ValueError, match="unknown field"):
+        from_wire_dict(wire)
+
+
+@pytest.mark.parametrize("field", ["v", "fk", "pc", "rs", "ts"])
+def test_wire_rejects_bool_integer_aliases(
+    sample_provenance: FrameProvenance, field: str,
+) -> None:
+    wire = to_wire_dict(sample_provenance)
+    wire[field] = True
+    with pytest.raises(ValueError, match="malformed"):
+        from_wire_dict(wire)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -0.01, 1.01, True, "1"])
+def test_wire_rejects_noncanonical_confidence(
+    sample_provenance: FrameProvenance, bad,
+) -> None:
+    wire = to_wire_dict(sample_provenance)
+    wire["pcf"] = bad
+    with pytest.raises(ValueError, match="malformed"):
+        from_wire_dict(wire)
+
+
+@pytest.mark.parametrize("field,size", [("seg", 64), ("sig", 128)])
+def test_wire_rejects_noncanonical_or_oversized_hex_before_decode(
+    sample_provenance: FrameProvenance, field: str, size: int,
+) -> None:
+    wire = to_wire_dict(sample_provenance)
+    wire[field] = "A" * size
+    with pytest.raises(ValueError, match="malformed"):
+        from_wire_dict(wire)
+    wire[field] = "0" * (size + 2)
+    with pytest.raises(ValueError, match="malformed"):
+        from_wire_dict(wire)
+
+
+def test_wire_rejects_unsupported_schema_at_parse_boundary(
+    sample_provenance: FrameProvenance,
+) -> None:
+    wire = to_wire_dict(sample_provenance)
+    wire["v"] = 99
+    with pytest.raises(ValueError, match="malformed"):
+        from_wire_dict(wire)
+
+
 def test_wire_contains_only_compact_keys(
     sample_provenance: FrameProvenance,
 ) -> None:
@@ -541,10 +591,12 @@ def test_ui_dict_contains_required_user_facing_fields(
     sample_provenance: FrameProvenance,
 ) -> None:
     ui = to_ui_dict(sample_provenance, verified=True)
-    assert ui["kind"] == "Real"
+    assert ui["kind"] == "Original"
     assert ui["path"] == "Local network"
     assert ui["recording"] == "Not recording"
     assert ui["verified"] is True
+    assert ui["verification"] == "Sender signature confirmed"
+    assert "not the truth of a physical scene" in ui["scope"]
     assert ui["produced_at_us"] == sample_provenance.timestamp_us
 
 

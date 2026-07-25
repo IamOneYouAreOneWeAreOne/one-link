@@ -247,7 +247,6 @@ def test_unwrap_endpoint_returns_unwrapped_share_via_handler(tmp_path):
     from one_link import social_recovery
     from one_link.daemon import Daemon
     from one_link.state import State
-    from one_link.wire import decode_msg
 
     # Wrap a real share to a specific guardian keypair.
     guardian_priv = Ed25519PrivateKey.generate()

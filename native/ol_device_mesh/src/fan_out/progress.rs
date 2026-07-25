@@ -191,7 +191,7 @@ mod tests {
         t.mark_in_flight([2; 32], [2; 16]);
         let released = t.mark_source_failed([1; 16]);
         let mut sorted = released.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         assert_eq!(sorted, vec![[1; 32], [3; 32]]);
         assert!(!t.in_flight_chunks.contains_key(&[1; 32]));
         assert!(!t.in_flight_chunks.contains_key(&[3; 32]));

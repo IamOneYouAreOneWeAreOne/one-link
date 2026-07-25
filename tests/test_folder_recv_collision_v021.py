@@ -20,7 +20,6 @@ import asyncio
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.blobstore import BlobStore
@@ -112,10 +111,8 @@ def test_no_collision_when_brand_new_file(tmp_path: Path):
 
 
 def test_no_collision_when_same_size(tmp_path: Path):
-    """Same-size existing file is treated as 'probably identical' by
-    the materialize hot path (no re-hash for cost). Skip collision
-    fire — the rare same-size-different-content case is a known
-    limit, documented as not worse than today's behavior."""
+    """Same-size content is re-hashed, replaced when different, but the
+    legacy collision notification remains size-oriented."""
     engine, state, blob_store, _ = _engine_setup(tmp_path)
     src = tmp_path / "src"
     src.mkdir()
@@ -138,6 +135,7 @@ def test_no_collision_when_same_size(tmp_path: Path):
     engine._materialize("demo", entry)
     # Same-size path doesn't fire collision (intentional).
     assert collisions == []
+    assert (src / "x.txt").read_bytes() == incoming_bytes
     state.close()
 
 

@@ -19,8 +19,8 @@
 //!
 //! - `C_support[i]` = cumulative fraction of swarm-wide chunk supply
 //!   enclosed within the topological neighborhood of peer `i`. Peers
-//!   at the "center" of the swarm have low C_support (just their own
-//!   neighborhood); peers near the edge have high C_support (most of
+//!   at the "center" of the swarm have low `C_support` (just their own
+//!   neighborhood); peers near the edge have high `C_support` (most of
 //!   the swarm is "behind" them).
 //! - `k_phase` then gives a per-peer boost / penalty that modulates
 //!   the source term: core peers are weighted up, edge peers are
@@ -77,7 +77,7 @@ mod tests {
     #[test]
     fn kernel_monotonic_decreasing() {
         // As C_support increases, k_phase decreases (boost → attenuate).
-        let cs: Vec<f64> = (0..=10).map(|i| i as f64 / 10.0).collect();
+        let cs: Vec<f64> = (0..=10).map(|i| f64::from(i) / 10.0).collect();
         let k = support_phase_kernel(&cs, SupportPhaseConfig::default());
         for w in k.windows(2) {
             assert!(w[1] <= w[0], "kernel must be monotonic decreasing");

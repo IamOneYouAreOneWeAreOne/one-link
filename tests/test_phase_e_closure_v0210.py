@@ -242,6 +242,7 @@ def test_capability_fails_closed_on_state_exception() -> None:
     """When state.get_peer_capability_policy raises, _capability_allowed
     must fail CLOSED + bump the legacy continuity counter."""
     d = _bare_daemon()
+    d.state.get_peer.return_value = MagicMock(trust="pinned")
     d.state.get_peer_capability_policy = MagicMock(
         side_effect=RuntimeError("simulated state corruption"),
     )
@@ -259,6 +260,7 @@ def test_capability_fails_closed_on_state_exception() -> None:
 
 def test_capability_fail_open_counter_accumulates() -> None:
     d = _bare_daemon()
+    d.state.get_peer.return_value = MagicMock(trust="pinned")
     d.state.get_peer_capability_policy = MagicMock(
         side_effect=RuntimeError("simulated"),
     )
@@ -275,6 +277,7 @@ def test_capability_fail_open_counter_accumulates() -> None:
 def test_capability_normal_path_does_not_bump_fail_open() -> None:
     """Healthy capability check must NOT bump the fail-open counter."""
     d = _bare_daemon()
+    d.state.get_peer.return_value = MagicMock(trust="pinned")
     d.state.get_peer_capability_policy = MagicMock(return_value=["files"])
     d.detect_seed_file_tamper = MagicMock(return_value=False)
     d._cap_store = None

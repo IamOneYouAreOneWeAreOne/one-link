@@ -16,13 +16,13 @@
 //!   that wins regardless of value)
 //! - The timestamp (8 bytes)
 //!
-//! Domain-tagged via BLAKE3 derive_key so this hash can't be confused
+//! Domain-tagged via BLAKE3 `derive_key` so this hash can't be confused
 //! with any other in the workspace.
 
 use crate::vector_clock::ReplicaId;
 use crate::Lattice;
 
-/// BLAKE3 derive_key context for the LWW tie-break hash. Bumping
+/// BLAKE3 `derive_key` context for the LWW tie-break hash. Bumping
 /// this is a wire-incompatible change to the merge function — only
 /// safe at a fresh-folder boundary.
 const LWW_TIEBREAK_CONTEXT: &str = "ol-crdt-lww-tiebreak-v1";
@@ -129,7 +129,7 @@ mod tests {
         // Find a value where low_replica wins over high_replica
         // — proves the high-replica attacker can't always win.
         let mut found_inversion = false;
-        for value in ["a", "b", "c", "d", "e", "f", "g", "h"].iter() {
+        for value in &["a", "b", "c", "d", "e", "f", "g", "h"] {
             let mut high = LwwRegister::new(*value, 5, rid(0xFF));
             let low = LwwRegister::new(*value, 5, rid(0x01));
             high.merge(&low);

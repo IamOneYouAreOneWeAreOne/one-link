@@ -103,7 +103,7 @@ SetupIconFile=..\..\src\one_link\web\assets\one-glyph.ico
 VersionInfoVersion={#MyAppNumericVersion}
 VersionInfoProductName={#MyAppName}
 VersionInfoCompany={#MyAppPublisher}
-VersionInfoDescription=Peer-to-peer chat, file sync, and live voice/video. No accounts, no servers.
+VersionInfoDescription=Peer-to-peer chat, file sync, and live voice/video. No required account; direct-first with optional discovery and relay.
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

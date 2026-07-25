@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import socket
-import time
 
 import aiohttp
 import pytest
 
-from one_link.discovery import Peer, Registry
+from one_link.discovery import Peer
 from tests.harness import daemon_pair
 
 
@@ -114,7 +112,6 @@ async def test_api_prune_endpoint():
         base_a = f"http://127.0.0.1:{port_a}"
 
         # Inject a synthetic ghost into A's registry
-        from one_link.discovery import Peer
         # We don't have direct access to the running daemon's Discovery;
         # the live daemon is a subprocess. So instead we just verify the
         # endpoint runs without error and reports counts.

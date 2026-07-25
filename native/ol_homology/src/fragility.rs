@@ -50,10 +50,10 @@ pub struct FragilityReport {
 /// A chunk held by ≤3 peers AND that's a bridge gets the highest
 /// score. A chunk held by ≥3 peers and not a bridge gets a score
 /// near zero.
-pub fn fragility_score(
+pub fn fragility_score<S: std::hash::BuildHasher>(
     nodes: &[String],
     edges: &[(String, String)],
-    holders: &HashMap<String, usize>,
+    holders: &HashMap<String, usize, S>,
 ) -> FragilityReport {
     // Reference baseline: how many components does the full graph
     // have? Any chunk whose removal raises this is a bridge.
@@ -73,7 +73,12 @@ pub fn fragility_score(
         let is_bridge = without.n_components > baseline_components;
 
         let n_peers = *holders.get(chunk).unwrap_or(&0);
-        let peer_axis = ((3_i64 - n_peers as i64).max(0) as f64) / 3.0;
+        let peer_axis: f64 = match n_peers {
+            0 => 1.0,
+            1 => 2.0 / 3.0,
+            2 => 1.0 / 3.0,
+            _ => 0.0,
+        };
         let bridge_bonus = if is_bridge { 0.5 } else { 0.0 };
         let score = (peer_axis + bridge_bonus).clamp(0.0, 1.0);
 
@@ -167,7 +172,9 @@ mod tests {
             &holders_for(&[("a", 1), ("b", 10)]),
         );
         assert_eq!(
-            r.replication_priority.first().map(|x| x.as_str()),
+            r.replication_priority
+                .first()
+                .map(std::string::String::as_str),
             Some("a")
         );
     }

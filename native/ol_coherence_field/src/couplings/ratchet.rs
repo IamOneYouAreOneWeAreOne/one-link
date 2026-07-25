@@ -1,4 +1,4 @@
-//! τ_c × Double-Ratchet rotation coupling.
+//! `τ_c` × Double-Ratchet rotation coupling.
 //!
 //! Standard Double-Ratchet rotates keys per message, with a fixed
 //! cadence chosen at protocol-design time. The coherence-field
@@ -17,9 +17,9 @@
 //! - Baseline rotation rate: 1 per N bytes (chosen by `ol_ratchet`).
 //! - Coupling multiplier `μ(δτ_c) ∈ [1, μ_max]`: peers with high field
 //!   get μ = 1 (no extra rotation), peers with low field get μ
-//!   approaching μ_max (rotation happens μ_max× faster).
+//!   approaching `μ_max` (rotation happens `μ_max`× faster).
 //!
-//! - μ(field) = 1 + (μ_max − 1) · (1 − normalised_field)^p
+//! - `μ(field) = 1 + (μ_max − 1) · (1 − normalised_field)^p`
 //!
 //! where `p` controls how sharply the multiplier ramps up as
 //! coherence degrades. p = 2 (quadratic) is the production default
@@ -41,7 +41,7 @@ pub struct RotationCadence {
 
 /// Compute per-peer ratchet rotation multipliers from the field.
 ///
-/// `field` is the recovered δτ_c at every peer. `mu_max` is the
+/// `field` is the recovered `δτ_c` at every peer. `mu_max` is the
 /// rotation-rate cap (typical: 4–10×; values above 10× exhaust
 /// ratchet-state budget). `power` is the contrast exponent (p in the
 /// `(1 − norm)^p` term).
@@ -57,8 +57,8 @@ pub fn rotation_cadence_multiplier(
     if field.is_empty() {
         return Vec::new();
     }
-    let f_min = field.iter().cloned().fold(f64::INFINITY, f64::min);
-    let f_max = field.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let f_min = field.iter().copied().fold(f64::INFINITY, f64::min);
+    let f_max = field.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let span = (f_max - f_min).max(1e-9);
     let mu_max = mu_max.max(1.0);
     let power = power.max(0.0);
@@ -72,7 +72,7 @@ pub fn rotation_cadence_multiplier(
             // Deficit raised to power; multiplier grows with deficit.
             let deficit = (1.0 - n).powf(power);
             let multiplier = 1.0 + (mu_max - 1.0) * deficit;
-            let bytes = ((baseline_bytes as f64) / multiplier) as u64;
+            let bytes = floor_u64_div_f64(baseline_bytes, multiplier);
             RotationCadence {
                 peer: i,
                 multiplier,
@@ -82,9 +82,61 @@ pub fn rotation_cadence_multiplier(
         .collect()
 }
 
+/// Divide an integer byte budget by a finite binary64 multiplier without
+/// routing the integer through a lossy `u64 -> f64 -> u64` round trip.
+///
+/// Every production multiplier is at least one. Non-finite or otherwise
+/// invalid values produce zero, matching Rust's saturating float-to-unsigned
+/// conversion at the old call site; the caller then enforces its one-byte
+/// minimum.
+fn floor_u64_div_f64(dividend: u64, divisor: f64) -> u64 {
+    const FRACTION_BITS: i32 = 52;
+    const EXPONENT_BIAS: i32 = 1023;
+    const FRACTION_MASK: u64 = (1_u64 << 52) - 1;
+
+    if !divisor.is_finite() || divisor < 1.0 {
+        return 0;
+    }
+
+    let bits = divisor.to_bits();
+    let biased_exponent =
+        i32::try_from((bits >> 52) & 0x7ff).expect("an 11-bit binary64 exponent always fits i32");
+    let exponent = biased_exponent - EXPONENT_BIAS;
+    debug_assert!(
+        exponent >= 0,
+        "a finite divisor >= 1 has a non-negative exponent"
+    );
+    let significand = (1_u64 << 52) | (bits & FRACTION_MASK);
+
+    let quotient = if exponent <= FRACTION_BITS {
+        let shift = u32::try_from(FRACTION_BITS - exponent)
+            .expect("non-negative binary64 scaling shift fits u32");
+        (u128::from(dividend) << shift) / u128::from(significand)
+    } else if exponent >= 64 {
+        0
+    } else {
+        let shift = u32::try_from(exponent - FRACTION_BITS)
+            .expect("non-negative binary64 scaling shift fits u32");
+        u128::from(dividend) / (u128::from(significand) << shift)
+    };
+
+    u64::try_from(quotient).expect("division by a value >= 1 cannot exceed the dividend")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_integer_division_handles_full_u64_domain() {
+        assert_eq!(floor_u64_div_f64(1_000_000, 1.0), 1_000_000);
+        assert_eq!(floor_u64_div_f64(1_000_000, 4.0), 250_000);
+        assert_eq!(floor_u64_div_f64(1_000_000, 1.5), 666_666);
+        assert_eq!(floor_u64_div_f64(u64::MAX, 1.0), u64::MAX);
+        assert_eq!(floor_u64_div_f64(u64::MAX, 2.0), u64::MAX / 2);
+        assert_eq!(floor_u64_div_f64(u64::MAX, f64::INFINITY), 0);
+        assert_eq!(floor_u64_div_f64(u64::MAX, f64::NAN), 0);
+    }
 
     #[test]
     fn highest_field_peer_gets_baseline_cadence() {

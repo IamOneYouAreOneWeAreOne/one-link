@@ -38,7 +38,7 @@ pub enum PairError {
         supported: u8,
     },
 
-    /// A required tag byte was wrong (e.g. PairResponse parsed as Invite).
+    /// A required tag byte was wrong (e.g. `PairResponse` parsed as Invite).
     #[error("type tag mismatch: expected 0x{expected:02x}, got 0x{got:02x}")]
     BadTag {
         /// Tag the decoder expected.
@@ -93,6 +93,21 @@ pub enum PairError {
     /// point. Rejected to prevent confined-subgroup attacks.
     #[error("ephemeral X25519 public key is small-order")]
     SmallOrderPubkey,
+
+    /// A Factor-2 confirmation frame or acknowledgement had the wrong
+    /// fixed length. Variable-length parsing is deliberately forbidden.
+    #[error("factor-2 confirmation length wrong: expected {expected}, got {got}")]
+    BadFactor2ConfirmationLen {
+        /// Required byte length for this protocol step.
+        expected: usize,
+        /// Byte length supplied by the peer.
+        got: usize,
+    },
+
+    /// The peer did not prove possession of the same final Factor-2-mixed
+    /// chain key. No chain key is released when this error is returned.
+    #[error("factor-2 key confirmation failed")]
+    Factor2KeyConfirmationFailed,
 
     /// Internal invariant failed. Indicates a bug, not an attack.
     #[error("internal invariant violated: {0}")]

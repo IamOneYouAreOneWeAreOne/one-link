@@ -39,8 +39,8 @@ fn bench_primitive_encode(c: &mut Criterion) {
 fn bench_aggregate_encode(c: &mut Criterion) {
     // Models a small CRDT operation: vector clock + payload bytes.
     c.bench_function("encode_vector_clock_4_entries", |b| {
-        let entries: Vec<(Vec<u8>, u64)> = (0..4)
-            .map(|i| (vec![i as u8; 16], 1234u64 + i as u64))
+        let entries: Vec<(Vec<u8>, u64)> = (0u8..4)
+            .map(|i| (vec![i; 16], 1234u64 + u64::from(i)))
             .collect();
         b.iter(|| {
             let mut e = CanonEncoder::new();

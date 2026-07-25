@@ -15,7 +15,7 @@
 //! D · L · δτ_c = S.
 //! ```
 //!
-//! The S_One galaxy derivation calls this the **Poisson limit**: when
+//! The `S_One` galaxy derivation calls this the **Poisson limit**: when
 //! the cosmic-horizon-scale screening length swamps the galaxy radius,
 //! the scalar response looks Newtonian-like. The network analog is a
 //! swarm small enough that its diameter is well below `ell_screen` —
@@ -62,7 +62,8 @@ pub fn solve_poisson(
         });
     }
     // Project source to mean-zero (well-posedness requirement).
-    let s_mean: f64 = source.iter().sum::<f64>() / (n as f64);
+    let node_count = source.iter().fold(0.0_f64, |count, _| count + 1.0);
+    let s_mean: f64 = source.iter().sum::<f64>() / node_count;
     let s_zero: Vec<f64> = source.iter().map(|&s| s - s_mean).collect();
 
     // Diagonal: D · degree. Use 1.0 fallback for isolated nodes so
@@ -84,7 +85,7 @@ pub fn solve_poisson(
         for yi in y.iter_mut() {
             *yi *= d;
         }
-        let mean = y.iter().sum::<f64>() / (n as f64);
+        let mean = y.iter().sum::<f64>() / node_count;
         for yi in y.iter_mut() {
             *yi -= mean;
         }
@@ -102,8 +103,8 @@ pub fn solve_poisson(
     // physical convention is that δτ_c is a deviation from τ_∞, so
     // its swarm-average is identically zero).
     let mut field = result.x;
-    let mean = field.iter().sum::<f64>() / (n as f64);
-    for fi in field.iter_mut() {
+    let mean = field.iter().sum::<f64>() / node_count;
+    for fi in &mut field {
         *fi -= mean;
     }
     Ok(SolveResult {

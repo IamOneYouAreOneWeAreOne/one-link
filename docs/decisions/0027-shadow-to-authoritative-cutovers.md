@@ -16,7 +16,7 @@ This ADR records the cutover completion that promotes these from shadow / dual-i
 
 ### #1 Bandit route picker (authoritative — replaces EMA)
 
-Per [stress-test #3 of FILE_ENGINE_V2_PLAN.md](../FILE_ENGINE_V2_PLAN.md), the bandit MUST REPLACE (not coexist with) the EMA route memory. Done.
+Per [stress-test #3 of FILE_ENGINE_V2_PLAN.md](../FILE_ENGINE_V2_PLAN.md), the bandit must replace EMA ranking on the route-choice axis. Done. EMA observations remain descriptive cost/reliability inputs and power the explicit rollback path; they do not independently rank routes while the bandit picker is active.
 
 `AdaptiveTransferBrain.decide()` now consults the `BanditRouteSelector` built up by `observe()`. With ≥2 candidate routes and an initialized bandit:
 
@@ -85,6 +85,7 @@ Remaining for follow-up (not blockers for Phase D):
 - Full authoritative folder cutover — requires the semantic reconciliation step described above.
 - Receiver-side macaroon verification preference — requires a tracking window of widespread macaroon issuance.
 - Bandit's mode-level selection (currently Pareto still handles mode) — could move to a per-(route, mode) bandit if data warrants.
+- Chunk-size, parallelism, FEC-ratio, prefetch-window, pacing, and compression-threshold bandit controllers are future work and are not production-active.
 
 ## References
 

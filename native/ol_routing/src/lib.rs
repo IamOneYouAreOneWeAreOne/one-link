@@ -1,6 +1,6 @@
 //! `ol_routing` — tau_c-weighted routing primitives for One Link.
 //!
-//! Per [FILE_ENGINE_V2_PLAN.md] Phase D item #1:
+//! Per [`FILE_ENGINE_V2_PLAN.md`] Phase D item #1:
 //!
 //! > Tau-field routing on swarm graph — harvest OneField
 //! > mesh/routing.cl (production τ_c-weighted Dijkstra already

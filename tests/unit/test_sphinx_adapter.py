@@ -388,7 +388,7 @@ def test_build_cover_packet_round_trip():
     assert payload == b""
 
 
-def test_cover_packet_size_indistinguishable_from_real():
+def test_cover_packet_encoded_length_matches_real_packet():
     from one_link import sphinx_native as sph
 
     _, dest_pk = sph.generate_keypair()

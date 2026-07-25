@@ -2,7 +2,7 @@
 //!
 //! The whole point of `ol_coherence_field` as a shared crate is that
 //! the **same Rust code** plus a **per-domain calibration** produces
-//! the field for One Link (network), OneField Mesh (RF), and BioMesh
+//! the field for One Link (network), `OneField` Mesh (RF), and `BioMesh`
 //! (biological signals). This module supplies the per-domain
 //! constants.
 //!
@@ -28,9 +28,9 @@ pub use one_link::one_link_calibration;
 pub enum Domain {
     /// One Link network swarm.
     OneLink,
-    /// OneField Mesh RF τ_c routing.
+    /// `OneField` Mesh RF `τ_c` routing.
     OneField,
-    /// BioMesh biological-signal field.
+    /// `BioMesh` biological-signal field.
     BioMesh,
 }
 
@@ -58,13 +58,13 @@ pub struct Calibration {
     /// fit is 0.12.
     pub support_phase_w: f64,
     /// `c`-analog: maximum signal propagation speed in the domain.
-    /// One Link: max wire bps. OneField: c-of-light (RF). BioMesh:
+    /// One Link: max wire bps. `OneField`: c-of-light (RF). `BioMesh`:
     /// max signal-propagation rate.
     pub c_propagation: f64,
     /// `H_0`-analog: domain-equivalent "Hubble rate" (rate of
     /// system-level perturbation per unit system size). One Link:
-    /// peer-churn fraction / sec. OneField: tropospheric-fade rate.
-    /// BioMesh: metabolic-turnover rate.
+    /// peer-churn fraction / sec. `OneField`: tropospheric-fade rate.
+    /// `BioMesh`: metabolic-turnover rate.
     pub h_0_equivalent: f64,
 }
 
@@ -98,12 +98,12 @@ mod tests {
         let ol = one_link_calibration();
         let of = one_field_calibration();
         let bm = bio_mesh_calibration();
-        let ol_g = ol.apparent_horizon_anchor().unwrap();
-        let of_g = of.apparent_horizon_anchor().unwrap();
-        let bm_g = bm.apparent_horizon_anchor().unwrap();
-        assert!(ol_g > 0.0 && ol_g.is_finite());
-        assert!(of_g > 0.0 && of_g.is_finite());
-        assert!(bm_g > 0.0 && bm_g.is_finite());
+        let one_link_anchor = ol.apparent_horizon_anchor().unwrap();
+        let one_field_anchor = of.apparent_horizon_anchor().unwrap();
+        let bio_mesh_anchor = bm.apparent_horizon_anchor().unwrap();
+        assert!(one_link_anchor > 0.0 && one_link_anchor.is_finite());
+        assert!(one_field_anchor > 0.0 && one_field_anchor.is_finite());
+        assert!(bio_mesh_anchor > 0.0 && bio_mesh_anchor.is_finite());
     }
 
     #[test]
@@ -117,11 +117,11 @@ mod tests {
         let ol = one_link_calibration();
         let of = one_field_calibration();
         let bm = bio_mesh_calibration();
-        let ol_g = ol.apparent_horizon_anchor().unwrap();
-        let of_g = of.apparent_horizon_anchor().unwrap();
-        let bm_g = bm.apparent_horizon_anchor().unwrap();
-        let largest = ol_g.max(of_g).max(bm_g);
-        let smallest = ol_g.min(of_g).min(bm_g);
+        let one_link_anchor = ol.apparent_horizon_anchor().unwrap();
+        let one_field_anchor = of.apparent_horizon_anchor().unwrap();
+        let bio_mesh_anchor = bm.apparent_horizon_anchor().unwrap();
+        let largest = one_link_anchor.max(one_field_anchor).max(bio_mesh_anchor);
+        let smallest = one_link_anchor.min(one_field_anchor).min(bio_mesh_anchor);
         assert!(
             largest / smallest > 100.0,
             "anchors too close across domains: largest = {largest}, smallest = {smallest}",

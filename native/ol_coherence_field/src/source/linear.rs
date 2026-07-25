@@ -2,7 +2,7 @@
 //!
 //! ## Why this module exists
 //!
-//! The S_One galaxy chain proves a sharp **no-go theorem**: if the
+//! The `S_One` galaxy chain proves a sharp **no-go theorem**: if the
 //! source functional is linear in baryon density `ρ_b`, then the
 //! coherence flux `g_coh` collapses to `g_coh ∝ g_bar`. Translation:
 //! a purely density-linear source contributes *nothing new* beyond

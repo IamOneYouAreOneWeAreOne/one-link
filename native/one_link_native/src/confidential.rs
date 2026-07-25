@@ -35,7 +35,7 @@ use ol_confidential::{
 use ol_pqsig::HybridVerifyingKey;
 
 fn map_err(e: ConfidentialError) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    PyValueError::new_err(crate::errors::owned_error_message(e))
 }
 
 fn nonce_from_bytes(b: &[u8]) -> PyResult<AttestationNonce> {
@@ -122,13 +122,10 @@ impl PySoftwareProvider {
         let sealed_result = self.inner.seal_master(&arr);
         arr.zeroize();
         let sealed = sealed_result.map_err(map_err)?;
-        Ok((
-            PyBytes::new_bound(py, &sealed.bytes),
-            sealed.provider_tag.as_u8(),
-        ))
+        Ok((PyBytes::new(py, &sealed.bytes), sealed.provider_tag.as_u8()))
     }
 
-    /// Derive a child SealedKey from a sealed master + context tag.
+    /// Derive a child `SealedKey` from a sealed master + context tag.
     fn derive_child<'py>(
         &self,
         py: Python<'py>,
@@ -145,10 +142,7 @@ impl PySoftwareProvider {
             .inner
             .derive_child(&sealed_master, context_tag)
             .map_err(map_err)?;
-        Ok((
-            PyBytes::new_bound(py, &child.bytes),
-            child.provider_tag.as_u8(),
-        ))
+        Ok((PyBytes::new(py, &child.bytes), child.provider_tag.as_u8()))
     }
 
     /// Sign `transcript` under a sealed master. Returns the hybrid
@@ -169,7 +163,7 @@ impl PySoftwareProvider {
             .inner
             .sealed_sign(&sealed, transcript)
             .map_err(map_err)?;
-        Ok(PyBytes::new_bound(py, &sig))
+        Ok(PyBytes::new(py, &sig))
     }
 
     /// Recover the verifying key for a sealed master. Returns the
@@ -186,7 +180,7 @@ impl PySoftwareProvider {
             bytes: sealed_bytes.to_vec(),
         };
         let vk = self.inner.verifying_key(&sealed).map_err(map_err)?;
-        Ok(PyBytes::new_bound(py, &vk.to_bytes()))
+        Ok(PyBytes::new(py, &vk.to_bytes()))
     }
 
     /// Issue an attestation doc. Returns the encoded fields as a
@@ -250,19 +244,17 @@ impl PySoftwareProvider {
                 sdp,
             )
             .map_err(map_err)?;
-        let cmt = doc
-            .field_witness_commitment
-            .map(|c| PyBytes::new_bound(py, &c));
+        let cmt = doc.field_witness_commitment.map(|c| PyBytes::new(py, &c));
         Ok((
             doc.provider_tag.as_u8(),
-            PyBytes::new_bound(py, &doc.master_vk.to_bytes()),
-            PyBytes::new_bound(py, &doc.peer_nonce),
+            PyBytes::new(py, &doc.master_vk.to_bytes()),
+            PyBytes::new(py, &doc.peer_nonce),
             doc.issued_unix,
             doc.deadline_unix,
             cmt,
-            PyBytes::new_bound(py, &doc.platform_quote),
-            PyBytes::new_bound(py, &doc.issuer_sdp_pubkey),
-            PyBytes::new_bound(py, &doc.master_sig),
+            PyBytes::new(py, &doc.platform_quote),
+            PyBytes::new(py, &doc.issuer_sdp_pubkey),
+            PyBytes::new(py, &doc.master_sig),
         ))
     }
 }
@@ -288,25 +280,26 @@ fn fresh_software_provider() -> PySoftwareProvider {
 /// get the real constructor. The Python wrapper documents this in
 /// its docstring.
 #[pyfunction]
-fn software_provider_from_seed(_seed: &[u8]) -> PyResult<PySoftwareProvider> {
+fn software_provider_from_seed(seed: &[u8]) -> PyResult<PySoftwareProvider> {
     #[cfg(feature = "unstable-deterministic-provider")]
     {
-        if _seed.len() != 32 {
+        if seed.len() != 32 {
             return Err(PyValueError::new_err(format!(
                 "provider seed must be exactly 32 bytes, got {}",
-                _seed.len()
+                seed.len()
             )));
         }
         // Zeroize the local seed copy after the provider has taken it
         // (audit finding M5, May 14 2026).
         let mut arr = [0u8; 32];
-        arr.copy_from_slice(_seed);
+        arr.copy_from_slice(seed);
         let provider = SoftwareProvider::from_seed(&arr);
         arr.zeroize();
-        return Ok(PySoftwareProvider { inner: provider });
+        Ok(PySoftwareProvider { inner: provider })
     }
     #[cfg(not(feature = "unstable-deterministic-provider"))]
     {
+        let _ = seed;
         Err(PyValueError::new_err(
             "software_provider_from_seed is disabled in this build. \
              It is a deterministic-seed constructor intended for \
@@ -322,16 +315,16 @@ fn software_provider_from_seed(_seed: &[u8]) -> PyResult<PySoftwareProvider> {
 #[pyfunction]
 fn attestation_nonce(py: Python<'_>) -> Bound<'_, PyBytes> {
     let n = fresh_attestation_nonce(&mut OsRng);
-    PyBytes::new_bound(py, &n)
+    PyBytes::new(py, &n)
 }
 
-/// Verify a (deconstructed) AttestationDoc. Pass the same field
+/// Verify a (deconstructed) `AttestationDoc`. Pass the same field
 /// tuple shape as returned by `attest`, plus the verifier's expected
 /// channel-identity SDP pubkey (audit C1).
 ///
 /// `min_tier_byte` enforces the provider-tier floor (audit H4):
-/// `1` = Software (any tier accepted), `2` = HardwareBound, `3` =
-/// HardwareAttested.
+/// `1` = Software (any tier accepted), `2` = `HardwareBound`, `3` =
+/// `HardwareAttested`.
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
 #[pyo3(signature = (
@@ -444,18 +437,18 @@ struct PyWindowsHardenedProvider {
 #[cfg(feature = "windows-tpm")]
 #[pymethods]
 impl PyWindowsHardenedProvider {
-    /// Tier code. `2` = HardwareBound.
+    /// Tier code. `2` = `HardwareBound`.
     fn tier_byte(&self) -> u8 {
         self.inner.tier() as u8
     }
 
-    /// Wire tag byte. `4` = WindowsTpm.
+    /// Wire tag byte. `4` = `WindowsTpm`.
     fn tag_byte(&self) -> u8 {
         self.inner.tag().as_u8()
     }
 
     /// Seal a 32-byte master seed. Returns `(sealed_bytes, tag_byte)`
-    /// with tag = WindowsTpm so future round-trips bind to this
+    /// with tag = `WindowsTpm` so future round-trips bind to this
     /// provider class.
     fn seal_master<'py>(
         &self,
@@ -473,10 +466,7 @@ impl PyWindowsHardenedProvider {
         let sealed_result = self.inner.seal_master(&arr);
         arr.zeroize();
         let sealed = sealed_result.map_err(map_err)?;
-        Ok((
-            PyBytes::new_bound(py, &sealed.bytes),
-            sealed.provider_tag.as_u8(),
-        ))
+        Ok((PyBytes::new(py, &sealed.bytes), sealed.provider_tag.as_u8()))
     }
 
     fn derive_child<'py>(
@@ -495,10 +485,7 @@ impl PyWindowsHardenedProvider {
             .inner
             .derive_child(&sealed_master, context_tag)
             .map_err(map_err)?;
-        Ok((
-            PyBytes::new_bound(py, &child.bytes),
-            child.provider_tag.as_u8(),
-        ))
+        Ok((PyBytes::new(py, &child.bytes), child.provider_tag.as_u8()))
     }
 
     fn sealed_sign<'py>(
@@ -517,7 +504,7 @@ impl PyWindowsHardenedProvider {
             .inner
             .sealed_sign(&sealed, transcript)
             .map_err(map_err)?;
-        Ok(PyBytes::new_bound(py, &sig))
+        Ok(PyBytes::new(py, &sig))
     }
 
     fn verifying_key<'py>(
@@ -532,7 +519,7 @@ impl PyWindowsHardenedProvider {
             bytes: sealed_bytes.to_vec(),
         };
         let vk = self.inner.verifying_key(&sealed).map_err(map_err)?;
-        Ok(PyBytes::new_bound(py, &vk.to_bytes()))
+        Ok(PyBytes::new(py, &vk.to_bytes()))
     }
 
     /// Issue a TPM-rooted attestation doc. Same return tuple as
@@ -590,19 +577,17 @@ impl PyWindowsHardenedProvider {
                 sdp,
             )
             .map_err(map_err)?;
-        let cmt = doc
-            .field_witness_commitment
-            .map(|c| PyBytes::new_bound(py, &c));
+        let cmt = doc.field_witness_commitment.map(|c| PyBytes::new(py, &c));
         Ok((
             doc.provider_tag.as_u8(),
-            PyBytes::new_bound(py, &doc.master_vk.to_bytes()),
-            PyBytes::new_bound(py, &doc.peer_nonce),
+            PyBytes::new(py, &doc.master_vk.to_bytes()),
+            PyBytes::new(py, &doc.peer_nonce),
             doc.issued_unix,
             doc.deadline_unix,
             cmt,
-            PyBytes::new_bound(py, &doc.platform_quote),
-            PyBytes::new_bound(py, &doc.issuer_sdp_pubkey),
-            PyBytes::new_bound(py, &doc.master_sig),
+            PyBytes::new(py, &doc.platform_quote),
+            PyBytes::new(py, &doc.issuer_sdp_pubkey),
+            PyBytes::new(py, &doc.master_sig),
         ))
     }
 }
@@ -611,7 +596,7 @@ impl PyWindowsHardenedProvider {
 /// process software AEAD sealing key + acquires (or creates) the
 /// TPM-resident ECDSA-P256 attestation key under `tpm_key_name`.
 ///
-/// `tpm_key_name` is the NCrypt key handle name; daemons should use
+/// `tpm_key_name` is the `NCrypt` key handle name; daemons should use
 /// a stable per-install identifier (e.g. `"OL-confidential-attest-v1"`)
 /// so the same TPM key survives across daemon restarts.
 #[cfg(feature = "windows-tpm")]
@@ -623,10 +608,10 @@ fn fresh_windows_hardened_provider(tpm_key_name: &str) -> PyResult<PyWindowsHard
 }
 
 /// Fallback when the wheel wasn't built with `--features windows-tpm`.
-/// Surfaces a friendly error rather than a NameError on import.
+/// Surfaces a friendly error rather than a `NameError` on import.
 #[cfg(not(feature = "windows-tpm"))]
 #[pyfunction]
-fn fresh_windows_hardened_provider(_tpm_key_name: &str) -> PyResult<PyObject> {
+fn fresh_windows_hardened_provider(_tpm_key_name: &str) -> PyResult<Py<PyAny>> {
     Err(PyValueError::new_err(
         "WindowsHardenedProvider is disabled in this build. \
          Build the native wheel with `--features windows-tpm` on a \

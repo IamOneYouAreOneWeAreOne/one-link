@@ -52,6 +52,41 @@ def _ack(channel: _FakeChannel) -> dict:
     return decode_msg(channel.sent[-1])
 
 
+def _pin_channel_peer(d, peer_pub: bytes) -> str:
+    """Model the SAS-pinned transport precondition for privileged commands."""
+    peer_fp = fingerprint_of(peer_pub)
+    d.state.upsert_peer(
+        fingerprint=peer_fp,
+        short_id=peer_fp[:8],
+        pubkey=peer_pub,
+        hostname="self-phone",
+        trust_default="pinned",
+    )
+    return peer_fp
+
+
+def _enroll_channel_peer(d, peer_pub: bytes) -> str:
+    """Enroll the authenticated channel key as a trusted self device."""
+    root_priv, root_pub = _ed25519_pair()
+    cert = idag.encode_device_cert(
+        root_priv_seed=root_priv.private_bytes_raw(),
+        root_pub=root_pub,
+        device_pub=peer_pub,
+        device_kind="phone",
+    )
+    d.state.upsert_self_mesh_device(
+        root_pub=root_pub,
+        device_pub=peer_pub,
+        device_kind="phone",
+        label="Phone",
+        cert=cert,
+        local=False,
+        trusted=True,
+        safety_state="trusted",
+    )
+    return _pin_channel_peer(d, peer_pub)
+
+
 def _make_daemon(tmp_path: Path):
     from one_link.daemon import Daemon
 
@@ -94,8 +129,11 @@ def _remote_command(
     root_pub: bytes,
     action: str,
     scope: dict,
+    controller_priv: Ed25519PrivateKey | None = None,
 ) -> bytes:
-    controller_priv, controller_pub = _ed25519_pair()
+    if controller_priv is None:
+        controller_priv = Ed25519PrivateKey.generate()
+    controller_pub = controller_priv.public_key().public_bytes_raw()
     controller_cert = idag.encode_device_cert(
         root_priv_seed=root_seed,
         root_pub=root_pub,
@@ -117,14 +155,16 @@ def _remote_command(
 async def test_self_mesh_presence_frame_persists_and_acks(tmp_path: Path):
     d = _make_daemon(tmp_path)
     _, peer_pub = _ed25519_pair()
+    _enroll_channel_peer(d, peer_pub)
     channel = _FakeChannel(peer_pub)
+    now_ms = int(time.time() * 1000)
     await d._on_peer_message(channel, {
         "t": "SELF_MESH_PRESENCE",
         "id": "presence-1",
         "device_pub_b64": _b64u(peer_pub),
         "state": "awake",
         "sequence": 7,
-        "updated_ms": 12345,
+        "updated_ms": now_ms,
         "network": "wifi",
         "free_bytes": 4096,
         "route": "peer_channel",
@@ -140,6 +180,87 @@ async def test_self_mesh_presence_frame_persists_and_acks(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_self_mesh_presence_rejects_pinned_but_unenrolled_peer(tmp_path: Path):
+    d = _make_daemon(tmp_path)
+    _, peer_pub = _ed25519_pair()
+    _pin_channel_peer(d, peer_pub)
+    channel = _FakeChannel(peer_pub)
+
+    await d._on_peer_message(channel, {
+        "t": "SELF_MESH_PRESENCE",
+        "id": "presence-unenrolled",
+        "device_pub_b64": _b64u(peer_pub),
+        "state": "awake",
+        "sequence": 1,
+        "updated_ms": int(time.time() * 1000),
+    })
+
+    assert _ack(channel)["rejected"] == "self_mesh_presence_rejected: invalid"
+    assert d.state.list_self_mesh_presence() == []
+
+
+@pytest.mark.asyncio
+async def test_self_mesh_presence_rejects_identity_spoof(tmp_path: Path):
+    d = _make_daemon(tmp_path)
+    _, peer_pub = _ed25519_pair()
+    _, spoofed_pub = _ed25519_pair()
+    _enroll_channel_peer(d, peer_pub)
+    channel = _FakeChannel(peer_pub)
+
+    await d._on_peer_message(channel, {
+        "t": "SELF_MESH_PRESENCE",
+        "id": "presence-spoof",
+        "device_pub_b64": _b64u(spoofed_pub),
+        "state": "awake",
+        "sequence": 1,
+        "updated_ms": int(time.time() * 1000),
+    })
+
+    assert _ack(channel)["rejected"] == "self_mesh_presence_rejected: invalid"
+    assert d.state.list_self_mesh_presence() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"unexpected": "alias"},
+        {"sequence": True},
+        {"updated_ms": True},
+        {"battery_pct": True},
+        {"latency_ms": float("nan")},
+        {"device_pub_b64": "A" * 44},
+    ],
+)
+async def test_self_mesh_presence_rejects_noncanonical_or_ambiguous_fields(
+    tmp_path: Path,
+    mutation: dict,
+):
+    d = _make_daemon(tmp_path)
+    _, peer_pub = _ed25519_pair()
+    _enroll_channel_peer(d, peer_pub)
+    channel = _FakeChannel(peer_pub)
+    frame = {
+        "t": "SELF_MESH_PRESENCE",
+        "id": "presence-invalid",
+        "device_pub_b64": _b64u(peer_pub),
+        "state": "awake",
+        "sequence": 1,
+        "updated_ms": int(time.time() * 1000),
+    }
+    frame.update(mutation)
+
+    await d._handle_self_mesh_presence(
+        channel,
+        frame,
+        fingerprint_of(peer_pub),
+    )
+
+    assert _ack(channel)["rejected"] == "self_mesh_presence_rejected: invalid"
+    assert d.state.list_self_mesh_presence() == []
+
+
+@pytest.mark.asyncio
 async def test_remote_instruction_manifest_executes_once_and_replay_rejects(
     tmp_path: Path,
 ):
@@ -149,14 +270,16 @@ async def test_remote_instruction_manifest_executes_once_and_replay_rejects(
     _register_self_mesh_target(d, root_seed, root_pub)
     target = tmp_path / "note.txt"
     target.write_text("for the people\n", encoding="utf-8")
+    peer_priv, peer_pub = _ed25519_pair()
     command = _remote_command(
         d,
         root_seed=root_seed,
         root_pub=root_pub,
         action="pull_file_manifest",
         scope={"path": str(target)},
+        controller_priv=peer_priv,
     )
-    _, peer_pub = _ed25519_pair()
+    _pin_channel_peer(d, peer_pub)
     channel = _FakeChannel(peer_pub)
 
     await d._on_peer_message(channel, {
@@ -193,14 +316,15 @@ async def test_remote_instruction_requires_registered_local_root(tmp_path: Path)
     root_seed = root_priv.private_bytes_raw()
     target = tmp_path / "note.txt"
     target.write_text("we are one\n", encoding="utf-8")
+    peer_priv, peer_pub = _ed25519_pair()
     command = _remote_command(
         d,
         root_seed=root_seed,
         root_pub=root_pub,
         action="pull_file_manifest",
         scope={"path": str(target)},
+        controller_priv=peer_priv,
     )
-    _, peer_pub = _ed25519_pair()
     channel = _FakeChannel(peer_pub)
 
     await d._on_peer_message(channel, {
@@ -211,7 +335,37 @@ async def test_remote_instruction_requires_registered_local_root(tmp_path: Path)
 
     ack = _ack(channel)
     assert ack["t"] == "ACK"
-    assert "no local self-mesh target for root" in ack["rejected"]
+    assert ack["rejected"] == "self_mesh_instruction_rejected: invalid"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"unexpected": "alias"},
+        {"command_b64": True},
+        {"command_b64": "A" * 11_000},
+        {"ts": True},
+    ],
+)
+async def test_remote_instruction_outer_frame_fails_closed(
+    tmp_path: Path,
+    mutation: dict,
+):
+    d = _make_daemon(tmp_path)
+    _, peer_pub = _ed25519_pair()
+    peer_fp = _pin_channel_peer(d, peer_pub)
+    channel = _FakeChannel(peer_pub)
+    frame = {
+        "t": "SELF_MESH_REMOTE_INSTRUCTION",
+        "id": "malformed-command",
+        "command_b64": _b64u(b"{}"),
+    }
+    frame.update(mutation)
+
+    await d._handle_self_mesh_remote_instruction(channel, frame, peer_fp)
+
+    assert _ack(channel)["rejected"] == "self_mesh_instruction_rejected: invalid"
 
 
 @pytest.mark.asyncio
@@ -233,6 +387,7 @@ async def test_remote_instruction_send_file_queues_live_send(tmp_path: Path):
 
     d.resolve_for_send = fake_resolve
     d.send_file = fake_send_file
+    peer_priv, peer_pub = _ed25519_pair()
     command = _remote_command(
         d,
         root_seed=root_seed,
@@ -243,8 +398,9 @@ async def test_remote_instruction_send_file_queues_live_send(tmp_path: Path):
             "recipient_fp": "ab" * 32,
             "max_bytes": 64,
         },
+        controller_priv=peer_priv,
     )
-    _, peer_pub = _ed25519_pair()
+    _pin_channel_peer(d, peer_pub)
     channel = _FakeChannel(peer_pub)
 
     await d._on_peer_message(channel, {
@@ -266,14 +422,16 @@ async def test_remote_instruction_rejects_paths_outside_allowed_roots(tmp_path: 
     _register_self_mesh_target(d, root_seed, root_pub)
     target = tmp_path / "blocked.txt"
     target.write_text("not in allowed root\n", encoding="utf-8")
+    peer_priv, peer_pub = _ed25519_pair()
     command = _remote_command(
         d,
         root_seed=root_seed,
         root_pub=root_pub,
         action="pull_file_manifest",
         scope={"path": str(target)},
+        controller_priv=peer_priv,
     )
-    _, peer_pub = _ed25519_pair()
+    _pin_channel_peer(d, peer_pub)
     channel = _FakeChannel(peer_pub)
 
     await d._on_peer_message(channel, {
@@ -297,14 +455,15 @@ async def test_remote_instruction_requires_action_capability(tmp_path: Path):
     _register_self_mesh_target(d, root_seed, root_pub)
     target = tmp_path / "note.txt"
     target.write_text("cap gated\n", encoding="utf-8")
+    peer_priv, peer_pub = _ed25519_pair()
     command = _remote_command(
         d,
         root_seed=root_seed,
         root_pub=root_pub,
         action="pull_file_manifest",
         scope={"path": str(target)},
+        controller_priv=peer_priv,
     )
-    _, peer_pub = _ed25519_pair()
     peer_fp = fingerprint_of(peer_pub)
     d.state.upsert_peer(
         fingerprint=peer_fp,
@@ -329,6 +488,44 @@ async def test_remote_instruction_requires_action_capability(tmp_path: Path):
     assert requests == [(peer_fp, "self_mesh_manifest")]
 
 
+@pytest.mark.asyncio
+async def test_remote_instruction_cannot_be_relayed_by_different_pinned_peer(
+    tmp_path: Path,
+):
+    d = _make_daemon(tmp_path)
+    root_priv, root_pub = _ed25519_pair()
+    root_seed = root_priv.private_bytes_raw()
+    _register_self_mesh_target(d, root_seed, root_pub)
+    target = tmp_path / "private.txt"
+    target.write_text("owner only\n", encoding="utf-8")
+    controller_priv, _ = _ed25519_pair()
+    command = _remote_command(
+        d,
+        root_seed=root_seed,
+        root_pub=root_pub,
+        action="pull_file_manifest",
+        scope={"path": str(target)},
+        controller_priv=controller_priv,
+    )
+    _, relay_pub = _ed25519_pair()
+    relay_fp = _pin_channel_peer(d, relay_pub)
+    channel = _FakeChannel(relay_pub)
+
+    await d._handle_self_mesh_remote_instruction(
+        channel,
+        {
+            "t": "SELF_MESH_REMOTE_INSTRUCTION",
+            "id": "captured-command",
+            "command_b64": _b64u(command),
+        },
+        relay_fp,
+    )
+
+    assert _ack(channel)["rejected"] == "self_mesh_instruction_rejected: invalid"
+    events = [row["event"] for row in d.state.list_self_mesh_audit()]
+    assert events == ["command_rejected"]
+
+
 def test_choose_self_mesh_route_selects_best_device(tmp_path: Path):
     d = _make_daemon(tmp_path)
     root_priv, root_pub = _ed25519_pair()
@@ -338,7 +535,7 @@ def test_choose_self_mesh_route_selects_best_device(tmp_path: Path):
         device_pub=d.me.public_bytes,
         state="awake",
         sequence=10,
-        updated_ms=10_000,
+        updated_ms=int(time.time() * 1000),
         network="ethernet",
         free_bytes=1_000_000,
         route="self_lan",

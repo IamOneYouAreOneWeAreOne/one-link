@@ -13,8 +13,8 @@
 //! +--------+------------------------------------------------------+
 //! | 0      | hlc_timestamp: u64 LE (hybrid logical clock)         |
 //! | 8      | actor_id: [u8; 32] (peer fingerprint / CRDT actor)   |
-//! | 40     | chunk_log_anchor: u64 LE (offset within chunk_log    |
-//! |        |   that this manifest commit pairs with — ADR-0005)  |
+//! | 40     | chunk_log_anchor: u64 LE (file_id:u32 || offset:u32; |
+//! |        |   legacy high-word-zero values mean file 1)          |
 //! | 48     | reserved: [u8; 4] (must be zero)                     |
 //! +--------+------------------------------------------------------+
 //! Total: 52 bytes.
@@ -27,6 +27,9 @@ use crate::error::ChunkStoreError;
 
 /// Length of the manifest-record header in bytes.
 pub const MANIFEST_RECORD_HEADER_LEN: usize = 52;
+
+/// Maximum manifest body that fits in one bounded WAL record.
+pub const MAX_MANIFEST_BODY_LEN: usize = ol_wal::MAX_PAYLOAD_LEN - MANIFEST_RECORD_HEADER_LEN;
 
 /// Kind byte for the manifest-log WAL record.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -84,9 +87,9 @@ pub struct ManifestRecord {
     pub flags: u8,
     /// Hybrid logical clock timestamp.
     pub hlc_timestamp: u64,
-    /// 32-byte peer fingerprint (CRDT actor_id).
+    /// 32-byte peer fingerprint (CRDT `actor_id`).
     pub actor_id: [u8; 32],
-    /// Offset within the chunk_log that this manifest commit pairs with.
+    /// Packed `(file_id, offset)` within the rotating `chunk_log` family.
     /// Zero for records that don't reference a chunk (capability events,
     /// share-links, etc).
     pub chunk_log_anchor: u64,
@@ -95,8 +98,20 @@ pub struct ManifestRecord {
 }
 
 impl ManifestRecord {
-    /// Encode to a (kind_byte, flags_byte, payload_bytes) tuple.
-    pub fn encode(&self) -> (u8, u8, Vec<u8>) {
+    /// Validate resource and kind-specific invariants without allocating.
+    pub fn validate(&self) -> Result<(), ChunkStoreError> {
+        if self.body.len() > MAX_MANIFEST_BODY_LEN {
+            return Err(ChunkStoreError::MalformedRecord {
+                offset: 0,
+                reason: "manifest body exceeds WAL record maximum",
+            });
+        }
+        Ok(())
+    }
+
+    /// Encode to a (`kind_byte`, `flags_byte`, `payload_bytes`) tuple.
+    pub fn encode(&self) -> Result<(u8, u8, Vec<u8>), ChunkStoreError> {
+        self.validate()?;
         let mut payload = Vec::with_capacity(MANIFEST_RECORD_HEADER_LEN + self.body.len());
         payload.extend_from_slice(&self.hlc_timestamp.to_le_bytes());
         payload.extend_from_slice(&self.actor_id);
@@ -104,10 +119,10 @@ impl ManifestRecord {
         payload.extend_from_slice(&[0u8; 4]); // reserved
         debug_assert_eq!(payload.len(), MANIFEST_RECORD_HEADER_LEN);
         payload.extend_from_slice(&self.body);
-        (self.kind.as_u8(), self.flags, payload)
+        Ok((self.kind.as_u8(), self.flags, payload))
     }
 
-    /// Decode from a (kind_byte, flags_byte, payload_bytes) tuple.
+    /// Decode from a (`kind_byte`, `flags_byte`, `payload_bytes`) tuple.
     ///
     /// # Errors
     ///
@@ -135,14 +150,16 @@ impl ManifestRecord {
             });
         }
         let body = payload[MANIFEST_RECORD_HEADER_LEN..].to_vec();
-        Ok(Self {
+        let record = Self {
             kind,
             flags,
             hlc_timestamp,
             actor_id,
             chunk_log_anchor,
             body,
-        })
+        };
+        record.validate()?;
+        Ok(record)
     }
 }
 
@@ -164,7 +181,7 @@ mod tests {
     #[test]
     fn round_trip_manifest_version() {
         let r = sample(ManifestRecordKind::ManifestVersion);
-        let (kind, flags, payload) = r.encode();
+        let (kind, flags, payload) = r.encode().unwrap();
         let parsed = ManifestRecord::decode(kind, flags, &payload).unwrap();
         assert_eq!(parsed, r);
     }
@@ -180,7 +197,7 @@ mod tests {
             ManifestRecordKind::Sentinel,
         ] {
             let r = sample(kind);
-            let (kind_byte, flags, payload) = r.encode();
+            let (kind_byte, flags, payload) = r.encode().unwrap();
             let parsed = ManifestRecord::decode(kind_byte, flags, &payload).unwrap();
             assert_eq!(parsed.kind, kind);
         }
@@ -190,7 +207,7 @@ mod tests {
     fn round_trip_empty_body() {
         let mut r = sample(ManifestRecordKind::CapabilityGrant);
         r.body.clear();
-        let (kind, flags, payload) = r.encode();
+        let (kind, flags, payload) = r.encode().unwrap();
         assert_eq!(payload.len(), MANIFEST_RECORD_HEADER_LEN);
         let parsed = ManifestRecord::decode(kind, flags, &payload).unwrap();
         assert!(parsed.body.is_empty());
@@ -199,7 +216,7 @@ mod tests {
     #[test]
     fn rejects_unknown_kind() {
         let r = sample(ManifestRecordKind::ManifestVersion);
-        let (_kind, flags, payload) = r.encode();
+        let (_kind, flags, payload) = r.encode().unwrap();
         let result = ManifestRecord::decode(0x99, flags, &payload);
         assert!(matches!(
             result,
@@ -219,11 +236,21 @@ mod tests {
     #[test]
     fn rejects_nonzero_reserved() {
         let r = sample(ManifestRecordKind::ManifestVersion);
-        let (kind, flags, mut payload) = r.encode();
+        let (kind, flags, mut payload) = r.encode().unwrap();
         payload[50] = 0x42; // poison reserved byte (in [48..52] range)
         let result = ManifestRecord::decode(kind, flags, &payload);
         assert!(matches!(
             result,
+            Err(ChunkStoreError::MalformedRecord { .. })
+        ));
+    }
+
+    #[test]
+    fn encode_rejects_oversized_body_before_payload_copy() {
+        let mut record = sample(ManifestRecordKind::ManifestVersion);
+        record.body = vec![0u8; MAX_MANIFEST_BODY_LEN + 1];
+        assert!(matches!(
+            record.encode(),
             Err(ChunkStoreError::MalformedRecord { .. })
         ));
     }

@@ -1,20 +1,21 @@
 //! Adversarial test vectors for Sphinx Coherence.
 //!
-//! Every-byte-flip, cross-circuit, every known onion-routing attack
-//! class. These are the regression bricks against future "optimizations"
-//! that accidentally weaken the security guarantees.
+//! Bounded tamper, parser, wrong-key, and cross-circuit regression
+//! vectors. They cover the cases implemented below, not every known
+//! onion-routing attack and not traffic analysis or deployment behavior.
 
 use rand::rngs::OsRng;
 use rand::Rng;
 
 use ol_onion::sphinx::core::{
     build_sphinx_onion, generate_static_keypair, peel_sphinx_layer, SphinxHop, SphinxPacket,
-    SphinxPeelOutcome, SPHINX_PACKET_LEN,
+    SphinxPeelOutcome, SPHINX_MAX_USER_PAYLOAD, SPHINX_PACKET_LEN,
 };
 use ol_onion::sphinx::pq::{
     build_pq_sphinx_onion, generate_pq_keypair, peel_pq_sphinx_entry, PqSphinxHop, PqSphinxPacket,
-    PqSphinxPeelOutcome,
+    PqSphinxPeelOutcome, ML_KEM_CT_LEN,
 };
+use ol_onion::sphinx::primitives::{HEADER_LEN, MAX_HOPS};
 use ol_onion::{HopId, OnionError};
 
 fn make_relay() -> (curve25519_dalek::scalar::Scalar, SphinxHop) {
@@ -37,12 +38,11 @@ fn make_relay() -> (curve25519_dalek::scalar::Scalar, SphinxHop) {
 /// application layer is expected to AEAD-encrypt its inner content.
 /// This test verifies the property at each region:
 ///
-/// - Header-region flips (bytes 1..289): rejected with AeadFail.
+/// - Header-region flips (bytes 1..289): rejected with `AeadFail`.
 /// - Payload-region flips (bytes 289..): may decrypt to different
 ///   bytes, but the user-level AEAD would catch that.
 #[test]
 fn adversarial_header_region_byte_flips_rejected() {
-    use ol_onion::sphinx::primitives::HEADER_LEN;
     let (dest_sk, dest) = make_relay();
     let (eph_sk, _) = generate_static_keypair(&mut OsRng);
     let packet = build_sphinx_onion(&eph_sk, &[dest], b"adv-test", &mut OsRng).unwrap();
@@ -54,12 +54,11 @@ fn adversarial_header_region_byte_flips_rejected() {
     for i in 1..header_region_end {
         let mut tampered = *bytes;
         tampered[i] ^= 0x01;
-        let pkt = match SphinxPacket::from_bytes(&tampered) {
-            Ok(p) => p,
-            Err(_) => continue,
+        let Ok(pkt) = SphinxPacket::from_bytes(&tampered) else {
+            continue;
         };
         match peel_sphinx_layer(&dest_sk, &pkt) {
-            Err(OnionError::AeadFail) | Err(OnionError::SmallOrderPubkey) => {} // tamper detected
+            Err(OnionError::AeadFail | OnionError::SmallOrderPubkey) => {} // tamper detected
             Err(other) => panic!("byte {i} flip: unexpected error {other:?}"),
             Ok(out) => panic!("byte {i} flip: unexpectedly succeeded with {out:?}"),
         }
@@ -72,7 +71,6 @@ fn adversarial_header_region_byte_flips_rejected() {
 /// which a caller-side AEAD would catch.
 #[test]
 fn adversarial_payload_region_flips_change_user_payload() {
-    use ol_onion::sphinx::primitives::HEADER_LEN;
     let (dest_sk, dest) = make_relay();
     let (eph_sk, _) = generate_static_keypair(&mut OsRng);
     // Use a longer payload so most flips land inside user data.
@@ -135,10 +133,10 @@ fn adversarial_random_garbage_decode_typed_err_no_panic() {
     // fails at peel time.
     for seed in 0u32..10_000 {
         let mut bytes = [0u8; SPHINX_PACKET_LEN];
-        let mut s = seed as u64;
+        let mut s = u64::from(seed);
         for b in &mut bytes {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
-            *b = (s >> 33) as u8;
+            s = s.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            *b = (s >> 33).to_le_bytes()[0];
         }
         let _ = SphinxPacket::from_bytes(&bytes);
         // No panic = pass.
@@ -193,9 +191,11 @@ fn adversarial_relay_attempts_inner_peel_rejected() {
     let packet = build_sphinx_onion(&eph_sk, &[r1.clone(), r2, dest], b"x", &mut OsRng).unwrap();
 
     let outcome = peel_sphinx_layer(&r1_sk, &packet).unwrap();
-    let inner = match outcome {
-        SphinxPeelOutcome::Forward { next_packet, .. } => next_packet,
-        _ => panic!(),
+    let SphinxPeelOutcome::Forward {
+        next_packet: inner, ..
+    } = outcome
+    else {
+        panic!();
     };
     // r1 tries to peel inner with its own key.
     let err = peel_sphinx_layer(&r1_sk, &inner).unwrap_err();
@@ -224,17 +224,17 @@ fn make_pq_entry() -> (
     <ml_kem::MlKem768 as ml_kem::KemCore>::DecapsulationKey,
     PqSphinxHop,
 ) {
-    let (x_sk, x_pk) = generate_static_keypair(&mut OsRng);
-    let (pq_dk, pq_ek) = generate_pq_keypair(&mut OsRng);
+    let (relay_secret, relay_public) = generate_static_keypair(&mut OsRng);
+    let (pq_receiver_key, pq_sender_key) = generate_pq_keypair(&mut OsRng);
     let mut id = [0u8; 32];
     OsRng.fill(&mut id);
     (
-        x_sk,
-        pq_dk,
+        relay_secret,
+        pq_receiver_key,
         PqSphinxHop {
             id: HopId::from_bytes(id),
-            static_x_pk: x_pk,
-            static_pq_pk: Some(pq_ek),
+            static_x_pk: relay_public,
+            static_pq_pk: Some(pq_sender_key),
         },
     )
 }
@@ -257,13 +257,13 @@ fn adversarial_pq_intermediate_attempts_entry_peel_rejected() {
     // This catches a daemon bug where intermediate hops accidentally
     // use the entry-mode peel function.
     let (entry_x_sk, entry_pq_dk, entry) = make_pq_entry();
-    let (mid_x_sk, mid_x_pk) = generate_static_keypair(&mut OsRng);
+    let (mid_secret, mid_public) = generate_static_keypair(&mut OsRng);
     let (_mid_pq_dk, _) = generate_pq_keypair(&mut OsRng);
     let mut mid_id = [0u8; 32];
     OsRng.fill(&mut mid_id);
     let mid = PqSphinxHop {
         id: HopId::from_bytes(mid_id),
-        static_x_pk: mid_x_pk,
+        static_x_pk: mid_public,
         static_pq_pk: None, // intermediate hops don't have PQ pubkeys in this design
     };
     let (eph_sk, _) = generate_static_keypair(&mut OsRng);
@@ -271,22 +271,22 @@ fn adversarial_pq_intermediate_attempts_entry_peel_rejected() {
 
     // Entry peels with hybrid.
     let outcome = peel_pq_sphinx_entry(&entry_x_sk, &entry_pq_dk, &packet).unwrap();
-    let next = match outcome {
-        PqSphinxPeelOutcome::Forward { next_packet, .. } => next_packet,
-        _ => panic!(),
+    let PqSphinxPeelOutcome::Forward {
+        next_packet: next, ..
+    } = outcome
+    else {
+        panic!();
     };
 
     // Now an attacker (or buggy daemon) tries to peel the forwarded
     // packet at the mid hop using ENTRY-mode (with some PQ key).
     let (some_pq_dk, _) = generate_pq_keypair(&mut OsRng);
-    let err = peel_pq_sphinx_entry(&mid_x_sk, &some_pq_dk, &next).unwrap_err();
+    let err = peel_pq_sphinx_entry(&mid_secret, &some_pq_dk, &next).unwrap_err();
     assert_eq!(err, OnionError::AeadFail);
 }
 
 #[test]
 fn adversarial_pq_header_region_byte_flips_rejected() {
-    use ol_onion::sphinx::pq::ML_KEM_CT_LEN;
-    use ol_onion::sphinx::primitives::HEADER_LEN;
     let (entry_x_sk, entry_pq_dk, entry) = make_pq_entry();
     let (eph_sk, _) = generate_static_keypair(&mut OsRng);
     let packet = build_pq_sphinx_onion(&eph_sk, &[entry], b"adv", &mut OsRng).unwrap();
@@ -297,13 +297,12 @@ fn adversarial_pq_header_region_byte_flips_rejected() {
     for byte_idx in (1..header_region_end).step_by(47) {
         let mut tampered = bytes.clone();
         tampered[byte_idx] ^= 0x01;
-        let pkt = match PqSphinxPacket::from_bytes(&tampered) {
-            Ok(p) => p,
-            Err(_) => continue,
+        let Ok(pkt) = PqSphinxPacket::from_bytes(&tampered) else {
+            continue;
         };
         let result = peel_pq_sphinx_entry(&entry_x_sk, &entry_pq_dk, &pkt);
         match result {
-            Err(OnionError::AeadFail) | Err(OnionError::SmallOrderPubkey) => {}
+            Err(OnionError::AeadFail | OnionError::SmallOrderPubkey) => {}
             Err(other) => panic!("byte {byte_idx} flip: unexpected error {other:?}"),
             Ok(out) => panic!("byte {byte_idx} flip: unexpectedly succeeded with {out:?}"),
         }
@@ -328,7 +327,6 @@ fn adversarial_empty_payload_works() {
 fn adversarial_max_payload_works() {
     let (dest_sk, dest) = make_relay();
     let (eph_sk, _) = generate_static_keypair(&mut OsRng);
-    use ol_onion::sphinx::core::SPHINX_MAX_USER_PAYLOAD;
     let payload = vec![0xAA; SPHINX_MAX_USER_PAYLOAD];
     let packet = build_sphinx_onion(&eph_sk, &[dest], &payload, &mut OsRng).unwrap();
     let outcome = peel_sphinx_layer(&dest_sk, &packet).unwrap();
@@ -340,7 +338,6 @@ fn adversarial_max_payload_works() {
 
 #[test]
 fn adversarial_max_hops_round_trip() {
-    use ol_onion::sphinx::primitives::MAX_HOPS;
     let pairs: Vec<_> = (0..MAX_HOPS).map(|_| make_relay()).collect();
     let circuit: Vec<SphinxHop> = pairs.iter().map(|(_, h)| h.clone()).collect();
     let (eph_sk, _) = generate_static_keypair(&mut OsRng);
@@ -365,8 +362,7 @@ fn adversarial_max_hops_round_trip() {
 
 #[test]
 fn adversarial_too_many_hops_rejected() {
-    use ol_onion::sphinx::primitives::MAX_HOPS;
-    let pairs: Vec<_> = (0..MAX_HOPS + 1).map(|_| make_relay()).collect();
+    let pairs: Vec<_> = (0..=MAX_HOPS).map(|_| make_relay()).collect();
     let circuit: Vec<SphinxHop> = pairs.iter().map(|(_, h)| h.clone()).collect();
     let (eph_sk, _) = generate_static_keypair(&mut OsRng);
     let err = build_sphinx_onion(&eph_sk, &circuit, b"x", &mut OsRng).unwrap_err();
@@ -382,7 +378,6 @@ fn adversarial_empty_circuit_rejected() {
 
 #[test]
 fn adversarial_payload_oversize_rejected() {
-    use ol_onion::sphinx::core::SPHINX_MAX_USER_PAYLOAD;
     let (_, dest) = make_relay();
     let (eph_sk, _) = generate_static_keypair(&mut OsRng);
     let huge = vec![0u8; SPHINX_MAX_USER_PAYLOAD + 1];

@@ -4,14 +4,14 @@
 //!
 //!   - **PING / PONG**: liveness probe. Used by routing-table head
 //!     replacement (PING on bucket-full) + maintenance refresh.
-//!   - **STORE / STORE_ACK**: publish a signed record to the
+//!   - **`STORE` / `STORE_ACK`**: publish a signed record to the
 //!     receiver's local store. Receiver verifies signature before
 //!     storing; rejects bad signatures with a typed error code.
-//!   - **FIND_NODE / FIND_NODE_RESULT**: ask the receiver for the K
+//!   - **`FIND_NODE` / `FIND_NODE_RESULT`**: ask the receiver for the K
 //!     closest peers it knows to `target`. Receiver responds with
-//!     its routing-table closest_to(target).
-//!   - **FIND_VALUE / FIND_VALUE_RESULT**: ask for the value at
-//!     `target` (typically a NodeId being looked up). Receiver
+//!     its routing-table `closest_to(target)`.
+//!   - **`FIND_VALUE` / `FIND_VALUE_RESULT`**: ask for the value at
+//!     `target` (typically a `NodeId` being looked up). Receiver
 //!     returns the signed record if it has it, OR the K closest
 //!     peers otherwise (then the caller iteratively queries them).
 //!
@@ -33,25 +33,25 @@ use crate::record::SignedRecord;
 /// dated more than this far in the future or past are rejected.
 pub const MAX_CLOCK_SKEW_SECS: u64 = 60 * 5; // 5 minutes
 
-/// Maximum K results in a single FIND_NODE / FIND_VALUE response.
+/// Maximum K results in a single `FIND_NODE` / `FIND_VALUE` response.
 /// Bounded to keep response sizes amplification-resistant.
 pub const MAX_FIND_RESULTS: usize = 32;
 
 /// A 128-bit random nonce per envelope. Used together with the
-/// envelope's sender NodeId to deduplicate replays within a window.
+/// envelope's sender `NodeId` to deduplicate replays within a window.
 pub type Nonce = [u8; 16];
 
 /// Common header shared by every RPC envelope.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Header {
-    /// NodeId of the sender. The receiver uses this to refresh the
-    /// sender's routing-table entry on every received envelope.
+    /// Claimed `NodeId` of the sender. This field alone is not an identity
+    /// proof; routing admission requires an authenticated signed record.
     pub sender: NodeId,
     /// 16-byte random nonce. Receiver rejects duplicates in a
     /// recent-window LRU.
     pub nonce: Nonce,
     /// Unix-seconds wall clock from the sender. Rejected if outside
-    /// [now - MAX_CLOCK_SKEW, now + MAX_CLOCK_SKEW].
+    /// `[now - MAX_CLOCK_SKEW, now + MAX_CLOCK_SKEW]`.
     pub timestamp_unix: u64,
 }
 
@@ -67,7 +67,7 @@ impl Header {
     }
 
     /// Is this header acceptable to a receiver whose clock is `now_unix`?
-    /// Checks the timestamp is within [now - MAX_CLOCK_SKEW, now + MAX_CLOCK_SKEW].
+    /// Checks the timestamp is within `[now - MAX_CLOCK_SKEW, now + MAX_CLOCK_SKEW]`.
     #[must_use]
     pub fn is_within_skew(&self, now_unix: u64) -> bool {
         let lo = now_unix.saturating_sub(MAX_CLOCK_SKEW_SECS);
@@ -86,13 +86,13 @@ pub enum Request {
     Store(SignedRecord),
     /// "Give me the K closest peers you know to `target`."
     FindNode {
-        /// NodeId being searched for.
+        /// `NodeId` being searched for.
         target: NodeId,
     },
     /// "Give me the value for `target`, or the K closest peers if
     /// you don't have it."
     FindValue {
-        /// NodeId being looked up.
+        /// `NodeId` being looked up.
         target: NodeId,
     },
 }
@@ -100,22 +100,22 @@ pub enum Request {
 /// RPC response kinds, paired with their request types.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Response {
-    /// PING response — alive.
+    /// `PING` response — alive.
     Pong,
-    /// STORE response — accepted or rejected with a typed code.
+    /// `STORE` response — accepted or rejected with a typed code.
     StoreResult(StoreOutcome),
-    /// FIND_NODE response — closest K peers known to the receiver.
+    /// `FIND_NODE` response — closest K peers known to the receiver.
     FindNodeResult {
-        /// Up to K peer NodeIds, sorted ascending by XOR distance
+        /// Up to K peer `NodeIds`, sorted ascending by XOR distance
         /// to the original `target`.
         closest: Vec<NodeId>,
     },
-    /// FIND_VALUE response — either the signed record, or K closest
+    /// `FIND_VALUE` response — either the signed record, or K closest
     /// if the receiver doesn't hold the record.
     FindValueResult(FindValueOutcome),
 }
 
-/// STORE outcome: receiver accepted or rejected the record.
+/// `STORE` outcome: receiver accepted or rejected the record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StoreOutcome {
     /// Accepted; record is now in the receiver's local store.
@@ -125,13 +125,13 @@ pub enum StoreOutcome {
     /// Rejected — record was already expired at receipt.
     Expired,
     /// Rejected — record's claimed publisher doesn't match the
-    /// record's NodeId derivation.
+    /// record's `NodeId` derivation.
     PublisherMismatch,
     /// Rejected — receiver is rate-limiting this sender.
     RateLimited,
 }
 
-/// FIND_VALUE outcome: either we have the record, or we have closer
+/// `FIND_VALUE` outcome: either we have the record, or we have closer
 /// peers to recommend.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FindValueOutcome {
@@ -139,7 +139,7 @@ pub enum FindValueOutcome {
     /// verifies the signature before trusting.
     Found(SignedRecord),
     /// Receiver doesn't have it but knows these closer peers.
-    /// Up to K NodeIds, sorted ascending by XOR distance to target.
+    /// Up to K `NodeIds`, sorted ascending by XOR distance to target.
     Closer(Vec<NodeId>),
 }
 

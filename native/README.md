@@ -1,9 +1,18 @@
 # One Link native — Rust hot-path crates
 
+> **Capability boundary:** crate presence and crate-level tests do not by
+> themselves prove daemon/UI wiring or packaged-release availability. Current
+> capable daemons use the indexed native transfer and identity-bound QUIC file
+> lanes only after runtime capability/ABI checks. Filesystem mount crates and
+> other research primitives remain unadvertised until their application and
+> physical-platform gates pass.
+
 This is the Cargo workspace for One Link's file engine v2 native runtime.
-Per [`../docs/FILE_ENGINE_V2_PLAN.md`](../docs/FILE_ENGINE_V2_PLAN.md),
-hot-path code (chunk store, AEAD pipeline, transport, FUSE/FSKit/Dokan) lives
-here as Rust crates that the existing Python daemon imports via pyo3.
+Per [`../docs/FILE_ENGINE_V2_PLAN.md`](../docs/FILE_ENGINE_V2_PLAN.md), hot-path
+code lives here as Rust crates exposed selectively through pyo3. Chunk store,
+AEAD, transport, and the Linux `ol_fuse` callback binding have real runtime
+paths. The macOS `ol_fskit` and Windows `ol_winfs` crates remain interface
+scaffolds and are not product mount capabilities.
 
 ## Layout
 
@@ -18,11 +27,12 @@ native/
 ├── ol_chunk_store/             # Phase A1: chunk_log + manifest_log + LSM + bloom + WAL coupling
 ├── ol_quic/                    # Phase A2: QUIC transport via quinn + identity-bound TLS
 │
-├── one_link_native/            # The pyo3 umbrella binding crate; what Python imports
-│   ├── Cargo.toml
-│   └── src/                    # chunk / aead / wal / store / quic submodules
-│
-└── one_link_native-stubs/      # PEP-561 type stubs (loaded by Python type checkers)
+└── one_link_native/            # The pyo3 umbrella binding crate; what Python imports
+    ├── Cargo.toml
+    ├── src/                    # chunk / aead / wal / store / quic submodules
+    ├── __init__.pyi            # exact top-level runtime export contract
+    ├── *.pyi                   # one PEP-561 stub per native submodule
+    └── py.typed                # inline typing marker shipped in every wheel
 ```
 
 ## Architectural decisions
@@ -136,7 +146,7 @@ Current dep audit (Phase A1 + A2):
 | `crc32c` | Apache-2.0 / MIT | None |
 | `bloomfilter` | MIT / Apache-2.0 | None |
 | `quinn`, `quinn-proto`, `quinn-udp` | Apache-2.0 / MIT | None; pure Rust QUIC, used by Cloudflare/iroh/veilid |
-| `rustls`, `rustls-pemfile`, `rustls-pki-types` | Apache-2.0 / ISC / MIT | None; rustls is the de-facto Rust TLS |
+| `rustls`, `rustls-pki-types` | Apache-2.0 / MIT | None; typed PKI APIs avoid the unmaintained `rustls-pemfile` compatibility crate |
 | `rcgen` | Apache-2.0 / MIT | None; generates self-signed certs |
 | `ring` | ISC / MIT-style | None; cryptography primitives |
 | `ed25519-dalek` | BSD-3-Clause | None |

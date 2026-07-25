@@ -96,7 +96,9 @@ automated tests or explicit manual evidence.
 - Packaged HTTPS endpoint negotiates ALPN `http/1.1`, not `h2`.
 - Packaged HTTPS endpoint serves a two-certificate chain.
 - Release command:
-  `python scripts/validate_packaged_artifact.py --artifact dist/one-link/one-link.exe --spec build/one-link.spec`
+  `python scripts/validate_packaged_artifact.py --artifact dist/one-link --spec build/one-link.spec`
+  (pass the complete onedir so the gate can reject leaked preview
+  models/ONNX Runtime as well as validate the launcher and generated spec)
 
 ## Current Phase 1 Focus
 

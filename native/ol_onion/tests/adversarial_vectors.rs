@@ -1,4 +1,4 @@
-//! Adversarial test vectors for ol_onion.
+//! Adversarial test vectors for `ol_onion`.
 //!
 //! Catches known-attack patterns + edge cases that random property
 //! tests might miss.
@@ -36,11 +36,12 @@ fn adversarial_relay_cannot_decrypt_inner_layer() {
     let circuit = Circuit::new(vec![r1, r2.clone(), dest]).unwrap();
     let packet = build_onion(&circuit, b"secret", &mut OsRng).unwrap();
     let outcome = peel_one_layer(&r1_sk, &packet).unwrap();
-    let inner_bytes = match outcome {
-        PeelOutcome::Forward {
-            inner_packet_bytes, ..
-        } => inner_packet_bytes,
-        _ => panic!(),
+    let PeelOutcome::Forward {
+        inner_packet_bytes: inner_bytes,
+        ..
+    } = outcome
+    else {
+        panic!();
     };
     let inner = OnionPacket::decode(&inner_bytes).unwrap();
     // r1 attempts to peel the inner packet (which belongs to r2).
@@ -57,11 +58,12 @@ fn adversarial_relay_cannot_decrypt_destination_layer() {
     let circuit = Circuit::new(vec![r1, dest]).unwrap();
     let packet = build_onion(&circuit, b"plaintext", &mut OsRng).unwrap();
     let outcome = peel_one_layer(&r1_sk, &packet).unwrap();
-    let inner_bytes = match outcome {
-        PeelOutcome::Forward {
-            inner_packet_bytes, ..
-        } => inner_packet_bytes,
-        _ => panic!(),
+    let PeelOutcome::Forward {
+        inner_packet_bytes: inner_bytes,
+        ..
+    } = outcome
+    else {
+        panic!();
     };
     let inner = OnionPacket::decode(&inner_bytes).unwrap();
     let err = peel_one_layer(&r1_sk, &inner).unwrap_err();
@@ -128,7 +130,7 @@ fn adversarial_empty_payload_works() {
     let outcome = peel_one_layer(&dest_sk, &packet).unwrap();
     match outcome {
         PeelOutcome::Deliver { payload } => assert!(payload.is_empty()),
-        _ => panic!(),
+        PeelOutcome::Forward { .. } => panic!(),
     }
 }
 
@@ -167,7 +169,7 @@ fn adversarial_one_hop_circuit_works() {
     let outcome = peel_one_layer(&dest_sk, &packet).unwrap();
     match outcome {
         PeelOutcome::Deliver { payload } => assert_eq!(payload, b"direct"),
-        _ => panic!(),
+        PeelOutcome::Forward { .. } => panic!(),
     }
 }
 
@@ -186,8 +188,7 @@ fn adversarial_truncated_at_every_byte_position_rejected() {
         let result = OnionPacket::decode(&enc[..prefix_len]);
         assert!(
             result.is_err(),
-            "truncated decode at len {} unexpectedly succeeded",
-            prefix_len
+            "truncated decode at len {prefix_len} unexpectedly succeeded"
         );
     }
     // Full-length decode succeeds.
@@ -235,10 +236,10 @@ fn adversarial_random_garbage_packet_decode_returns_typed_err() {
     // OnionPacket. Refusal must be a typed error, not a panic.
     for seed in 0u32..1000 {
         let mut bytes = Vec::with_capacity(64);
-        let mut s = seed as u64;
+        let mut s = u64::from(seed);
         for _ in 0..64 {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
-            bytes.push((s >> 33) as u8);
+            s = s.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            bytes.push((s >> 33).to_le_bytes()[0]);
         }
         let _ = OnionPacket::decode(&bytes); // must NEVER panic
     }

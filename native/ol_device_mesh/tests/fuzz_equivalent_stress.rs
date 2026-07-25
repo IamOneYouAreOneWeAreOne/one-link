@@ -8,7 +8,7 @@
 //! `cargo test` harness.
 //!
 //! This is not a replacement for libfuzzer (no coverage-guided
-//! mutation, no SanitizerCoverage hits, no corpus minimization), but
+//! mutation, no `SanitizerCoverage` hits, no corpus minimization), but
 //! it does exercise the same surface with structured random bytes,
 //! which catches the bulk of "must never panic on arbitrary input"
 //! issues. CI runs the real libfuzzer harness on Linux.
@@ -202,14 +202,16 @@ fn fuzz_dfs_body(data: &[u8]) {
     let mut chunks: Vec<ChunkHash> = Vec::with_capacity(n_chunks);
     for i in 0..n_chunks {
         let mut h = [0u8; 32];
+        let chunk_index = u8::try_from(i).expect("the fuzz harness creates at most 24 chunks");
         for (j, b) in data.iter().take(32).enumerate() {
-            h[j] = b.wrapping_add(i as u8);
+            h[j] = b.wrapping_add(chunk_index);
         }
         chunks.push(h);
     }
     let policy = ErasurePolicy::new(2, 1, 1).unwrap();
     let manifest = FileManifest {
-        file_size: (n_chunks as u64) * 1024,
+        file_size: u64::try_from(n_chunks).expect("supported Rust pointer widths fit in u64")
+            * 1024,
         chunk_size: 1024,
         chunks: chunks.clone(),
         mime: b"application/octet-stream".to_vec(),
@@ -241,8 +243,10 @@ fn fuzz_fan_out_body(data: &[u8]) {
     let chunks: Vec<ChunkHash> = (0..(data.len() / 32).clamp(1, 4))
         .map(|i| {
             let mut h = [0u8; 32];
+            let chunk_index =
+                u8::try_from(i).expect("the fuzz harness creates at most four chunks");
             for (j, b) in data.iter().take(32).enumerate() {
-                h[j] = b.wrapping_add(i as u8);
+                h[j] = b.wrapping_add(chunk_index);
             }
             h
         })

@@ -41,11 +41,17 @@ Typical daemon usage:
     chain_key_scanner = scanner.receive_confirm(confirm_bytes)
     assert chain_key == chain_key_scanner  # byte-identical
 
-    # Optional Factor-2 channel-reciprocity mix-in (alongside
-    # ol_proximity_pair) for remote-relay-resistance:
-    # confirm_bytes, chain_key = inviter.confirm_with_factor2(f2_key)
-    # chain_key_scanner = scanner.receive_confirm_with_factor2(
-    #     confirm_bytes, f2_key)
+    # Optional externally sourced Factor-2 candidate. The three-step
+    # exchange confirms equality before the inviter releases its key:
+    # confirm_bytes = inviter.confirm_with_factor2(f2_candidate)
+    # ack, chain_key_scanner = scanner.receive_confirm_with_factor2(
+    #     confirm_bytes, f2_candidate)
+    # chain_key_inviter = inviter.receive_factor2_ack(ack)
+    # assert chain_key_inviter == chain_key_scanner
+
+The Factor-2 API proves that both pairing peers supplied the same bytes; it
+does not prove those bytes came from physical proximity. The current
+``ol_proximity_pair`` surface is research-only and is not daemon-wired.
 """
 
 from __future__ import annotations
@@ -62,6 +68,7 @@ try:
     SAS_WORD_COUNT: int = _native_pq.SAS_WORD_COUNT
     SAS_BITS: int = _native_pq.SAS_BITS
     CHAIN_KEY_LEN: int = _native_pq.CHAIN_KEY_LEN
+    FACTOR2_CONFIRMATION_TAG_LEN: int = _native_pq.FACTOR2_CONFIRMATION_TAG_LEN
     INVITE_NONCE_LEN: int = _native_pq.INVITE_NONCE_LEN
     INVITE_MAX_BYTES: int = _native_pq.INVITE_MAX_BYTES
     INVITE_VERSION: int = _native_pq.INVITE_VERSION
@@ -71,6 +78,7 @@ except ImportError as exc:
     SAS_WORD_COUNT = 5
     SAS_BITS = 30
     CHAIN_KEY_LEN = 32
+    FACTOR2_CONFIRMATION_TAG_LEN = 32
     INVITE_NONCE_LEN = 32
     INVITE_MAX_BYTES = 512
     INVITE_VERSION = 1
@@ -148,20 +156,28 @@ class Inviter:
 
     def confirm_with_factor2(
         self, factor2_key: bytes
-    ) -> Tuple[bytes, bytes]:
-        """Like `confirm()` but mixes in a 32-byte Factor-2 key.
+    ) -> bytes:
+        """Start the explicit Factor-2 key-confirmation exchange.
 
-        Use the output of
-        `proximity_pair_native.derive_factor2_secret` as
-        `factor2_key`. BOTH peers MUST supply the same factor-2 key;
-        otherwise the chain keys diverge silently.
+        This call returns only the frame for the scanner. It deliberately
+        withholds the chain key until :meth:`receive_factor2_ack` verifies
+        that the scanner supplied the same candidate. Candidate provenance
+        and entropy remain the caller's responsibility.
         """
         if len(factor2_key) != 32:
             raise ValueError(
                 f"factor2_key must be 32 bytes, got {len(factor2_key)}"
             )
-        cb, ck = self._native.confirm_with_factor2(factor2_key)
-        return bytes(cb), bytes(ck)
+        return bytes(self._native.confirm_with_factor2(factor2_key))
+
+    def receive_factor2_ack(self, ack: bytes) -> bytes:
+        """Verify the scanner's acknowledgement and release the final key."""
+        if len(ack) != FACTOR2_CONFIRMATION_TAG_LEN:
+            raise ValueError(
+                "factor2 acknowledgement must be "
+                f"{FACTOR2_CONFIRMATION_TAG_LEN} bytes, got {len(ack)}"
+            )
+        return bytes(self._native.receive_factor2_ack(ack))
 
     def abort(self) -> None:
         """User said SAS doesn't match. Discard ephemeral material."""
@@ -217,17 +233,19 @@ class Scanner:
 
     def receive_confirm_with_factor2(
         self, confirm_bytes: bytes, factor2_key: bytes
-    ) -> bytes:
-        """Like `receive_confirm` but mixes in 32-byte Factor-2 key."""
+    ) -> Tuple[bytes, bytes]:
+        """Verify Factor-2 agreement and return ``(ack, chain_key)``.
+
+        A mismatched candidate raises and no chain key is returned.
+        """
         if len(factor2_key) != 32:
             raise ValueError(
                 f"factor2_key must be 32 bytes, got {len(factor2_key)}"
             )
-        return bytes(
-            self._native.receive_confirm_with_factor2(  # type: ignore[attr-defined]
-                confirm_bytes, factor2_key
-            )
+        ack, key = self._native.receive_confirm_with_factor2(  # type: ignore[attr-defined]
+            confirm_bytes, factor2_key
         )
+        return bytes(ack), bytes(key)
 
     def abort(self) -> None:
         """User said SAS doesn't match. Discard ephemeral material."""
@@ -337,6 +355,7 @@ __all__ = [
     "SAS_WORD_COUNT",
     "SAS_BITS",
     "CHAIN_KEY_LEN",
+    "FACTOR2_CONFIRMATION_TAG_LEN",
     "INVITE_NONCE_LEN",
     "INVITE_MAX_BYTES",
     "INVITE_VERSION",

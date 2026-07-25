@@ -27,9 +27,14 @@ Design contract:
 """
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 from pathlib import Path
+
+from one_link.fault_observability import report_best_effort_failure
+
+log = logging.getLogger(__name__)
 
 BG_COLOR = "#0e1117"
 FG_COLOR = "#e9edf6"
@@ -70,10 +75,22 @@ def _on_parent_disconnect(callback) -> None:
     def _watch() -> None:
         try:
             sys.stdin.buffer.read()  # blocks until EOF
-        except Exception:
-            pass
-        try: callback()
-        except Exception: pass
+        except (OSError, ValueError) as exc:
+            report_best_effort_failure(
+                log,
+                "splash_parent_pipe_read",
+                exc,
+                level=logging.DEBUG,
+            )
+        try:
+            callback()
+        except Exception as exc:
+            report_best_effort_failure(
+                log,
+                "splash_parent_disconnect_callback",
+                exc,
+                level=logging.DEBUG,
+            )
     t = threading.Thread(target=_watch, daemon=True, name="splash-parent-watch")
     t.start()
 
@@ -175,8 +192,13 @@ def run_splash() -> int:
     def _close() -> None:
         try:
             root.after(0, root.destroy)
-        except Exception:
-            pass
+        except Exception as exc:
+            report_best_effort_failure(
+                log,
+                "splash_close_schedule",
+                exc,
+                level=logging.DEBUG,
+            )
 
     _on_parent_disconnect(_close)
     # Also close on Esc — escape hatch in case anything goes wrong.

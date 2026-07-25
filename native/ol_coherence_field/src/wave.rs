@@ -13,7 +13,7 @@
 //!
 //! ## Scope of this module
 //!
-//! The wave-step is the FORECAST half of the τ_c substrate: given the
+//! The wave-step is the FORECAST half of the `τ_c` substrate: given the
 //! current scalar field per node + the previous step, project one
 //! `dt` forward + flag disturbances likely to cascade across the
 //! mesh. The reaction-diffusion solver in [`crate::pde`] handles the
@@ -27,7 +27,7 @@
 //! ## RESEARCH-GRADE
 //!
 //! The map flags D25 as research-grade. The selector should consume
-//! the output as a soft signal (e.g. to bump anchor_lay probability)
+//! the output as a soft signal (e.g. to bump `anchor_lay` probability)
 //! NOT as a binary trigger, until the false-positive rate is
 //! calibrated against the production workload.
 
@@ -87,10 +87,10 @@ pub enum WaveError {
     },
 }
 
-/// Default wave speed (units: τ_c-units per second). Calibrated from
-/// the S_One screening-length derivation: c_eff = c / √3 · H_0 ≈ 1.0
-/// in normalised τ_c units. The selector treats this as a constant;
-/// per-domain calibrations (OneField, BioMesh) override.
+/// Default wave speed (units: `τ_c`-units per second). Calibrated from
+/// the `S_One` screening-length derivation: `c_eff = c / √3 · H_0 ≈ 1.0`
+/// in normalised `τ_c` units. The selector treats this as a constant;
+/// per-domain calibrations (`OneField`, `BioMesh`) override.
 pub const DEFAULT_WAVE_SPEED: f32 = 1.0;
 
 /// Default damping. Without damping, the wave equation oscillates
@@ -108,8 +108,8 @@ pub const DEFAULT_CASCADE_THRESHOLD: f32 = 0.15;
 /// Maintains two snapshots of the field — current (`psi_t`) and
 /// previous (`psi_t_minus_dt`) — so the second-order leapfrog can
 /// project forward without re-discretising. Neighbor topology
-/// supplied externally; the same graph the FieldObservations uses
-/// for gradient_at is the right input.
+/// supplied externally; the same graph the `FieldObservations` uses
+/// for `gradient_at` is the right input.
 ///
 /// Thread-safety: not thread-safe by itself. Wrap in a Mutex if
 /// stepped from multiple threads.
@@ -126,7 +126,7 @@ pub struct WaveStepper {
     /// from `step()`. Useful for production deploys where the field
     /// is bounded in [0, 1] (τ_c-domain) and runaway implies a bug.
     clamp_range: Option<(f32, f32)>,
-    /// Step counter — number of successful step() calls since seed.
+    /// Step counter — number of successful `step()` calls since seed.
     /// Useful for diagnostics + correlating cascade warnings with
     /// step-time history.
     step_count: u64,
@@ -191,16 +191,17 @@ impl WaveStepper {
     }
 
     /// Override the cascade-warning threshold.
+    #[must_use]
     pub fn with_threshold(mut self, threshold: f32) -> Self {
         self.cascade_threshold = threshold.max(0.0);
         self
     }
 
-    /// Seed the current snapshot from an external τ_c map.
+    /// Seed the current snapshot from an external `τ_c` map.
     /// Use this on startup or after a field-state reset.
     pub fn seed(&mut self, values: &HashMap<String, f32>) {
-        self.psi_t_minus_dt = values.clone();
-        self.psi_t = values.clone();
+        self.psi_t_minus_dt.clone_from(values);
+        self.psi_t.clone_from(values);
     }
 
     /// Advance one time step `dt` using the leapfrog scheme.
@@ -214,7 +215,7 @@ impl WaveStepper {
     /// increments the running [`cascade_warnings`] counter.
     ///
     /// **CFL stability**: returns [`WaveError::CflViolation`] if the
-    /// Courant number `c·dt·√(λ_max)/2` exceeds 1, where λ_max is
+    /// Courant number `c·dt·√(λ_max)/2` exceeds 1, where `λ_max` is
     /// bounded by `2 · max_degree(neighbors)` for the normalised
     /// graph Laplacian. Disable via [`with_cfl_enforce(false)`] only
     /// when the caller has independently verified stability (e.g.
@@ -223,7 +224,7 @@ impl WaveStepper {
     /// **Clamp**: if [`with_clamp_range`] was set, a value drifting
     /// outside the range raises [`WaveError::ClampTripped`] with the
     /// offending node id. Useful for production deploys where field
-    /// values are bounded in `[0, 1]` (τ_c domain) and runaway is a
+    /// values are bounded in `[0, 1]` (`τ_c` domain) and runaway is a
     /// bug.
     pub fn step(
         &mut self,
@@ -262,8 +263,13 @@ impl WaveStepper {
             // Graph Laplacian: mean(neighbors) − self.
             let lap = match neighbors.get(node) {
                 Some(ns) if !ns.is_empty() => {
-                    let sum: f32 = ns.iter().map(|n| *self.psi_t.get(n).unwrap_or(&0.0)).sum();
-                    let mean = sum / ns.len() as f32;
+                    let (sum, count) = ns.iter().fold((0.0_f32, 0.0_f32), |state, n| {
+                        (
+                            state.0 + self.psi_t.get(n).copied().unwrap_or(0.0),
+                            state.1 + 1.0,
+                        )
+                    });
+                    let mean = sum / count;
                     mean - current
                 }
                 _ => 0.0,
@@ -312,7 +318,7 @@ impl WaveStepper {
 
     /// Courant number for a given `dt` against this stepper's wave
     /// speed and the standard normalised graph Laplacian eigenvalue
-    /// bound (λ_max ≤ 2). Returns the value `c · dt · √λ_max`;
+    /// bound (`λ_max` ≤ 2). Returns the value `c · dt · √λ_max`;
     /// stability requires this be ≤ 1.
     ///
     /// Use this BEFORE calling [`step`] to pre-validate dt against
@@ -324,7 +330,7 @@ impl WaveStepper {
     }
 
     /// Maximum stable `dt` for this stepper's wave speed under the
-    /// CFL condition. Returns ∞ when wave_speed is 0 (no waves to
+    /// CFL condition. Returns ∞ when `wave_speed` is 0 (no waves to
     /// propagate; any dt is stable).
     #[must_use]
     pub fn max_stable_dt(&self) -> f32 {
@@ -349,7 +355,7 @@ impl WaveStepper {
     /// drift is bounded.
     ///
     /// Returns 0.0 when fewer than 2 steps have been taken (kinetic
-    /// term needs both ψ_t and ψ_{t-dt}, which `seed()` initialises
+    /// term needs both `ψ_t` and `ψ_{t-dt}`, which `seed()` initialises
     /// to identical values producing zero kinetic energy).
     #[must_use]
     pub fn total_energy(&self, dt: f32, neighbors: &HashMap<String, Vec<String>>) -> f32 {
@@ -366,12 +372,14 @@ impl WaveStepper {
             if let Some(ns) = neighbors.get(node) {
                 if !ns.is_empty() {
                     let mut grad2 = 0.0_f32;
+                    let mut neighbor_count = 0.0_f32;
                     for n in ns {
                         let nv = *self.psi_t.get(n).unwrap_or(&0.0);
                         let diff = current - nv;
                         grad2 += diff * diff;
+                        neighbor_count += 1.0;
                     }
-                    let avg = grad2 / ns.len() as f32;
+                    let avg = grad2 / neighbor_count;
                     potential += 0.5 * self.wave_speed * self.wave_speed * avg;
                 }
             }
@@ -428,7 +436,7 @@ impl WaveStepper {
         self.cascade_warnings = 0;
     }
 
-    /// Number of successful step() calls since the stepper was
+    /// Number of successful `step()` calls since the stepper was
     /// constructed or last seeded. Cheap O(1).
     #[must_use]
     pub fn step_count(&self) -> u64 {
@@ -442,7 +450,7 @@ impl WaveStepper {
     }
 
     /// Iterate over the current (node, ψ) pairs. Order is undefined
-    /// (HashMap iteration). Use [`psi_at`] for a single-node lookup.
+    /// (`HashMap` iteration). Use [`psi_at`] for a single-node lookup.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &f32)> {
         self.psi_t.iter()
     }
@@ -458,7 +466,7 @@ impl Default for WaveStepper {
 mod tests {
     use super::*;
 
-    fn _neighbors_chain(n: usize) -> HashMap<String, Vec<String>> {
+    fn neighbors_chain(n: usize) -> HashMap<String, Vec<String>> {
         let mut out = HashMap::new();
         for i in 0..n {
             let mut ns = Vec::new();
@@ -468,7 +476,7 @@ mod tests {
             if i < n - 1 {
                 ns.push(format!("n{}", i + 1));
             }
-            out.insert(format!("n{}", i), ns);
+            out.insert(format!("n{i}"), ns);
         }
         out
     }
@@ -476,9 +484,12 @@ mod tests {
     #[test]
     fn new_defaults() {
         let w = WaveStepper::new();
-        assert_eq!(w.wave_speed(), DEFAULT_WAVE_SPEED);
-        assert_eq!(w.damping(), DEFAULT_DAMPING);
-        assert_eq!(w.cascade_threshold(), DEFAULT_CASCADE_THRESHOLD);
+        assert_eq!(w.wave_speed().to_bits(), DEFAULT_WAVE_SPEED.to_bits());
+        assert_eq!(w.damping().to_bits(), DEFAULT_DAMPING.to_bits());
+        assert_eq!(
+            w.cascade_threshold().to_bits(),
+            DEFAULT_CASCADE_THRESHOLD.to_bits()
+        );
         assert_eq!(w.cascade_warnings(), 0);
         assert!(w.is_empty());
     }
@@ -507,15 +518,15 @@ mod tests {
         let mut w = WaveStepper::new();
         let mut initial = HashMap::new();
         for i in 0..3 {
-            initial.insert(format!("n{}", i), 0.5);
+            initial.insert(format!("n{i}"), 0.5);
         }
         w.seed(&initial);
-        let neighbors = _neighbors_chain(3);
+        let neighbors = neighbors_chain(3);
         // A constant field has zero Laplacian and zero (ψ−prev), so
         // it should not change under the leapfrog update.
         w.step(0.1, &neighbors).unwrap();
         for i in 0..3 {
-            let v = w.psi_at(&format!("n{}", i)).unwrap();
+            let v = w.psi_at(&format!("n{i}")).unwrap();
             assert!((v - 0.5).abs() < 1e-5);
         }
         // No cascade warnings on a constant field.
@@ -527,12 +538,12 @@ mod tests {
         let mut w = WaveStepper::new();
         let mut initial = HashMap::new();
         for i in 0..5 {
-            initial.insert(format!("n{}", i), 0.5);
+            initial.insert(format!("n{i}"), 0.5);
         }
         // Disturb node n2.
         initial.insert("n2".to_string(), 1.0);
         w.seed(&initial);
-        let neighbors = _neighbors_chain(5);
+        let neighbors = neighbors_chain(5);
         w.step(0.1, &neighbors).unwrap();
         // The neighbors of n2 should have moved away from 0.5 a bit.
         let n1 = w.psi_at("n1").unwrap();
@@ -546,11 +557,11 @@ mod tests {
         let mut w = WaveStepper::new().with_threshold(0.01); // very sensitive
         let mut initial = HashMap::new();
         for i in 0..3 {
-            initial.insert(format!("n{}", i), 0.0);
+            initial.insert(format!("n{i}"), 0.0);
         }
         initial.insert("n0".to_string(), 1.0);
         w.seed(&initial);
-        let neighbors = _neighbors_chain(3);
+        let neighbors = neighbors_chain(3);
         // High disturbance + low threshold -> warnings.
         let warns = w.step(0.5, &neighbors).unwrap();
         assert!(warns >= 1);

@@ -180,7 +180,7 @@ mod tests {
         chunks.reverse();
         let att = sign_storage_attestation(&sk, 1, chunks).unwrap();
         let mut sorted = att.chunk_hashes.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         assert_eq!(att.chunk_hashes, sorted);
     }
 
@@ -206,10 +206,11 @@ mod tests {
     #[test]
     fn oversize_chunk_list_rejected() {
         let sk = make_sk();
-        let too_many: Vec<ChunkHash> = (0..(MAX_CHUNKS_PER_ATTESTATION + 1))
+        let too_many: Vec<ChunkHash> = (0..=MAX_CHUNKS_PER_ATTESTATION)
             .map(|i| {
                 let mut x = [0u8; CHUNK_HASH_LEN];
-                x[..4].copy_from_slice(&(i as u32).to_be_bytes());
+                let index = u32::try_from(i).expect("the attestation bound fits in u32");
+                x[..4].copy_from_slice(&index.to_be_bytes());
                 x
             })
             .collect();
@@ -227,7 +228,7 @@ mod tests {
         att.chunk_hashes[0][0] ^= 0xFF;
         // The above reverses sort order so the wrong-sort path fires;
         // restore sort then try a non-sort-breaking tamper.
-        att.chunk_hashes.sort();
+        att.chunk_hashes.sort_unstable();
         att.attest_unix = 9_999;
         let err = att.verify(&sk.verifying_key()).unwrap_err();
         assert!(matches!(err, DeviceMeshError::StorageAttestVerifyFail));

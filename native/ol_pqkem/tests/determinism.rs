@@ -36,7 +36,7 @@ fn deterministic_seed_round_trip_pinned() {
     let pk_bytes = pk.to_bytes();
     let sk_bytes = sk.to_bytes();
     let ct_bytes = ct.to_bytes();
-    let ss_bytes: [u8; 32] = *ss;
+    let shared_secret_bytes: [u8; 32] = *ss;
 
     // Sanity: decapsulate to make sure the test isn't broken.
     let ss_recovered = decapsulate(&sk, &ct).unwrap();
@@ -46,7 +46,7 @@ fn deterministic_seed_round_trip_pinned() {
     let pk_first16 = hex_lower(&pk_bytes[..16]);
     let sk_first16 = hex_lower(&sk_bytes[..16]);
     let ct_first16 = hex_lower(&ct_bytes[..16]);
-    let ss_hex = hex_lower(&ss_bytes);
+    let ss_hex = hex_lower(&shared_secret_bytes);
 
     if pk_first16 != PINNED_PK_FIRST16
         || sk_first16 != PINNED_SK_FIRST16

@@ -20,7 +20,7 @@
 //!   1M random structured inputs produces byte-identical output
 //!   between the CL canonical encoder and the Rust encoder.
 //!
-//! The full production codegen tool is substantial scope (3-5K LoC
+//! The full production codegen tool is substantial scope (3-5K `LoC`
 //! per the plan). This is the bootstrap: shows the pipeline shape,
 //! ships a working parser + emitter for the minimal struct subset,
 //! and lets the workspace grow into the full grammar incrementally.

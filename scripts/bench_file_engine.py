@@ -30,15 +30,18 @@ Pass --json to emit machine-readable results::
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
+import logging
 import os
 import statistics
 import sys
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 # Make the project's tests/ harness importable.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -46,13 +49,18 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import psutil  # noqa: E402  (must come after sys.path mutation)
 
+from one_link import app as app_mod  # noqa: E402
+from one_link import control_ipc  # noqa: E402
+from one_link.fault_observability import report_best_effort_failure  # noqa: E402
 from tests.harness import (  # noqa: E402
-    DaemonPair,
+    LIVE_INTEGRATION_ENV,
     _bring_up,
-    daemon_pair,
+    daemon_pair as _daemon_pair,
     inbox_files,
     request,
 )
+
+log = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -67,6 +75,94 @@ def _human_bytes(n: int) -> str:
     if n < 1024 ** 3:
         return f"{n / 1024 ** 2:.1f} MiB"
     return f"{n / 1024 ** 3:.2f} GiB"
+
+
+def _api(home: Path, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Call one benchmark daemon's authenticated loopback API."""
+
+    data_dir = home / "data"
+    control_port = int(
+        control_ipc.read_private_bytes_strict(
+            data_dir / "control.port",
+            max_bytes=64,
+            label="control port",
+        )
+        .decode("ascii")
+        .strip()
+    )
+    secret = control_ipc.read_control_secret(data_dir)
+    daemon = app_mod.resolve_authenticated_daemon(
+        control_port,
+        secret,
+        timeout=10.0,
+    )
+    if daemon is None:
+        raise RuntimeError("benchmark daemon/UI authentication failed")
+    port = daemon.server_port
+    token = daemon.token
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    headers = {"Authorization": f"Bearer {token}"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    try:
+        connection.request(method, path, body=data, headers=headers)
+        response = connection.getresponse()
+        raw = response.read()
+    finally:
+        connection.close()
+    if not 200 <= response.status < 300:
+        detail = raw.decode("utf-8", errors="replace")[:1024]
+        raise RuntimeError(
+            f"benchmark API {method} {path} failed ({response.status}): {detail}"
+        )
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"benchmark API {method} {path} returned a non-object")
+    return payload
+
+
+def _wait_api_peer(home: Path, short_id: str, *, timeout_s: float = 20.0) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_s
+    last: list[dict[str, Any]] = []
+    while time.monotonic() < deadline:
+        payload = _api(home, "GET", "/api/peers?include_unpaired=1")
+        last = [item for item in payload.get("peers", []) if isinstance(item, dict)]
+        for peer in last:
+            if peer.get("short_id") == short_id:
+                return peer
+        time.sleep(0.05)
+    raise RuntimeError(f"benchmark peer {short_id} did not appear; peers={last!r}")
+
+
+@contextmanager
+def daemon_pair() -> Iterator[Any]:
+    """Yield an isolated pair with explicit file capability policy."""
+
+    with _daemon_pair() as pair:
+        peer_a = _wait_api_peer(pair.b.home, pair.a.short_id)
+        peer_b = _wait_api_peer(pair.a.home, pair.b.short_id)
+        for home, peer in ((pair.a.home, peer_b), (pair.b.home, peer_a)):
+            fingerprint = str(peer.get("fingerprint") or "")
+            if not fingerprint:
+                raise RuntimeError("benchmark peer did not expose a fingerprint")
+            trust_result = _api(
+                home,
+                "POST",
+                f"/api/peers/{fingerprint}/trust",
+                {"trust": "pinned"},
+            )
+            if trust_result.get("ok") is not True:
+                raise RuntimeError(f"benchmark trust setup failed: {trust_result!r}")
+            result = _api(
+                home,
+                "POST",
+                f"/api/peers/{fingerprint}/capabilities",
+                {"allowed": ["chat", "files"], "note": "isolated benchmark lane"},
+            )
+            if result.get("ok") is not True:
+                raise RuntimeError(f"benchmark capability setup failed: {result!r}")
+        yield pair
 
 
 def _human_throughput(bytes_: int, seconds: float) -> str:
@@ -339,19 +435,20 @@ def bench_many_small_files(n: int = 20, per_size: int = 4096) -> dict:
                 time.sleep(0.1)
             elapsed = time.time() - t0
     total_bytes = n * per_size
+    per_file_sec = elapsed / n if n > 0 else 0.0
     out = {
         "scenario": "many_small_files",
         "n": n,
         "per_size_bytes": per_size,
         "total_bytes": total_bytes,
         "elapsed_sec": round(elapsed, 4),
-        "per_file_sec": round(elapsed / n, 4) if n > 0 else None,
+        "per_file_sec": round(per_file_sec, 4) if n > 0 else None,
         "aggregate_throughput_bps": round(total_bytes / elapsed, 2) if elapsed > 0 else 0,
         "completed": len(seen),
     }
     print(f"  many-small: {n}×{_human_bytes(per_size)} ({total_bytes} bytes) "
           f"sequentially -> {elapsed:.3f}s "
-          f"({out['per_file_sec'] * 1000:.1f} ms/file avg)")
+          f"({per_file_sec * 1000:.1f} ms/file avg)")
     return out
 
 
@@ -657,8 +754,8 @@ def bench_resume_effectiveness(size: int = 32 * 1024 * 1024) -> dict:
                 try:
                     request(p.a.control_port, cmd="send_file",
                             peer=p.b.short_id, path=str(src), timeout=120)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    report_best_effort_failure(log, "benchmark_resume_sender", exc)
             sender = threading.Thread(target=_do_send, daemon=True)
             sender.start()
             # Wait for at least 5 chunks to land in B's cache —
@@ -680,13 +777,13 @@ def bench_resume_effectiveness(size: int = 32 * 1024 * 1024) -> dict:
             p.b.proc.kill()
             try:
                 p.b.proc.wait(timeout=5.0)
-            except Exception:
-                pass
+            except Exception as exc:
+                report_best_effort_failure(log, "benchmark_resume_receiver_wait", exc)
             try:
                 if p.b.log_fh is not None:
                     p.b.log_fh.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                report_best_effort_failure(log, "benchmark_resume_log_close", exc)
             sender.join(timeout=30.0)
             # Restart B on the same home dir.  Delete the stale
             # port files first so the harness's _read_port waits
@@ -845,7 +942,17 @@ def bench_chunk_cache_gc(n_chunks: int = 1000, chunk_size: int = 65536) -> dict:
 # main
 # ──────────────────────────────────────────────────────────────────
 
+def _enable_live_benchmark_lane() -> None:
+    """Explicitly opt this live benchmark into the daemon-spawn lane."""
+
+    # The shared test harness is fail-closed by default so a normal pytest run
+    # cannot accidentally spawn dozens of real daemons. Invoking this script
+    # is itself the operator's explicit request for a live benchmark.
+    os.environ[LIVE_INTEGRATION_ENV] = "1"
+
+
 def main() -> int:
+    _enable_live_benchmark_lane()
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--json", type=Path, default=None,

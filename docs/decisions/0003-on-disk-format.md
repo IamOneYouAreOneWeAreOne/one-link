@@ -58,12 +58,12 @@ This format is the load-bearing constraint for the entire engine. Get it wrong a
 |        |   bit 4-7: reserved (must be zero)                                |
 | 2      | reserved: u16 (must be zero)                                     |
 | 4      | length_plaintext: u32 (8 KiB - 256 KiB per ADR-0001)             |
-| 8      | length_ciphertext: u32 (length_plaintext + frame_count*16)       |
+| 8      | length_ciphertext: u32 (plaintext + one tag, or one tag/frame)   |
 | 12     | chunk_id_full: [u8; 32] (BLAKE3-256 of plaintext OR convergent)  |
 | 44     | ratchet_key_id: [u8; 16] (HKDF derivation seed; ADR-0006)        |
 | 60     | stripe_descriptor: StripeDescriptor (24 bytes; ADR-0004)          |
-| 84     | aead_frames: [AeadFrame; frame_count] (16 KiB plaintext + 16 byte tag each)
-| ...    | (frame_count = ceil(length_plaintext / 16384))                    |
+| 84     | AEAD ciphertext: atomic chunk + 16-byte tag, or 16 KiB frames + 16-byte tag each |
+| ...    | (streaming frame_count = ceil(length_plaintext / 16384))          |
 +--------+------------------------------------------------------------------+
 | End    | record_crc32c: u32 (CRC32-Castagnoli of header + frames)         |
 +--------+------------------------------------------------------------------+
@@ -86,7 +86,7 @@ Header is fixed 84 bytes. Body is `length_ciphertext` bytes. Trailer is 4 bytes 
 | 2      | length: u16 (record body length, max 64 KiB)                     |
 | 4      | hlc_timestamp: u64 (hybrid logical clock)                        |
 | 12     | actor_id: [u8; 32] (peer fingerprint; CRDT actor identifier)     |
-| 44     | chunk_log_anchor: u64 (chunk_log offset this record commits *with*; ADR-0005 WAL coupling) |
+| 44     | chunk_log_anchor: u64 (`clog_file_id:u32 || clog_offset:u32`; legacy high-word-zero anchors mean file 1; ADR-0005) |
 | 52     | body: [u8; length] (canonically-encoded record per std.codec.canon)
 | ...    |                                                                  |
 +--------+------------------------------------------------------------------+
@@ -102,14 +102,14 @@ Standard sorted-string-table layout, key = chunk_id_full (32 bytes), value = (cl
 
 Every write follows this sequence:
 1. Append AEAD-encrypted chunk frames + header + CRC to `chunk_log/NNNNNN.clog` via `write()` then `fdatasync()`.
-2. Append manifest record (with `chunk_log_anchor = clog_offset_just_written`) to `manifest_log/NNNNNN.mlog` then `fdatasync()`.
+2. Append manifest record (with `chunk_log_anchor = pack(clog_file_id, clog_offset_just_written)`) to `manifest_log/NNNNNN.mlog` then `fdatasync()`.
 3. Update in-memory index (memtable). Memtable is durable via the chunk_log+manifest_log; no separate memtable WAL needed (eliminates one durability path = simpler crash recovery).
 4. When memtable ≥ 64 MiB, flush to L0 SST. Flush is a non-durability operation (chunk_log + manifest_log are still authoritative); SST is rebuildable from them.
 
 ### Recovery contract (crash-only):
 
 1. On boot, scan all `chunk_log/*.clog` files. For each record, verify CRC; reject torn/corrupt records (last record of last file is the only legitimate truncation point). Build chunk_id → location map in memory.
-2. Scan all `manifest_log/*.mlog` files. For each record, verify CRC; verify `chunk_log_anchor` references a valid chunk_log offset (otherwise the manifest commit happened *after* a chunk write that was lost; reject the manifest record).
+2. Scan all `manifest_log/*.mlog` files. For each record, verify CRC; decode and verify the complete `(chunk_log file id, offset)` anchor (otherwise the manifest commit happened *after* a chunk write that was lost; reject the manifest record). Pre-rotation legacy anchors with a zero high word map to file 1.
 3. Rebuild memtable from manifest_log records newer than the most recent flushed SST.
 4. Rebuild SSTs that are missing or whose CRC sidecar fails.
 
@@ -130,7 +130,7 @@ No "graceful shutdown" path. No "did the file get fully synced" ambiguity. The C
 **Negative:**
 - 84-byte chunk header is overhead at 0.13% for 64 KiB chunks. Acceptable.
 - Two-WAL design (chunk_log + manifest_log) doubles the syncs per logical write. Mitigated by group commit (ADR-0007): N concurrent writes batch into one fdatasync per WAL.
-- `chunk_log_anchor` couples manifest commits to specific chunk_log offsets. If we ever introduce log compaction that rewrites chunk_log offsets, the anchor must be re-mapped. Mitigation: log compaction operates only on full files and rewrites anchors atomically.
+- `chunk_log_anchor` couples manifest commits to specific chunk-log file/offset coordinates. If we ever introduce log compaction that rewrites coordinates, the anchor must be re-mapped. Mitigation: log compaction operates only on full files and rewrites anchors atomically.
 
 ## Verification
 

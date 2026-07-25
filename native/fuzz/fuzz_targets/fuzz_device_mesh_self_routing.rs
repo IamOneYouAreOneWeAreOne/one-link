@@ -3,22 +3,17 @@
 
 use libfuzzer_sys::fuzz_target;
 use ol_device_mesh::self_routing::{
-    dtn_couriers, multi_path_plan, pick_best_route, sign_route_announcement, PeerLink,
-    RouteTable,
+    dtn_couriers, multi_path_plan, pick_best_route, sign_route_announcement, PeerLink, RouteTable,
 };
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, DEVICE_ID_LEN};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 fuzz_target!(|data: &[u8]| {
     let mut rng = ChaCha20Rng::from_seed([0xA6u8; 32]);
     let master = MasterIdentity::generate(&mut rng);
-    let (sk, att_l1) = mint_subkey(
-        &master, DeviceClass::Phone, [0x55; DEVICE_ID_LEN], 0, 365,
-    )
-    .unwrap();
+    let (sk, att_l1) =
+        mint_subkey(&master, DeviceClass::Phone, [0x55; DEVICE_ID_LEN], 0, 365).unwrap();
     let vk = ol_pqsig::HybridVerifyingKey::from_bytes(&att_l1.subkey_vk_bytes).unwrap();
 
     // 1. Build a fuzz-derived link list and sign an announcement.
@@ -49,12 +44,17 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // 3. Mutate a signed announcement and try re-verify.
-    let _ = sign_route_announcement(&sk, 1, vec![PeerLink {
-        peer_device_id: [0xAA; DEVICE_ID_LEN],
-        tau_score: 100,
-        last_seen_unix: 1,
-        direct: true,
-    }]).map(|mut a| {
+    let _ = sign_route_announcement(
+        &sk,
+        1,
+        vec![PeerLink {
+            peer_device_id: [0xAA; DEVICE_ID_LEN],
+            tau_score: 100,
+            last_seen_unix: 1,
+            direct: true,
+        }],
+    )
+    .map(|mut a| {
         if let Some(&b) = data.first() {
             if !a.links.is_empty() {
                 a.links[0].tau_score = u32::from(b) * 1000;

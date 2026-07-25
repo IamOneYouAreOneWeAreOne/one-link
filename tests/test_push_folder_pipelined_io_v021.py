@@ -41,15 +41,18 @@ def test_blob_stream_loop_uses_create_task_for_pipelining():
     channel.send (no Task) would lose the pipelining win — this
     guard catches it."""
     body = _push_folder_body()
-    # The pipelined loop has a create_task wrapping a to_thread(fh.read).
+    # The pipelined loop has a create_task wrapping the cancellation-safe
+    # storage helper, which itself owns asyncio.to_thread. Keeping the helper
+    # in the marker prevents a source guard from rewarding the older race
+    # where teardown could close ``fh`` while its worker was still reading.
     # Search for the marker pattern.
     assert "asyncio.create_task" in body, (
         "push_folder_to_peer no longer uses asyncio.create_task — the "
         "blob-send loop appears to have lost its disk-read pipelining"
     )
-    assert "asyncio.to_thread(fh.read" in body, (
-        "push_folder_to_peer no longer reads chunks via to_thread — "
-        "disk reads are back on the event loop, blocking sends"
+    assert "_run_folder_storage_call(fh.read" in body, (
+        "push_folder_to_peer no longer reads chunks via the cancellation-safe "
+        "thread helper — disk reads may be back on the event loop or racing close"
     )
 
 

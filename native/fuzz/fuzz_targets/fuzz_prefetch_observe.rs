@@ -16,7 +16,9 @@ fuzz_target!(|data: &[u8]| {
     let mut p = PrefetchPredictor::default();
     let mut t = 0u64;
     while let Some(peer_b) = take_byte(&mut input) {
-        let Some(file_b) = take_byte(&mut input) else { break };
+        let Some(file_b) = take_byte(&mut input) else {
+            break;
+        };
         let mut peer = [0u8; 32];
         peer[0] = peer_b;
         let mut file = [0u8; 32];

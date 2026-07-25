@@ -54,6 +54,12 @@ pub const SCHNORR_CHALLENGE_DOMAIN: &[u8] = b"OL-sphinx-aggsig-challenge-v1";
 pub const BN_KEY_TAG_DOMAIN: &[u8] = b"OL-sphinx-aggsig-bn-key-tag-v1";
 /// Domain prefix for the batch-verify random weighting.
 pub const BATCH_WEIGHT_DOMAIN: &[u8] = b"OL-sphinx-aggsig-batch-weight-v1";
+/// Maximum signatures processed in one batch or aggregate operation.
+pub const MAX_AGGREGATE_SIGNERS: usize = 1_024;
+/// Maximum message length accepted per aggregate entry.
+pub const MAX_SIGNATURE_MESSAGE_BYTES: usize = 1024 * 1024;
+/// Maximum sum of message bytes hashed in one aggregate operation.
+pub const MAX_BATCH_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 
 /// 32-byte Schnorr signing key (Ristretto255 scalar).
 ///
@@ -210,6 +216,7 @@ pub fn batch_verify(
     if entries.is_empty() {
         return Err(OnionError::Internal("batch_verify of empty set"));
     }
+    validate_signed_entries(entries)?;
     // Derive per-entry random weights from BLAKE3 over the full
     // batch transcript so different verifier sessions can't be
     // tricked into accepting batches that fail under a different
@@ -321,12 +328,12 @@ pub fn batch_verify(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BnAggregateSignature {
     /// `Σ a_i · s_i mod q` (32 bytes, canonical encoding).
-    pub s_agg: [u8; 32],
+    s_agg: [u8; 32],
     /// Per-signer `R_i` values in sort-order by pubkey. Length must
     /// match the number of `(vk, msg)` entries passed to
     /// [`bn_verify`]. Each entry is 32 bytes (compressed Ristretto255
     /// point).
-    pub r_per_signer: Vec<[u8; 32]>,
+    r_per_signer: Vec<[u8; 32]>,
 }
 
 impl BnAggregateSignature {
@@ -361,7 +368,17 @@ impl BnAggregateSignature {
     /// # Errors
     /// Returns `Internal` if `bytes.len() != 32 * (1 + expected_signers)`.
     pub fn decode(bytes: &[u8], expected_signers: usize) -> Result<Self, OnionError> {
-        let want = 32 * (1 + expected_signers);
+        if expected_signers == 0 || expected_signers > MAX_AGGREGATE_SIGNERS {
+            return Err(OnionError::Internal(
+                "BnAggregateSignature signer count outside bounds",
+            ));
+        }
+        let want = expected_signers
+            .checked_add(1)
+            .and_then(|count| count.checked_mul(32))
+            .ok_or(OnionError::Internal(
+                "BnAggregateSignature wire size overflow",
+            ))?;
         if bytes.len() != want {
             return Err(OnionError::Internal(
                 "BnAggregateSignature decode: wire size != 32 * (1 + N)",
@@ -402,6 +419,7 @@ pub fn bn_aggregate(
     if entries.is_empty() {
         return Err(OnionError::Internal("BN aggregate of empty set"));
     }
+    validate_signed_entries(entries)?;
     // Sort entries by pubkey to produce a canonical wire form. We
     // index sort *positions* rather than reordering the slice so
     // the caller's slice stays untouched.
@@ -475,6 +493,23 @@ pub fn bn_verify(
     if entries.is_empty() {
         return Err(OnionError::Internal("BN verify of empty set"));
     }
+    if entries.len() > MAX_AGGREGATE_SIGNERS {
+        return Err(OnionError::Internal("BN verify signer limit exceeded"));
+    }
+    let mut total_message_bytes = 0usize;
+    for (_, message) in entries {
+        if message.len() > MAX_SIGNATURE_MESSAGE_BYTES {
+            return Err(OnionError::Internal("BN verify message limit exceeded"));
+        }
+        total_message_bytes = total_message_bytes
+            .checked_add(message.len())
+            .ok_or(OnionError::Internal("BN verify message size overflow"))?;
+        if total_message_bytes > MAX_BATCH_MESSAGE_BYTES {
+            return Err(OnionError::Internal(
+                "BN verify total message limit exceeded",
+            ));
+        }
+    }
     if entries.len() != aggregate.r_per_signer.len() {
         return Err(OnionError::Internal(
             "BN verify: entry count != aggregate R count",
@@ -539,6 +574,36 @@ pub fn bn_verify(
 }
 
 // ── Internal helpers ─────────────────────────────────────────────
+
+fn validate_signed_entries(
+    entries: &[(SchnorrVerifyingKey, &[u8], SchnorrSignature)],
+) -> Result<(), OnionError> {
+    if entries.len() > MAX_AGGREGATE_SIGNERS {
+        return Err(OnionError::Internal(
+            "signature batch signer limit exceeded",
+        ));
+    }
+    let mut total_message_bytes = 0usize;
+    for (_, message, _) in entries {
+        if message.len() > MAX_SIGNATURE_MESSAGE_BYTES {
+            return Err(OnionError::Internal(
+                "signature batch message limit exceeded",
+            ));
+        }
+        total_message_bytes =
+            total_message_bytes
+                .checked_add(message.len())
+                .ok_or(OnionError::Internal(
+                    "signature batch message size overflow",
+                ))?;
+        if total_message_bytes > MAX_BATCH_MESSAGE_BYTES {
+            return Err(OnionError::Internal(
+                "signature batch total message limit exceeded",
+            ));
+        }
+    }
+    Ok(())
+}
 
 fn challenge_hash(r_bytes: &[u8; 32], vk_bytes: &[u8; 32], msg: &[u8]) -> Scalar {
     let mut h = Hasher::new();
@@ -776,7 +841,7 @@ mod tests {
         let msgs: Vec<Vec<u8>> = (0..n)
             .map(|i| {
                 let mut v = b"BN-msg-".to_vec();
-                v.push(i as u8);
+                v.extend_from_slice(&i.to_le_bytes());
                 v
             })
             .collect();
@@ -904,7 +969,7 @@ mod tests {
         let r = bn_verify(&bn_borrow_verify(&owned), &agg);
         assert!(matches!(
             r,
-            Err(OnionError::SignatureInvalid) | Err(OnionError::Internal(_))
+            Err(OnionError::SignatureInvalid | OnionError::Internal(_))
         ));
     }
 
@@ -946,7 +1011,7 @@ mod tests {
         // order — both are acceptable rejections.
         assert!(matches!(
             r,
-            Err(OnionError::SignatureInvalid) | Err(OnionError::Internal(_))
+            Err(OnionError::SignatureInvalid | OnionError::Internal(_))
         ));
         let _ = sks;
     }
@@ -1003,5 +1068,22 @@ mod tests {
         assert!(BnAggregateSignature::decode(&bytes, 3).is_err());
         // Wrong claimed signer count.
         assert!(BnAggregateSignature::decode(&agg.encode(), 7).is_err());
+    }
+
+    #[test]
+    fn aggregate_resource_limits_precede_allocation_and_curve_work() {
+        assert!(BnAggregateSignature::decode(&[], usize::MAX).is_err());
+        assert!(BnAggregateSignature::decode(&[], MAX_AGGREGATE_SIGNERS + 1).is_err());
+
+        let entries = vec![
+            (
+                SchnorrVerifyingKey([0u8; 32]),
+                b"x".as_slice(),
+                SchnorrSignature([0u8; 64]),
+            );
+            MAX_AGGREGATE_SIGNERS + 1
+        ];
+        assert!(batch_verify(&entries).is_err());
+        assert!(bn_aggregate(&entries).is_err());
     }
 }

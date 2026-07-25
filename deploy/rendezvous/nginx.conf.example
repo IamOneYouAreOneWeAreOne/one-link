@@ -1,16 +1,36 @@
 # Example nginx vhost for fronting a rendezvous with TLS.
 #
-# Save to /etc/nginx/sites-available/one-link-rendezvous.conf, then:
+# Obtain the referenced certificate before enabling this vhost (standalone
+# requires port 80 to be free), then replace the example hostname and install:
+#   certbot certonly --standalone -d rendezvous.example.com
+#   cp nginx.conf.example /etc/nginx/sites-available/one-link-rendezvous.conf
 #   ln -s ../sites-available/one-link-rendezvous.conf \
 #         /etc/nginx/sites-enabled/
-#   certbot --nginx -d rendezvous.example.com
-#   systemctl reload nginx
+#   nginx -t && systemctl reload nginx
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# This file is included from nginx's http{} context. These bounded shared
+# zones shed request/connection floods before they allocate backend Python
+# handlers; the application retains its stricter protocol-aware quotas.
+limit_req_zone $binary_remote_addr zone=one_link_rendezvous_per_ip:10m rate=30r/s;
+limit_conn_zone $binary_remote_addr zone=one_link_rendezvous_connections:10m;
 
 server {
     listen 80;
     listen [::]:80;
     server_name rendezvous.example.com;
-    return 301 https://$host$request_uri;
+    # Request targets carry discovery identifiers even before TLS redirect.
+    access_log off;
+    error_log /var/log/nginx/one-link-rendezvous-error.log emerg;
+    limit_req zone=one_link_rendezvous_per_ip burst=60 nodelay;
+    limit_req_status 429;
+    # Use the configured name, never the request Host, and preserve POST for a
+    # client that accidentally starts at http://.
+    return 308 https://$server_name$request_uri;
 }
 
 server {
@@ -25,18 +45,81 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_prefer_server_ciphers off;
     ssl_session_cache shared:SSL:10m;
+    ssl_session_tickets off;
+    server_tokens off;
+    # API paths contain raw pubkeys, blinded lookup tokens, and relay
+    # destinations. The default nginx access log records the whole request
+    # target, so this privacy-preserving baseline disables it.
+    access_log off;
+    # nginx error messages are not format/redaction configurable and some
+    # upstream failures include the raw request target. Retain only process-
+    # emergency events for this vhost; monitor backend health/metrics instead.
+    error_log /var/log/nginx/one-link-rendezvous-error.log emerg;
+    limit_req zone=one_link_rendezvous_per_ip burst=60 nodelay;
+    limit_req_status 429;
+    # One source cannot occupy the backend's entire 64-handler envelope.
+    limit_conn one_link_rendezvous_connections 32;
+    limit_conn_status 429;
     add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header Cache-Control "no-store" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
 
     # Payloads are small; no buffering or huge bodies needed.
     proxy_buffering off;
-    client_max_body_size 16k;
+    client_max_body_size 8k;
+    client_body_timeout 10s;
+    client_header_timeout 10s;
 
-    # Rendezvous expects X-Forwarded-For for accurate per-IP limits.
+    # Compose enables ONE_LINK_RDZ_TRUST_PROXY_HEADERS because this proxy is
+    # the only peer of its host-loopback listener. Never enable header trust
+    # on a rendezvous port that untrusted clients can reach directly.
+    # Metrics are private by default. Operators who intentionally expose this
+    # path must remove this exact-match block and configure a 32+ byte backend
+    # Bearer token through ONE_LINK_RDZ_METRICS_TOKEN_FILE.
+    location = /metrics {
+        return 404;
+    }
+
+    # Relay upgrades get a backend heartbeat every 30 seconds. 75 seconds
+    # allows two missed scheduling windows while still retiring dead tunnels.
+    # Both the production pairwise-blinded v2 relay and the explicit legacy
+    # v1 migration route require WebSocket upgrade semantics.
+    location ~ ^/api/v[12]/relay/ {
+        proxy_pass http://127.0.0.1:7118;
+        proxy_http_version 1.1;
+        proxy_set_header Host $server_name;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Forwarded "";
+        proxy_set_header Cookie "";
+        proxy_hide_header Set-Cookie;
+        proxy_hide_header Server;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 75s;
+        proxy_send_timeout 35s;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:7118;
-        proxy_set_header Host $host;
+        proxy_http_version 1.1;
+        proxy_set_header Host $server_name;
         proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_read_timeout 30s;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Forwarded "";
+        proxy_set_header Cookie "";
+        proxy_hide_header Set-Cookie;
+        proxy_hide_header Server;
+        # Strip hop-by-hop upgrade metadata on ordinary HTTP routes and retain
+        # upstream keep-alive instead of forcing a new loopback TCP connection
+        # per register/lookup request.
+        proxy_set_header Upgrade "";
+        proxy_set_header Connection "";
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 15s;
+        proxy_send_timeout 15s;
     }
 
     # Defensive: 400 anything that smells like path traversal.

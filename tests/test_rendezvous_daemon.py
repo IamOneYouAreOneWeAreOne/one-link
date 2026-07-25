@@ -11,7 +11,6 @@ Two layers:
 """
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,7 +25,7 @@ from one_link.daemon import Daemon
 from one_link.discovery import Peer
 from one_link.identity import Identity, fingerprint_of
 from one_link.rendezvous_client import RendezvousClient
-from one_link.rendezvous_proto import Endpoint, sign_register
+from one_link.rendezvous_proto import Endpoint
 from one_link.rendezvous_server import RendezvousApp, ServerConfig
 from one_link.state import State
 

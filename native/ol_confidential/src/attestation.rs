@@ -1,6 +1,11 @@
-//! Remote attestation doc — peer-verifiable proof that the daemon
-//! is running under a specific [`crate::ConfidentialProvider`] and
-//! that its master identity is fresh-bound to the peer's nonce.
+//! Signed provider-claim envelope with peer challenge binding.
+//!
+//! The envelope proves that the holder of the master signing key endorsed
+//! these bytes and responded to the expected nonce within policy. A provider
+//! tag is self-asserted. A genuine remote hardware-attestation claim requires
+//! independent validation of the platform quote, certificate/root, policy,
+//! and measurements; this envelope alone is not proof that a daemon runs in
+//! an enclave.
 //!
 //! ## Wire shape
 //!
@@ -29,9 +34,10 @@
 //!   nonce it sent.
 //! - `deadline_unix` MUST be `<= issued_unix + ATTESTATION_FRESHNESS_WINDOW_SECS`
 //!   (default 30s); the verifier rejects any doc past its deadline.
-//! - `field_witness_commitment` MAY bind the doc to a coherence-field
-//!   witness so the doc is non-transferable across hosts (Row 9
-//!   field-binding extended to attestation).
+//! - `field_witness_commitment` MAY require the verifier to supply matching
+//!   bytes. It proves equality to a signed commitment, not physical origin,
+//!   entropy, host identity, or non-transferability; the same witness can be
+//!   copied and replayed with a fresh signed document.
 
 use blake3::Hasher;
 use ol_pqsig::{HybridVerifyingKey, HYBRID_SIG_LEN, HYBRID_VK_LEN};
@@ -112,8 +118,8 @@ pub struct AttestationDoc {
     pub deadline_unix: u64,
     /// Optional BLAKE3 commitment over the local coherence-field
     /// witness. When present, the verifier checks the commitment
-    /// against its own witness — useful for refusing to accept docs
-    /// that were minted at a different physical location.
+    /// against expected bytes. This is context equality only, not proof of
+    /// physical location or host identity.
     pub field_witness_commitment: Option<[u8; 32]>,
     /// Provider-specific platform quote bytes. Empty for the
     /// software provider; non-empty for hardware providers (SGX
@@ -123,7 +129,7 @@ pub struct AttestationDoc {
     /// master signature commits to this binding so a verifier can
     /// confirm the master at the OTHER end is endorsing the very
     /// channel identity the verifier is talking to — defeats the
-    /// "Alice attests with someone else's master_vk under her own
+    /// "Alice attests with someone else's `master_vk` under her own
     /// SDP identity" identity-confusion attack (audit C1).
     pub issuer_sdp_pubkey: IssuerSdpPubkey,
     /// Hybrid signature over the canonical transcript, by the master.

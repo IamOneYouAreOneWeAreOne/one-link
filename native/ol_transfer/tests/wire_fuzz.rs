@@ -68,7 +68,8 @@ proptest! {
         ids in prop::collection::vec(prop::array::uniform32(any::<u8>()), 0..50),
         bloom_bytes in prop::collection::vec(any::<u8>(), 0..512),
     ) {
-        let payload = ol_transfer::wire::encode_scoped_bloom(&ids, &bloom_bytes);
+        let payload = ol_transfer::wire::encode_scoped_bloom(&ids, &bloom_bytes)
+            .expect("bounded generated form encodes");
         let (decoded_ids, decoded_bloom) = decode_scoped_bloom(&payload).expect("encoded form decodes");
         prop_assert_eq!(decoded_ids, ids);
         prop_assert_eq!(decoded_bloom, &bloom_bytes[..]);

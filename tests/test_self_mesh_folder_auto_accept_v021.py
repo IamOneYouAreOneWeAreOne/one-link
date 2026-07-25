@@ -22,18 +22,21 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from one_link import foldersync
+from one_link import identity_dag as idag
 from one_link.blobstore import BlobStore
+from one_link.capabilities import FOLDER_SYNC, FOLDER_SYNC_COMMIT_V1
 from one_link.daemon import Daemon
 from one_link.foldersync import FolderEngine
 from one_link.identity import Identity, fingerprint_of
 from one_link.state import State
+from one_link.wire import make_msg
 
 
 def _identity() -> Identity:
@@ -43,6 +46,29 @@ def _identity() -> Identity:
         private=sk, public=sk.public_key(), public_bytes=pub,
         fingerprint=fingerprint_of(pub), short_id=fingerprint_of(pub)[:8],
         hostname="self-mesh-host",
+    )
+
+
+def _folder_channel(*, transcript: str) -> MagicMock:
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    channel.transcript_hex = transcript
+    channel.peer_caps = {
+        "features": [FOLDER_SYNC, FOLDER_SYNC_COMMIT_V1],
+    }
+    return channel
+
+
+def _manifest_push(*, sender_fp: str, folder: str) -> dict:
+    entries: list[dict] = []
+    return make_msg(
+        "MANIFEST_PUSH",
+        sender_fp[:8],
+        folder=folder,
+        merkle_root=foldersync.manifest_root_for_entries(entries),
+        manifest_digest=Daemon._folder_manifest_digest(entries),
+        entry_count=0,
+        entries=entries,
     )
 
 
@@ -63,13 +89,21 @@ def test_is_self_mesh_peer_true_after_register(tmp_path: Path):
     # device_pub. Compute device_pub as an Ed25519 key.
     sk = Ed25519PrivateKey.generate()
     device_pub = sk.public_key().public_bytes_raw()
-    root_pub = bytes([0x42] * 32)
-    state.upsert_self_mesh_device(
+    root_sk = Ed25519PrivateKey.generate()
+    root_pub = root_sk.public_key().public_bytes_raw()
+    cert = idag.encode_device_cert(
+        root_priv_seed=root_sk.private_bytes_raw(),
         root_pub=root_pub,
         device_pub=device_pub,
         device_kind="laptop",
+    )
+    state.upsert_self_mesh_device(
+        root_pub=root_pub,
+        device_pub=device_pub,
+        cert=cert,
+        device_kind="laptop",
         label="laptop",
-        local=True,
+        local=False,
         trusted=True,
     )
     fp = fingerprint_of(device_pub)
@@ -84,10 +118,18 @@ def test_is_self_mesh_peer_false_for_revoked(tmp_path: Path):
     state = State(db_path=tmp_path / "s.db")
     sk = Ed25519PrivateKey.generate()
     device_pub = sk.public_key().public_bytes_raw()
-    root_pub = bytes([0x42] * 32)
+    root_sk = Ed25519PrivateKey.generate()
+    root_pub = root_sk.public_key().public_bytes_raw()
+    cert = idag.encode_device_cert(
+        root_priv_seed=root_sk.private_bytes_raw(),
+        root_pub=root_pub,
+        device_pub=device_pub,
+        device_kind="laptop",
+    )
     state.upsert_self_mesh_device(
         root_pub=root_pub,
         device_pub=device_pub,
+        cert=cert,
         device_kind="laptop",
         label="lost-device",
         local=False,
@@ -96,6 +138,46 @@ def test_is_self_mesh_peer_false_for_revoked(tmp_path: Path):
     )
     fp = fingerprint_of(device_pub)
     assert state.is_self_mesh_peer(fp) is False
+    state.close()
+
+
+@pytest.mark.parametrize(
+    ("trusted", "safety_state", "with_cert"),
+    [
+        (False, "trusted", True),
+        (True, "frozen", True),
+        (True, "trusted", False),
+    ],
+)
+def test_is_self_mesh_peer_requires_live_certified_authority(
+    tmp_path: Path,
+    trusted: bool,
+    safety_state: str,
+    with_cert: bool,
+):
+    state = State(db_path=tmp_path / "s.db")
+    device_sk = Ed25519PrivateKey.generate()
+    device_pub = device_sk.public_key().public_bytes_raw()
+    root_sk = Ed25519PrivateKey.generate()
+    root_pub = root_sk.public_key().public_bytes_raw()
+    cert = idag.encode_device_cert(
+        root_priv_seed=root_sk.private_bytes_raw(),
+        root_pub=root_pub,
+        device_pub=device_pub,
+        device_kind="phone",
+    )
+    state.upsert_self_mesh_device(
+        root_pub=root_pub,
+        device_pub=device_pub,
+        cert=cert if with_cert else None,
+        device_kind="phone",
+        label="phone",
+        local=False,
+        trusted=trusted,
+        safety_state=safety_state,
+    )
+
+    assert state.is_self_mesh_peer(fingerprint_of(device_pub)) is False
     state.close()
 
 
@@ -129,13 +211,21 @@ async def receive_ctx(tmp_path: Path, monkeypatch):
         pubkey=sender_device_pub, hostname="sender-device",
     )
     state.set_peer_trust(sender_fp, "pinned")
-    root_pub = bytes([0x77] * 32)
-    state.upsert_self_mesh_device(
+    root_sk = Ed25519PrivateKey.generate()
+    root_pub = root_sk.public_key().public_bytes_raw()
+    sender_cert = idag.encode_device_cert(
+        root_priv_seed=root_sk.private_bytes_raw(),
         root_pub=root_pub,
         device_pub=sender_device_pub,
         device_kind="laptop",
+    )
+    state.upsert_self_mesh_device(
+        root_pub=root_pub,
+        device_pub=sender_device_pub,
+        cert=sender_cert,
+        device_kind="laptop",
         label="sender",
-        local=True,
+        local=False,
         trusted=True,
     )
     # Stub push_folder_to_peer so the auto-accept pull-back attempt
@@ -159,13 +249,11 @@ async def test_self_mesh_sender_auto_accepted(receive_ctx):
     daemon = receive_ctx["daemon"]
     state = receive_ctx["state"]
     sender_fp = receive_ctx["sender_fp"]
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    msg = {
-        "t": "MANIFEST_PUSH", "folder": "from_my_laptop",
-        "merkle_root": "deadbeef" * 8,
-        "entry_count": 0, "entries": [],
-    }
+    channel = _folder_channel(transcript="a" * 64)
+    msg = _manifest_push(
+        sender_fp=sender_fp,
+        folder="from_my_laptop",
+    )
     await daemon._handle_manifest_push(channel, msg, sender_fp)
     # Give the auto-accept task a tick.
     for _ in range(20):
@@ -204,12 +292,11 @@ async def test_non_self_mesh_sender_stays_pending(receive_ctx, tmp_path):
         pubkey=other_pub, hostname="other",
     )
     state.set_peer_trust(other_fp, "pinned")
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    msg = {
-        "t": "MANIFEST_PUSH", "folder": "from_stranger",
-        "merkle_root": "x", "entry_count": 0, "entries": [],
-    }
+    channel = _folder_channel(transcript="b" * 64)
+    msg = _manifest_push(
+        sender_fp=other_fp,
+        folder="from_stranger",
+    )
     await daemon._handle_manifest_push(channel, msg, other_fp)
     await asyncio.sleep(0.1)
     # Folder NOT auto-created.
@@ -234,12 +321,11 @@ async def test_auto_accept_skips_when_folder_already_exists(receive_ctx, tmp_pat
         name="from_my_laptop", local_path=str(existing_local),
         shared_with=[],
     )
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    msg = {
-        "t": "MANIFEST_PUSH", "folder": "from_my_laptop",
-        "merkle_root": "x", "entry_count": 0, "entries": [],
-    }
+    channel = _folder_channel(transcript="c" * 64)
+    msg = _manifest_push(
+        sender_fp=sender_fp,
+        folder="from_my_laptop",
+    )
     await daemon._handle_manifest_push(channel, msg, sender_fp)
     await asyncio.sleep(0.1)
     # Existing folder is UNCHANGED.

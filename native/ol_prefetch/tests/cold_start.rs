@@ -58,8 +58,7 @@ fn cold_start_converges_within_50_observations() {
     let at = converged_at.unwrap();
     assert!(
         at <= 50,
-        "Phase D gate: converged at {} iterations; need ≤50",
-        at
+        "Phase D gate: converged at {at} iterations; need ≤50"
     );
 }
 

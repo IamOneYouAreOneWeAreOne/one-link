@@ -1,4 +1,4 @@
-//! BioMesh biological-signal calibration.
+//! `BioMesh` biological-signal calibration.
 //!
 //! Maps the unified field constants to biological-signal observables:
 //!
@@ -11,7 +11,7 @@
 
 use super::{Calibration, Domain};
 
-/// Default BioMesh calibration for typical mammalian-tissue signals.
+/// Default `BioMesh` calibration for typical mammalian-tissue signals.
 #[must_use]
 pub fn bio_mesh_calibration() -> Calibration {
     Calibration {

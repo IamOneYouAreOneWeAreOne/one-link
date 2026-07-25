@@ -1,8 +1,8 @@
 //! Adversarial vectors v2 — second-round red-team additions across
-//! all 10 layers. The shipped per-layer adversarial_vectors_*.rs
+//! all 10 layers. The shipped per-layer `adversarial_vectors_*.rs`
 //! files cover the obvious attack surface; this file adds vectors
 //! against subtler invariants (boundary timestamps, empty inputs,
-//! reused tags, decode-time DoS shapes) that didn't make the first
+//! reused tags, decode-time denial-of-service shapes) that didn't make the first
 //! cut.
 
 use rand::rngs::OsRng;

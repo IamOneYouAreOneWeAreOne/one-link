@@ -10,7 +10,6 @@ Verifies:
 
 from __future__ import annotations
 
-import statistics
 from pathlib import Path
 
 import pytest
@@ -27,7 +26,6 @@ if not CKPT_PATH.exists():
 
 
 from one_link.semantic_scene_codec import (  # noqa: E402
-    REGIME_LABELS_UI,
     SceneFrame,
     SemanticSceneDecoder,
     SemanticSceneEncoder,

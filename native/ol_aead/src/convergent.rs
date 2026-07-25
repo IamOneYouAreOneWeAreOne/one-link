@@ -8,7 +8,7 @@
 //! 2. Cross-user dedup at swarm scale: twelve people sending the same
 //!    raw video bytes produce a single on-disk + on-wire chunk family.
 //! 3. **Confirmable-plaintext attack**: an attacker who guesses the
-//!    plaintext can verify the guess by reproducing the chunk_id.
+//!    plaintext can verify the guess by reproducing the `chunk_id`.
 //!    Acceptable only for content where plaintext is already public
 //!    (raw camera footage, mass-distributed media, public images).
 //!
@@ -19,13 +19,13 @@
 //! - [`ConvergentPolicy`] enum representing share-level mode.
 //! - [`resolve_mode`]: combines policy + content type → final mode.
 //!
-//! The chunk_id (convergent address) is derived in
+//! The `chunk_id` (convergent address) is derived in
 //! [`ol_chunk::chunk_address_convergent`]; this module only owns the
 //! AEAD-key half of the derivation.
 
 use crate::key::{ChunkAeadKey, FRAME_KEY_LEN};
 
-/// BLAKE3 derive_key context for convergent AEAD keys.
+/// BLAKE3 `derive_key` context for convergent AEAD keys.
 ///
 /// Registered in [ADR-0006](../../../docs/decisions/0006-blake3-derive-scheme.md).
 pub const CONVERGENT_AEAD_KEY_CONTEXT: &str = "ol-chunk-aead-key-convergent-v1";
@@ -62,7 +62,7 @@ pub enum ContentType {
     OfficeDocument,
     /// PGP / S/MIME / TLS keys + certificates. Always private.
     EncryptedOrKey,
-    /// Database / spreadsheet data (CSV, SQL, SQLite). Always private.
+    /// Database / spreadsheet data (CSV, SQL, `SQLite`). Always private.
     DataStore,
     /// Mail boxes / password vaults / shell config / git dir. Always private.
     SensitiveConfig,

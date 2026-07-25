@@ -1,6 +1,6 @@
 //! `ol_selector` — the universal per-event selector for One Link.
 //!
-//! Implements the 14-rule Smart-Rules tree from forge_shootouts Gap 17,
+//! Implements the 14-rule Smart-Rules tree from `forge_shootouts` Gap 17,
 //! which empirically demonstrates a 97% reduction in user-intent regret
 //! versus the daemon's current static decision logic.
 //!
@@ -20,7 +20,7 @@
 //!
 //! - The rule tree is a pure function of `Context`. No state, no I/O.
 //! - Implements [`Decide<Decision>`](ol_decide::Decide), so any other
-//!   crate that wants to swap selectors (e.g. UnifiedMin in Phase H)
+//!   crate that wants to swap selectors (e.g. `UnifiedMin` in Phase H)
 //!   plugs in trivially.
 //! - The `safe_default` is "full conservative": 3-hop onion, cover ON,
 //!   anchor laid, emit-now, classical path. Used when context is

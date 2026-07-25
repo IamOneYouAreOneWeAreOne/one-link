@@ -22,6 +22,7 @@ CAPS frame so a peer can render the rich label.
 """
 from __future__ import annotations
 
+import logging
 import platform
 import subprocess
 import sys
@@ -29,7 +30,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from one_link.fault_observability import report_best_effort_failure
 from one_link.platform_guard import install_windows_platform_fastpath
+from one_link.process_security import (
+    hidden_creationflags,
+    resolve_argv,
+    trusted_process_env,
+)
+
+log = logging.getLogger(__name__)
 
 install_windows_platform_fastpath()
 
@@ -94,17 +103,21 @@ def _safe_run(cmd: list[str], *, timeout: float = 1.5) -> str:
     On Windows we pass CREATE_NO_WINDOW so the probe doesn't flash a
     conhost window when the daemon shells out to wmic / powershell /
     PnPUtil for system info."""
-    import os as _os
-    creationflags = 0x08000000 if _os.name == "nt" else 0
+    if not 0.0 < float(timeout) <= 10.0:
+        return ""
     try:
+        argv = resolve_argv(cmd, system_tool=True)
         out = subprocess.run(
-            cmd,
+            argv,
             capture_output=True, text=True, check=False,
             timeout=timeout,
-            creationflags=creationflags,
+            creationflags=hidden_creationflags(),
+            cwd=str(Path(argv[0]).parent),
+            env=trusted_process_env(),
+            shell=False,
         )
-        return (out.stdout or "").strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, Exception):
+        return (out.stdout or "")[:65_536].strip()
+    except (subprocess.SubprocessError, OSError, ValueError):
         return ""
 
 
@@ -167,8 +180,13 @@ def _detect_windows() -> DeviceInfo:
                     info.kind = _WIN_PC_TYPE.get(pc_type, info.kind)
                 except (ValueError, TypeError):
                     pass
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError, TypeError, ValueError) as exc:
+            report_best_effort_failure(
+                log,
+                "windows_device_probe",
+                exc,
+                level=logging.DEBUG,
+            )
 
     info.display = _windows_display_label(info)
     return info

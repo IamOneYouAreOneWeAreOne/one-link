@@ -1,4 +1,4 @@
-//! Two UdpTransport instances on loopback talk to each other.
+//! Two `UdpTransport` instances on loopback talk to each other.
 //! The acceptance gate for production-deployable F1.3.
 
 use std::future::Future;
@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 use ol_discovery::lookup::Transport;
 use ol_discovery::node_id::NodeId;
@@ -19,8 +20,8 @@ fn id(b: u8) -> NodeId {
     NodeId([b; 32])
 }
 
-/// Test handler: PING → Pong; FIND_NODE → return fixed closest set;
-/// FIND_VALUE → return fixed closer set. Everything else → Pong.
+/// Test handler: `PING` → Pong; `FIND_NODE` → return fixed closest set;
+/// `FIND_VALUE` → return fixed closer set. Everything else → Pong.
 struct StubHandler {
     closest_to_return: Mutex<Vec<NodeId>>,
 }
@@ -49,8 +50,19 @@ impl RequestHandler for StubHandler {
     }
 }
 
-/// Build two UdpTransports on ephemeral localhost ports, return
-/// (transport_a, addr_a, transport_b, addr_b).
+struct PongOnly;
+
+impl RequestHandler for PongOnly {
+    fn handle<'a>(
+        &'a self,
+        _env: RpcEnvelope<Request>,
+    ) -> Pin<Box<dyn Future<Output = Response> + Send + 'a>> {
+        Box::pin(async move { Response::Pong })
+    }
+}
+
+/// Build two `UdpTransport` instances on ephemeral localhost ports, returning
+/// (`transport_a`, `addr_a`, `transport_b`, `addr_b`).
 async fn spawn_two_peers(
     a_id: NodeId,
     b_id: NodeId,
@@ -74,15 +86,6 @@ async fn spawn_two_peers(
     // B runs a receiver with the handler.
     let _h_b = t_b.spawn_receiver(handler_b);
     // A also runs a receiver so it can receive responses. Empty handler.
-    struct PongOnly;
-    impl RequestHandler for PongOnly {
-        fn handle<'a>(
-            &'a self,
-            _env: RpcEnvelope<Request>,
-        ) -> Pin<Box<dyn Future<Output = Response> + Send + 'a>> {
-            Box::pin(async move { Response::Pong })
-        }
-    }
     let _h_a = t_a.spawn_receiver(Arc::new(PongOnly));
     (t_a, addr_a, t_b, addr_b)
 }
@@ -159,4 +162,43 @@ async fn query_to_silent_peer_times_out_to_failed() {
         result,
         ol_discovery::lookup::LookupQueryResult::Failed
     ));
+}
+
+#[tokio::test]
+async fn slow_request_handler_does_not_block_response_delivery() {
+    struct SlowPing;
+    impl RequestHandler for SlowPing {
+        fn handle<'a>(
+            &'a self,
+            _env: RpcEnvelope<Request>,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + 'a>> {
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                Response::Pong
+            })
+        }
+    }
+
+    let a_id = id(0x31);
+    let b_id = id(0x32);
+    let (t_a, _, t_b, _) = spawn_two_peers(a_id, b_id, Arc::new(SlowPing)).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // The first request occupies B's application handler. B then issues its
+    // own request to A. Its receive loop must still deliver A's response
+    // immediately; the former inline-await implementation stalled it behind
+    // the unrelated 800 ms handler.
+    let occupy_b = t_a.request(b_id, Request::Ping);
+    let reverse_query = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let started = Instant::now();
+        let response = t_b.request(a_id, Request::Ping).await.unwrap();
+        assert_eq!(response, Response::Pong);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "nonce-matched response was head-of-line blocked by a request handler"
+        );
+    };
+    let (slow_result, ()) = tokio::join!(occupy_b, reverse_query);
+    assert!(matches!(slow_result, Ok(Response::Pong)));
 }

@@ -119,7 +119,6 @@ async def test_cover_traffic_runs_real_sphinx_round_trip(daemon_with_seed):
     sample). Bump the rate and confirm AT LEAST ONE real emit
     succeeds — every emit runs the Sphinx pipeline end-to-end so a
     count > 0 means real crypto is exercising every tick."""
-    import asyncio
     daemon = daemon_with_seed
     await daemon.start()
     try:

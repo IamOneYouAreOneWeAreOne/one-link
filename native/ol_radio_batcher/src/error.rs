@@ -13,7 +13,7 @@ pub enum BatcherError {
     /// before enqueuing more.
     ///
     /// The selector's `safe_default` action when this happens is
-    /// emit-now (treat as urgent_bypass): if we can't queue, we must
+    /// emit-now (treat as `urgent_bypass)`: if we can't queue, we must
     /// transmit. The daemon translates this into a direct send.
     #[error("queue full: size={size}, max={max}")]
     QueueFull {
@@ -32,11 +32,20 @@ pub enum BatcherError {
         got: u32,
     },
 
-    /// max_queue_size was 0 — would refuse every enqueue. Reject in
+    /// `max_queue_size` was 0 — would refuse every enqueue. Reject in
     /// the constructor.
     #[error("max_queue_size must be > 0 (got {got})")]
     InvalidMaxQueueSize {
         /// The offending value.
         got: usize,
+    },
+
+    /// The configured queue entry cap exceeds the process safety ceiling.
+    #[error("max_queue_size exceeds safety ceiling: {got} > {max}")]
+    MaxQueueSizeTooLarge {
+        /// Requested entry cap.
+        got: usize,
+        /// Hard process ceiling.
+        max: usize,
     },
 }

@@ -2,7 +2,7 @@
 //!
 //! Pins:
 //!   1. The canonical wire-format prefixes (domain tags).
-//!   2. Bounded sizes (MAX_APPROVALS / MAX_ELIGIBLE_DEVICES / POLICY_LABEL_MAX).
+//!   2. Bounded sizes (`MAX_APPROVALS` / `MAX_ELIGIBLE_DEVICES` / `POLICY_LABEL_MAX`).
 //!   3. Policy canonical-transcript bytes for a fixed input.
 //!   4. Proposal canonical-transcript bytes for a fixed input.
 //!   5. Approval canonical-transcript bytes for a fixed input.
@@ -20,6 +20,7 @@ use ol_device_mesh::quorum::{
     PROPOSAL_DOMAIN, PROPOSAL_NONCE_LEN,
 };
 use ol_device_mesh::DEVICE_ID_LEN;
+use std::fmt::Write as _;
 
 fn check_regen<F: FnOnce()>(label: &str, dump: F) {
     if std::env::var("OL_QUORUM_KAT_REGEN").as_deref() == Ok("1") {
@@ -29,7 +30,11 @@ fn check_regen<F: FnOnce()>(label: &str, dump: F) {
 }
 
 fn to_hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    let mut hex = String::with_capacity(b.len() * 2);
+    for byte in b {
+        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
 }
 
 // ── 1. Domain tags pinned ─────────────────────────────────────────
@@ -58,6 +63,18 @@ fn kat_bound_constants_pinned() {
 
 #[test]
 fn kat_policy_canonical_transcript_pinned() {
+    const EXPECTED_POLICY_TRANSCRIPT_HEX: &str = concat!(
+        "4f4c2d6465766963652d6d6573682d706f6c6963792d7631", // "OL-device-mesh-policy-v1"
+        "42424242424242424242424242424242",                 // policy_id
+        "0012",                                             // label length = 18 (BE)
+        "6c6179657232",                                     // "layer2"
+        "2d746573742d706f6c696379",                         // "-test-policy"
+        "02",                                               // k = 2
+        "0003",                                             // n = 3 (BE)
+        "11111111111111111111111111111111",                 // device id 1
+        "22222222222222222222222222222222",                 // device id 2
+        "33333333333333333333333333333333",                 // device id 3
+    );
     let policy_id = [0x42; POLICY_ID_LEN];
     let label = b"layer2-test-policy";
     let k = 2u8;
@@ -81,18 +98,6 @@ fn kat_policy_canonical_transcript_pinned() {
         eprintln!("    EXPECTED_POLICY_TRANSCRIPT_HEX = \"{hex}\"");
     });
 
-    const EXPECTED_POLICY_TRANSCRIPT_HEX: &str = concat!(
-        "4f4c2d6465766963652d6d6573682d706f6c6963792d7631", // "OL-device-mesh-policy-v1"
-        "42424242424242424242424242424242",                 // policy_id
-        "0012",                                             // label length = 18 (BE)
-        "6c6179657232",                                     // "layer2"
-        "2d746573742d706f6c696379",                         // "-test-policy"
-        "02",                                               // k = 2
-        "0003",                                             // n = 3 (BE)
-        "11111111111111111111111111111111",                 // device id 1
-        "22222222222222222222222222222222",                 // device id 2
-        "33333333333333333333333333333333",                 // device id 3
-    );
     assert_eq!(
         hex, EXPECTED_POLICY_TRANSCRIPT_HEX,
         "policy transcript drift"
@@ -103,6 +108,16 @@ fn kat_policy_canonical_transcript_pinned() {
 
 #[test]
 fn kat_proposal_canonical_transcript_pinned() {
+    const EXPECTED_PROPOSAL_TRANSCRIPT_HEX: &str = concat!(
+        "4f4c2d6465766963652d6d6573682d70726f706f73616c2d7631", // "OL-device-mesh-proposal-v1"
+        "42424242424242424242424242424242",                     // policy_id
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", // op_digest
+        "dadadadadadadadadadadadadadadada",                     // nonce
+        "000000006553f100",                                     // issued_unix BE
+        "000000006553ff10",                                     // deadline_unix BE
+        "11111111111111111111111111111111",                     // issuer id
+        "0000000000000007",                                     // day BE
+    );
     let policy_id = [0x42; POLICY_ID_LEN];
     let op_digest = [0xEE; OPERATION_DIGEST_LEN];
     let nonce = [0xDA; PROPOSAL_NONCE_LEN];
@@ -127,16 +142,6 @@ fn kat_proposal_canonical_transcript_pinned() {
         eprintln!("    EXPECTED_PROPOSAL_TRANSCRIPT_HEX = \"{hex}\"");
     });
 
-    const EXPECTED_PROPOSAL_TRANSCRIPT_HEX: &str = concat!(
-        "4f4c2d6465766963652d6d6573682d70726f706f73616c2d7631", // "OL-device-mesh-proposal-v1"
-        "42424242424242424242424242424242",                     // policy_id
-        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", // op_digest
-        "dadadadadadadadadadadadadadadada",                     // nonce
-        "000000006553f100",                                     // issued_unix BE
-        "000000006553ff10",                                     // deadline_unix BE
-        "11111111111111111111111111111111",                     // issuer id
-        "0000000000000007",                                     // day BE
-    );
     assert_eq!(
         hex, EXPECTED_PROPOSAL_TRANSCRIPT_HEX,
         "proposal transcript drift"
@@ -147,6 +152,13 @@ fn kat_proposal_canonical_transcript_pinned() {
 
 #[test]
 fn kat_approval_canonical_transcript_pinned() {
+    const EXPECTED_APPROVAL_TRANSCRIPT_HEX: &str = concat!(
+        "4f4c2d6465766963652d6d6573682d617070726f76616c2d7631", // "OL-device-mesh-approval-v1"
+        "bebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebe", // proposal id
+        "22222222222222222222222222222222",                     // approver id
+        "0000000000000003",                                     // day BE
+        "000000006553f4e8",                                     // approved_unix BE
+    );
     let pid = [0xBE; 32];
     let approver = [0x22; DEVICE_ID_LEN];
     let day: u64 = 3;
@@ -160,13 +172,6 @@ fn kat_approval_canonical_transcript_pinned() {
         eprintln!("    EXPECTED_APPROVAL_TRANSCRIPT_HEX = \"{hex}\"");
     });
 
-    const EXPECTED_APPROVAL_TRANSCRIPT_HEX: &str = concat!(
-        "4f4c2d6465766963652d6d6573682d617070726f76616c2d7631", // "OL-device-mesh-approval-v1"
-        "bebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebe", // proposal id
-        "22222222222222222222222222222222",                     // approver id
-        "0000000000000003",                                     // day BE
-        "000000006553f4e8",                                     // approved_unix BE
-    );
     assert_eq!(
         hex, EXPECTED_APPROVAL_TRANSCRIPT_HEX,
         "approval transcript drift"

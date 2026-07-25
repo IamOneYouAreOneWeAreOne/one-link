@@ -699,7 +699,7 @@ async fn concurrent_fetch_stress_200_parallel() {
     assert_eq!(outcomes.len(), 200);
     let success_count = outcomes.iter().filter(|o| o.is_success()).count();
     assert_eq!(success_count, 200);
-    eprintln!("200 parallel fetches: {:?}", elapsed);
+    eprintln!("200 parallel fetches: {elapsed:?}");
 
     // Bob now has all 200 chunks.
     let s = bob.store.read().unwrap();

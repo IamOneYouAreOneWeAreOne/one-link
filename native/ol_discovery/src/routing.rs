@@ -1,6 +1,6 @@
 //! K-bucket routing table.
 //!
-//! Vanilla Kademlia: 256 buckets (one per bit of the NodeId), each
+//! Vanilla Kademlia: 256 buckets (one per bit of the `NodeId`), each
 //! holding up to K most-recently-seen peers. New peers go to the
 //! tail of their bucket; existing peers move to the tail when seen
 //! again ("recently-seen-most-recent" replacement policy).
@@ -34,13 +34,17 @@ use crate::node_id::{closer_to, NodeId, NODE_ID_BITS};
 /// K=20 as the standard; we match.
 pub const K_BUCKET_DEFAULT: usize = 20;
 
-/// Number of buckets in the table. One per bit of the NodeId.
+/// Maximum configurable entries per bucket.  This caps total routing-table
+/// memory at `MAX_BUCKETS * MAX_K_BUCKET_SIZE` entries.
+pub const MAX_K_BUCKET_SIZE: usize = 256;
+
+/// Number of buckets in the table. One per bit of the `NodeId`.
 pub const MAX_BUCKETS: usize = NODE_ID_BITS; // 256
 
 /// One bucket entry: a peer the local node has heard from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BucketEntry {
-    /// The peer's NodeId.
+    /// The peer's `NodeId`.
     pub id: NodeId,
     /// Unix-seconds timestamp the entry was last touched (last seen).
     /// Used for least-recently-seen eviction.
@@ -73,7 +77,7 @@ pub enum InsertOutcome {
     },
 }
 
-/// One K-bucket. Wraps a VecDeque so head-removal + tail-push are O(1).
+/// One K-bucket. Wraps a `VecDeque` so head-removal + tail-push are O(1).
 #[derive(Clone, Debug, Default)]
 struct Bucket {
     entries: VecDeque<BucketEntry>,
@@ -89,7 +93,7 @@ pub struct RoutingTable {
 }
 
 impl RoutingTable {
-    /// Construct a new table for the given local NodeId.
+    /// Construct a new table for the given local `NodeId`.
     /// Uses the default K (= [`K_BUCKET_DEFAULT`]).
     #[must_use]
     pub fn new(own_id: NodeId) -> Self {
@@ -103,10 +107,14 @@ impl RoutingTable {
         for _ in 0..MAX_BUCKETS {
             buckets.push(Bucket::default());
         }
-        Self { own_id, k, buckets }
+        Self {
+            own_id,
+            k: k.clamp(1, MAX_K_BUCKET_SIZE),
+            buckets,
+        }
     }
 
-    /// Borrow the local NodeId.
+    /// Borrow the local `NodeId`.
     #[must_use]
     pub const fn own_id(&self) -> &NodeId {
         &self.own_id
@@ -147,7 +155,9 @@ impl RoutingTable {
         let bucket = &mut self.buckets[idx];
         // Existing peer? Move to tail with updated timestamp.
         if let Some(pos) = bucket.entries.iter().position(|e| e.id == id) {
-            let mut existing = bucket.entries.remove(pos).expect("position valid");
+            let Some(mut existing) = bucket.entries.remove(pos) else {
+                return InsertOutcome::SelfInsertIgnored;
+            };
             existing.last_seen_unix = last_seen_unix;
             bucket.entries.push_back(existing);
             bucket.last_refresh_unix = last_seen_unix;
@@ -162,8 +172,10 @@ impl RoutingTable {
             return InsertOutcome::Inserted;
         }
         // Bucket full. Caller decides what to do via PING.
-        let head = *bucket.entries.front().expect("non-empty (k > 0)");
-        InsertOutcome::BucketFull { head }
+        match bucket.entries.front().copied() {
+            Some(head) => InsertOutcome::BucketFull { head },
+            None => InsertOutcome::SelfInsertIgnored,
+        }
     }
 
     /// Called by the maintenance loop when a PING-on-bucket-full
@@ -233,7 +245,7 @@ impl RoutingTable {
     /// `now_unix - max_age_secs`. Returns indices sorted ascending.
     ///
     /// The maintenance loop runs a `FIND_NODE` lookup against each
-    /// stale bucket using a randomly-chosen NodeId in that bucket's
+    /// stale bucket using a randomly-chosen `NodeId` in that bucket's
     /// distance range, which has the effect of populating + refreshing
     /// the bucket.
     #[must_use]
@@ -280,7 +292,7 @@ impl RoutingTable {
     }
 
     /// Mark a bucket as just-refreshed. Maintenance loops call this
-    /// after issuing a FIND_NODE refresh lookup against the bucket
+    /// after issuing a `FIND_NODE` refresh lookup against the bucket
     /// so subsequent `stale_buckets()` queries don't immediately
     /// re-flag it.
     pub fn mark_bucket_refreshed(&mut self, bucket_idx: usize, now_unix: u64) {
@@ -289,7 +301,7 @@ impl RoutingTable {
         }
     }
 
-    /// Generate a NodeId that lives in bucket `bucket_idx` (relative
+    /// Generate a `NodeId` that lives in bucket `bucket_idx` (relative
     /// to `own_id`). Used by maintenance to issue refresh lookups
     /// targeting the right distance range.
     ///
@@ -313,7 +325,7 @@ impl RoutingTable {
     }
 }
 
-/// Sort utility: stable-sort a list of NodeIds by XOR distance to
+/// Sort utility: stable-sort a list of `NodeIds` by XOR distance to
 /// `target`, ascending. Used by the lookup algorithm.
 pub fn sort_by_distance(ids: &mut [NodeId], target: &NodeId) {
     ids.sort_by(|a, b| {

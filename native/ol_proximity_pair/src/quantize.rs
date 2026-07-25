@@ -1,21 +1,21 @@
 //! Stage 1+2: quantize raw observations to a bit string.
 //!
-//! Algorithm (matches OneField's bootstrap.cl):
+//! Algorithm (matches `OneField`'s bootstrap.cl):
 //!
 //! 1. Compute the median of the observation values (per-byte).
 //! 2. For each observation, output:
-//!    - bit `1` if value > median + guard_band
-//!    - bit `0` if value < median - guard_band
+//!    - bit `1` if value > median + `guard_band`
+//!    - bit `0` if value < median - `guard_band`
 //!    - SKIP if value is inside the guard band (ambiguous; both sides
 //!      might disagree)
 //!
-//! The guard band trades raw key rate for agreement rate. OneField uses
+//! The guard band trades raw key rate for agreement rate. `OneField` uses
 //! a guard band sized at ~5% of the observation range.
 
 use crate::PairError;
 
 /// Default observation-vector minimum length: 128 bytes (= 128 probes
-/// of 1 byte each, matching OneField's `KEY_DERIVATION_PROBES`).
+/// of 1 byte each, matching `OneField`'s `KEY_DERIVATION_PROBES`).
 pub const OBSERVATION_BYTES_DEFAULT: usize = 128;
 
 /// Default guard band as a fraction of the observed range
@@ -109,8 +109,11 @@ mod tests {
         // With zero guard band every value gets classified.
         assert!(!bits.is_empty());
         // First half (low values) should be 0; second half (high) should be 1.
-        let n_zeros = bits.iter().filter(|&&b| b == 0).count();
-        let n_ones = bits.iter().filter(|&&b| b == 1).count();
+        let (n_zeros, n_ones) = bits.iter().fold((0usize, 0usize), |counts, bit| match bit {
+            0 => (counts.0 + 1, counts.1),
+            1 => (counts.0, counts.1 + 1),
+            _ => counts,
+        });
         assert!(n_zeros > 0);
         assert!(n_ones > 0);
         assert_eq!(n_zeros + n_ones, bits.len());
@@ -155,7 +158,8 @@ mod tests {
             .zip(bob_bits[..n].iter())
             .filter(|(a, b)| a == b)
             .count();
-        let agreement_rate = agreement as f64 / n as f64;
+        let agreement_rate = f64::from(u32::try_from(agreement).expect("test vector fits u32"))
+            / f64::from(u32::try_from(n).expect("test vector fits u32"));
         // Should agree on the vast majority of bits.
         assert!(
             agreement_rate >= 0.85,

@@ -19,15 +19,12 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.groups import (
-    GROUP_ID_BYTES,
     MAX_GROUP_MEMBERS,
     MAX_GROUP_NAME_LEN,
-    PROTOCOL_VERSION,
     ROLE_ADMIN,
     ROLE_MEMBER,
     ROLE_OWNER,
     GroupEvent,
-    GroupState,
     new_group_id,
     reduce_events,
     sign_add_member,
@@ -713,3 +710,64 @@ def test_rename_with_empty_name_dropped():
     ev_bad.name = ""  # tamper
     state = reduce_events([ev_c, ev_bad], skip_signature_verify=True)
     assert state.name == "ok"  # rename rejected at apply time
+
+
+# ─── hostile wire-boundary coverage ────────────────────────────────
+
+@pytest.mark.parametrize(
+    "field",
+    ["group_id_b64", "author_pubkey_b64", "nonce_b64", "signature"],
+)
+def test_from_wire_rejects_padded_base64_aliases(field: str):
+    sk, pk = _new_key()
+    wire = sign_create_group(private_key=sk, pubkey=pk, name="g").to_wire()
+    wire[field] += "="
+    with pytest.raises(ValueError, match="canonical base64url|too large"):
+        GroupEvent.from_wire(wire)
+
+
+def test_from_wire_rejects_unknown_and_missing_fields():
+    sk, pk = _new_key()
+    wire = sign_create_group(private_key=sk, pubkey=pk, name="g").to_wire()
+    wire["future_confusion"] = True
+    with pytest.raises(ValueError, match="unknown fields"):
+        GroupEvent.from_wire(wire)
+    wire.pop("future_confusion")
+    wire.pop("role")
+    with pytest.raises(ValueError, match="missing fields"):
+        GroupEvent.from_wire(wire)
+
+
+def test_from_wire_rejects_mismatched_content_address():
+    sk, pk = _new_key()
+    wire = sign_create_group(private_key=sk, pubkey=pk, name="g").to_wire()
+    wire["event_id"] = "0" * 64
+    with pytest.raises(ValueError, match="does not match"):
+        GroupEvent.from_wire(wire)
+
+
+@pytest.mark.parametrize("bad_timestamp", [True, -1, 2**63])
+def test_from_wire_rejects_noncanonical_timestamp(bad_timestamp):
+    sk, pk = _new_key()
+    wire = sign_create_group(private_key=sk, pubkey=pk, name="g").to_wire()
+    wire["timestamp_ms"] = bad_timestamp
+    with pytest.raises(ValueError, match="timestamp_ms"):
+        GroupEvent.from_wire(wire)
+
+
+def test_from_wire_rejects_kind_field_smuggling():
+    sk, pk = _new_key()
+    wire = sign_create_group(private_key=sk, pubkey=pk, name="g").to_wire()
+    wire["target_pubkey_b64"] = wire["author_pubkey_b64"]
+    with pytest.raises(ValueError, match="invalid fields"):
+        GroupEvent.from_wire(wire)
+
+
+def test_signing_rejects_mismatched_identity_and_invalid_group_id():
+    sk, _ = _new_key()
+    _, other_pk = _new_key()
+    with pytest.raises(ValueError, match="does not match"):
+        sign_create_group(private_key=sk, pubkey=other_pk, name="g")
+    with pytest.raises(ValueError, match="group_id"):
+        sign_create_group(private_key=sk, pubkey=sk.public_key().public_bytes_raw(),
+                          name="g", group_id=b"")

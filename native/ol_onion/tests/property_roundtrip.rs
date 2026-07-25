@@ -1,4 +1,4 @@
-//! Property tests for ol_onion at the F1.x bar (1M iters CI / 5M
+//! Property tests for `ol_onion` at the F1.x bar (1M iters CI / 5M
 //! nightly).
 
 use proptest::prelude::*;
@@ -51,7 +51,7 @@ proptest! {
     /// (well-formed) ciphertext content.
     #[test]
     fn packet_encode_decode_roundtrip(
-        hops_remaining in 0u8..=(MAX_HOPS as u8),
+        hops_remaining in 0u8..=u8::try_from(MAX_HOPS).unwrap(),
         ephem in any::<[u8; 32]>(),
         nonce in any::<[u8; 12]>(),
         ct_bytes in prop::collection::vec(any::<u8>(), 16..=512),
@@ -84,8 +84,9 @@ proptest! {
         n_hops in 1usize..=4,
         payload in prop::collection::vec(any::<u8>(), 0..=200),
     ) {
-        let hops: Vec<(StaticSecret, HopDescriptor)> =
-            (0..n_hops as u8).map(|i| make_hop_pair(i + 1)).collect();
+        let hops: Vec<(StaticSecret, HopDescriptor)> = (0..n_hops)
+            .map(|i| make_hop_pair(u8::try_from(i).unwrap() + 1))
+            .collect();
         let descriptors: Vec<HopDescriptor> =
             hops.iter().map(|(_, h)| h.clone()).collect();
         let circuit = Circuit::new(descriptors).unwrap();

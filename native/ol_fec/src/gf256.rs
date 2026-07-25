@@ -37,7 +37,7 @@ pub static LOG: [u8; FIELD_SIZE] = {
     let mut i: usize = 0;
     while i < FIELD_ORDER {
         // SAFETY: x ∈ 1..256, indexing is in bounds.
-        log[x as usize] = i as u8;
+        log[x as usize] = i.to_le_bytes()[0];
         x = mul_no_table(x, PRIMITIVE_ROOT as u16);
         i += 1;
     }
@@ -51,8 +51,9 @@ pub static EXP: [u8; 2 * FIELD_ORDER] = {
     let mut x: u16 = 1;
     let mut i: usize = 0;
     while i < FIELD_ORDER {
-        exp[i] = x as u8;
-        exp[i + FIELD_ORDER] = x as u8;
+        let x_byte = x.to_le_bytes()[0];
+        exp[i] = x_byte;
+        exp[i + FIELD_ORDER] = x_byte;
         x = mul_no_table(x, PRIMITIVE_ROOT as u16);
         i += 1;
     }
@@ -101,28 +102,32 @@ pub const fn add(a: u8, b: u8) -> u8 {
     a ^ b
 }
 
-/// Multiplicative inverse: `inv(a) * a = 1`. Panics for `a == 0`.
+/// Multiplicative inverse: `inv(a) * a = 1`, or `None` for zero.
 #[inline]
 #[must_use]
-pub fn inv(a: u8) -> u8 {
-    assert!(a != 0, "GF(2^8) zero has no multiplicative inverse");
+pub fn inv(a: u8) -> Option<u8> {
+    if a == 0 {
+        return None;
+    }
     let la = LOG[a as usize] as usize;
     // 255 - la is in 1..=254, well-defined index.
-    EXP[FIELD_ORDER - la]
+    Some(EXP[FIELD_ORDER - la])
 }
 
-/// Division: `a / b = a * inv(b)`. Panics for `b == 0`.
+/// Division: `a / b = a * inv(b)`, or `None` for a zero divisor.
 #[inline]
 #[must_use]
-pub fn div(a: u8, b: u8) -> u8 {
-    if a == 0 {
-        return 0;
+pub fn div(a: u8, b: u8) -> Option<u8> {
+    if b == 0 {
+        return None;
     }
-    assert!(b != 0, "GF(2^8) division by zero");
+    if a == 0 {
+        return Some(0);
+    }
     let la = LOG[a as usize] as usize;
     let lb = LOG[b as usize] as usize;
     // la in 0..255, lb in 0..255; la + 255 - lb in 0..509.
-    EXP[la + FIELD_ORDER - lb]
+    Some(EXP[la + FIELD_ORDER - lb])
 }
 
 /// In-place fused multiply-add over a byte slice:
@@ -133,7 +138,7 @@ pub fn div(a: u8, b: u8) -> u8 {
 /// to the scalar table-lookup path otherwise. Both paths are
 /// **byte-identical** in output (property-tested).
 ///
-/// **x86_64 SSSE3 path**: uses PSHUFB to do 16 GF(2^8) multiplications
+/// **`x86_64` SSSE3 path**: uses PSHUFB to do 16 GF(2^8) multiplications
 /// per instruction via the 4-bit-by-4-bit decomposition
 /// (Plank-Greenan-Miller 2013). Two 16-entry tables (high-nibble +
 /// low-nibble of the multiplication result) are precomputed per
@@ -142,10 +147,15 @@ pub fn div(a: u8, b: u8) -> u8 {
 /// **Scalar fallback**: per-coefficient 256-entry multiplication table
 /// (the "Klauspost trick"). Amortizes log/exp lookups across the shard.
 #[inline]
-pub fn fma_into(dest: &mut [u8], src: &[u8], coeff: u8) {
-    debug_assert_eq!(dest.len(), src.len());
+pub fn fma_into(dest: &mut [u8], src: &[u8], coeff: u8) -> Result<(), crate::FecError> {
+    if dest.len() != src.len() {
+        return Err(crate::FecError::InconsistentShardLen {
+            expected: dest.len(),
+            len: src.len(),
+        });
+    }
     if coeff == 0 {
-        return;
+        return Ok(());
     }
     if coeff == 1 {
         // Fast path: addition (XOR) only, no multiply. Uses the same
@@ -154,7 +164,7 @@ pub fn fma_into(dest: &mut [u8], src: &[u8], coeff: u8) {
         for (d, s) in dest.iter_mut().zip(src.iter()) {
             *d ^= *s;
         }
-        return;
+        return Ok(());
     }
 
     // Runtime SIMD dispatch.
@@ -165,24 +175,29 @@ pub fn fma_into(dest: &mut [u8], src: &[u8], coeff: u8) {
             unsafe {
                 fma_into_ssse3(dest, src, coeff);
             }
-            return;
+            return Ok(());
         }
     }
-    fma_into_scalar(dest, src, coeff);
+    fma_into_scalar(dest, src, coeff)
 }
 
 /// Scalar fallback: per-coefficient 256-entry table lookup.
 #[inline]
-pub fn fma_into_scalar(dest: &mut [u8], src: &[u8], coeff: u8) {
-    debug_assert_eq!(dest.len(), src.len());
+pub fn fma_into_scalar(dest: &mut [u8], src: &[u8], coeff: u8) -> Result<(), crate::FecError> {
+    if dest.len() != src.len() {
+        return Err(crate::FecError::InconsistentShardLen {
+            expected: dest.len(),
+            len: src.len(),
+        });
+    }
     if coeff == 0 {
-        return;
+        return Ok(());
     }
     if coeff == 1 {
         for (d, s) in dest.iter_mut().zip(src.iter()) {
             *d ^= *s;
         }
-        return;
+        return Ok(());
     }
     let mut mul_table = [0u8; FIELD_SIZE];
     let lc = LOG[coeff as usize] as usize;
@@ -194,6 +209,7 @@ pub fn fma_into_scalar(dest: &mut [u8], src: &[u8], coeff: u8) {
     for (d, s) in dest.iter_mut().zip(src.iter()) {
         *d ^= mul_table[*s as usize];
     }
+    Ok(())
 }
 
 /// SSSE3 PSHUFB path. Splits each source byte into high + low nibbles,
@@ -207,7 +223,9 @@ pub fn fma_into_scalar(dest: &mut [u8], src: &[u8], coeff: u8) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "ssse3")]
 unsafe fn fma_into_ssse3(dest: &mut [u8], src: &[u8], coeff: u8) {
-    use std::arch::x86_64::*;
+    use std::arch::x86_64::{
+        __m128i, _mm_and_si128, _mm_set1_epi8, _mm_shuffle_epi8, _mm_srli_epi64, _mm_xor_si128,
+    };
 
     debug_assert_eq!(dest.len(), src.len());
 
@@ -217,9 +235,10 @@ unsafe fn fma_into_ssse3(dest: &mut [u8], src: &[u8], coeff: u8) {
     // byte b, vectorized 16-wide via PSHUFB.
     let mut low_table = [0u8; 16];
     let mut high_table = [0u8; 16];
-    for i in 0..16usize {
-        low_table[i] = mul(coeff, i as u8);
-        high_table[i] = mul(coeff, (i as u8) << 4);
+    for nibble in 0u8..16 {
+        let index = usize::from(nibble);
+        low_table[index] = mul(coeff, nibble);
+        high_table[index] = mul(coeff, nibble << 4);
     }
 
     // SAFETY: all SSSE3 intrinsics + pointer arithmetic below are
@@ -229,15 +248,18 @@ unsafe fn fma_into_ssse3(dest: &mut [u8], src: &[u8], coeff: u8) {
     //    `[src.as_ptr()..src.as_ptr() + n)` and the mirrored dest range.
     //  - The tail loop does byte-wise scalar access.
     unsafe {
-        let low_v = _mm_loadu_si128(low_table.as_ptr().cast::<__m128i>());
-        let high_v = _mm_loadu_si128(high_table.as_ptr().cast::<__m128i>());
+        let low_v = std::mem::transmute::<[u8; 16], __m128i>(low_table);
+        let high_v = std::mem::transmute::<[u8; 16], __m128i>(high_table);
         let mask_nibble = _mm_set1_epi8(0x0F);
 
         let n = src.len();
         let n16 = n & !15;
         let mut i = 0usize;
         while i < n16 {
-            let s = _mm_loadu_si128(src.as_ptr().add(i).cast::<__m128i>());
+            let src_bytes: [u8; 16] = src[i..i + 16]
+                .try_into()
+                .expect("vector loop always has 16 source bytes");
+            let s = std::mem::transmute::<[u8; 16], __m128i>(src_bytes);
             let low_nibbles = _mm_and_si128(s, mask_nibble);
             // Right-shift each byte 4 bits to get high nibbles.
             // `_mm_srli_epi64` shifts the *whole 64-bit lane*, so bytes
@@ -247,9 +269,13 @@ unsafe fn fma_into_ssse3(dest: &mut [u8], src: &[u8], coeff: u8) {
             let low_result = _mm_shuffle_epi8(low_v, low_nibbles);
             let high_result = _mm_shuffle_epi8(high_v, high_nibbles);
             let product = _mm_xor_si128(low_result, high_result);
-            let d = _mm_loadu_si128(dest.as_ptr().add(i).cast::<__m128i>());
+            let dest_bytes: [u8; 16] = dest[i..i + 16]
+                .try_into()
+                .expect("vector loop always has 16 destination bytes");
+            let d = std::mem::transmute::<[u8; 16], __m128i>(dest_bytes);
             let d_xor = _mm_xor_si128(d, product);
-            _mm_storeu_si128(dest.as_mut_ptr().add(i).cast::<__m128i>(), d_xor);
+            let output = std::mem::transmute::<__m128i, [u8; 16]>(d_xor);
+            dest[i..i + 16].copy_from_slice(&output);
             i += 16;
         }
         // Scalar tail for the last 0..15 bytes.
@@ -293,16 +319,23 @@ mod tests {
     #[test]
     fn inv_is_multiplicative_inverse() {
         for x in 1u8..=255 {
-            let i = inv(x);
+            let i = inv(x).unwrap();
             assert_eq!(mul(x, i), 1, "inv({x:#x}) failed");
         }
+    }
+
+    #[test]
+    fn zero_inverse_and_zero_divisor_are_rejected_without_panicking() {
+        assert_eq!(inv(0), None);
+        assert_eq!(div(1, 0), None);
+        assert_eq!(div(0, 0), None);
     }
 
     #[test]
     fn div_is_inverse_of_mul() {
         for a in 0u8..=255 {
             for b in 1u8..=255 {
-                let q = div(a, b);
+                let q = div(a, b).unwrap();
                 let r = mul(q, b);
                 assert_eq!(
                     r, a,
@@ -334,17 +367,17 @@ mod tests {
         let original = vec![0x42u8; 100];
         let mut dest = original.clone();
         let src = vec![0xCDu8; 100];
-        fma_into(&mut dest, &src, 0);
+        fma_into(&mut dest, &src, 0).unwrap();
         assert_eq!(dest, original);
     }
 
     #[test]
     fn fma_one_coefficient_is_xor() {
         let mut dest = vec![0u8; 32];
-        let src: Vec<u8> = (0..32).map(|i| i as u8).collect();
-        fma_into(&mut dest, &src, 1);
+        let src: Vec<u8> = (0u8..32).collect();
+        fma_into(&mut dest, &src, 1).unwrap();
         assert_eq!(dest, src);
-        fma_into(&mut dest, &src, 1);
+        fma_into(&mut dest, &src, 1).unwrap();
         assert_eq!(dest, vec![0u8; 32]); // XOR with self = zero
     }
 
@@ -353,10 +386,20 @@ mod tests {
         let mut dest = vec![0u8; 256];
         let src: Vec<u8> = (0u8..=255).collect();
         let coeff = 0xAB;
-        fma_into(&mut dest, &src, coeff);
+        fma_into(&mut dest, &src, coeff).unwrap();
         for i in 0..256 {
             assert_eq!(dest[i], mul(coeff, src[i]));
         }
+    }
+
+    #[test]
+    fn fma_rejects_mismatched_lengths_before_simd_access() {
+        let mut dest = [0u8; 32];
+        let src = [0u8; 31];
+        assert!(matches!(
+            fma_into(&mut dest, &src, 7),
+            Err(crate::FecError::InconsistentShardLen { .. })
+        ));
     }
 
     /// SIMD path (when available) MUST produce byte-identical output
@@ -378,8 +421,8 @@ mod tests {
             for coeff in 0u8..=255 {
                 let mut dest_simd = vec![0xAAu8; len];
                 let mut dest_scalar = vec![0xAAu8; len];
-                fma_into(&mut dest_simd, src, coeff);
-                fma_into_scalar(&mut dest_scalar, src, coeff);
+                fma_into(&mut dest_simd, src, coeff).unwrap();
+                fma_into_scalar(&mut dest_scalar, src, coeff).unwrap();
                 assert_eq!(
                     dest_simd, dest_scalar,
                     "SIMD ≠ scalar at len={len} coeff={coeff:#x}"

@@ -20,9 +20,9 @@ pub fn optimal_m_bits(n: usize, p: f64) -> u32 {
         return 8;
     }
     let p = p.clamp(1e-10, 0.999);
-    let raw = -((n as f64) * p.ln()) / (std::f64::consts::LN_2 * std::f64::consts::LN_2);
+    let raw = -(usize_as_f64(n) * p.ln()) / (std::f64::consts::LN_2 * std::f64::consts::LN_2);
     // Round up; minimum 8 bits.
-    raw.ceil().max(8.0) as u32
+    ceil_f64_to_u32_saturating(raw.max(8.0))
 }
 
 /// Compute the optimal number of hash functions `k` for `m_bits` over
@@ -34,8 +34,42 @@ pub fn optimal_k(n: usize, m_bits: u32) -> u32 {
     if n == 0 {
         return 1;
     }
-    let raw = ((m_bits as f64) / (n as f64)) * std::f64::consts::LN_2;
-    raw.round().clamp(1.0, 32.0) as u32
+    let raw = (f64::from(m_bits) / usize_as_f64(n)) * std::f64::consts::LN_2;
+    ceil_f64_to_u32_saturating(raw.round().clamp(1.0, 32.0))
+}
+
+/// Convert a pointer-sized count to `f64` without an unchecked precision-
+/// losing cast. Splitting at 32 bits makes the intentional IEEE-754 rounding
+/// explicit while preserving the full magnitude on 64-bit targets.
+fn usize_as_f64(value: usize) -> f64 {
+    let value = u64::try_from(value).unwrap_or(u64::MAX);
+    let high = u32::try_from(value >> 32).expect("shifted high half fits in u32");
+    let low = u32::try_from(value & u64::from(u32::MAX)).expect("masked low half fits in u32");
+    f64::from(high).mul_add(4_294_967_296.0, f64::from(low))
+}
+
+/// Return `ceil(value)` as a saturating `u32` without relying on Rust's
+/// implicit float-to-integer saturation rules.
+fn ceil_f64_to_u32_saturating(value: f64) -> u32 {
+    if !value.is_finite() || value >= f64::from(u32::MAX) {
+        return u32::MAX;
+    }
+    if value <= 0.0 {
+        return 0;
+    }
+
+    let target = value.ceil();
+    let mut low = 0_u32;
+    let mut high = u32::MAX;
+    while low < high {
+        let midpoint = low + (high - low) / 2;
+        if f64::from(midpoint) < target {
+            low = midpoint.saturating_add(1);
+        } else {
+            high = midpoint;
+        }
+    }
+    low
 }
 
 /// Target false-positive rate Phase B v1 chooses by default.
@@ -73,12 +107,12 @@ mod tests {
 
     #[test]
     fn larger_n_scales_linearly() {
-        let m_1k = optimal_m_bits(1024, 0.01);
-        let m_16k = optimal_m_bits(16 * 1024, 0.01);
-        let m_256k = optimal_m_bits(256 * 1024, 0.01);
+        let baseline_bits = optimal_m_bits(1024, 0.01);
+        let medium_bits = optimal_m_bits(16 * 1024, 0.01);
+        let large_bits = optimal_m_bits(256 * 1024, 0.01);
         // m grows linearly with n.
-        let ratio_a = (m_16k as f64) / (m_1k as f64);
-        let ratio_b = (m_256k as f64) / (m_16k as f64);
+        let ratio_a = f64::from(medium_bits) / f64::from(baseline_bits);
+        let ratio_b = f64::from(large_bits) / f64::from(medium_bits);
         // 16x and 16x respectively, with rounding tolerance.
         assert!((ratio_a - 16.0).abs() < 0.1, "ratio={ratio_a}");
         assert!((ratio_b - 16.0).abs() < 0.1, "ratio={ratio_b}");

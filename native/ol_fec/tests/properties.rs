@@ -22,11 +22,13 @@ proptest! {
         let mut state = seed;
         let data: Vec<Vec<u8>> = (0..k).map(|_| {
             (0..shard_len).map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                (state >> 33) as u8
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (state >> 33).to_le_bytes()[0]
             }).collect()
         }).collect();
-        let data_refs: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
+        let data_refs: Vec<&[u8]> = data.iter().map(std::vec::Vec::as_slice).collect();
         let parity = codec.encode(&data_refs).unwrap();
         prop_assert_eq!(parity.len(), m);
         for p in &parity {
@@ -55,11 +57,13 @@ proptest! {
         let mut state = seed;
         let data: Vec<Vec<u8>> = (0..k).map(|_| {
             (0..shard_len).map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                (state >> 33) as u8
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (state >> 33).to_le_bytes()[0]
             }).collect()
         }).collect();
-        let data_refs: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
+        let data_refs: Vec<&[u8]> = data.iter().map(std::vec::Vec::as_slice).collect();
         let parity = codec.encode(&data_refs).unwrap();
 
         // Build a "present" mask: bit i set in drop_mask means drop shard i.
@@ -112,8 +116,7 @@ proptest! {
             filled += 1;
         }
         let _ = filled;
-        // Helper to drop the parity-shard borrows when we leave scope.
-        let _keep_alive = parity;
+        prop_assert_eq!(parity.len(), m);
         let r = codec.decode(&present);
         prop_assert!(r.is_err());
     }

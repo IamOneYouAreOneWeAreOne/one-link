@@ -35,14 +35,26 @@ import logging
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
+from one_link.fault_observability import report_best_effort_failure
+
 log = logging.getLogger(__name__)
 
 
 try:
     from one_link_native import quic as _native_quic  # type: ignore[import-not-found,attr-defined]
 
-    HAS_NATIVE: bool = True
+    # Accepted connections must expose the fingerprint taken directly from
+    # their authenticated TLS session. Older extension ABIs lacked this and
+    # cannot safely bind concurrent accepts to pinned peers.
+    HAS_NATIVE: bool = callable(
+        getattr(getattr(_native_quic, "Connection", None), "peer_fingerprint", None)
+    )
     NATIVE_VERSION: str | None = getattr(_native_quic, "__version__", None)
+    if not HAS_NATIVE:
+        log.error(
+            "one_link_native.quic is too old for identity-bound accepts; "
+            "QUIC transport disabled until a current native build is installed"
+        )
 except ImportError as exc:
     HAS_NATIVE = False
     NATIVE_VERSION = None
@@ -280,8 +292,13 @@ class QuicPeerSession:
         self._closed = True
         try:
             self._conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            report_best_effort_failure(
+                log,
+                "quic_session_close",
+                exc,
+                level=logging.DEBUG,
+            )
 
 
 def open_outbound(endpoint, remote_addr: str) -> Optional[QuicPeerSession]:

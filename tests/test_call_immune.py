@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import threading
 
-import pytest
 
 from one_link.call_immune import (
     Arbitrator,
@@ -26,7 +25,6 @@ from one_link.call_immune import (
     ImmuneAction,
     ImmuneDecision,
     ImmuneSystem,
-    Thresholds,
 )
 from one_link.call_vitals import (
     CallVitals,

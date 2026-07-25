@@ -34,7 +34,6 @@ chat UI auto-show after pairing, test surface.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -96,7 +95,7 @@ def test_save_message_validates_required_fields(peer_html: str):
     """Records without peer_fp / id / ts are meaningless. Surface the
     error rather than silently writing junk that breaks the cursor
     range."""
-    snippet = _snippet(peer_html, "async function saveMessage", 1500)
+    snippet = _snippet(peer_html, "function _normalizeStoredMessage", 1800)
     assert "rec.peer_fp" in snippet
     assert "rec.id" in snippet
     assert "rec.ts" in snippet
@@ -108,7 +107,8 @@ def test_load_messages_uses_idb_key_range(peer_html: str):
     would be O(n) per fetch."""
     snippet = _snippet(peer_html, "async function loadMessages", 2500)
     assert "IDBKeyRange.bound" in snippet
-    assert 'openCursor(range, "next")' in snippet
+    assert 'openCursor(range, "prev")' in snippet
+    assert "out.reverse()" in snippet
 
 
 def test_clear_messages_present(peer_html: str):
@@ -123,9 +123,12 @@ def test_send_chat_requires_active_pair(peer_html: str):
     """Without a finished pair on the active session, send fails
     loudly. Don't silently drop or queue."""
     snippet = _snippet(peer_html, "async function sendChatMessage", 2200)
-    assert "no paired peer on the active connection" in snippet
-    assert "p.finished" in snippet
-    assert "p.remote_hello" in snippet
+    assert "_activeChatBinding(p, true)" in snippet
+    binding = _snippet(peer_html, "function _activeChatBinding", 2400)
+    assert "no mutually-confirmed paired peer" in binding
+    assert 'readyState !== "open"' in binding
+    assert "p.finished" in binding
+    assert "p.remote_hello" in binding
 
 
 def test_send_chat_validates_body(peer_html: str):
@@ -143,7 +146,7 @@ def test_send_chat_persists_outgoing(peer_html: str):
     sender's local copy is the source of truth for their history."""
     snippet = _snippet(peer_html, "async function sendChatMessage", 2200)
     assert 'direction: "out"' in snippet
-    assert "saveMessage(rec)" in snippet
+    assert "persistOutboundMessage(rec, wire, binding)" in snippet
 
 
 def test_send_chat_uses_send_control(peer_html: str):
@@ -151,7 +154,9 @@ def test_send_chat_uses_send_control(peer_html: str):
     wire that pair_hello/confirm uses. Don't introduce a parallel
     transport without an explicit ship + version bump."""
     snippet = _snippet(peer_html, "async function sendChatMessage", 2200)
-    assert "sendControl(p.session, wire)" in snippet
+    assert "drainChatOutbox(p)" in snippet
+    drain = _snippet(peer_html, "async function _drainChatOutboxOnce", 7500)
+    assert "binding.pairing.session.control.send(reserved.wire_json)" in drain
 
 
 # ───────── receive contract ────────────────────────────────────────
@@ -192,7 +197,7 @@ def test_ack_handler_marks_outgoing_delivered(peer_html: str):
     and set ack_ms. The bubble's text updates to reflect."""
     snippet = _snippet(peer_html, "async function _onChatAckReceived", 2200)
     assert "ack_ms" in snippet
-    assert "saveMessage(target)" in snippet
+    assert "acknowledgeOutboundMessage" in snippet
     assert "_markBubbleAcked(id)" in snippet
 
 
@@ -307,6 +312,27 @@ def test_test_surface_exposes_message_helpers(peer_html: str):
         "sendChatMessage",
     ):
         assert name in snippet, f"surface missing {name}"
+
+
+def test_message_idempotency_is_exact_and_store_is_bounded(peer_html: str):
+    save = _snippet(peer_html, "async function saveMessage", 4200)
+    assert 'index("by_peer_id")' in save
+    assert "_sameStoredMessage" in save
+    assert "message id was reused for different content" in save
+    assert "MSG_MAX_ROWS_PER_PEER" in save
+
+
+def test_receive_persists_before_ack_and_render(peer_html: str):
+    receive = _snippet(peer_html, "async function _onChatTextReceived", 3000)
+    persist_at = receive.index("await saveMessage(rec)")
+    ack_at = receive.index("sendControl(p.session")
+    render_at = receive.index("_appendChatBubble")
+    assert persist_at < ack_at < render_at
+
+
+def test_send_persists_before_wire(peer_html: str):
+    send = _snippet(peer_html, "async function sendChatMessage", 3000)
+    assert send.index("await persistOutboundMessage") < send.index("await drainChatOutbox")
 
 
 # ───────── version pin ──────────────────────────────────────────────

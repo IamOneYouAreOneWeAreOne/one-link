@@ -42,6 +42,7 @@ Companion: docs/LIVING_PRESENCE_ARCHITECTURE.md §4.5 + Tier β acceptance
 from __future__ import annotations
 
 import hashlib
+import logging
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -62,6 +63,9 @@ from one_link.frame_provenance import (
     SEGMENT_HASH_LEN,
     _canonical_bytes,
 )
+
+
+log = logging.getLogger(__name__)
 
 
 # Live-RTC schema variant: same byte layout as SCHEMA_V1 except the
@@ -214,7 +218,10 @@ class WindowAttestor:
             try:
                 self._on_signed(_window_from(signed), signed)
             except Exception:
-                pass
+                log.exception(
+                    "live frame provenance callback failed for window %s",
+                    signed.timestamp_us,
+                )
         return signed
 
     def force_close(self, timestamp_us: int) -> Optional[FrameProvenance]:
@@ -233,7 +240,10 @@ class WindowAttestor:
             try:
                 self._on_signed(_window_from(signed), signed)
             except Exception:
-                pass
+                log.exception(
+                    "live frame provenance callback failed for window %s",
+                    signed.timestamp_us,
+                )
         return signed
 
     def _close_locked(self, *, timestamp_us: int) -> Window:

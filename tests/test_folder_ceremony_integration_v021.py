@@ -18,11 +18,14 @@ import pytest_asyncio
 from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from one_link import foldersync
 from one_link.blobstore import BlobStore
+from one_link.capabilities import FOLDER_SYNC, FOLDER_SYNC_COMMIT_V1
 from one_link.daemon import Daemon
 from one_link.identity import Identity, fingerprint_of
 from one_link.server import UIServer
 from one_link.state import State
+from one_link.wire import make_msg
 
 
 def _identity() -> Identity:
@@ -37,6 +40,34 @@ def _identity() -> Identity:
 
 def _h(t: str) -> dict:
     return {"Authorization": f"Bearer {t}"}
+
+
+def _folder_channel(*, transcript: str = "c" * 64) -> MagicMock:
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    channel.transcript_hex = transcript
+    channel.peer_caps = {
+        "features": [FOLDER_SYNC, FOLDER_SYNC_COMMIT_V1],
+    }
+    return channel
+
+
+def _manifest_push(
+    *,
+    sender_fp: str,
+    folder: str,
+    entries: list[dict] | None = None,
+) -> dict:
+    manifest_entries = list(entries or [])
+    return make_msg(
+        "MANIFEST_PUSH",
+        sender_fp[:8],
+        folder=folder,
+        merkle_root=foldersync.manifest_root_for_entries(manifest_entries),
+        manifest_digest=Daemon._folder_manifest_digest(manifest_entries),
+        entry_count=len(manifest_entries),
+        entries=manifest_entries,
+    )
 
 
 @pytest_asyncio.fixture
@@ -88,20 +119,17 @@ async def test_unknown_folder_push_creates_pending_offer(receiver_ctx):
     daemon = receiver_ctx["daemon"]
     state = receiver_ctx["state"]
     sender_fp = receiver_ctx["sender_fp"]
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    msg = {
-        "t": "MANIFEST_PUSH",
-        "folder": "papers",
-        "merkle_root": "deadbeef" * 8,
-        "entry_count": 2,
-        "entries": [
+    channel = _folder_channel()
+    msg = _manifest_push(
+        sender_fp=sender_fp,
+        folder="papers",
+        entries=[
             {"file_path": "a.txt", "blob_hash": "a" * 64, "size": 100,
              "mtime_ms": 1, "vclock": {sender_fp: 1}},
             {"file_path": "b.txt", "blob_hash": "b" * 64, "size": 200,
              "mtime_ms": 2, "vclock": {sender_fp: 1}},
         ],
-    }
+    )
     await daemon._handle_manifest_push(channel, msg, sender_fp)
     # Offer was cached.
     offers = state.list_folder_offers()
@@ -120,6 +148,9 @@ async def test_unknown_folder_push_creates_pending_offer(receiver_ctx):
     decoded = decode_msg(sent_args)
     assert decoded["t"] == "MANIFEST_WANTS"
     assert decoded["folder"] == "papers"
+    assert decoded["of"] == msg["id"]
+    assert decoded["sync_id"] == msg["id"]
+    assert decoded["wants"] == []
     assert decoded.get("pending_offer") is True
 
 
@@ -130,15 +161,11 @@ async def test_unpinned_sender_push_is_silently_ignored(receiver_ctx):
     could spam offers into the UI."""
     daemon = receiver_ctx["daemon"]
     state = receiver_ctx["state"]
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    msg = {
-        "t": "MANIFEST_PUSH",
-        "folder": "unwanted",
-        "entries": [],
-        "merkle_root": "x",
-        "entry_count": 0,
-    }
+    channel = _folder_channel(transcript="d" * 64)
+    msg = _manifest_push(
+        sender_fp="99" * 32,
+        folder="unwanted",
+    )
     await daemon._handle_manifest_push(channel, msg, "99" * 32)
     assert state.list_folder_offers() == []
 
@@ -153,14 +180,13 @@ async def test_offer_listing_endpoint_surfaces_pending(receiver_ctx):
     client = receiver_ctx["client"]
     token = receiver_ctx["token"]
     # Simulate an inbound push.
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    await daemon._handle_manifest_push(channel, {
-        "t": "MANIFEST_PUSH", "folder": "ledger",
-        "merkle_root": "x", "entry_count": 1,
-        "entries": [{"file_path": "f.txt", "blob_hash": "c" * 64,
-                     "size": 50, "mtime_ms": 1, "vclock": {sender_fp: 1}}],
-    }, sender_fp)
+    channel = _folder_channel(transcript="e" * 64)
+    await daemon._handle_manifest_push(channel, _manifest_push(
+        sender_fp=sender_fp,
+        folder="ledger",
+        entries=[{"file_path": "f.txt", "blob_hash": "c" * 64,
+                  "size": 50, "mtime_ms": 1, "vclock": {sender_fp: 1}}],
+    ), sender_fp)
     r = await client.get("/api/folder-offers", headers=_h(token))
     assert r.status == 200
     body = await r.json()
@@ -191,14 +217,13 @@ async def test_accept_endpoint_creates_local_folder(receiver_ctx):
         loop=asyncio.get_running_loop(),
     )
     # Stash an offer the API can act on.
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    await daemon._handle_manifest_push(channel, {
-        "t": "MANIFEST_PUSH", "folder": "incoming",
-        "merkle_root": "x", "entry_count": 1,
-        "entries": [{"file_path": "data.txt", "blob_hash": "0" * 64,
-                     "size": 5, "mtime_ms": 1, "vclock": {sender_fp: 1}}],
-    }, sender_fp)
+    channel = _folder_channel(transcript="f" * 64)
+    await daemon._handle_manifest_push(channel, _manifest_push(
+        sender_fp=sender_fp,
+        folder="incoming",
+        entries=[{"file_path": "data.txt", "blob_hash": "0" * 64,
+                  "size": 5, "mtime_ms": 1, "vclock": {sender_fp: 1}}],
+    ), sender_fp)
     offer = state.list_folder_offers()[0]
     local_path = tmp_path / "accepted-incoming"
     r = await client.post(
@@ -228,12 +253,11 @@ async def test_decline_endpoint_does_not_create_folder(receiver_ctx):
     sender_fp = receiver_ctx["sender_fp"]
     client = receiver_ctx["client"]
     token = receiver_ctx["token"]
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    await daemon._handle_manifest_push(channel, {
-        "t": "MANIFEST_PUSH", "folder": "refused",
-        "merkle_root": "x", "entry_count": 0, "entries": [],
-    }, sender_fp)
+    channel = _folder_channel(transcript="1" * 64)
+    await daemon._handle_manifest_push(channel, _manifest_push(
+        sender_fp=sender_fp,
+        folder="refused",
+    ), sender_fp)
     offer = state.list_folder_offers()[0]
     r = await client.post(
         f"/api/folder-offers/{offer['id']}/decline",
@@ -252,12 +276,11 @@ async def test_re_offer_after_decline_resets_to_pending(receiver_ctx):
     daemon = receiver_ctx["daemon"]
     state = receiver_ctx["state"]
     sender_fp = receiver_ctx["sender_fp"]
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    msg = {
-        "t": "MANIFEST_PUSH", "folder": "persistent",
-        "merkle_root": "x", "entry_count": 0, "entries": [],
-    }
+    channel = _folder_channel(transcript="2" * 64)
+    msg = _manifest_push(
+        sender_fp=sender_fp,
+        folder="persistent",
+    )
     await daemon._handle_manifest_push(channel, msg, sender_fp)
     offer = state.list_folder_offers()[0]
     state.mark_folder_offer_declined(offer["id"])

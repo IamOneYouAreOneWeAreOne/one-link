@@ -33,7 +33,6 @@ from one_link.semantic_voice_codec import (  # noqa: E402
     SemanticVoiceDecoder,
     SemanticVoiceEncoder,
     WIRE_MAGIC,
-    WIRE_VERSION,
     estimate_bitrate_bps,
     model_pack_hash,
     pack_packet,

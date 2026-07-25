@@ -39,11 +39,11 @@ def _native_available() -> bool:
 # ──────────────────────────────── bloom_honor_enabled() ────────────
 
 
-def test_bloom_honor_disabled_by_default():
+def test_bloom_honor_enabled_by_default_for_exact_v2():
     from one_link.bloom_init import bloom_honor_enabled
 
     with env("ONE_LINK_BLOOM_HONOR", None):
-        assert bloom_honor_enabled() is False
+        assert bloom_honor_enabled() is True
 
 
 def test_bloom_honor_enabled_with_env_flag():
@@ -54,7 +54,7 @@ def test_bloom_honor_enabled_with_env_flag():
             assert bloom_honor_enabled() is True
 
 
-def test_bloom_honor_rejects_unknown_values():
+def test_bloom_honor_accepts_explicit_disable_values():
     from one_link.bloom_init import bloom_honor_enabled
 
     for v in ("", "0", "false", "no", "off"):
@@ -103,7 +103,7 @@ def test_production_fp_rate_rejects_invalid_env():
 # ──────────────────────────── _bloom_only_for_peer ─────────────────
 
 
-def test_bloom_only_for_peer_false_without_env_flag():
+def test_bloom_only_for_peer_false_for_legacy_v1_even_when_default_enabled():
     from one_link.daemon import Daemon
 
     class _Stub:
@@ -139,6 +139,24 @@ def test_bloom_only_for_peer_false_without_peer_cap():
         assert Daemon._bloom_only_for_peer(stub, "anyone") is False  # type: ignore[arg-type]
 
 
+def test_bloom_only_for_peer_false_when_exact_v2_is_disabled():
+    from one_link.daemon import Daemon
+
+    class _Stub:
+        _outbound_sessions = {}
+
+        def _peer_advertised_caps(self, fp):
+            from one_link.capabilities import BLOOM_INIT_EXACT_V2
+
+            return frozenset({BLOOM_INIT_EXACT_V2})
+
+        def _locally_held_chunk_ids_for_blob(self, _blob):
+            return [b"\x00" * 32]
+
+    with env("ONE_LINK_BLOOM_HONOR", "0"):
+        assert Daemon._bloom_only_for_peer(_Stub(), "anyone") is False  # type: ignore[arg-type]
+
+
 def test_bloom_only_for_peer_false_when_no_local_chunks():
     """Empty receiver inventory → no Bloom-only advantage."""
     from one_link.daemon import Daemon
@@ -147,9 +165,9 @@ def test_bloom_only_for_peer_false_when_no_local_chunks():
         _outbound_sessions = {}
 
         def _peer_advertised_caps(self, fp):
-            from one_link.capabilities import BLOOM_INIT_V1
+            from one_link.capabilities import BLOOM_INIT_EXACT_V2
 
-            return frozenset({BLOOM_INIT_V1})
+            return frozenset({BLOOM_INIT_EXACT_V2})
 
         def _locally_held_chunk_ids_for_blob(self, _blob):
             return []  # empty
@@ -167,15 +185,15 @@ def test_bloom_only_for_peer_true_when_all_conditions_met():
         _outbound_sessions = {}
 
         def _peer_advertised_caps(self, fp):
-            from one_link.capabilities import BLOOM_INIT_V1
+            from one_link.capabilities import BLOOM_INIT_EXACT_V2
 
-            return frozenset({BLOOM_INIT_V1})
+            return frozenset({BLOOM_INIT_EXACT_V2})
 
         def _locally_held_chunk_ids_for_blob(self, _blob):
             return [b"\x00" * 32, b"\x01" * 32]
 
     stub = _Stub()
-    with env("ONE_LINK_BLOOM_HONOR", "1"):
+    with env("ONE_LINK_BLOOM_HONOR", None):
         assert Daemon._bloom_only_for_peer(stub, "anyone") is True  # type: ignore[arg-type]
 
 

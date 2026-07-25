@@ -5,7 +5,7 @@
 //! ```
 //!
 //! The α = 1/2 exponent in the `√y` is *not* a tunable hyper-parameter
-//! — it is forced by Bose-Einstein statistics in the S_One galaxy
+//! — it is forced by Bose-Einstein statistics in the `S_One` galaxy
 //! derivation chain. See [`super::alpha_constraint`] for the
 //! derivation.
 //!
@@ -83,7 +83,7 @@ mod tests {
         // nu should be monotonically decreasing in y (more coherence
         // → smaller penalty multiplier).
         let mut prev = f64::INFINITY;
-        for y in (1..50).map(|k| k as f64 * 0.1) {
+        for y in (1..50).map(|k| f64::from(k) * 0.1) {
             let v = be_rar(y).unwrap();
             assert!(
                 v <= prev + 1e-12,
@@ -105,9 +105,7 @@ mod tests {
         // within a part in 10⁹.
         assert!(
             abs_diff / just_below.abs() < 1e-6,
-            "discontinuity at threshold: {} vs {}",
-            just_below,
-            just_above
+            "discontinuity at threshold: {just_below} vs {just_above}"
         );
     }
 }

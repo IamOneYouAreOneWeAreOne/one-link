@@ -1,22 +1,24 @@
 //! Row 8 Layer 10 — adversary-grade privacy tier: duress mode +
 //! plausibly-deniable second persona + steganographic pairing.
 //!
-//! The dramatic finisher. Three properties:
+//! Experimental primitives with three design goals. This module does not
+//! by itself provide a complete decoy persona, sensor acquisition, silent
+//! delivery, coercion resistance, or forensic deniability:
 //!
 //! 1. **Duress mode**: a device gets seized (border crossing,
 //!    coercion, mugging). The user types a *duress code* instead
 //!    of the real unlock. The device:
-//!    - Presents a complete, plausible DECOY mesh state to the
-//!      captor (decoy contacts, decoy files, decoy messages).
-//!    - Silently emits a signed [`DuressAlert`] to siblings so
-//!      Layer-2 quorum revocation kicks in.
-//!    - The real state remains encrypted; the captor cannot tell
-//!      from the disk image alone that it exists.
+//!    - The target UI presents a complete, plausible decoy mesh state.
+//!    - The target daemon delivers a signed [`DuressAlert`] to siblings.
+//!    - This crate encrypts real and decoy payload slots, but the envelope
+//!      format itself reveals that two slots exist; no claim is made that a
+//!      forensic examiner cannot identify the duress feature.
 //!
 //! 2. **Plausibly deniable second persona**: every [`DuressEnvelope`]
 //!    on disk has two ciphertexts (real + decoy) that are
-//!    structurally identical. Without the field witness, even
-//!    knowing the user's password recovers AT MOST the decoy.
+//!    structurally matched. Without the *secret, high-entropy* witness,
+//!    knowing the user's password recovers at most the decoy through this
+//!    API. Public/low-entropy field output is not an independent key.
 //!    The real ciphertext is XOR-bound to a coherence-field
 //!    witness (the row-9 mechanism reused at Layer 1).
 //!
@@ -24,16 +26,17 @@
 //!    THREE channels (QR + sub-perceptible audio chirp +
 //!    accelerometer-pattern). The pair completes only when all
 //!    three commit to the same secret within a time window. A
-//!    remote attacker who photographs the QR from across the room
-//!    cannot reproduce the audio + motion, so the pairing fails.
+//!    verifier checks commitments supplied by callers. This crate does not
+//!    capture/authenticate real audio or motion sensors, so it does not prove
+//!    proximity or defeat a remote attacker by itself.
 //!
 //! ## What this layer ships
 //!
 //! - [`DuressCode`] — Argon2id-derived 32-byte key from a short
 //!   user-entered code.
 //! - [`DuressEnvelope`] — two ChaCha20-Poly1305 AEAD ciphertexts
-//!   (`real_ct` + `decoy_ct`) plus the salts. Structurally
-//!   indistinguishable from the outside.
+//!   (`real_ct` + `decoy_ct`) plus salts. Slot encodings are structurally
+//!   matched, while the two-slot envelope type remains observable.
 //! - [`UnlockOutcome`] — `Real(_)`, `Decoy(_)`, or `WrongCode`.
 //!   The daemon flips the duress flag on `Decoy`.
 //! - [`DuressAlert`] — signed broadcast "I'm under duress as of T."
@@ -48,8 +51,9 @@
 //! `DuressEnvelope::create` requires a 32-byte `field_witness` for
 //! the REAL ciphertext. The witness derives from the Phase E
 //! coherence-field state at mint time (or any 32-byte secret the
-//! user holds out-of-band). Without it, no password recovers the
-//! real ciphertext — the attacker can only see the decoy.
+//! user holds out-of-band). It must be independently generated or
+//! demonstrated to have adequate min-entropy and stored separately;
+//! otherwise the field context adds no cryptographic boundary.
 //!
 //! ## Composition with the lower layers
 //!

@@ -8,8 +8,16 @@ three durability profiles (EPHEMERAL, STANDARD, ARCHIVAL).
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from one_link_native.erasure import StripeParams
 
 log = logging.getLogger(__name__)
+
+EPHEMERAL: StripeParams | None
+STANDARD: StripeParams | None
+ARCHIVAL: StripeParams | None
 
 try:
     from one_link_native import erasure as _native_erasure  # type: ignore[import-not-found]

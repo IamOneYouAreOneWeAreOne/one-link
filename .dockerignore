@@ -1,0 +1,24 @@
+# The rendezvous image needs only five Python modules, its entrypoint, and its
+# dependency lock. Deny everything first so .git, local identities/databases,
+# test captures, build artifacts, and the large native target tree never enter
+# the Docker build context or a remote builder.
+**
+
+!deploy/
+deploy/**
+!deploy/rendezvous/
+deploy/rendezvous/**
+!deploy/rendezvous/Dockerfile
+!deploy/rendezvous/entrypoint.sh
+!deploy/rendezvous/requirements.lock
+
+!src/
+src/**
+!src/one_link/
+src/one_link/**
+!src/one_link/__init__.py
+!src/one_link/rdz_blind.py
+!src/one_link/relay_proto.py
+!src/one_link/relay_routing.py
+!src/one_link/rendezvous_proto.py
+!src/one_link/rendezvous_server.py

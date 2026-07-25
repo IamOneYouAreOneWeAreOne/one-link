@@ -7,10 +7,8 @@ rules in _sync_paused_or_quiet.
 """
 from __future__ import annotations
 
-import asyncio
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest

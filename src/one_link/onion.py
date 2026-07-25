@@ -1,25 +1,24 @@
-"""Onion-routed relay path — no single relay sees both endpoints.
+"""Simplified layered-ECIES packet-construction primitive.
 
-Sealed Sender (Bundle 39) hid the SENDER identity from the relay.
-Onion routing hides the PATH: a packet flows through 3+ relays,
-each unwrapping only its own layer to learn "forward to the next
-hop". The first relay knows the sender but not the destination;
-the last relay knows the destination but not the sender; the
-middle relays know neither.
+No active One Link daemon message/file route imports this module and no
+multi-relay circuit control plane is deployed. Given a caller-supplied path,
+each successful unwrap reveals the next address and inner ciphertext to that
+hop. What a relay/operator can correlate also depends on sockets, repeated or
+colluding relays, route selection, timing, sizes, and volume; this primitive
+does not by itself establish that no operator sees both endpoints.
 
 Inspired by Sphinx (Danezis & Goldberg, 2009 — the format used by
 Tor's hidden services + Lightning Network). This is a SIMPLIFIED
 variant: not constant-size, no header MAC chain that hides hop
 count, no replay tag. Those are real Sphinx requirements for
-strong unlinkability against a global adversary; for the One Link
-threat model (a curious or compromised single relay, not a global
-passive adversary), the simpler layered ECIES gives the user-
-visible property "no relay sees both endpoints" while keeping the
-implementation small + auditable.
+strong unlinkability against a global adversary. This simplified construction
+does not claim that property, sender anonymity, replay resistance, fixed-size
+traffic, forward secrecy after static recipient/relay-key compromise, or a
+deployed product route.
 
-A future bundle can swap this for a full Sphinx (constant-size +
-unlinkable + replay-protected) when the threat model upgrades to
-the global-adversary tier.
+A future product route would still need authenticated directory/path control,
+loop/collusion policy, replay handling, traffic shaping, multi-operator
+deployment, abuse controls, and adversarial end-to-end qualification.
 
 Wire format
 -----------

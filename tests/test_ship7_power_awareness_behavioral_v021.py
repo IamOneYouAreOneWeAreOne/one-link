@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 from one_link.daemon import Daemon
 from one_link.state import State

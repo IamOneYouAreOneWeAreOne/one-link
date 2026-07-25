@@ -1,6 +1,26 @@
 //! The `Dispatcher` pick/compress/decompress surface.
 
 use crate::error::CompressError;
+use std::io::{Cursor, Read};
+
+/// Absolute per-call plaintext ceiling.
+///
+/// One Link transfers are chunked well below this limit (normally 256 KiB to
+/// 4 MiB).  Keeping a process-wide ceiling as well as the caller-provided
+/// `max_size` means an accidentally unbounded FFI caller cannot turn a small
+/// hostile frame into an allocation bomb.
+pub const MAX_DECOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
+
+/// Maximum tag-prefixed compressed payload accepted by the decoder.
+///
+/// The extra MiB covers the worst-case expansion of the supported codecs for
+/// a [`MAX_DECOMPRESSED_BYTES`] incompressible input while still bounding CPU
+/// spent consuming attacker-controlled compressed bytes.
+pub const MAX_COMPRESSED_PAYLOAD_BYTES: usize = MAX_DECOMPRESSED_BYTES + 1024 * 1024;
+
+// 2^26 == MAX_DECOMPRESSED_BYTES.  This prevents a zstd frame header from
+// requesting an enormous history window before producing any output.
+const ZSTD_MAX_WINDOW_LOG: u32 = 26;
 
 /// Codecs supported by the dispatcher.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -122,8 +142,15 @@ impl Dispatcher {
     /// `decompress` can route it without out-of-band metadata.
     ///
     /// # Errors
-    /// zstd I/O errors propagate as [`CompressError::Zstd`].
+    /// zstd I/O errors propagate as [`CompressError::Zstd`].  Inputs above
+    /// [`MAX_DECOMPRESSED_BYTES`] are rejected before codec work begins.
     pub fn compress(&self, algo: Algorithm, bytes: &[u8]) -> Result<Vec<u8>, CompressError> {
+        if bytes.len() > MAX_DECOMPRESSED_BYTES {
+            return Err(CompressError::InputTooLarge {
+                actual: bytes.len(),
+                max: MAX_DECOMPRESSED_BYTES,
+            });
+        }
         let mut out = Vec::with_capacity(bytes.len() + 8);
         out.push(algo.tag());
         match algo {
@@ -159,21 +186,58 @@ impl Dispatcher {
         if payload.is_empty() {
             return Err(CompressError::PayloadTooShort { len: 0 });
         }
-        let algo = Algorithm::from_tag(payload[0])?;
-        let body = &payload[1..];
-        let out = match algo {
-            Algorithm::None => body.to_vec(),
-            Algorithm::Lz4 => lz4_flex::block::decompress_size_prepended(body)?,
-            Algorithm::ZstdBalanced | Algorithm::ZstdAggressive => zstd::stream::decode_all(body)?,
-        };
-        if out.len() > max_size {
-            return Err(CompressError::OutputTooLarge {
-                decompressed: out.len(),
-                max: max_size,
+        if payload.len() > MAX_COMPRESSED_PAYLOAD_BYTES {
+            return Err(CompressError::PayloadTooLarge {
+                actual: payload.len(),
+                max: MAX_COMPRESSED_PAYLOAD_BYTES,
             });
         }
-        Ok(out)
+        let algo = Algorithm::from_tag(payload[0])?;
+        let body = &payload[1..];
+        let effective_max = max_size.min(MAX_DECOMPRESSED_BYTES);
+
+        match algo {
+            Algorithm::None => {
+                ensure_output_bound(body.len(), effective_max)?;
+                Ok(body.to_vec())
+            }
+            Algorithm::Lz4 => {
+                // lz4_flex's convenience decoder allocates the four-byte
+                // declared size immediately.  Inspect it before calling the
+                // decoder so a forged u32 length cannot force a huge reserve.
+                let (declared, _) = lz4_flex::block::uncompressed_size(body)?;
+                ensure_output_bound(declared, effective_max)?;
+                let out = lz4_flex::block::decompress_size_prepended(body)?;
+                // Defense in depth if codec behavior ever changes.
+                ensure_output_bound(out.len(), effective_max)?;
+                Ok(out)
+            }
+            Algorithm::ZstdBalanced | Algorithm::ZstdAggressive => {
+                let mut decoder = zstd::stream::read::Decoder::new(Cursor::new(body))?;
+                decoder.window_log_max(ZSTD_MAX_WINDOW_LOG)?;
+
+                // Read at most one byte beyond the cap.  Unlike decode_all,
+                // this bounds both allocation and decompression work even for
+                // frames with unknown content size or concatenated frames.
+                let read_limit = effective_max.saturating_add(1) as u64;
+                let mut bounded = decoder.take(read_limit);
+                let mut out = Vec::with_capacity(effective_max.min(64 * 1024));
+                bounded.read_to_end(&mut out)?;
+                ensure_output_bound(out.len(), effective_max)?;
+                Ok(out)
+            }
+        }
     }
+}
+
+fn ensure_output_bound(actual: usize, max: usize) -> Result<(), CompressError> {
+    if actual > max {
+        return Err(CompressError::OutputTooLarge {
+            decompressed: actual,
+            max,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -307,7 +371,7 @@ mod tests {
     #[test]
     fn round_trip_random_payload() {
         // A non-degenerate payload (no easy run-length advantage).
-        let input: Vec<u8> = (0..1024u32).flat_map(|x| x.to_le_bytes()).collect();
+        let input: Vec<u8> = (0..1024u32).flat_map(u32::to_le_bytes).collect();
         for algo in [
             Algorithm::None,
             Algorithm::Lz4,
@@ -358,9 +422,50 @@ mod tests {
         assert!(matches!(
             r,
             Err(CompressError::OutputTooLarge {
-                decompressed: 100_000,
+                decompressed,
                 max: 50_000
+            }) if decompressed > 50_000
+        ));
+    }
+
+    #[test]
+    fn lz4_declared_size_bomb_is_rejected_before_allocation() {
+        let d = dispatcher();
+        let mut payload = vec![Algorithm::Lz4.tag()];
+        payload.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            d.decompress(&payload, 1024),
+            Err(CompressError::OutputTooLarge {
+                decompressed,
+                max: 1024
+            }) if decompressed == u32::MAX as usize
+        ));
+    }
+
+    #[test]
+    fn none_payload_checks_bound_before_copying() {
+        let d = dispatcher();
+        let payload = vec![Algorithm::None.tag(); 4097];
+        assert!(matches!(
+            d.decompress(&payload, 4095),
+            Err(CompressError::OutputTooLarge {
+                decompressed: 4096,
+                max: 4095
             })
+        ));
+    }
+
+    #[test]
+    fn process_wide_output_ceiling_applies_to_unbounded_caller() {
+        let d = dispatcher();
+        let mut payload = vec![Algorithm::Lz4.tag()];
+        payload.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            d.decompress(&payload, usize::MAX),
+            Err(CompressError::OutputTooLarge {
+                decompressed,
+                max: MAX_DECOMPRESSED_BYTES
+            }) if decompressed == u32::MAX as usize
         ));
     }
 

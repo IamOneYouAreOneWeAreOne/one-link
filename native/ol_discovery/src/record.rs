@@ -3,8 +3,8 @@
 //! Each record carries:
 //!   - The publisher's Ed25519 master pubkey (32 bytes).
 //!   - Reachability endpoints (transport addresses).
-//!   - A freshness timestamp (publish_time, unix seconds).
-//!   - A TTL (record expires at publish_time + ttl_secs).
+//!   - A freshness timestamp (`publish_time`, unix seconds).
+//!   - A TTL (record expires at `publish_time + ttl_secs`).
 //!   - An Ed25519 signature by the publisher over the canonical
 //!     byte serialization of the above.
 //!
@@ -21,22 +21,26 @@ pub const RECORD_DEFAULT_TTL_SECS: u64 = 24 * 60 * 60;
 
 /// Maximum endpoint string length. Bounded to keep records small +
 /// resistant to amplification attacks during DHT gossip.
-const MAX_ENDPOINT_LEN: usize = 128;
+pub const MAX_ENDPOINT_LEN: usize = 128;
 
 /// Maximum number of endpoints per record. Keeps record size bounded.
-const MAX_ENDPOINTS: usize = 8;
+pub const MAX_ENDPOINTS: usize = 8;
+
+/// Longest accepted DHT record lifetime.  A bounded lifetime prevents a
+/// self-signed spam record from pinning a storage slot indefinitely.
+pub const MAX_RECORD_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// The unsigned record payload. This is what's signed; serialization
 /// is canonical (length-prefixed; same encoding both sides) so a
 /// signature commits to a unique byte string.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PeerRecord {
-    /// Ed25519 master pubkey of the publisher. The NodeId is
+    /// Ed25519 master pubkey of the publisher. The `NodeId` is
     /// `BLAKE3(pubkey)`; lookups verify signature against this key.
     pub publisher_pubkey: [u8; 32],
     /// Reachability endpoints. Each is a transport-specific
-    /// address string ("udp://1.2.3.4:5678", "quic://host:port",
-    /// "circuit-relay://peer-fp/path", etc.). Length-bounded.
+    /// address string (`udp://1.2.3.4:5678`, `quic://host:port`,
+    /// `circuit-relay://peer-fp/path`, etc.). Length-bounded.
     pub endpoints: Vec<String>,
     /// Unix seconds when the record was published.
     pub publish_time_unix: u64,
@@ -49,10 +53,10 @@ impl PeerRecord {
     ///
     /// Format (length-prefixed, big-endian sizes):
     ///   - 4-byte magic "OLR1"
-    ///   - 32-byte publisher_pubkey
-    ///   - 8-byte publish_time_unix (BE)
-    ///   - 8-byte ttl_secs (BE)
-    ///   - 2-byte n_endpoints (BE)
+    ///   - 32-byte `publisher_pubkey`
+    ///   - 8-byte `publish_time_unix` (BE)
+    ///   - 8-byte `ttl_secs` (BE)
+    ///   - 2-byte `n_endpoints` (BE)
     ///   - For each endpoint:
     ///       - 2-byte len (BE)
     ///       - `len` bytes UTF-8
@@ -77,7 +81,7 @@ impl PeerRecord {
         out
     }
 
-    /// The NodeId implied by this record's publisher pubkey.
+    /// The `NodeId` implied by this record's publisher pubkey.
     #[must_use]
     pub fn node_id(&self) -> NodeId {
         NodeId::from_pubkey(&self.publisher_pubkey)
@@ -92,7 +96,7 @@ impl PeerRecord {
     }
 
     /// Validate basic record shape (size bounds, non-empty).
-    fn shape_check(&self) -> Result<(), RecordError> {
+    pub fn validate(&self) -> Result<(), RecordError> {
         if self.endpoints.len() > MAX_ENDPOINTS {
             return Err(RecordError::TooManyEndpoints {
                 got: self.endpoints.len(),
@@ -106,6 +110,12 @@ impl PeerRecord {
                     max: MAX_ENDPOINT_LEN,
                 });
             }
+        }
+        if self.ttl_secs == 0 || self.ttl_secs > MAX_RECORD_TTL_SECS {
+            return Err(RecordError::InvalidTtl {
+                got: self.ttl_secs,
+                max: MAX_RECORD_TTL_SECS,
+            });
         }
         Ok(())
     }
@@ -138,9 +148,18 @@ pub enum RecordError {
     },
     /// Record's claimed publisher pubkey doesn't match the signing
     /// key (defensive check; the public API generally signs a record
-    /// with its own publisher_pubkey).
+    /// with its own `publisher_pubkey`).
     #[error("record's publisher_pubkey doesn't match the signing key")]
     PubkeyMismatch,
+
+    /// Record lifetime is zero or exceeds the storage-retention bound.
+    #[error("invalid record TTL: {got} seconds (allowed 1..={max})")]
+    InvalidTtl {
+        /// Claimed lifetime.
+        got: u64,
+        /// Maximum accepted lifetime.
+        max: u64,
+    },
 }
 
 /// A signed record: the payload plus the 64-byte Ed25519 signature
@@ -165,7 +184,7 @@ impl SignedRecord {
     /// - [`RecordError::TooManyEndpoints`] / [`RecordError::EndpointTooLong`]
     ///   on shape violations.
     pub fn sign(record: PeerRecord, signing_key: &SigningKey) -> Result<Self, RecordError> {
-        record.shape_check()?;
+        record.validate()?;
         let derived_pub: VerifyingKey = signing_key.verifying_key();
         if derived_pub.to_bytes() != record.publisher_pubkey {
             return Err(RecordError::PubkeyMismatch);
@@ -185,7 +204,7 @@ impl SignedRecord {
     ///   isn't a valid Ed25519 point.
     /// - [`RecordError::BadSignature`] on any verification failure.
     pub fn verify(&self) -> Result<(), RecordError> {
-        self.record.shape_check()?;
+        self.record.validate()?;
         let verifying_key = VerifyingKey::from_bytes(&self.record.publisher_pubkey)
             .map_err(|_| RecordError::MalformedPubkey)?;
         let sig = Signature::from_bytes(&self.signature);
@@ -205,7 +224,7 @@ impl SignedRecord {
         Ok(self.record.is_fresh(now_unix))
     }
 
-    /// The NodeId the record refers to.
+    /// The `NodeId` the record refers to.
     #[must_use]
     pub fn node_id(&self) -> NodeId {
         self.record.node_id()
@@ -299,11 +318,27 @@ mod tests {
     fn too_many_endpoints_rejected() {
         let sk = make_key();
         let mut rec = make_record(&sk, vec![]);
-        for i in 0..(MAX_ENDPOINTS + 1) {
+        for i in 0..=MAX_ENDPOINTS {
             rec.endpoints.push(format!("udp://{i}.0.0.0:1"));
         }
         let err = SignedRecord::sign(rec, &sk).unwrap_err();
         assert!(matches!(err, RecordError::TooManyEndpoints { .. }));
+    }
+
+    #[test]
+    fn zero_and_excessive_ttl_are_rejected_before_signing() {
+        let sk = make_key();
+        let mut rec = make_record(&sk, vec!["udp://1.2.3.4:5678"]);
+        rec.ttl_secs = 0;
+        assert!(matches!(
+            SignedRecord::sign(rec.clone(), &sk),
+            Err(RecordError::InvalidTtl { .. })
+        ));
+        rec.ttl_secs = MAX_RECORD_TTL_SECS + 1;
+        assert!(matches!(
+            SignedRecord::sign(rec, &sk),
+            Err(RecordError::InvalidTtl { .. })
+        ));
     }
 
     #[test]

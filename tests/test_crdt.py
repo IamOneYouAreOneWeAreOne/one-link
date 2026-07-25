@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from one_link.crdt import ManifestEntry, VectorClock, merge_manifest_entries
 

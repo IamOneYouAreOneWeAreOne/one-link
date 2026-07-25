@@ -1,12 +1,12 @@
-//! Criterion benchmark for ol_discovery primitives.
+//! Criterion benchmark for `ol_discovery` primitives.
 //!
 //! Establishes baseline throughput for hot ops:
-//!   - NodeId XOR distance
+//!   - `NodeId` XOR distance
 //!   - Routing-table insert (bucket bookkeeping)
-//!   - Routing-table closest_to (sort over a populated table)
+//!   - Routing-table `closest_to` (sort over a populated table)
 //!   - Record sign + verify (Ed25519 cost)
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_main, Criterion};
 
 use ed25519_dalek::SigningKey;
 
@@ -44,7 +44,7 @@ fn bench_routing_insert(c: &mut Criterion) {
             || {
                 let mut t = RoutingTable::new(NodeId([0x00; 32]));
                 for i in 1u8..=100 {
-                    let _ = t.insert(NodeId([i; 32]), i as u64);
+                    let _ = t.insert(NodeId([i; 32]), u64::from(i));
                 }
                 t
             },
@@ -62,11 +62,12 @@ fn bench_routing_closest_to(c: &mut Criterion) {
         let mut t = RoutingTable::new(NodeId([0x00; 32]));
         for i in 0..n {
             let mut id = [0u8; 32];
-            id[0] = (i & 0xFF) as u8;
-            id[1] = ((i >> 8) & 0xFF) as u8;
+            id[0] = u8::try_from(i & 0xFF).expect("masked benchmark id byte fits in u8");
+            id[1] = u8::try_from((i >> 8) & 0xFF).expect("masked benchmark id byte fits in u8");
             // Skip self.
             if id != [0u8; 32] {
-                let _ = t.insert(NodeId(id), i as u64);
+                let timestamp = u64::try_from(i).expect("benchmark index fits in u64");
+                let _ = t.insert(NodeId(id), timestamp);
             }
         }
         let label = format!("routing/closest_to_n_{n}");
@@ -135,24 +136,35 @@ fn bench_stale_buckets_query(c: &mut Criterion) {
     let mut t = RoutingTable::new(NodeId([0x00; 32]));
     for i in 1u16..=512 {
         let mut id = [0u8; 32];
-        id[0] = (i & 0xFF) as u8;
-        id[1] = ((i >> 8) & 0xFF) as u8;
-        let _ = t.insert(NodeId(id), 1_000 + i as u64);
+        id[0] = u8::try_from(i & 0xFF).expect("masked benchmark id byte fits in u8");
+        id[1] = u8::try_from((i >> 8) & 0xFF).expect("masked benchmark id byte fits in u8");
+        let _ = t.insert(NodeId(id), 1_000 + u64::from(i));
     }
     c.bench_function("routing/stale_buckets_n_512", |bch| {
         bch.iter(|| t.stale_buckets(black_box(10_000), black_box(3600)));
     });
 }
 
-criterion_group!(
-    benches,
-    bench_xor_distance,
-    bench_routing_insert,
-    bench_routing_closest_to,
-    bench_record_sign,
-    bench_record_verify,
-    bench_canonical_bytes,
-    bench_synthetic_id,
-    bench_stale_buckets_query,
-);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{
+        bench_canonical_bytes, bench_record_sign, bench_record_verify, bench_routing_closest_to,
+        bench_routing_insert, bench_stale_buckets_query, bench_synthetic_id, bench_xor_distance,
+    };
+    use criterion::criterion_group;
+
+    criterion_group!(
+        benches,
+        bench_xor_distance,
+        bench_routing_insert,
+        bench_routing_closest_to,
+        bench_record_sign,
+        bench_record_verify,
+        bench_canonical_bytes,
+        bench_synthetic_id,
+        bench_stale_buckets_query,
+    );
+}
+criterion_main!(criterion_benchmark_harness::benches);

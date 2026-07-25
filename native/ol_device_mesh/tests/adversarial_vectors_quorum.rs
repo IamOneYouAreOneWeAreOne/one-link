@@ -84,7 +84,7 @@ fn adversarial_outside_eligible_roster_rejected() {
     let outsider = [0x99; 16];
     let (sk1, a1) = mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
     let (sk2, a2) = mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
-    let (sk_outsider, a_outsider) =
+    let (sk_outsider, outsider_attestation) =
         mint_subkey(&master, DeviceClass::Desktop, outsider, 0, 365).unwrap();
     // Roster excludes the outsider.
     let policy = mint_policy(&master, [0xAA; 16], b"p", 2, vec![id1, id2]).unwrap();
@@ -98,7 +98,7 @@ fn adversarial_outside_eligible_roster_rejected() {
         proposal,
         approvals: vec![ap_outsider, ap2],
         policy,
-        subkey_attestations: vec![a1, a2, a_outsider],
+        subkey_attestations: vec![a1, a2, outsider_attestation],
     };
     let err = cert.verify(&master.verifying_key(), now + 100).unwrap_err();
     assert!(matches!(err, DeviceMeshError::ApproverNotEligible { .. }));

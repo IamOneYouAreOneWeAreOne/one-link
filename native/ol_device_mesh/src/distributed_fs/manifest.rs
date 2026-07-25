@@ -56,6 +56,7 @@ pub struct FileManifest {
 impl FileManifest {
     /// Validate the manifest's shape (bounds + chunk count rules).
     pub fn shape_check(&self) -> DeviceMeshResult<()> {
+        self.policy.validate()?;
         if self.chunks.is_empty() {
             return Err(DeviceMeshError::FileManifestEmpty);
         }
@@ -213,6 +214,26 @@ mod tests {
         };
         let err = m.shape_check().unwrap_err();
         assert!(matches!(err, DeviceMeshError::FileManifestEmpty));
+    }
+
+    #[test]
+    fn forged_zero_shard_policy_is_rejected_without_modulo_by_zero() {
+        let manifest = FileManifest {
+            file_size: 1,
+            chunk_size: 1,
+            chunks: make_chunks(1),
+            mime: Vec::new(),
+            created_unix: 0,
+            policy: ErasurePolicy {
+                k: 0,
+                m: 0,
+                min_devices_per_shard: 1,
+            },
+        };
+        assert!(matches!(
+            manifest.shape_check(),
+            Err(DeviceMeshError::ErasurePolicyZeroData)
+        ));
     }
 
     #[test]

@@ -9,7 +9,6 @@ example-based tests in tests/test_identity_rotation_v021.py.
 """
 from __future__ import annotations
 
-from copy import deepcopy
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from hypothesis import HealthCheck, given, settings, strategies as st
@@ -17,9 +16,7 @@ from hypothesis import HealthCheck, given, settings, strategies as st
 from one_link.identity_rotation import (
     CertVerifyError,
     RotationCertificate,
-    RotationReason,
     VALID_REASONS,
-    apply_certificate_to_peer,
     fingerprint_for_pubkey,
     mint_certificate,
     verify_certificate,

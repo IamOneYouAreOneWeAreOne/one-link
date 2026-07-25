@@ -12,6 +12,12 @@ crate-type = ["lib"]
 
 [dependencies]
 thiserror = { workspace = true }
+# `Choice` stops LLVM from turning GF(256) arithmetic masks back into
+# secret-dependent branches; the core barrier avoids an out-of-line call.
+subtle    = { workspace = true, features = ["core_hint_black_box"] }
+blake3    = { workspace = true }
+rand_core = { workspace = true }
+zeroize   = { workspace = true }
 
 [dev-dependencies]
 proptest  = { workspace = true }

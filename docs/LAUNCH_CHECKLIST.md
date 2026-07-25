@@ -1,10 +1,11 @@
 # Launch checklist
 
 This is the operational gate for taking One Link from "works on
-my machine" to "ship to people who don't know me." Every line is
-a concrete thing a human (or CI workflow) verifies before pulling
-the trigger on a public release. Skipping any item is breaking
-the public promise.
+my machine" to "ship to people who don't know me." Every current-release line
+is a concrete thing a human (or CI workflow) verifies before pulling the
+trigger on a public release. Items explicitly labeled **future packaging
+gate** are inactive until that artifact format is added to the authoritative
+release contract; their presence does not claim that format ships.
 
 Companion to `docs/RELEASE_CHECKLIST.md` (which covers the
 tag-and-sign mechanics). This one covers the user-facing
@@ -25,11 +26,10 @@ surfaces a release needs to be ready in.
       THEIR OS as the prominent button. No "click here for all
       builds" generic page that makes them guess.
 
-- [ ] **The download is verifiable in one command.** The download
-      page shows the Sigstore `cosign verify-blob` command + the
-      expected rollup hash from `one-link verify-this-install`.
-      Auditors can confirm bit-identity without trusting the
-      website itself.
+- [ ] **The download is verifiable in one command.** The download page uses
+      `scripts/verify-release.sh <artifact> <exact-tag>` so the checksum
+      manifest, artifact bundle, OIDC issuer, and exact tagged-workflow identity
+      are all checked. No wildcard certificate identity is permitted.
 
 - [ ] **No promise the daemon can't keep.** Every capability
       claimed on the download page (chat, files, voice calls,
@@ -37,22 +37,44 @@ surfaces a release needs to be ready in.
       OS the user is downloading. Aspirational features go under
       a clearly-labeled "Coming soon" section, not in the headline.
 
-## B. "Does the install just work?"
+## B. "Does the current portable bundle just work?"
 
-- [ ] **Windows .exe SmartScreen flow.** Until the binary is
-      code-signed, the download page has a prominent callout
-      explaining the SmartScreen warning ("Click 'More info' →
-      'Run anyway' - this is normal for new open-source apps")
-      with a screenshot. Users who close the warning thinking
-      it's malware are a silent install-failure.
+The authoritative `release.yml` contract is configured to package the complete
+PyInstaller onedir output as architecture-labeled portable ZIP archives:
+Windows x86_64/ARM64, macOS ARM64, and Linux x86_64/ARM64. No production tag
+has completed that workflow yet. The contract does **not** include a Windows
+installer, macOS DMG/PKG, or Linux AppImage.
 
-- [ ] **macOS Gatekeeper flow.** Until notarized: same callout.
-      Right-click → Open → confirm. Linked from the macOS
-      download button.
+- [ ] **Portable ZIP extraction and launch works on every advertised OS and
+      architecture.** Verify the exact tagged archive before extraction,
+      extract the complete bundle, and launch `one-link.exe`, `one-link.app`,
+      or `one-link` from that bundle on a fresh physical device. The executable
+      must not be separated from its onedir support files. The download page
+      documents any SmartScreen, Gatekeeper, executable-bit, or quarantine
+      steps actually observed for these ZIP artifacts; each instruction is
+      re-tested against the exact release bytes.
 
-- [ ] **Linux .AppImage chmod step.** Either the AppImage works
-      with no chmod (preferred) OR the download page has the
-      `chmod +x` command shown.
+### Future packaging gates (not current shipping claims)
+
+These checks become mandatory only when the authoritative release workflow
+publishes, signs, and lists the corresponding format. Auto-build artifacts or
+roadmap text do not make a format supported.
+
+- [ ] **Future packaging gate — Windows installer (.exe/MSI).** Validate
+      install, upgrade, uninstall, architecture selection, code signing, and
+      the exact SmartScreen flow on a fresh Windows device before advertising
+      an installer. No Windows installer currently ships under the production
+      release contract.
+
+- [ ] **Future packaging gate — macOS DMG/PKG.** Validate installation,
+      upgrade, removal, code signing, notarization, and the exact Gatekeeper
+      flow on a fresh macOS device before advertising a DMG or installer. No
+      DMG or PKG currently ships under the production release contract.
+
+- [ ] **Future packaging gate — Linux AppImage.** Validate executable-bit
+      preservation, launch behavior, desktop integration, update behavior,
+      and supported distributions before advertising an AppImage. No AppImage
+      currently ships under the production release contract.
 
 - [ ] **iOS Safari mobileconfig flow.** Walked end-to-end on a
       real iPhone:
@@ -132,12 +154,13 @@ surfaces a release needs to be ready in.
       pane or in Settings → About. Users have a discoverable
       way to file a report.
 
-- [ ] **`one-link verify-this-install` rollup hash matches
-      release notes.** Per `tests/test_verify_this_install_v021.py`.
-      Tamper detection on demand.
+- [ ] **`one-link verify-this-install --expected-rollup <hash>` matches an
+      independently authenticated install-content manifest.** A plain release
+      note or local hash is not an authenticity proof. Per
+      `tests/test_verify_this_install_v021.py`.
 
 - [ ] **Daemon logs to a discoverable location.** Per
-      `one-link verify-this-install --json` output's package_root,
+      `one-link verify-this-install --json --inventory-only` output's package_root,
       the log directory is documented + reachable via Files
       Explorer / Finder.
 
@@ -162,10 +185,12 @@ surfaces a release needs to be ready in.
 
 ## Pre-flight: am I actually ready to launch?
 
-You are ready when EVERY box above is checked. Anything unchecked
-is a promise you're breaking on day one. Better to delay the
-launch by a week than to ship a build that breaks the trust the
-project's whole premise depends on.
+You are ready when every **current-release** box above is checked. Future
+packaging gates are not portable-ZIP release requirements, but become hard
+gates before their formats can be advertised or published. Anything unchecked
+inside the active contract is a promise you're breaking on day one. Better to
+delay the launch than to ship a build that breaks the trust the project's
+whole premise depends on.
 
 If a box can't be checked + can't be fixed:
 - Mark it explicitly "out of scope for vN.N.N" in the release

@@ -1,12 +1,13 @@
 """Tests for the May 15 2026 sovereignty preset layer.
 
 Three tiers:
-  - just_works (default): community STUN + update notifications + LAN
+  - just_works (default): LAN/direct + community STUN address discovery
+    + update notifications; configured routes are required cross-network
   - quiet: LAN only, zero outbound
   - off_grid: no mDNS either
 
-Plus the resolver layer: explicit settings + env-vars win over the
-preset default in that order.
+Plus the resolver layer: explicit settings + env-vars may tighten but never
+loosen the selected preset.
 """
 from __future__ import annotations
 
@@ -29,9 +30,18 @@ def test_three_presets_exist():
 
 
 def test_default_preset_is_just_works():
-    """Fresh install lands on 'Just Works' — usable cross-network out
-    of the box, no corp accounts."""
+    """Fresh install lands on the LAN/direct-first Just Works policy."""
     assert _sov.DEFAULT_PRESET_NAME == "just_works"
+
+
+def test_just_works_copy_does_not_claim_stock_cross_network_infrastructure():
+    """A policy permit and STUN list must not read as a ready route."""
+    p = _sov.get_preset("just_works")
+    copy = f"{p.description} {p.outbound_summary}".lower()
+    assert "stun is not signaling" in copy
+    assert "configured rendezvous or signaling route" in copy
+    assert "no public rendezvous or turn endpoint" in copy
+    assert "rendezvous and turn are used only when an endpoint is configured" in copy
 
 
 def test_just_works_uses_community_stun_not_big_three():
@@ -48,8 +58,8 @@ def test_just_works_uses_community_stun_not_big_three():
             f"just_works preset includes corp STUN {forbidden!r}; "
             f"only independent/community servers belong here"
         )
-    # And it MUST include at least one server (otherwise the user
-    # would silently lose cross-NAT pairing on the default).
+    # Address discovery is enabled by default. This does not provide
+    # signaling or a relay and therefore is not cross-network readiness.
     assert len(p.stun_servers) >= 1
 
 
@@ -92,7 +102,7 @@ def test_preset_get_is_case_insensitive():
 # ── Resolver order — setting > env > preset ────────────────────────
 
 
-def test_update_check_explicit_setting_overrides_preset():
+def test_update_check_explicit_setting_can_only_tighten_preset():
     """User can set state.update_check_enabled=0 on just_works to
     silence update notifications without switching presets."""
     on = _sov.resolve_update_check_enabled(
@@ -101,16 +111,16 @@ def test_update_check_explicit_setting_overrides_preset():
         preset_name="just_works",
     )
     assert on is False
-    # And vice versa: setting=1 on quiet enables it.
+    # A stale/explicit ON cannot loosen Quiet's no-public-network ceiling.
     on = _sov.resolve_update_check_enabled(
         state_setting="1",
         env_var=None,
         preset_name="quiet",
     )
-    assert on is True
+    assert on is False
 
 
-def test_update_check_env_var_overrides_preset():
+def test_update_check_env_var_can_only_tighten_preset():
     on = _sov.resolve_update_check_enabled(
         state_setting=None,
         env_var="0",
@@ -122,7 +132,7 @@ def test_update_check_env_var_overrides_preset():
         env_var="1",
         preset_name="quiet",
     )
-    assert on is True
+    assert on is False
 
 
 def test_update_check_setting_beats_env():
@@ -179,6 +189,15 @@ def test_stun_setting_overrides_preset_with_custom_list():
     assert urls == ("stun:mybox.local:3478", "stun:other:3478")
 
 
+@pytest.mark.parametrize("preset_name", ["quiet", "off_grid"])
+def test_stun_override_cannot_loosen_strict_preset(preset_name):
+    assert _sov.resolve_stun_servers(
+        state_setting="stun:operator.example:3478",
+        env_var="stun:environment.example:3478",
+        preset_name=preset_name,
+    ) == ()
+
+
 def test_stun_env_var_overrides_preset_when_setting_missing():
     urls = _sov.resolve_stun_servers(
         state_setting=None,
@@ -204,6 +223,62 @@ def test_stun_resolver_dedups_and_strips_whitespace():
         preset_name="just_works",
     )
     assert urls == ("stun:a:1", "stun:b:2")
+
+
+def test_stun_resolver_canonicalizes_host_scheme_ipv6_and_port():
+    urls = _sov.resolve_stun_servers(
+        state_setting=(
+            "STUN:Relay.Example.:03478,"
+            "stuns:[2001:0db8:0:0:0:0:0:1]:5349"
+        ),
+        env_var=None,
+        preset_name="just_works",
+    )
+    assert urls == (
+        "stun:relay.example:3478",
+        "stuns:[2001:db8::1]:5349",
+    )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "https://relay.example",
+        "stun:user@relay.example:3478",
+        "stun:relay.example:0",
+        "stun:relay.example:65536",
+        "stun:relay.example:",
+        "stun:2001:db8::1",
+        "stun:relay.example?transport=udp",
+        "stun:relay example:3478",
+        "stun:127.000.000.001:3478",
+        "stun:éxample.test:3478",
+    ],
+)
+def test_stun_resolver_drops_ambiguous_or_invalid_urls(bad: str):
+    assert _sov.resolve_stun_servers(
+        state_setting=bad, env_var=None, preset_name="just_works",
+    ) == ()
+
+
+def test_ice_server_parser_bounds_and_validates_turn_transport():
+    assert _sov.parse_ice_server_list(
+        "turn:RELAY.example:3478?TRANSPORT=UDP,"
+        "turns:relay.example:5349?transport=tcp,"
+        "turn:relay.example/path,turn:relay.example?x=y",
+        allowed_schemes={"turn", "turns"},
+    ) == (
+        "turn:relay.example:3478?transport=udp",
+        "turns:relay.example:5349?transport=tcp",
+    )
+    assert _sov.parse_ice_server_list(
+        "A" * (_sov.MAX_ICE_SERVER_LIST_CHARS + 1),
+        allowed_schemes={"stun"},
+    ) == ()
+    raw = ",".join(f"stun:s{i}.example:3478" for i in range(40))
+    assert len(_sov.parse_ice_server_list(
+        raw, allowed_schemes={"stun"},
+    )) == _sov.MAX_ICE_SERVERS
 
 
 # ── current_preset_name state lookup ───────────────────────────────
@@ -327,6 +402,12 @@ async def test_api_status_returns_expected_shape(monkeypatch):
     ):
         assert key in body["features"]
     assert "turn_relay" in body["features"]
+    # Just Works permits configured routes, but the stock configuration
+    # supplies neither rendezvous nor TURN infrastructure.
+    assert body["features"]["rendezvous"]["enabled"] is True
+    assert body["features"]["rendezvous"]["configured"] is False
+    assert body["features"]["rendezvous"]["active"] is False
+    assert body["features"]["turn_relay"]["configured"] is False
 
 
 @pytest.mark.asyncio
@@ -462,59 +543,6 @@ async def test_peer_rtc_ice_config_orders_turn_relays_by_health(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_peer_rtc_ice_config_orders_turn_relays_by_health(monkeypatch):
-    from one_link.server import UIServer
-
-    now_ms = int(time.time() * 1000)
-
-    class _State:
-        def get_setting(self, k):
-            return {
-                "stun_servers": "",
-                "turn_servers": "turn:slow.relay:3478,turn:fast.relay:3478,turn:unknown.relay:3478",
-                "turn_username": "one",
-                "turn_credential": "secret",
-            }.get(k)
-
-    daemon = SimpleNamespace(
-        state=_State(),
-        discovery=None,
-        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aa", hostname="me"),
-        _outbound_log=[],
-        _outbound_log_started_ms=0,
-        _outbound_sessions={},
-        _relay_metrics={
-            "turn:slow.relay:3478": {
-                "rtt_ms": 650.0,
-                "loss_rate": 0.42,
-                "n_attempts": 10,
-                "n_successes": 4,
-                "last_observed_ms": now_ms,
-            },
-            "turn:fast.relay:3478": {
-                "rtt_ms": 24.0,
-                "loss_rate": 0.0,
-                "n_attempts": 12,
-                "n_successes": 12,
-                "last_observed_ms": now_ms,
-            },
-        },
-    )
-    server = UIServer(daemon)
-    resp = await server.api_peer_rtc_ice_config(SimpleNamespace(query={}))
-    body = json.loads(resp.text)
-    turn = body["iceServers"][-1]
-    assert turn["urls"][0] == "turn:fast.relay:3478"
-    assert turn["urls"][-1] == "turn:slow.relay:3478"
-    relays = body["routePolicy"]["relay_candidates"]
-    assert relays[0]["url"] == "turn:fast.relay:3478"
-    assert relays[0]["health"] == "healthy"
-    assert relays[-1]["health"] == "poor"
-    assert body["routePolicy"]["best_relay_health"] == "healthy"
-    assert body["routePolicy"]["best_relay_score"] == relays[0]["score"]
-
-
-@pytest.mark.asyncio
 async def test_api_preset_set_switches_setting(monkeypatch):
     """POST /api/sovereignty/preset writes state.settings."""
     from one_link.server import UIServer
@@ -528,6 +556,11 @@ async def test_api_preset_set_switches_setting(monkeypatch):
             self.settings[k] = v
 
     state = _State()
+
+    async def _apply(name):
+        state.set_setting("sovereignty_preset", name)
+        return {"ok": True, "preset": name}
+
     daemon = SimpleNamespace(
         state=state,
         discovery=None,
@@ -537,6 +570,7 @@ async def test_api_preset_set_switches_setting(monkeypatch):
         _outbound_log=[],
         _outbound_log_started_ms=0,
         _outbound_sessions={},
+        apply_sovereignty_preset=_apply,
     )
     server = UIServer(daemon)
 
@@ -713,7 +747,7 @@ def test_p2p_version_gossip_older_peer_does_not_trigger_hint():
 
 @pytest.mark.asyncio
 async def test_api_outbound_log_endpoint_returns_audit_trail():
-    """The Privacy panel's "Recent outbound calls" reads here."""
+    """The Privacy panel renders the explicitly incomplete event log."""
     from one_link.server import UIServer
 
     daemon = SimpleNamespace(
@@ -733,7 +767,9 @@ async def test_api_outbound_log_endpoint_returns_audit_trail():
     )
     body = json.loads(resp.text)
     assert "entries" in body
-    assert "promise" in body
+    assert body["complete_network_monitor"] is False
+    assert "empty list does not prove" in body["scope"]
+    assert "promise" not in body
     assert "session_started_ms" in body
     assert len(body["entries"]) == 1
     assert body["entries"][0]["destination"] == "api.github.com"

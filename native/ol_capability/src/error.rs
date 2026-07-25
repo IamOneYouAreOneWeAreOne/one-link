@@ -32,4 +32,13 @@ pub enum CapError {
         /// What was wrong.
         reason: &'static str,
     },
+
+    /// A locally constructed capability or caveat exceeds a protocol
+    /// resource bound.  This is distinct from malformed peer input so API
+    /// callers can correct their request without treating it as an attack.
+    #[error("capability resource limit exceeded: {reason}")]
+    ResourceLimit {
+        /// The bound that was exceeded.
+        reason: &'static str,
+    },
 }

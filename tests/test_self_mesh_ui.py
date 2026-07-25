@@ -76,5 +76,7 @@ def test_peer_shell_can_claim_one_setup_device_invite():
     assert "device_pub_b64: rec.public_key_b64u" in src
     assert "cert_b64: body.cert_b64 ||" in src
     assert "pending: !!body.pending" in src
-    assert "trust_code: body.trust_code" in src
-    assert "Check this code on the other device" in src
+    assert "await _validateSetupClaim(query, rec, body)" in src
+    assert "trust_phrase: verifiedSas.phrase" in src
+    assert "sas_version: SETUP_SAS_VERSION" in src
+    assert "Check all five words on the other device" in src

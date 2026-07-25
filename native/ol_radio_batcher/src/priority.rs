@@ -18,7 +18,7 @@ pub enum Priority {
     ///
     /// This is the default for selector-tagged `Batch` decisions.
     Normal,
-    /// Drain when 3× the DRX window elapses (or max_age, whichever
+    /// Drain when 3× the DRX window elapses (or `max_age`, whichever
     /// fires first).
     ///
     /// Used for genuinely-background work: discovery beacons,

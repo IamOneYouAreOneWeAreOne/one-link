@@ -86,11 +86,11 @@ proptest! {
     #[test]
     fn scheduler_deterministic(
         seed in any::<[u8; 32]>(),
-        rate_bits in 1u64..1_000_000u64,
+        rate_bits in 1u32..1_000_000u32,
     ) {
-        let rate = rate_bits as f64 / 1000.0; // 0.001 .. 1000 Hz
-        let mut a = CoverScheduler::new(rate, seed);
-        let mut b = CoverScheduler::new(rate, seed);
+        let rate = f64::from(rate_bits) / 1000.0; // 0.001 .. 1000 Hz
+        let mut a = CoverScheduler::new(rate, seed).unwrap();
+        let mut b = CoverScheduler::new(rate, seed).unwrap();
         for _ in 0..32 {
             prop_assert_eq!(a.next_wait_ms(), b.next_wait_ms());
         }
@@ -104,8 +104,8 @@ proptest! {
         s2 in any::<[u8; 32]>(),
     ) {
         prop_assume!(s1 != s2);
-        let mut a = CoverScheduler::new(1.0, s1);
-        let mut b = CoverScheduler::new(1.0, s2);
+        let mut a = CoverScheduler::new(1.0, s1).unwrap();
+        let mut b = CoverScheduler::new(1.0, s2).unwrap();
         let mut differ = false;
         for _ in 0..32 {
             if a.next_wait_ms() != b.next_wait_ms() {
@@ -121,10 +121,10 @@ proptest! {
     #[test]
     fn scheduler_finite_for_any_positive_rate(
         seed in any::<[u8; 32]>(),
-        rate_bits in 1u64..1_000_000u64,
+        rate_bits in 1u32..1_000_000u32,
     ) {
-        let rate = rate_bits as f64 / 1000.0;
-        let mut s = CoverScheduler::new(rate, seed);
+        let rate = f64::from(rate_bits) / 1000.0;
+        let mut s = CoverScheduler::new(rate, seed).unwrap();
         let _ = s.next_wait_ms();
     }
 }
@@ -141,11 +141,11 @@ proptest! {
     /// `current_cover_rate` is always in `[0, target_total_hz]`.
     #[test]
     fn cover_rate_in_bounds(
-        target_bits in 1u64..1_000_000u64,
+        target_bits in 1u32..1_000_000u32,
         timestamps in prop::collection::vec(any::<u64>(), 0..32),
     ) {
-        let target = target_bits as f64 / 1000.0;
-        let mut eq = RateEqualizer::new(target);
+        let target = f64::from(target_bits) / 1000.0;
+        let mut eq = RateEqualizer::new(target).unwrap();
         for ts in &timestamps {
             eq.observe_real_emission(*ts);
         }
@@ -157,11 +157,11 @@ proptest! {
     /// `observed_real_rate` is always non-negative.
     #[test]
     fn observed_rate_non_negative(
-        target_bits in 1u64..1_000_000u64,
+        target_bits in 1u32..1_000_000u32,
         timestamps in prop::collection::vec(any::<u64>(), 0..32),
     ) {
-        let target = target_bits as f64 / 1000.0;
-        let mut eq = RateEqualizer::new(target);
+        let target = f64::from(target_bits) / 1000.0;
+        let mut eq = RateEqualizer::new(target).unwrap();
         for ts in &timestamps {
             eq.observe_real_emission(*ts);
         }
@@ -172,11 +172,11 @@ proptest! {
     /// panic on any sequence of arbitrary timestamps.
     #[test]
     fn observe_total(
-        target_bits in 1u64..1_000_000u64,
+        target_bits in 1u32..1_000_000u32,
         ops in prop::collection::vec((any::<bool>(), any::<u64>()), 0..32),
     ) {
-        let target = target_bits as f64 / 1000.0;
-        let mut eq = RateEqualizer::new(target);
+        let target = f64::from(target_bits) / 1000.0;
+        let mut eq = RateEqualizer::new(target).unwrap();
         for (is_emit, ts) in &ops {
             if *is_emit {
                 eq.observe_real_emission(*ts);
@@ -190,13 +190,13 @@ proptest! {
     /// fills to target). This is the load-bearing equalizer property.
     #[test]
     fn long_idle_returns_to_full_cover(
-        target_bits in 1u64..1_000_000u64,
+        target_bits in 1u32..1_000_000u32,
         ts_a in 1_000u64..10_000u64,
         ts_b_offset in 1u64..100u64,
     ) {
-        let target = target_bits as f64 / 1000.0;
-        let mut eq = RateEqualizer::new(target);
-        eq.set_half_life_sec(1.0);
+        let target = f64::from(target_bits) / 1000.0;
+        let mut eq = RateEqualizer::new(target).unwrap();
+        eq.set_half_life_sec(1.0).unwrap();
         eq.observe_real_emission(ts_a);
         eq.observe_real_emission(ts_a + ts_b_offset);
         // Now idle for a million seconds — observed → 0; cover → target.

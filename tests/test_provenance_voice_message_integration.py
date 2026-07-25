@@ -14,16 +14,14 @@ that:
   5. An attacker intercepting and re-signing fails verification.
   6. A malformed wire message is dropped without crashing.
 
-The actual daemon hooks (the elif clause in ``_on_peer_message`` and
-the send-after-FILE_OFFER hook in ``send_file``) are documented in
-docs/LIVING_PRESENCE_ARCHITECTURE.md §9.3 and land in a focused
-follow-up PR. This test simulates that wiring at the module level so
-the design is proven end-to-end before the daemon changes ship.
+The live daemon hooks are the ``FILE_PROVENANCE`` branch in
+``_on_peer_message`` and the capability-gated send immediately after
+``FILE_OFFER`` in ``send_file``. This test isolates the complete wire and
+verification flow from sockets; the daemon dispatch and transfer tests cover
+the two integration points themselves.
 """
 
 from __future__ import annotations
-
-import hashlib
 
 import blake3
 import pytest
@@ -35,7 +33,6 @@ from one_link.frame_provenance import (
     FrameKind,
     PathClass,
     RecordingState,
-    make_segment_hash,
 )
 from one_link.identity import Identity
 from one_link.provenance_wiring import (
@@ -99,9 +96,8 @@ def voice_recording() -> bytes:
 
 @pytest.fixture
 def voice_blob_hex(voice_recording: bytes) -> str:
-    """SHA256 hex — matches what the daemon's FILE_OFFER uses for the
-    ``blob`` field."""
-    return hashlib.sha256(voice_recording).hexdigest()
+    """Canonical BLAKE3-256 used by the daemon's ``FILE_OFFER.blob``."""
+    return blake3.blake3(voice_recording).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -120,8 +116,8 @@ def test_alice_sends_voice_message_bob_verifies_and_renders_reality_dot(
     # ─── ALICE'S DEVICE ─────────────────────────────────────────────
     # User taps record, releases. Opus blob exists. Daemon's send-
     # file flow would normally compute size, blob_hex, build a
-    # FILE_OFFER, and dispatch via channel.send. We model what the
-    # follow-up hook adds: after FILE_OFFER, also send FILE_PROVENANCE.
+    # FILE_OFFER, and dispatch via channel.send. The live hook then sends
+    # FILE_PROVENANCE on the same authenticated channel.
 
     alice_provenance = build_provenance_for_file(
         identity=alice,
@@ -176,10 +172,12 @@ def test_alice_sends_voice_message_bob_verifies_and_renders_reality_dot(
     # The UI dict is exactly what the Reality dot will receive.
     ui = bob_store.ui_state_for_blob(voice_blob_hex)
     assert ui == {
-        "kind": "Real",
+        "kind": "Original",
         "path": "Local network",
         "recording": "Not recording",
         "verified": True,
+        "verification": "Sender signature confirmed",
+        "scope": "Confirms the sender and exact bytes, not the truth of a physical scene",
         "produced_at_us": alice_provenance.timestamp_us,
     }
 
@@ -305,4 +303,4 @@ def test_alice_records_her_own_outbound_provenance(
     ui = alice_store.ui_state_for_blob(voice_blob_hex)
     assert ui is not None
     assert ui["verified"] is True   # we signed it, trivially verified
-    assert ui["kind"] == "Real"
+    assert ui["kind"] == "Original"

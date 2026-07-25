@@ -6,6 +6,7 @@ use ol_device_mesh::active_routing::{
     ROUTING_CONTEXT_DOMAIN, ROUTING_HISTORY_DECAY_DEFAULT_SECS,
 };
 use ol_device_mesh::DeviceClass;
+use std::fmt::Write as _;
 
 fn check_regen<F: FnOnce()>(label: &str, dump: F) {
     if std::env::var("OL_ACTIVE_ROUTING_KAT_REGEN").as_deref() == Ok("1") {
@@ -15,7 +16,11 @@ fn check_regen<F: FnOnce()>(label: &str, dump: F) {
 }
 
 fn to_hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    let mut hex = String::with_capacity(b.len() * 2);
+    for byte in b {
+        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
 }
 
 #[test]

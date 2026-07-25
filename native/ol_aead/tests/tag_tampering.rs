@@ -3,7 +3,7 @@
 //! Per the file-engine-v2 plan's Phase C item #9 sweep: AEAD tag
 //! verification must be constant-time (i.e. always run to completion
 //! across all 16 tag bytes, regardless of where a mismatch occurs).
-//! RustCrypto's `aead` trait uses `subtle::ConstantTimeEq` internally;
+//! `RustCrypto`'s `aead` trait uses `subtle::ConstantTimeEq` internally;
 //! these tests confirm the property holds end-to-end through
 //! `ol_aead::decrypt_chunk` for both AES-GCM and ChaCha20-Poly1305.
 
@@ -20,7 +20,7 @@ fn fixed_cipher(kind: AeadKind) -> AeadCipher {
 fn run_tamper_sweep(kind: AeadKind, plaintext_len: usize) {
     let cipher = fixed_cipher(kind);
     let chunk_id = [0x42u8; 32];
-    let plaintext: Vec<u8> = (0..plaintext_len).map(|i| (i & 0xFF) as u8).collect();
+    let plaintext: Vec<u8> = (0..plaintext_len).map(|i| i.to_le_bytes()[0]).collect();
     let ciphertext = encrypt_chunk(&cipher, &chunk_id, &plaintext).expect("encrypt");
 
     // Decrypt the original — must succeed.

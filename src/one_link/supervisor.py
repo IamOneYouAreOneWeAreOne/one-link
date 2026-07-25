@@ -39,7 +39,13 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from one_link import crash_log
+from one_link.fault_observability import report_best_effort_failure
 from one_link.paths import data_dir
+from one_link.process_security import (
+    hidden_creationflags,
+    resolve_explicit_executable,
+    sanitized_process_env,
+)
 
 log = logging.getLogger("one_link.supervisor")
 
@@ -91,8 +97,15 @@ def _daemon_argv() -> list[str]:
     on what "the daemon" is.
     """
     if getattr(sys, "frozen", False):
-        return [sys.executable, "daemon", "-v"]
-    return [sys.executable, "-m", "one_link.cli", "daemon", "-v"]
+        return [resolve_explicit_executable(sys.executable), "daemon", "-v"]
+    return [
+        resolve_explicit_executable(sys.executable),
+        "-P",
+        "-m",
+        "one_link.cli",
+        "daemon",
+        "-v",
+    ]
 
 
 def _append_restart_log(reason: str, exit_code: Optional[int]) -> None:
@@ -148,7 +161,7 @@ def _spawn_daemon_child(log_path: Path) -> subprocess.Popen:
     # to log "supervised=yes" so a future "was that run supposed to
     # auto-restart?" question is answerable from the log alone.
     env = {
-        **os.environ,
+        **sanitized_process_env(),
         "PYTHONUNBUFFERED": "1",
         "ONE_LINK_SUPERVISED": "1",
     }
@@ -156,16 +169,19 @@ def _spawn_daemon_child(log_path: Path) -> subprocess.Popen:
     if os.name == "nt":
         creationflags = (
             subprocess.CREATE_NEW_PROCESS_GROUP
-            | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            | hidden_creationflags()
         )
+    argv = _daemon_argv()
     return subprocess.Popen(
-        _daemon_argv(),
+        argv,
         stdout=out,
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
         env=env,
         creationflags=creationflags if os.name == "nt" else 0,
         close_fds=True,
+        cwd=str(Path(argv[0]).parent),
+        shell=False,
     )
 
 
@@ -234,8 +250,14 @@ def run(
                 exit_code = proc.wait()
             except KeyboardInterrupt:
                 shutdown["requested"] = True
-                try: proc.wait(timeout=10)
-                except Exception: pass
+                try:
+                    proc.wait(timeout=10)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    report_best_effort_failure(
+                        log,
+                        "supervisor_interrupt_child_wait",
+                        exc,
+                    )
                 exit_code = proc.returncode if proc.returncode is not None else 0
 
             proc_holder["proc"] = None

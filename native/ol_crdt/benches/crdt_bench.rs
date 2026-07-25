@@ -20,12 +20,14 @@ fn build_folder(n: usize, replica: u8) -> Folder {
     let r = rid(replica);
     let mut f = Folder::new();
     for i in 0..n {
+        let file_id = u32::try_from(i).expect("benchmark folder sizes fit in u32");
+        let scalar = u64::try_from(i).expect("supported Rust pointer widths fit in u64");
         f.add_file(
             &r,
-            fid(i as u32),
+            fid(file_id),
             format!("f{i}.bin"),
-            (i as u64) * 1024,
-            (i as u64) * 7,
+            scalar * 1024,
+            scalar * 7,
         );
     }
     f
@@ -67,5 +69,12 @@ fn bench_contains(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_add_file, bench_merge_scaling, bench_contains);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{bench_add_file, bench_contains, bench_merge_scaling, criterion_group};
+
+    criterion_group!(benches, bench_add_file, bench_merge_scaling, bench_contains);
+}
+criterion_main!(criterion_benchmark_harness::benches);

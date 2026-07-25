@@ -1,65 +1,51 @@
-name: auto-build macOS Intel (decoupled)
+name: macOS Intel build (self-hosted, manual)
 
-# 2026-06-16: a DEDICATED build for the Intel-Mac (x86_64) dmg,
-# decoupled from the main auto_build.yml.
-#
-# Why separate: macos-13 (the only hosted Intel runner) frequently sits
-# "queued" for a long time. In the main multi-platform workflow, whose
-# concurrency is cancel-in-progress, every push to master cancelled the
-# slow Intel leg before it published — so one-link-macos-x86_64.dmg
-# never reached the auto-latest release while arm64/Windows/Linux did.
-#
-# This workflow:
-#   * builds ONLY the Intel dmg,
-#   * uses its OWN concurrency group with cancel-in-progress: FALSE, so
-#     a new push QUEUES behind an in-flight Intel build instead of
-#     killing it — it runs to completion whenever a runner frees up,
-#   * also runs on a daily schedule + manual dispatch so it self-heals
-#     even if a push-triggered run is delayed,
-#   * upserts just the x86_64 dmg (+ sha256) onto the SAME `auto-latest`
-#     release (softprops only adds/replaces the listed files, leaving
-#     the arm64/Windows/Linux assets the main build published intact).
-
-# NOTE: deliberately NO `push:` trigger. macos-13 (the only hosted Intel
-# runner) sits queued for a long time, and GitHub's concurrency rules keep
-# only the NEWEST *pending* run in a group — `cancel-in-progress: false`
-# protects a RUNNING job but NOT queued ones. So a push trigger meant every
-# new commit superseded the still-queued Intel run before it ever got a
-# runner, and the dmg never published. Instead the Intel dmg rebuilds on a
-# daily schedule + on demand, which is plenty fresh for a release artifact.
+# GitHub no longer provides a usable hosted Intel-macOS runner for this
+# repository. The former daily `macos-13` job produced 29 consecutive
+# cancellations and no release evidence. Keep the build recipe available for
+# deliberate validation on an explicitly provisioned Intel self-hosted runner,
+# but do not generate permanent scheduled red/queued noise or imply that Intel
+# macOS is currently supported.
 on:
-  schedule:
-    # Daily at 08:17 UTC — keeps one-link-macos-x86_64.dmg no more than
-    # ~a day stale relative to master without any push-driven churn.
-    - cron: "17 8 * * *"
   workflow_dispatch:
 
 concurrency:
-  # Own group, non-cancelling: let a slow Intel build run to completion.
-  # With no push trigger there is no rapid-supersede problem to begin with.
+  # Own group, non-cancelling: let an explicitly requested validation finish.
   group: auto-build-macos-intel
   cancel-in-progress: false
 
 permissions:
-  contents: write   # update the rolling auto-latest release
+  contents: read
 
 jobs:
   build-intel:
     name: build macOS Intel (x86_64)
-    runs-on: macos-13
+    runs-on: [self-hosted, macOS, X64, one-link-intel]
+    permissions:
+      contents: read
     # Generous cap: Intel builds are slow, but bound it so a wedged run
     # eventually frees the concurrency slot for the next attempt.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
+      - name: setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: true
+
       - name: install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup default 1.96.0
 
       - name: generate macOS .icns icon
         shell: bash
@@ -69,26 +55,19 @@ jobs:
 
       - name: install build tooling
         shell: bash
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pyinstaller
-          python -m pip install -e .
+        run: uv sync --frozen --python python --extra release
 
       - name: build native crate from source
         shell: bash
-        continue-on-error: true
-        run: |
-          python -m pip install maturin
-          cd native/one_link_native
-          maturin develop --release \
-            || echo "maturin build failed; Intel dmg ships pure-Python"
+        working-directory: native
+        run: uv run --project .. --frozen --extra release maturin develop --release --locked
 
       - name: build the standalone binary
         shell: bash
         env:
           PYTHONIOENCODING: utf-8
         run: |
-          python scripts/build_binary.py --gui --allow-native-cdc-fallback
+          uv run --frozen --extra release python scripts/build_binary.py --gui
 
       - name: verify the binary is x86_64
         shell: bash
@@ -122,16 +101,10 @@ jobs:
           mkdir -p ../out
           cp "$DMG_NAME" "$DMG_NAME.sha256" ../out/
 
-      - name: upload Intel dmg to auto-latest release
-        uses: softprops/action-gh-release@v2
+      - name: retain ephemeral Intel CI payload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          tag_name: auto-latest
-          # Do NOT set name/body here — that would clobber the main
-          # build's release notes. Only add/replace the Intel files.
-          prerelease: true
-          make_latest: false
-          files: |
-            out/one-link-macos-x86_64.dmg
-            out/one-link-macos-x86_64.dmg.sha256
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: intel-continuous-build-${{ github.sha }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 7

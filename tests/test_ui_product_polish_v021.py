@@ -59,20 +59,25 @@ def test_file_details_explain_open_route_and_actions() -> None:
 
 def test_chat_file_preview_avoids_fragile_unicode_separators() -> None:
     html = _html()
-    assert '? ` - ${_lightboxState.index + 1} of ${count}`' in html
+    assert "? ` - ${_lightboxState.index + 1} of ${count}`" in html
     assert '+ (ent.sizeBytes ? ` - ${fmtBytes(ent.sizeBytes)}` : "")' in html
     assert 'prev.textContent = "<";' in html
     assert 'next.textContent = ">";' in html
-    assert '? ` · ${_lightboxState.index + 1} of ${count}`' not in html
+    assert "? ` · ${_lightboxState.index + 1} of ${count}`" not in html
     assert '+ (ent.sizeBytes ? ` · ${fmtBytes(ent.sizeBytes)}` : "")' not in html
 
 
 def test_launcher_and_tray_open_authenticated_owner_url() -> None:
     cli = (ROOT / "src" / "one_link" / "cli.py").read_text(encoding="utf-8")
+    app = (ROOT / "src" / "one_link" / "app.py").read_text(encoding="utf-8")
     tray = (ROOT / "src" / "one_link" / "tray.py").read_text(encoding="utf-8")
-    assert '"ui.token"' in cli
-    assert 'f"?t={token}"' in cli
-    assert '"server.port"' in cli
+    assert "control_ipc.request_control" in cli
+    assert "_resolve_running_daemon(timeout=timeout)" in cli
+    assert '"ui_launch_info"' in app
+    assert "_open_verified_ui_instance" in app
+    assert '"ui.token"' not in cli
+    assert '"server.port"' not in cli
+    assert 'f"http://127.0.0.1:{port}/?t={token}"' in cli
     assert "ui_port.txt" not in cli
     assert "def _display_url(url: str)" in tray
     assert "urlsplit(url)" in tray
@@ -82,7 +87,7 @@ def test_launcher_and_tray_open_authenticated_owner_url() -> None:
 def test_composer_toolbar_uses_icons_not_text_labels() -> None:
     html = _html()
     composer_start = html.index('<div class="composer">')
-    composer_end = html.index('<!-- v0.9.2 voice recording overlay', composer_start)
+    composer_end = html.index("<!-- v0.9.2 voice recording overlay", composer_start)
     composer = html[composer_start:composer_end]
 
     for control_id in ("btn-attach2", "btn-voice", "btn-emoji"):
@@ -95,7 +100,27 @@ def test_composer_toolbar_uses_icons_not_text_labels() -> None:
     assert ">:)</button>" not in composer
     assert "COMPOSER_MIC_ICON" in html
     assert "COMPOSER_STOP_ICON" in html
-    assert 'setVoiceButtonIcon(false)' in html
-    assert 'setVoiceButtonIcon(true)' in html
+    assert "setVoiceButtonIcon(false)" in html
+    assert "setVoiceButtonIcon(true)" in html
     assert '$("#btn-voice").textContent = "Mic"' not in html
     assert '$("#btn-voice").textContent = "Attach"' not in html
+
+
+def test_image_metadata_removal_fails_closed_before_staging() -> None:
+    html = _html()
+    stage_start = html.index("async function stageFile(file, relPath = null)")
+    stage_end = html.index("function _isImageFileForStrip", stage_start)
+    stage_body = html[stage_start:stage_end]
+    strip_start = html.index("async function _stripImageMetadata(file)")
+    strip_end = html.index("function removeStaged", strip_start)
+    strip_body = html[strip_start:strip_end]
+
+    assert "EXIF strip failed, sending original" not in html
+    assert "Image metadata removal failed; attachment blocked" in stage_body
+    assert "could not safely remove its location and camera metadata" in stage_body
+    assert "return false;" in stage_body
+    assert stage_body.index("return false;") < stage_body.index("state.staged.push(")
+    assert "if (!blob) return file" not in strip_body
+    assert "if (!ctx) throw new Error" in strip_body
+    assert "if (!value || value.size === 0)" in strip_body
+    assert "browser did not honor sanitized image type" in strip_body

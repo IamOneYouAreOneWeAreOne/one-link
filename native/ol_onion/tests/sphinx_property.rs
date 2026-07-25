@@ -1,6 +1,6 @@
 //! Sphinx Coherence property tests at the F1.x bar.
 //!
-//! 1M iters CI default / 5M iters nightly via ONE_LINK_F1_GATE=1.
+//! 1M iters CI default / 5M iters nightly via `ONE_LINK_F1_GATE=1`.
 
 use proptest::prelude::*;
 use rand::rngs::OsRng;
@@ -120,7 +120,7 @@ proptest! {
         n_relays in 0usize..=MAX_HOPS,
     ) {
         let keys: Vec<[u8; 32]> = (0..n_relays)
-            .map(|i| [i as u8 + 1; 32])
+            .map(|i| [u8::try_from(i).unwrap() + 1; 32])
             .collect();
         let filler = build_filler(&keys);
         prop_assert_eq!(filler.len(), n_relays * SLOT_LEN);
@@ -168,7 +168,9 @@ proptest! {
         n_hops in 1usize..=MAX_HOPS,
         payload_len in 0usize..=200,
     ) {
-        let payload: Vec<u8> = (0..payload_len).map(|i| (i as u8).wrapping_mul(31)).collect();
+        let payload: Vec<u8> = (0..payload_len)
+            .map(|i| u8::try_from(i).unwrap().wrapping_mul(31))
+            .collect();
         let pairs: Vec<_> = (0..n_hops).map(|_| make_relay()).collect();
         let circuit: Vec<SphinxHop> = pairs.iter().map(|(_, h)| h.clone()).collect();
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
@@ -261,25 +263,14 @@ proptest! {
         prop_assert_ne!(k1.blinding_seed, k2.blinding_seed);
     }
 
-    /// Audit I2 May 2026 — non-leakage property of the field-bound
-    /// witness. A passive observer of just the hop sub-keys (without
-    /// access to `shared`) gets NO computable information about the
-    /// witness beyond equality with hop-keys derived from the same
-    /// witness. Concretely: for two random witnesses W1, W2, the
-    /// hop-stream bytes from `(shared, alpha, W1)` are
-    /// indistinguishable (uniformly random) from those of
-    /// `(shared, alpha, W2)` to a party that doesn't know `shared`.
-    ///
-    /// This test pins the property in a falsifiable way: across
-    /// random `(shared, alpha)` and random `(W1, W2)`, neither
-    /// `header_stream` nor `mac_key` should expose statistical
-    /// regularities tied to the witness. We assert (1) the bytes
-    /// differ across distinct witnesses (avalanche, already pinned
-    /// above) AND (2) any prefix of the keystream has uniform-ish
-    /// byte distribution across runs — falsifies a "witness leaks
-    /// via byte-frequency" claim.
+    /// Coarse diffusion regression for witness input. Distinct fixture
+    /// witnesses should change the derived stream, and its short prefix
+    /// should not collapse to a trivially low-diversity value. This does
+    /// not establish non-leakage, uniformity, entropy, or
+    /// indistinguishability; those are cryptographic-analysis questions,
+    /// and a published witness remains public context.
     #[test]
-    fn field_bound_witness_non_leakage(
+    fn field_bound_witness_changes_nontrivial_stream_sample(
         shared in any::<[u8; 32]>(),
         alpha in any::<[u8; 32]>(),
         w1 in any::<[u8; FIELD_WITNESS_LEN]>(),
@@ -288,15 +279,9 @@ proptest! {
         prop_assume!(w1 != w2);
         let k1 = derive_hop_keys_with_witness(&shared, &alpha, &w1);
         let k2 = derive_hop_keys_with_witness(&shared, &alpha, &w2);
-        // Avalanche: distinct witnesses → distinct keystreams.
+        // Input-binding smoke: distinct witnesses change the stream.
         prop_assert_ne!(k1.header_stream, k2.header_stream);
-        // Non-trivial byte distribution: the first 16 bytes of
-        // each keystream must contain at least 8 distinct byte
-        // values. A leaky derivation that copied witness bytes
-        // verbatim would fail this with witnesses that have <8
-        // unique bytes (e.g. mostly-zero). Property is conservative
-        // (BLAKE3 XOF passes by 5+ orders of magnitude) but pins
-        // the "no plaintext witness in keystream" floor.
+        // Coarse low-diversity regression over one 16-byte prefix.
         let unique_bytes_k1 = {
             let mut seen = [false; 256];
             for &b in &k1.header_stream[..16] {
@@ -373,24 +358,26 @@ proptest! {
             build_pq_sphinx_onion, generate_pq_keypair, peel_pq_sphinx_entry,
             PqSphinxPeelOutcome,
         };
-        let payload: Vec<u8> = (0..payload_len).map(|i| i as u8).collect();
-        let (entry_x_sk, entry_x_pk) = generate_static_keypair(&mut OsRng);
-        let (entry_pq_dk, entry_pq_ek) = generate_pq_keypair(&mut OsRng);
+        let payload: Vec<u8> = (0..payload_len)
+            .map(|i| u8::try_from(i).unwrap())
+            .collect();
+        let (entry_secret, entry_public) = generate_static_keypair(&mut OsRng);
+        let (pq_receiver_key, pq_sender_key) = generate_pq_keypair(&mut OsRng);
         let mut id = [0u8; 32];
         OsRng.fill(&mut id);
         let entry = PqSphinxHop {
             id: HopId::from_bytes(id),
-            static_x_pk: entry_x_pk,
-            static_pq_pk: Some(entry_pq_ek),
+            static_x_pk: entry_public,
+            static_pq_pk: Some(pq_sender_key),
         };
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
         let packet =
             build_pq_sphinx_onion(&eph_sk, &[entry], &payload, &mut OsRng).unwrap();
-        match peel_pq_sphinx_entry(&entry_x_sk, &entry_pq_dk, &packet).unwrap() {
+        match peel_pq_sphinx_entry(&entry_secret, &pq_receiver_key, &packet).unwrap() {
             PqSphinxPeelOutcome::Deliver { payload: out } => {
                 prop_assert_eq!(out, payload);
             }
-            _ => prop_assert!(false, "expected Deliver"),
+            PqSphinxPeelOutcome::Forward { .. } => prop_assert!(false, "expected Deliver"),
         }
     }
 }

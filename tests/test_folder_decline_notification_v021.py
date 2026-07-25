@@ -31,7 +31,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.blobstore import BlobStore
-from one_link.daemon import Daemon, encode_msg, decode_msg
+from one_link.capabilities import FOLDER_SYNC
+from one_link.daemon import Daemon, decode_msg
 from one_link.identity import Identity, fingerprint_of
 from one_link.server import UIServer
 from one_link.state import State
@@ -77,7 +78,7 @@ async def decline_ctx(tmp_path: Path, monkeypatch):
     )
     daemon._peer_fp_from_peer = lambda p: peer_fp if p is fake_peer else None
     daemon._check_outbound_trust = lambda peer: None
-    daemon._capability_allowed = lambda fp, cap: True
+    daemon._capability_allowed = lambda fp, cap, scope=b"": True
     daemon.discovery = MagicMock()
     daemon.discovery.registry = MagicMock()
     daemon.discovery.registry.list = MagicMock(return_value=[fake_peer])
@@ -118,8 +119,76 @@ async def test_notify_peer_folder_declined_sends_frame(decline_ctx):
 
 
 @pytest.mark.asyncio
+async def test_notify_folder_responses_use_exact_folder_capability_scope(decline_ctx):
+    daemon = decline_ctx["daemon"]
+    calls = []
+
+    def _allowed(peer_fp, cap, scope=b""):
+        calls.append((peer_fp, cap, scope))
+        return True
+
+    daemon._capability_allowed = _allowed
+    assert await daemon.notify_peer_folder_declined(
+        decline_ctx["peer"], "papers",
+    )
+    assert await daemon.notify_peer_folder_accepted(
+        decline_ctx["peer"], "papers",
+    )
+    assert calls == [
+        (decline_ctx["peer_fp"], FOLDER_SYNC, b"papers"),
+        (decline_ctx["peer_fp"], FOLDER_SYNC, b"papers"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("wire_type", "handler_name"),
+    [
+        ("FOLDER_OFFER_DECLINED", "_handle_folder_offer_declined"),
+        ("FOLDER_OFFER_ACCEPTED", "_handle_folder_offer_accepted"),
+    ],
+)
+async def test_folder_response_dispatch_cannot_cross_folder_capability_scope(
+    decline_ctx,
+    wire_type,
+    handler_name,
+):
+    daemon = decline_ctx["daemon"]
+    checked_scopes = []
+
+    def _only_papers(peer_fp, cap, scope=b""):
+        checked_scopes.append(scope)
+        return cap == FOLDER_SYNC and scope == b"papers"
+
+    daemon._capability_allowed = _only_papers
+    handler = AsyncMock()
+    setattr(daemon, handler_name, handler)
+    channel = MagicMock(
+        peer_ed_pub=bytes.fromhex(decline_ctx["peer_fp"]),
+        peer_short_id=decline_ctx["peer_fp"][:8],
+    )
+    channel.send = AsyncMock()
+
+    await daemon._on_peer_message(
+        channel,
+        {
+            "t": wire_type,
+            "id": "wrong-folder-response",
+            "ts": 1,
+            "from": decline_ctx["peer_fp"][:8],
+            "folder": "secrets",
+        },
+    )
+
+    assert checked_scopes == [b"secrets"]
+    handler.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_notify_returns_false_when_capability_denied(decline_ctx):
-    decline_ctx["daemon"]._capability_allowed = lambda fp, cap: False
+    decline_ctx["daemon"]._capability_allowed = (
+        lambda fp, cap, scope=b"": False
+    )
     ok = await decline_ctx["daemon"].notify_peer_folder_declined(
         decline_ctx["peer"], "papers",
     )

@@ -17,7 +17,14 @@ canonical theorem stack to the daemon:
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from one_link_native.coherence_field import (
+        Calibration,
+        GraphLaplacian,
+        SolveResult,
+    )
 
 log = logging.getLogger(__name__)
 
@@ -38,21 +45,21 @@ except ImportError as exc:
     )
 
 
-def graph_laplacian(n_nodes: int) -> Any:
+def graph_laplacian(n_nodes: int) -> GraphLaplacian:
     """Build a fresh, empty :class:`GraphLaplacian` over ``n_nodes``."""
     _require_native()
     return _native_field.GraphLaplacian(n_nodes)
 
 
 def solve_helmholtz(
-    graph: Any,
+    graph: GraphLaplacian,
     d: float,
     gamma: float,
     source: list[float],
     *,
     max_iters: int = 2000,
     tolerance: float = 1e-6,
-) -> dict[str, Any]:
+) -> SolveResult:
     """Solve ``(Γ·I + D·L)·δτ_c = S`` for the field over ``graph``.
 
     Returns a dict ``{"field", "residual", "iterations", "converged"}``.
@@ -82,7 +89,7 @@ def screening_length(d: float, gamma: float) -> float | None:
     return _native_field.screening_length(d, gamma)
 
 
-def one_link_calibration() -> dict[str, Any]:
+def one_link_calibration() -> Calibration:
     """Production One Link calibration constants (D, Γ, α, β, c, H_0)."""
     _require_native()
     return _native_field.one_link_calibration()

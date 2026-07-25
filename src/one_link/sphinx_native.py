@@ -1,29 +1,34 @@
-"""Adapter for the Sphinx Coherence onion-routing primitive
+"""Adapter for the Sphinx Coherence packet primitive
 (`ol_onion::sphinx` via `one_link_native.sphinx`).
 
-Per `One_link/native/ol_onion/SPHINX_COHERENCE_DESIGN.md`. Three
-layers:
+No active One Link message/file route uses this adapter and no multi-operator
+mix network is deployed. The live cover-frame experiment exercises selected
+packet/scheduler paths only. These primitives do not establish sender anonymity
+or resistance to a global observer. Per
+`One_link/native/ol_onion/SPHINX_COHERENCE_DESIGN.md`, three constructions exist:
 
 1. **Standard Sphinx (T1.1)**: Ristretto255 alpha blinding + filler-
-   byte construction. Single packet-level ephemeral pubkey BLINDED
-   at each hop so a global passive observer sees uncorrelated random
-   group elements at every relay. ~165 us 3-hop build.
+   byte construction. A packet-level ephemeral group element is blinded at each
+   hop. That changes the visible element but does not prevent correlation by
+   timing, direction, volume, topology, or route control.
 
 2. **PQ-hybrid (T1.2)**: ML-KEM-768 ciphertext addressed to the
-   entry hop. The PQ-binding propagates downstream via the
-   cumulative blinding chain, so a quantum adversary recording
-   today cannot decrypt the alpha chain tomorrow.
+   entry hop. The combiner binds the classical and ML-KEM inputs for the
+   implemented entry-hop primitive; downstream hops remain conditional on
+   their classical construction. This has no whole-route post-quantum proof and
+   is not the product's active PQ daemon channel.
 
 3. **Field-bound (T1.3)**: derive_hop_keys_with_witness mixes the
    relay's coherence-field PDE state into the blinding factor.
    Daemon-side responsibility to source witnesses from
    `ol_coherence_field` (not exposed at this Python layer yet).
 
-Sphinx packets are FIXED SIZE at every hop (~1305 bytes standard,
-~2393 bytes PQ-hybrid) so a network observer cannot infer hop count
-from packet length.
+Accepted Sphinx encodings have a fixed length within each variant (~1305 bytes
+standard, ~2393 bytes PQ-hybrid). That bounds the encoded length signal; variant
+choice, endpoints, traffic presence, direction, timing, count, and topology
+remain observable, and fixed packet length is not an anonymity proof.
 
-Typical daemon usage as sender:
+Primitive sender example (not current message/file daemon wiring):
 
 .. code-block:: python
 
@@ -38,7 +43,7 @@ Typical daemon usage as sender:
     packet = sph.build_sphinx(eph_sk, circuit, payload=b"hello")
     # Send packet to peer_a over the transport.
 
-As a relay:
+Primitive relay example (not a deployed relay circuit):
 
 .. code-block:: python
 
@@ -234,9 +239,11 @@ def peel_pq_sphinx_intermediate(
 def build_cover_packet(
     eph_sk: bytes, circuit: List[Tuple[bytes, bytes]], cover_size: int
 ) -> bytes:
-    """Build a Sphinx cover packet — indistinguishable on the wire
-    from a real packet (same size, same blinding, same encryption).
-    Destination identifies it via `is_cover_payload`.
+    """Build a Sphinx cover packet with the real packet encoding and length.
+
+    Destination identifies it via `is_cover_payload`. Matching encoded structure
+    and length does not prove indistinguishability once timing, route, endpoint,
+    count, connection, and application scheduling are observed.
 
     `cover_size`: random-byte padding length after the cover sentinel
     (≥ `COVER_PAYLOAD_MIN`).
@@ -286,14 +293,13 @@ class CoverScheduler:
 
 
 class RateEqualizer:
-    """Adaptive rate equalizer for cover traffic.
+    """EWMA-based cover-rate recommendation primitive.
 
-    Maintains a CONSTANT total emission rate (cover + real)
-    regardless of real-traffic load. When real traffic spikes, the
-    cover rate drops; when real traffic is idle, the cover rate
-    rises to fill the gap. An observer sees a uniform-rate output
-    stream and cannot infer "is there real traffic now?" from
-    packet timing alone.
+    It estimates observed real rate and returns a target-minus-estimate cover
+    rate. It does not schedule or shape real traffic, serialize real and cover
+    packets onto one constant-rate link, compensate for queueing/loss, or prove
+    that any observer sees a uniform stream. Product callers must not treat the
+    estimate as traffic-analysis resistance.
 
     ## Usage
 
@@ -327,7 +333,7 @@ class RateEqualizer:
         self._native.observe_idle_tick(int(now_ms))
 
     def current_cover_rate(self) -> float:
-        """Cover rate that maintains target total emission."""
+        """Target-minus-EWMA cover-rate estimate, clamped by the native primitive."""
         return float(self._native.current_cover_rate())
 
     def observed_real_rate(self) -> float:

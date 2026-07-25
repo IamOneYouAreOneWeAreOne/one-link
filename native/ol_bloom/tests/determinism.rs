@@ -1,19 +1,19 @@
 //! Cross-platform determinism test for the Bloom filter wire format.
 //!
 //! Per ADR-0011 + ADR-0008: Bloom-filter encoded bytes MUST be
-//! byte-identical across x86_64, aarch64, and any other target — peers
+//! byte-identical across `x86_64`, `aarch64`, and any other target — peers
 //! interoperate by comparing bytes, not by re-deriving from local
 //! state.
 //!
 //! This test pins the xxh3-128-derived h1 / h2 values for a fixed set
-//! of chunk_ids, plus the encoded bytes of a fixed-population filter,
+//! of `chunk_ids`, plus the encoded bytes of a fixed-population filter,
 //! against test vectors known to be correct. A change in either
 //! direction (test vector or implementation) is a wire-format break
 //! that requires an ADR amendment.
 
 use ol_bloom::Bloom;
 
-/// Convert a hex string to a `[u8; 32]` chunk_id. Currently unused by
+/// Convert a hex string to a `[u8; 32]` `chunk_id`. Currently unused by
 /// the active determinism harness but kept available for ad-hoc
 /// fixture work; gated `#[allow(dead_code)]` so the test harness
 /// stays warning-clean.
@@ -138,14 +138,14 @@ fn hex_encode_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0F) as usize] as char);
+        out.push(char::from(HEX[usize::from(b >> 4)]));
+        out.push(char::from(HEX[usize::from(b & 0x0F)]));
     }
     out
 }
 
 /// The bit-array bytes for the n=8 fixed-input Bloom filter, pinned at
-/// the Phase B-2 xxh3-128 hash function with seed 0xB100_F117_E000_0001.
+/// the Phase B-2 xxh3-128 hash function with seed `0xB100_F117_E000_0001`.
 ///
 /// This is the SOURCE OF TRUTH for Bloom wire-format determinism.
 /// Recompute via:

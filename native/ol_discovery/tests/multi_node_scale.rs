@@ -1,6 +1,6 @@
 //! Multi-node DHT scale test.
 //!
-//! Spins up N DhtNodes on loopback UDP, seeds them in a chain
+//! Spins up N `DhtNodes` on loopback UDP, seeds them in a chain
 //! (node[i+1] knows node[i]), then verifies a TRANSITIVE lookup
 //! works: node[N-1] can find node[0]'s record via iterative
 //! lookup that walks the chain.
@@ -10,7 +10,9 @@ use std::time::Duration;
 use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
 
+use ol_discovery::dht_node::DhtError;
 use ol_discovery::dht_node::DhtNode;
+use ol_discovery::lookup::LookupError;
 use ol_discovery::node_id::NodeId;
 use ol_discovery::record::{PeerRecord, SignedRecord, RECORD_DEFAULT_TTL_SECS};
 
@@ -31,12 +33,11 @@ fn make_peer(seed_peers: Vec<(NodeId, std::net::SocketAddr)>) -> Peer {
         endpoints: vec![format!("udp://{addr}")],
         publish_time_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
+            .map_or(0, |duration| duration.as_secs()),
         ttl_secs: RECORD_DEFAULT_TTL_SECS,
     };
     let signed = SignedRecord::sign(rec, &sk).unwrap();
-    node.publish_self_record(signed.clone());
+    node.publish_self_record(signed.clone()).unwrap();
     Peer {
         _sk: sk,
         id,
@@ -104,8 +105,6 @@ fn five_nodes_lookup_in_all_directions() {
     // either succeed (Ok), converge cleanly to None (Ok(None)), or
     // return a typed NoBootstrap error (peer 0 has empty routing
     // table). Never panic.
-    use ol_discovery::dht_node::DhtError;
-    use ol_discovery::lookup::LookupError;
     for src_idx in 0..peers.len() {
         for tgt_idx in 0..peers.len() {
             if src_idx == tgt_idx {
@@ -114,8 +113,7 @@ fn five_nodes_lookup_in_all_directions() {
             let r = peers[src_idx].node.lookup_record(peers[tgt_idx].id);
             // Either Ok(Some|None) or Err(NoBootstrap) — both valid.
             match r {
-                Ok(_) => {}
-                Err(DhtError::Lookup(LookupError::NoBootstrap)) => {}
+                Ok(_) | Err(DhtError::Lookup(LookupError::NoBootstrap)) => {}
                 Err(other) => panic!("unexpected error: {other:?}"),
             }
         }

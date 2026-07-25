@@ -31,7 +31,9 @@ fn bench_attenuate(c: &mut Criterion) {
     let cap = Capability::root(fixed_id(), &root);
     c.bench_function("attenuate_one_caveat", |b| {
         b.iter(|| {
-            let attenuated = black_box(&cap).attenuate(Caveat::ExpiresAt(black_box(1_000_000)));
+            let attenuated = black_box(&cap)
+                .attenuate(Caveat::ExpiresAt(black_box(1_000_000)))
+                .unwrap();
             black_box(attenuated);
         });
     });
@@ -56,7 +58,7 @@ fn bench_verify_chain(c: &mut Criterion) {
                 3 => Caveat::PeerFingerprint([0x77u8; 32]),
                 _ => Caveat::AuditTag("audit".to_string()),
             };
-            cap = cap.attenuate(cav);
+            cap = cap.attenuate(cav).unwrap();
         }
         group.bench_with_input(BenchmarkId::from_parameter(len), len, |b, _| {
             b.iter(|| {
@@ -72,9 +74,13 @@ fn bench_wire_round_trip(c: &mut Criterion) {
     let root = fixed_root();
     let cap = Capability::root(fixed_id(), &root)
         .attenuate(Caveat::ExpiresAt(1_000_000))
+        .unwrap()
         .attenuate(Caveat::PathPrefix("/folder".to_string()))
+        .unwrap()
         .attenuate(Caveat::OperationIn(vec!["read".into()]))
-        .attenuate(Caveat::AuditTag("alice".into()));
+        .unwrap()
+        .attenuate(Caveat::AuditTag("alice".into()))
+        .unwrap();
     c.bench_function("encode_4_caveats", |b| {
         b.iter(|| {
             let bytes = black_box(&cap).encode();
@@ -90,11 +96,21 @@ fn bench_wire_round_trip(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_root_mint,
-    bench_attenuate,
-    bench_verify_chain,
-    bench_wire_round_trip
-);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{
+        bench_attenuate, bench_root_mint, bench_verify_chain, bench_wire_round_trip,
+        criterion_group,
+    };
+
+    criterion_group!(
+        benches,
+        bench_root_mint,
+        bench_attenuate,
+        bench_verify_chain,
+        bench_wire_round_trip
+    );
+}
+criterion_main!(criterion_benchmark_harness::benches);

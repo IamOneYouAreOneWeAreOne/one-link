@@ -196,9 +196,10 @@ specifics:
 | Element | Disposition | Notes |
 |---|---|---|
 | Discovery overlay (LAN device list) | KEEP | |
-| 6-digit SAS digits | KEEP | Accessibility; primary verification path. |
-| SAS art (visual) | KEEP and PROMOTE on phone | Visual is faster than digits on a small screen. |
-| Speak SAS aloud button | KEEP | |
+| Five-word transcript-bound SAS | KEEP | Authoritative verification path; compare every word and its order. |
+| Numeric compatibility value | DE-EMPHASIZE | Show only for a mixed-version peer that cannot render the word protocol. |
+| SAS art (visual) | KEEP | Supplementary recognition aid, never a replacement for the words. |
+| Speak SAS words aloud button | KEEP | Read in order for accessibility. |
 | First-pair "say hi" nudge | KEEP | |
 
 ### Settings shell

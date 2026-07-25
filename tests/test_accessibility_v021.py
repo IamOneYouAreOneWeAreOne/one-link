@@ -98,6 +98,83 @@ def test_top_level_inputs_have_aria_label_not_just_placeholder(index_html):
         )
 
 
+def test_all_form_controls_have_persistent_accessible_names(index_html):
+    """Placeholders disappear while typing and are not labels.
+
+    Pin every static input/textarea/select, including controls inside hidden
+    drawers: hidden-at-boot UI is still announced when the drawer opens.
+    """
+    label_targets = set(
+        re.findall(
+            r'<label\b[^>]*\bfor=["\']([^"\']+)["\']',
+            index_html,
+            flags=re.IGNORECASE,
+        )
+    )
+    missing: list[str] = []
+    for match in re.finditer(
+        r'<(?P<tag>input|textarea|select)\b(?P<attrs>[^>]*)>',
+        index_html,
+        flags=re.IGNORECASE,
+    ):
+        attrs = match.group("attrs")
+        if re.search(r'\btype=["\']hidden["\']', attrs, re.IGNORECASE):
+            continue
+        control_id_match = re.search(r'\bid=["\']([^"\']+)["\']', attrs)
+        control_id = control_id_match.group(1) if control_id_match else ""
+        explicitly_named = bool(
+            re.search(r'\baria-label(?:ledby)?=["\'][^"\']+["\']', attrs)
+        )
+        prefix = index_html[: match.start()].lower()
+        nested_in_label = prefix.rfind("<label") > prefix.rfind("</label>")
+        if (
+            not explicitly_named
+            and not nested_in_label
+            and control_id not in label_targets
+        ):
+            missing.append(control_id or f"anonymous-{match.group('tag').lower()}")
+    assert not missing, f"form controls without persistent accessible names: {missing}"
+
+
+def test_document_metadata_and_mobile_menu_name(index_html):
+    assert re.search(r'<meta\s+name="description"\s+content="[^"]+"', index_html)
+    menu = re.search(
+        r'<button[^>]*id="mobile-hamburger-top"[^>]*>([^<]+)</button>',
+        index_html,
+    )
+    assert menu
+    tag = menu.group(0)
+    visible = menu.group(1).strip().lower()
+    accessible = re.search(r'aria-label="([^"]+)"', tag)
+    assert accessible and visible in accessible.group(1).lower()
+
+
+def test_dark_theme_secondary_text_meets_wcag_aa_floor(index_html):
+    """The audited token is 4.73:1 even on the lightest dark surface."""
+    assert "--text-dimmer:#7f8798" in index_html
+    assert "color: #9485ff" in index_html
+    assert "background: #6f4df1" in index_html
+
+
+def test_phone_layout_is_viewport_bounded_with_safe_touch_targets(index_html):
+    """Pin the mobile overflow/touch regression found in device emulation.
+
+    The desktop header's intrinsic width used to expand a 390px phone page to
+    roughly 635px, while content-box safe-area padding made the header overlap
+    the main grid row.  Dense settings/sidebar controls also missed the 44px
+    touch-target contract documented by the responsive layer.
+    """
+    assert "--ol-mobile-header-h: calc(56px + env(safe-area-inset-top))" in index_html
+    assert "grid-template-rows: var(--ol-mobile-header-h) auto 1fr" in index_html
+    assert "max-width: 100vw" in index_html
+    assert "box-sizing: border-box" in index_html
+    assert ".pane-tabs {\n      flex: 1 1 0;\n      min-width: 0;\n      margin: 0;" in index_html
+    assert ".settings-shell button," in index_html
+    assert ".settings-shell select {\n      min-height: 44px;" in index_html
+    assert "@media (pointer: coarse)" in index_html
+    assert "button:not([hidden])," in index_html
+
+
 # ── modals must declare role + aria-modal ──────────────────────────
 
 

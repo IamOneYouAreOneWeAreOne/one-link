@@ -1,4 +1,4 @@
-//! Daily ratchet for per-device subkey forward secrecy.
+//! Daily one-way key evolution for per-device signing subkeys.
 //!
 //! Each device's subkey chain is rooted at `day_index = 0` and
 //! advances forward one day at a time. The chain is one-way: the
@@ -10,18 +10,19 @@
 //! via `derive_subkey_seed(master_seed, class, id, day)`, so loss of
 //! a device's current subkey doesn't lose history if the master is
 //! recoverable.  But an attacker who captures only the device's
-//! present-day subkey cannot decrypt any prior day's traffic — the
-//! prior subkeys are gone from RAM and inaccessible without the
-//! master.
+//! present-day subkey seed cannot be used by this API to derive a prior
+//! seed under the BLAKE3 one-wayness and successful-erasure assumptions.
+//! These are signing subkeys; this primitive does not itself encrypt or
+//! prove confidentiality of any prior day's network traffic.
 //!
 //! ## Threat-coverage matrix
 //!
-//! | Attacker has              | Can recover prior days?            |
+//! | Attacker has              | Can derive prior seed through this API? |
 //! |---                        |---                                 |
 //! | Today's device subkey     | NO — chain is one-way              |
 //! | Master seed               | YES — derive any day deterministically |
 //! | Today's device + master   | YES                                |
-//! | Yesterday's device subkey | YES, only via THAT device's RAM    |
+//! | Yesterday's device subkey | It already possesses that day's seed; it can derive later steps |
 
 use crate::derivation::SUBKEY_SEED_LEN;
 use blake3::Hasher;

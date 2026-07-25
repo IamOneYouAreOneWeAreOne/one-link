@@ -1,5 +1,10 @@
-"""Multi-modal LAN discovery — finds EVERY device on the local
-network and identifies it, without calling any third-party server.
+"""Best-effort multi-modal discovery of devices visible on local interfaces.
+
+No discovery method can enumerate every local device: client isolation,
+firewalls, sleeping devices, IPv6-only paths, privacy-address rotation,
+permissions, missing commands, and non-advertising hosts all create blind
+spots. Names, vendor, kind, and model are bounded heuristics unless the device
+itself supplies authenticated evidence.
 
 Five protocols, all open-standard, all local-only:
 
@@ -31,9 +36,11 @@ Everything correlates by (IP, MAC). OUI vendor lookup ships INSIDE
 One Link via a bundled, gzipped subset of the IEEE OUI registry
 (no calls to macvendors.com / wireshark.org / corp lookup services).
 
-Sovereignty floor: this module never touches an outside server.
-Verified by the Privacy panel's outbound-call audit log — a scan
-adds zero entries.
+The scanners are intended for local-interface addresses and bundled data; they
+do not intentionally call a third-party lookup service. That source-level
+boundary and the application's best-effort outbound-event log are not
+packet-capture proof that an OS resolver, proxy, dependency, or compromised local
+device made no outside connection.
 """
 from __future__ import annotations
 
@@ -49,6 +56,13 @@ import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
+
+from one_link.process_security import (
+    hidden_creationflags,
+    resolve_argv,
+    trusted_process_env,
+)
+from one_link.fault_observability import report_best_effort_failure
 
 log = logging.getLogger("one_link.lan_discovery")
 
@@ -274,16 +288,19 @@ def scan_arp_table(timeout_s: float = 2.0) -> list[DiscoveredDevice]:
     seen: dict[str, DiscoveredDevice] = {}
     for cmd in cmds:
         try:
+            argv = resolve_argv(cmd, system_tool=True)
             res = subprocess.run(
-                cmd,
+                argv,
                 capture_output=True,
                 text=True,
                 timeout=timeout_s,
-                creationflags=(
-                    0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
-                ),
+                creationflags=hidden_creationflags(),
+                cwd=str(Path(argv[0]).parent),
+                env=trusted_process_env(),
+                check=False,
+                shell=False,
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except (OSError, ValueError, subprocess.SubprocessError):
             continue
         if res.returncode != 0:
             continue
@@ -363,6 +380,7 @@ async def scan_mdns_browse_all(
     seen via _airplay + _raop + _companion-link becomes ONE
     device record with all three services in `mdns_services`."""
     try:
+        from zeroconf import ServiceStateChange
         from zeroconf.asyncio import (
             AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf,
         )
@@ -416,9 +434,17 @@ async def scan_mdns_browse_all(
                             dev.model = decode_apple_model(v_s)
                         else:
                             dev.model = v_s
-            except Exception:
-                pass
-        except Exception:
+            except (AttributeError, IndexError, TypeError, UnicodeError, ValueError) as exc:
+                report_best_effort_failure(
+                    log, "mdns_txt_parse", exc, level=logging.DEBUG
+                )
+        except Exception as exc:
+            # This is a third-party callback boundary. Keep the other service
+            # browsers alive, but retain enough context to distinguish a
+            # resolver failure from a genuinely absent device.
+            report_best_effort_failure(
+                log, "mdns_service_resolve", exc, level=logging.DEBUG
+            )
             return
 
     # Synchronous wrapper that zeroconf can call from its callback thread.
@@ -428,12 +454,11 @@ async def scan_mdns_browse_all(
                               state_change=None, **_kw):
         zc = zeroconf
         st = service_type
-        try:
-            from zeroconf import ServiceStateChange
-            if state_change is not ServiceStateChange.Added:
-                return
-        except Exception:
-            pass
+        # Fail closed on every event except an explicit Added notification.
+        # Falling through when the enum import/comparison failed caused
+        # Removed notifications to be resolved and re-added as stale devices.
+        if state_change is not ServiceStateChange.Added:
+            return
         if zc is None or st is None or name is None:
             return
         asyncio.ensure_future(_on_service(zc, st, name, state_change))
@@ -445,20 +470,30 @@ async def scan_mdns_browse_all(
                 aio.zeroconf, st, handlers=[_on_state_change_sync],
             )
             browsers.append(b)
-        except Exception:
+        except Exception as exc:
+            report_best_effort_failure(
+                log, "mdns_browser_setup", exc, level=logging.DEBUG
+            )
             continue
+
+    if not browsers:
+        log.warning("mDNS scan could not start a browser for any service type")
 
     await asyncio.sleep(timeout_s)
 
     for b in browsers:
         try:
             await b.async_cancel()
-        except Exception:
-            pass
+        except Exception as exc:
+            report_best_effort_failure(
+                log, "mdns_browser_cancel", exc, level=logging.DEBUG
+            )
     try:
         await aio.async_close()
-    except Exception:
-        pass
+    except Exception as exc:
+        report_best_effort_failure(
+            log, "mdns_scanner_close", exc, level=logging.DEBUG
+        )
 
     return list(by_ip.values())
 
@@ -963,8 +998,13 @@ async def _tcp_probe_port(ip: str, port: int, timeout_s: float = 0.6) -> bool:
         writer.close()
         try:
             await writer.wait_closed()
-        except Exception:
-            pass
+        except (OSError, RuntimeError) as exc:
+            report_best_effort_failure(
+                log,
+                "lan_probe_writer_close",
+                exc,
+                level=logging.DEBUG,
+            )
         return True
     except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
         return False
@@ -988,8 +1028,13 @@ async def _tcp_grab_banner(ip: str, port: int, timeout_s: float = 0.8) -> str:
             writer.close()
             try:
                 await writer.wait_closed()
-            except Exception:
-                pass
+            except (OSError, RuntimeError) as exc:
+                report_best_effort_failure(
+                    log,
+                    "lan_banner_writer_close",
+                    exc,
+                    level=logging.DEBUG,
+                )
     except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
         return ""
 
@@ -1315,13 +1360,23 @@ def rehydrate_from_cache(devices: list[DiscoveredDevice]) -> None:
                 if not d.open_ports and c_ports:
                     try:
                         d.open_ports = _json.loads(c_ports)
-                    except Exception:
-                        pass
+                    except (_json.JSONDecodeError, TypeError) as exc:
+                        report_best_effort_failure(
+                            log,
+                            "device_cache_open_ports_decode",
+                            exc,
+                            level=logging.DEBUG,
+                        )
                 if not d.mdns_services and c_svcs:
                     try:
                         d.mdns_services = _json.loads(c_svcs)
-                    except Exception:
-                        pass
+                    except (_json.JSONDecodeError, TypeError) as exc:
+                        report_best_effort_failure(
+                            log,
+                            "device_cache_services_decode",
+                            exc,
+                            level=logging.DEBUG,
+                        )
                 if "cache" not in d.sources:
                     d.sources.append("cache")
                 # Write back: bump counter, update last_seen, refresh
@@ -1356,8 +1411,13 @@ def rehydrate_from_cache(devices: list[DiscoveredDevice]) -> None:
     finally:
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            report_best_effort_failure(
+                log,
+                "device_cache_rehydrate_close",
+                exc,
+                level=logging.DEBUG,
+            )
 
 
 def load_recent_cached_devices(max_age_ms: int = 24 * 3600 * 1000,
@@ -1406,8 +1466,13 @@ def load_recent_cached_devices(max_age_ms: int = 24 * 3600 * 1000,
     finally:
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            report_best_effort_failure(
+                log,
+                "device_cache_load_close",
+                exc,
+                level=logging.DEBUG,
+            )
 
 
 async def enrich_via_tcp_probe(
@@ -1791,8 +1856,13 @@ def _local_ips() -> list[str]:
         ):
             if fam == socket.AF_INET:
                 ips.add(str(sockaddr[0]))
-    except Exception:
-        pass
+    except OSError as exc:
+        # If this lookup fails, loopback is still filtered below. Log the
+        # degraded self-filter so a local interface showing up as a duplicate
+        # device is diagnosable instead of looking like a remote peer.
+        report_best_effort_failure(
+            log, "local_ip_enumeration", exc, level=logging.DEBUG
+        )
     # Loopback is always self.
     ips.add("127.0.0.1")
     return list(ips)
@@ -1845,10 +1915,18 @@ def _default_gateway() -> str:
     network health; never to send packets to."""
     if os.name == "nt":
         try:
+            argv = resolve_argv(
+                ["route.exe", "print", "0.0.0.0"],
+                system_tool=True,
+            )
             res = subprocess.run(
-                ["route", "print", "0.0.0.0"],
+                argv,
                 capture_output=True, text=True, timeout=2.0,
-                creationflags=0x08000000,
+                creationflags=hidden_creationflags(),
+                cwd=str(Path(argv[0]).parent),
+                env=trusted_process_env(),
+                check=False,
+                shell=False,
             )
             for line in res.stdout.splitlines():
                 # Default-route lines look like:
@@ -1860,17 +1938,29 @@ def _default_gateway() -> str:
                 )
                 if m:
                     return m.group(1)
-        except Exception:
-            pass
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            report_best_effort_failure(
+                log, "windows_default_gateway", exc, level=logging.DEBUG
+            )
     else:
         try:
-            res = subprocess.run(
+            argv = resolve_argv(
                 ["ip", "route", "show", "default"],
+                system_tool=True,
+            )
+            res = subprocess.run(
+                argv,
                 capture_output=True, text=True, timeout=2.0,
+                cwd=str(Path(argv[0]).parent),
+                env=trusted_process_env(),
+                check=False,
+                shell=False,
             )
             m = re.search(r"default via (\d+\.\d+\.\d+\.\d+)", res.stdout)
             if m:
                 return m.group(1)
-        except Exception:
-            pass
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            report_best_effort_failure(
+                log, "posix_default_gateway", exc, level=logging.DEBUG
+            )
     return ""

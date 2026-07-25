@@ -23,18 +23,20 @@ mDNS convergence (~5-15 seconds wall time).
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
 
 import pytest
+
+from one_link import control_ipc
+
+
+_CONTROL_SECRETS: dict[int, str] = {}
 
 
 pytestmark = pytest.mark.timeout(180)
@@ -137,20 +139,20 @@ def _read_port(home: Path, name: str, timeout: float = 15.0) -> int:
 
 
 def _request(control_port: int, *, timeout: float = 30.0, **req) -> dict:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    s.connect(("127.0.0.1", control_port))
+    return control_ipc.request_control(
+        control_port,
+        req,
+        timeout=timeout,
+        secret=_CONTROL_SECRETS[control_port],
+    )
+
+
+def _log_tail(path: Path, *, lines: int = 80) -> str:
+    """Return a bounded daemon-log tail for actionable live-test failures."""
     try:
-        s.sendall((json.dumps(req) + "\n").encode("utf-8"))
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf.decode("utf-8").strip() or "{}")
-    finally:
-        s.close()
+        return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
+    except OSError as exc:
+        return f"<log unavailable: {exc}>"
 
 
 def _wait_full_convergence(daemons: list[dict], n_peers: int, timeout: float = 45.0) -> None:
@@ -173,6 +175,32 @@ def _wait_full_convergence(daemons: list[dict], n_peers: int, timeout: float = 4
     )
 
 
+def _pin_full_mesh(daemons: list[dict]) -> None:
+    """Model the user-approved trust boundary before exercising chat.
+
+    Discovery deliberately creates pending peers.  A pending LAN identity must
+    never inherit chat authority merely because it appeared over mDNS.  The
+    live swarm therefore pins every directed relationship through the
+    authenticated owner control API and verifies that the transition stuck
+    before any application message is attempted.
+    """
+    for daemon in daemons:
+        for peer in daemons:
+            if peer is daemon:
+                continue
+            result = _request(
+                daemon["control_port"],
+                cmd="pin_peer",
+                peer=peer["short_id"],
+                trust="pinned",
+                note="four-peer live swarm fixture",
+            )
+            assert result.get("ok"), (
+                f"pin {daemon['label']}->{peer['label']} failed: {result}"
+            )
+            assert result.get("trust") == "pinned", result
+
+
 @pytest.fixture
 def four_peer_swarm():
     """4-daemon swarm fixture."""
@@ -186,6 +214,7 @@ def four_peer_swarm():
             home.mkdir(parents=True, exist_ok=True)
             proc, log_fh = _spawn_daemon(home, log, label)
             ctrl = _read_port(home, "control.port", timeout=20.0)
+            _CONTROL_SECRETS[ctrl] = control_ipc.read_control_secret(home / "data")
             info = _request(ctrl, cmd="peers")
             assert info.get("ok"), f"daemon {label} 'peers' failed: {info}"
             daemons.append({
@@ -198,6 +227,7 @@ def four_peer_swarm():
                 "short_id": info["me"]["short_id"],
             })
         _wait_full_convergence(daemons, n_peers=4)
+        _pin_full_mesh(daemons)
         yield daemons
     finally:
         for d in daemons:
@@ -274,7 +304,9 @@ def test_four_peer_swarm_text_messages_route(four_peer_swarm):
             body=f"hello from {sender['label']} to {receiver['label']}",
         )
         assert res.get("ok"), (
-            f"send {sender['label']}->{receiver['label']} failed: {res}"
+            f"send {sender['label']}->{receiver['label']} failed: {res}\n"
+            f"--- sender log ---\n{_log_tail(sender['log'])}\n"
+            f"--- receiver log ---\n{_log_tail(receiver['log'])}"
         )
 
 

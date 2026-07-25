@@ -1,7 +1,8 @@
 //! `ol_pqsig` — Ed25519 + ML-DSA-65 hybrid digital signatures.
 //!
-//! Per [`COHERENCE_MESH_PLAN.md`] row 1 — post-quantum identity.
-//! The master identity key needs to survive a future cryptanalytic
+//! Per [`COHERENCE_MESH_PLAN.md`] row 1 — post-quantum-signature primitive.
+//! The design target is for selected master-identity operations to remain
+//! verifiable after a future cryptanalytic
 //! break of Ed25519 (Shor's algorithm reduces ECDLP to polynomial
 //! time on a sufficiently large quantum computer). ML-DSA-65
 //! (NIST FIPS 204, formerly CRYSTALS-Dilithium-Level3) gives us
@@ -17,13 +18,16 @@
 //!   hybrid_sig = ed25519_sig (64 B) || ml_dsa_65_sig (3309 B)
 //! ```
 //!
-//! Verification REQUIRES BOTH halves to pass. An attacker must break
-//! BOTH the classical and PQ schemes to forge a hybrid signature.
+//! Verification requires both halves to pass. Under the component security
+//! and composition assumptions, forging requires satisfying both verifiers.
+//! That conditional primitive property does not mean current One Link daemon
+//! identity, message, or browser paths all use this format; those paths must
+//! report their actual negotiated/authentication suites.
 //!
 //! ## Key layout
 //!
 //! - **Signing key**: 32-byte Ed25519 seed + 32-byte ML-DSA seed
-//!   = 64 bytes. The ML-DSA SigningKey is expanded from its seed
+//!   = 64 bytes. The ML-DSA `SigningKey` is expanded from its seed
 //!   at sign time (FIPS 204 §6).
 //! - **Verifying key**: 32-byte Ed25519 pubkey + 1952-byte ML-DSA
 //!   verifying key = 1984 bytes.
@@ -64,7 +68,7 @@
 use blake3::Hasher;
 use ed25519_dalek::{Signer as _, SigningKey, Verifier as _, VerifyingKey};
 use ml_dsa::{
-    signature::{Keypair as _, Signer as _},
+    signature::{Keypair as _, Signer as _, Verifier as _},
     EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey as MlDsaSigningKey,
     VerifyingKey as MlDsaVerifyingKey, B32,
 };
@@ -133,7 +137,7 @@ pub enum PqSigError {
 pub type PqSigResult<T> = Result<T, PqSigError>;
 
 /// Hybrid signing key — stores both Ed25519 seed bytes and the
-/// ML-DSA-65 seed bytes. ML-DSA SigningKey is expanded from its
+/// ML-DSA-65 seed bytes. ML-DSA `SigningKey` is expanded from its
 /// seed on each sign (the expansion is part of the per-sign cost).
 pub struct HybridSigningKey {
     ed25519_seed: [u8; ED25519_SK_LEN],
@@ -149,10 +153,10 @@ impl std::fmt::Debug for HybridSigningKey {
 impl Drop for HybridSigningKey {
     fn drop(&mut self) {
         // Best-effort zeroize.
-        for b in self.ed25519_seed.iter_mut() {
+        for b in &mut self.ed25519_seed {
             *b = 0;
         }
-        for b in self.ml_dsa_seed.iter_mut() {
+        for b in &mut self.ml_dsa_seed {
             *b = 0;
         }
     }
@@ -242,7 +246,6 @@ impl HybridVerifyingKey {
             }
         })?;
         let ml_sig_decoded = ml_dsa::Signature::<MlDsa65>::decode(&ml_sig_arr);
-        use ml_dsa::signature::Verifier as _;
         let ml_ok = if let Some(ml_sig) = ml_sig_decoded {
             self.ml_dsa.verify(&transcript, &ml_sig).is_ok()
         } else {
@@ -291,7 +294,7 @@ impl HybridSigningKey {
     }
 
     /// Sign `message`. Both halves cover the same BLAKE3-hashed
-    /// transcript (PROTOCOL_DOMAIN || message).
+    /// transcript (`PROTOCOL_DOMAIN` || message).
     pub fn sign(&self, message: &[u8]) -> PqSigResult<[u8; HYBRID_SIG_LEN]> {
         let transcript = transcript(message);
         let ed25519 = SigningKey::from_bytes(&self.ed25519_seed);
@@ -351,7 +354,7 @@ fn dummy_ml_dsa_signature() -> &'static [u8; ML_DSA_65_SIG_LEN] {
     })
 }
 
-/// Canonical message transcript = BLAKE3(PROTOCOL_DOMAIN || message).
+/// Canonical message transcript = `BLAKE3(PROTOCOL_DOMAIN` || message).
 /// Domain-separation prevents cross-protocol signature replay.
 fn transcript(message: &[u8]) -> [u8; 32] {
     let mut h = Hasher::new();

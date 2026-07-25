@@ -28,6 +28,7 @@ def test_module_imports():
     assert pp.OBSERVATION_BYTES_DEFAULT == 128
     assert pp.SYNDROME_BLOCK_BITS_DEFAULT == 8
     assert pp.CASCADE_PASSES_DEFAULT == 4
+    assert pp.PRODUCTION_FACTOR2_AVAILABLE is False
 
 
 def test_quantize_observations_basic():
@@ -137,7 +138,7 @@ def test_privacy_amplify_different_salt_yields_different_key():
     assert k1 != k2
 
 
-def test_full_pipeline_one_shot():
+def test_research_pipeline_returns_explicitly_unconfirmed_candidate():
     from one_link import proximity_pair_native as pp
 
     # Alice + Bob co-located (tiny perturbation).
@@ -151,20 +152,32 @@ def test_full_pipeline_one_shot():
     bob_syndrome = pp.block_syndrome(bob_bits)
 
     salt = b"OL-proximity-pair-v1-default-sal"
-    alice_key = pp.derive_factor2_secret(
+    alice_key = pp.derive_unconfirmed_candidate(
         my_observations=alice_obs,
         peer_syndrome=bob_syndrome,
         salt=salt,
     )
     assert len(alice_key) == 32
-    # No exceptions — pipeline executed end-to-end.
+    # Fixed-size research output only; this is not an agreement assertion.
+
+
+def test_legacy_factor2_secret_api_fails_closed_even_with_valid_inputs():
+    from one_link import proximity_pair_native as pp
+
+    with pytest.raises(pp.Factor2UnavailableError, match="not available"):
+        pp.derive_factor2_secret(
+            my_observations=bytes(range(256)) * 2,
+            peer_syndrome=b"\x00" * 64,
+            salt=b"x" * 32,
+        )
 
 
 def test_hamming_reconcile_byte_identical_at_low_error_rate():
-    """Alien-tech acceptance gate through Python: with <=1 error per
-    120-bit block, Hamming reconciliation produces byte-identical
-    bits, and BLAKE3 amplification produces byte-identical 32-byte
-    Factor-2 keys on both sides."""
+    """Restricted SEC fixture: <=1 error per 120-bit block converges.
+
+    This does not establish real observation alignment, entropy, proximity,
+    or a production Factor-2 key.
+    """
     from one_link import proximity_pair_native as pp
 
     # Alice's bits = Bob's bits with 3 errors spread across 3 blocks.
@@ -202,7 +215,7 @@ def test_hamming_parity_length():
     assert len(p) == 14
 
 
-def test_distant_attacker_derives_different_key():
+def test_unrelated_fixture_derives_different_unconfirmed_candidate():
     from one_link import proximity_pair_native as pp
 
     alice_obs = bytes((i * 7) % 256 for i in range(512))
@@ -211,15 +224,16 @@ def test_distant_attacker_derives_different_key():
 
     alice_bits = pp.quantize_observations(alice_obs)
     alice_syn = pp.block_syndrome(alice_bits)
-    alice_key = pp.derive_factor2_secret(
+    alice_key = pp.derive_unconfirmed_candidate(
         my_observations=alice_obs,
         peer_syndrome=alice_syn,
         salt=salt,
     )
-    attacker_key = pp.derive_factor2_secret(
+    attacker_key = pp.derive_unconfirmed_candidate(
         my_observations=attacker_obs,
         peer_syndrome=alice_syn,  # attacker has alice's syndrome but wrong obs
         salt=salt,
     )
-    # Attacker without co-presence cannot derive matching key.
+    # This deterministic fixture differs; it is not a security or proximity
+    # proof and the candidates are never accepted as keys here.
     assert alice_key != attacker_key

@@ -16,6 +16,11 @@ FILE_COMPRESSION = "file_compression"
 FILE_BINARY_FRAME = "file_binary_frame"
 FILE_CDC_BINARY_FRAME = "file_cdc_binary_frame"
 FILE_ACK_BATCH = "file_ack_batch"
+# Exact end-to-end file commit receipt.  Chunk ACKs only prove that a peer
+# accepted a frame; they do not prove that the destination was fsynced and its
+# complete BLAKE3 matched the offered blob.  Peers advertising this capability
+# send an encrypted, offer-correlated FILE_COMMIT after that durable boundary.
+FILE_COMMIT_RECEIPT_V1 = "file_commit_receipt_v1"
 # Wave 2b: multiple FILE_OFFERs bundled in a single
 # FILE_OFFER_BATCH frame so a "send 100 photos" workflow pays
 # one round-trip instead of N. Receiver answers with one
@@ -37,10 +42,22 @@ SELF_MESH_SEND = "self_mesh_send"
 # capability + audited library only, so deployments can interop
 # without yet flipping the wire format).
 DOUBLE_RATCHET_V1 = "double_ratchet_v1"
+# Authenticated, deadlock-free cutover extension for DOUBLE_RATCHET_V1. Peers
+# advertising this exchange a ratchet-encrypted commit containing both exact
+# final-legacy sequence boundaries. Older v1 peers omit it and remain safely
+# interoperable: the responder waits for the initiator's first application DR
+# frame rather than emitting post-activation legacy ciphertext.
+DOUBLE_RATCHET_CUTOVER_V2 = "double_ratchet_cutover_v2"
+# The exact pre-channel wire suite implemented by channel.py: signed suite
+# offer/selection, independent X25519 plus native ML-KEM-768/X25519 KEM,
+# transcript-bound extraction, and mutual key confirmation.  It is removed
+# from runtime CAPS unless the native KEM passes its process self-test.
+PQ_HYBRID_HANDSHAKE_V1 = "pq_hybrid_x25519_mlkem768_v1"
 # Phase C-3 (ADR-0025, ADR-0026): capability advertisement for the
 # native chunk-store transport pipeline. When both peers advertise
-# this AND the sender opts in via ONE_LINK_NATIVE_TRANSFER=1, file
-# chunks travel as FILE_NATIVE_CHUNK messages encrypted by the
+# this (plus NATIVE_TRANSFER_INDEXED_V1) and has not explicitly disabled
+# native transfer via ONE_LINK_NATIVE_TRANSFER=0, file chunks travel as
+# FILE_NATIVE_CHUNK messages encrypted by the
 # ring-backed AEAD pipeline (ADR-0002) keyed off the channel's
 # native-transfer-derived session secret (ADR-0025). Legacy peers
 # (no NATIVE_TRANSFER_V1 in caps) keep using FILE_CHUNK /
@@ -52,13 +69,17 @@ NATIVE_TRANSFER_V1 = "native_transfer_v1"
 # native_transfer_v1 peers receive FILE_BIN_CHUNK instead so repeated
 # file sends cannot drift AEAD nonce/index state.
 NATIVE_TRANSFER_INDEXED_V1 = "native_transfer_indexed_v1"
-# Phase B Bloom-init handshake (ADR-pending): when both peers advertise
-# this, the receiver sends a Bloom filter of its locally-held chunk_ids
-# at transfer-offer time; the sender XORs it against the manifest and
-# sends only the missing chunks. Reduces bytes-on-wire by 75-93% in the
-# steady-state resume regime. Falls back transparently to the legacy
-# manifest-then-chunks flow when either peer lacks this cap.
+# Phase B Bloom-init handshake (ADR-pending): the v1 capability permits a
+# receiver-inventory Bloom advisory. It does not promise that the advisory is
+# an exact replacement for FILE_WANTS, because a legacy Bloom has false
+# positives and older peers do not bind it to one ordered manifest.
 BLOOM_INIT_V1 = "bloom_init_v1"
+# Lossless Bloom cutover. A v2 receiver binds the filter to the exact ordered
+# CDC manifest and includes every false-positive missing index as a correction.
+# This makes Bloom + corrections exactly equivalent to FILE_WANTS. The new
+# capability is deliberately separate: silently changing v1 response semantics
+# would make a new default-on receiver deadlock with an older v1 sender.
+BLOOM_INIT_EXACT_V2 = "bloom_init_exact_v2"
 # Phase A2 QUIC transport (PHASE_A2_QUIC_CUTOVER_PLAN.md): when both
 # peers advertise this, daemon↔daemon traffic flows over QUIC instead
 # of WebRTC/DTLS-SRTP. Browser-as-peer paths stay on WebRTC; v0.20.x
@@ -73,27 +94,39 @@ QUIC_TRANSPORT_V1 = "quic_transport_v1"
 # The wiring module lives in one_link.provenance_wiring; the
 # cryptography in one_link.frame_provenance.
 FRAME_PROVENANCE_V1 = "frame_provenance_v1"
+# Durable async-capsule transport: bounded offer/chunk/complete exchange plus
+# an exact receiver commit receipt.  This is a protocol extension, not a new
+# user permission; the underlying voice/video-call capability still governs
+# who may create the conversation artifact.
+ASYNC_CAPSULE_V1 = "async_capsule_v1"
 
-# Living Presence Tier ζ — semantic voice codec. Peers advertising
-# this feature can negotiate the SEMANTIC_DELTA_AV rung on the
-# Presence Compiler ladder. The model_pack_hash field on CAPS
-# pins the exact trained checkpoint; mismatched packs fall back
-# to the AUDIO_ONLY rung (Opus 16 kbps).
+# Living Presence Tier ζ research capability. The repository contains a
+# deterministic codec substrate and trained predictor checkpoint, but the
+# browser media plane does not yet carry semantic audio end to end. Therefore
+# this string is known for forward compatibility but MUST NOT appear in
+# LOCAL_CAPABILITIES until capture -> wire -> reconstruction -> playout and
+# model-pack binding all pass the physical two-device release gate.
 SEMANTIC_VOICE_V1 = "semantic_voice_v1"
 
-# Living Presence Tier η — neural predictive extrapolator. Peers
-# advertising this run a trained next-frame predictor on the
-# receive path so missing audio frames are filled by a model-
-# generated continuation rather than a hold-last placeholder.
-# Tier η AUTOPILOT prerequisite per LIVING_PRESENCE_ARCHITECTURE
-# §4.7.
+# Living Presence Tier η research capability. Current runtime adapters track
+# prediction metadata and deterministic decisions; they do not synthesize and
+# insert real browser media samples. Keep it non-advertised until that playout
+# boundary is implemented and qualified.
 PREDICTIVE_CONTINUITY_V1 = "predictive_continuity_v1"
 
-# Living Presence Tier θ — semantic scene codec. Peers advertising
-# this can negotiate scene-feature compression at ~1.5 kbps for
-# the video plane. Receiver renders the scene representation as
-# moving boxes / face stand-ins / icons per doctrine §3.6.c.
+# Living Presence Tier θ research capability. Codec and model tests exist, but
+# scene extraction, negotiated DataChannel transport, and receiver rendering
+# are not yet wired into calls, so stable builds do not advertise it.
 SEMANTIC_SCENE_V1 = "semantic_scene_v1"
+
+# Features that exist as tested research substrates but are not complete wire
+# promises. Keeping this explicit prevents a future marketing/build change
+# from accidentally turning module presence into an advertised capability.
+PREVIEW_CAPABILITIES = (
+    SEMANTIC_VOICE_V1,
+    PREDICTIVE_CONTINUITY_V1,
+    SEMANTIC_SCENE_V1,
+)
 
 # May 15 2026 — base user-facing call capabilities. Distinct from the
 # advanced presence tiers (SEMANTIC_VOICE_V1 / SEMANTIC_SCENE_V1 /
@@ -115,6 +148,20 @@ VIDEO_CALL = "video_call"
 # Old peers ignore the unknown flag and behave as v0.20.x asymmetric
 # sync — graceful interop.
 FOLDER_SYNC_BIDI_V1 = "folder_sync_bidi_v1"
+
+# Exact folder reconciliation receipt. Chunk writes alone do not prove that a
+# manifest was accepted, every requested CAS object was durably indexed, or the
+# winning paths were materialized. Peers advertising this extension finish a
+# sync with an ID-bound FOLDER_SYNC_VERIFY / FOLDER_SYNC_COMMIT exchange.
+FOLDER_SYNC_COMMIT_V1 = "folder_sync_commit_v1"
+
+# Crash/disconnect-resumable folder CAS reception. A receiver advertises an
+# fsynced prefix offset and BLAKE3 digest inside the authenticated,
+# manifest-correlated MANIFEST_WANTS response. The sender validates that exact
+# prefix against its verified CAS object and binds every resumed offer/chunk to
+# absolute byte offsets. This changes transport efficiency only; FOLDER_SYNC
+# and the per-folder share policy remain the authorization boundary.
+FOLDER_BLOB_RESUME_V1 = "folder_blob_resume_v1"
 
 # D17 (wire-up) — Receiver-initiated blob fetch. When both peers
 # advertise this, the daemon can send BLOB_REQUEST{blob=hash} and the
@@ -143,9 +190,12 @@ LOCAL_CAPABILITIES = (
     FILE_BINARY_FRAME,
     FILE_CDC_BINARY_FRAME,
     FILE_ACK_BATCH,
+    FILE_COMMIT_RECEIPT_V1,
     FILE_OFFER_BATCH_V1,
     FOLDER_SYNC,
     FOLDER_SYNC_BIDI_V1,
+    FOLDER_SYNC_COMMIT_V1,
+    FOLDER_BLOB_RESUME_V1,
     BLOB_REQUEST_V1,
     COVER_TRAFFIC_V1,
     MERKLE_SYNC,
@@ -153,16 +203,54 @@ LOCAL_CAPABILITIES = (
     SELF_MESH_MANIFEST,
     SELF_MESH_SEND,
     DOUBLE_RATCHET_V1,
+    DOUBLE_RATCHET_CUTOVER_V2,
+    PQ_HYBRID_HANDSHAKE_V1,
     NATIVE_TRANSFER_INDEXED_V1,
     BLOOM_INIT_V1,
+    BLOOM_INIT_EXACT_V2,
     QUIC_TRANSPORT_V1,
     FRAME_PROVENANCE_V1,
-    SEMANTIC_VOICE_V1,
-    PREDICTIVE_CONTINUITY_V1,
-    SEMANTIC_SCENE_V1,
+    ASYNC_CAPSULE_V1,
     VOICE_CALL,
     VIDEO_CALL,
 )
+
+
+def advertised_capabilities() -> tuple[str, ...]:
+    """Return capabilities this *running build* can actually execute.
+
+    ``LOCAL_CAPABILITIES`` is the complete protocol vocabulary compiled into
+    Python. Native-backed promises are narrower: advertising them when their
+    authenticated ABI is absent makes negotiation claim a data path that will
+    inevitably fall back. Runtime CAPS therefore removes only those promises
+    whose required native implementation is unavailable.
+    """
+
+    available = list(LOCAL_CAPABILITIES)
+    native_checks = (
+        (BLOOM_INIT_V1, "bloom_init"),
+        (BLOOM_INIT_EXACT_V2, "bloom_init"),
+        (QUIC_TRANSPORT_V1, "peer_quic"),
+        (NATIVE_TRANSFER_INDEXED_V1, "native_transfer"),
+        (PQ_HYBRID_HANDSHAKE_V1, "pqkem_native"),
+    )
+    for capability, module_name in native_checks:
+        try:
+            module = __import__(
+                f"one_link.{module_name}",
+                fromlist=[module_name],
+            )
+            probe = getattr(module, "runtime_is_usable", None)
+            usable = (
+                bool(probe())
+                if callable(probe)
+                else bool(getattr(module, "HAS_NATIVE", False))
+            )
+        except (ImportError, OSError, RuntimeError):
+            usable = False
+        if not usable and capability in available:
+            available.remove(capability)
+    return tuple(available)
 
 # v0.7.1 deny-by-default capability split. The audit doc
 # (docs/SECURITY_AUDIT_v0.7.0.md, finding A) prescribes:
@@ -178,13 +266,6 @@ PROMPT_REQUIRED = (
     FUTURE_TRANSPORTS,
     SELF_MESH_MANIFEST,
     SELF_MESH_SEND,
-    # Advanced presence/media capabilities are user-facing powers.
-    # They may use model packs, predictive continuity, or semantic
-    # rendering, so they stay deny-by-default until the user grants
-    # them to a trusted peer.
-    SEMANTIC_VOICE_V1,
-    PREDICTIVE_CONTINUITY_V1,
-    SEMANTIC_SCENE_V1,
     # Voice + Video calls are user-facing powers — each peer must be
     # explicitly granted each one. Granting Voice doesn't imply Video
     # and vice versa.
@@ -204,16 +285,21 @@ TRANSPORT_LAYER_CAPS = (
     FILE_BINARY_FRAME,
     FILE_CDC_BINARY_FRAME,
     FILE_ACK_BATCH,
+    FILE_COMMIT_RECEIPT_V1,
     FILE_OFFER_BATCH_V1,
     DOUBLE_RATCHET_V1,
+    DOUBLE_RATCHET_CUTOVER_V2,
+    PQ_HYBRID_HANDSHAKE_V1,
     NATIVE_TRANSFER_INDEXED_V1,
     BLOOM_INIT_V1,
+    BLOOM_INIT_EXACT_V2,
     QUIC_TRANSPORT_V1,
     # FRAME_PROVENANCE_V1 is automatic safety metadata. It does not
     # grant a peer any new access; it attaches verifiable provenance
     # to what's already being sent. No user prompt; always on when
     # both peers support it.
     FRAME_PROVENANCE_V1,
+    ASYNC_CAPSULE_V1,
     # FOLDER_SYNC_BIDI_V1 is a protocol extension of FOLDER_SYNC. It
     # doesn't grant any new permission; it just changes how an
     # already-permitted folder sync proceeds (both sides exchange in
@@ -221,6 +307,8 @@ TRANSPORT_LAYER_CAPS = (
     # (granting the peer access to the folder) is still gated by
     # FOLDER_SYNC + the per-folder share-list.
     FOLDER_SYNC_BIDI_V1,
+    FOLDER_SYNC_COMMIT_V1,
+    FOLDER_BLOB_RESUME_V1,
     # BLOB_REQUEST_V1 is a protocol extension of FOLDER_SYNC for
     # receiver-pulled blob fetches. It doesn't grant any new permission;
     # the BLOB_REQUEST handler still gates on the same pinned-peer +

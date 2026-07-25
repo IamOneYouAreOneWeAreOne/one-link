@@ -218,10 +218,11 @@ proptest! {
         let (sk, _att) = mint_subkey(&master, class, id, 0, 365).unwrap();
         let proof = LivenessProof::issue(&sk, issued_at, state_root(b"s")).unwrap();
         let witness = sibling_witness(sk.verifying_key(), skew);
+        let offset_magnitude = verifier_offset.unsigned_abs();
         let verifier_now = if verifier_offset >= 0 {
-            issued_at.saturating_add(verifier_offset as u64)
+            issued_at.saturating_add(offset_magnitude)
         } else {
-            issued_at.saturating_sub((-verifier_offset) as u64)
+            issued_at.saturating_sub(offset_magnitude)
         };
         let actual_diff = verifier_now.abs_diff(issued_at);
         let r = verify_liveness(&proof, &witness, verifier_now);

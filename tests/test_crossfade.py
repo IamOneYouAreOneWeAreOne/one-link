@@ -18,8 +18,6 @@ from one_link.crossfade import (
     MAX_DURATION_MS,
     MIN_DURATION_MS,
     CrossfadeKind,
-    CrossfadePlan,
-    CrossfadeSample,
     make_device_handoff,
     make_route_handoff,
     mix_samples,

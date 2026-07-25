@@ -1,0 +1,15 @@
+{
+  "started_at": "2026-05-19T16:08:24",
+  "quic_vs_webrtc": {
+    "scenario": "quic_vs_webrtc",
+    "size_bytes": 16777216,
+    "pinned_quic_median_sec": 0.2356,
+    "pinned_quic_throughput_bps": 71211856.96,
+    "unpinned_webrtc_median_sec": 0.1422,
+    "unpinned_webrtc_throughput_bps": 117986801.37,
+    "quic_speedup_x": 0.604,
+    "samples_pinned": 2,
+    "samples_unpinned": 2
+  },
+  "finished_at": "2026-05-19T16:08:56"
+}

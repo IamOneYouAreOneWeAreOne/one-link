@@ -33,7 +33,8 @@ fn ratchet_10000_chunk_stream_aead_round_trip() {
 
     let start = Instant::now();
     let mut total_bytes = 0usize;
-    for step in 0..CHUNKS as u64 {
+    let chunk_count = u64::try_from(CHUNKS).expect("supported Rust pointer widths fit in u64");
+    for step in 0..chunk_count {
         // Sender.
         let mk = sender_chain.next_message_key();
         let key = mk_to_aead_key(&mk);
@@ -57,11 +58,10 @@ fn ratchet_10000_chunk_stream_aead_round_trip() {
         assert_eq!(recovered, plaintext_template);
     }
     let elapsed = start.elapsed();
+    let chunk_count = u128::from(chunk_count);
+    let nanos_per_chunk = elapsed.as_nanos() / chunk_count;
     eprintln!(
-        "10,000-chunk ratchet stream: {:?} total ({:.1} ns/chunk), {} bytes ciphertext",
-        elapsed,
-        elapsed.as_nanos() as f64 / CHUNKS as f64,
-        total_bytes
+        "10,000-chunk ratchet stream: {elapsed:?} total ({nanos_per_chunk} ns/chunk), {total_bytes} bytes ciphertext"
     );
 
     // Sanity: < 5 seconds in debug, well under 1 s in release.

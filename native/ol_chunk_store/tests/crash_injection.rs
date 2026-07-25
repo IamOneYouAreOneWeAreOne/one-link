@@ -1,18 +1,18 @@
-//! Phase A1 acceptance gate: 10_000 randomized crash-injection points
+//! Phase A1 acceptance gate: `10_000` randomized crash-injection points
 //! across the chunk-store + WAL replay path. Zero chunk loss + zero
 //! manifest divergence after recovery.
 //!
 //! We don't actually `kill -9` the process (the test harness needs to
 //! keep running) — we simulate the crash by leaking the in-flight
-//! ChunkStore handle (dropping the `flush()` follow-up), then truncate
-//! the chunk_log file at a random byte boundary, then re-open the
+//! `ChunkStore` handle (dropping the `flush()` follow-up), then truncate
+//! the `chunk_log` file at a random byte boundary, then re-open the
 //! store and assert (a) every chunk that was successfully appended
 //! BEFORE the truncation point is still readable and (b) the
 //! truncation point's manifest header lies on a record boundary so
 //! replay doesn't drop already-committed work.
 //!
-//! Iteration count via `OL_STORE_CRASH_ITERS` (default 1_000 to keep
-//! `cargo test` snappy; nightly CI sets 10_000 to meet the plan's
+//! Iteration count via `OL_STORE_CRASH_ITERS` (default `1_000` to keep
+//! `cargo test` snappy; nightly CI sets `10_000` to meet the plan's
 //! Phase A1 acceptance number).
 
 use std::fs::OpenOptions;
@@ -25,7 +25,7 @@ use ol_chunk_store::{
 use tempfile::tempdir;
 
 /// Return the path of the highest-numbered `<N>.wal` segment in
-/// ``dir``, or None if the dir is empty / missing.
+/// `dir`, or `None` if the directory is empty or missing.
 fn highest_wal_segment(dir: &std::path::Path) -> Option<std::path::PathBuf> {
     let mut best: Option<(u64, std::path::PathBuf)> = None;
     let entries = std::fs::read_dir(dir).ok()?;
@@ -45,7 +45,7 @@ fn highest_wal_segment(dir: &std::path::Path) -> Option<std::path::PathBuf> {
     best.map(|(_, p)| p)
 }
 
-/// SplitMix64 PRNG so the test is deterministic per seed.
+/// `SplitMix64` PRNG so the test is deterministic per seed.
 fn next_rng(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = *state;
@@ -68,7 +68,7 @@ fn make_chunk(idx: u32, payload_len: usize) -> ChunkRecord {
         aead_kind: ChunkAeadKind::AesGcm256,
         compressed: false,
         format_aware: false,
-        length_plaintext: payload_len as u32,
+        length_plaintext: u32::try_from(payload_len).expect("test payload length must fit in u32"),
         chunk_id: id,
         ratchet_key_id: [0u8; 16],
         stripe_descriptor: StripeDescriptor::NONE,
@@ -162,7 +162,8 @@ fn crash_injection_survives_random_truncations() {
                         "iter {iter}: chunk {idx} present after gap — monotonic recovery violated"
                     );
                 }
-                last_present_idx = Some(idx as u32);
+                last_present_idx =
+                    Some(u32::try_from(idx).expect("test chunk index must fit in u32"));
             } else {
                 saw_gap = true;
             }

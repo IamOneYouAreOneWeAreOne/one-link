@@ -13,7 +13,6 @@ regression there fails loud and fast.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 
 import blake3
 import pytest
@@ -119,7 +118,7 @@ def voice_blob() -> bytes:
 
 @pytest.fixture
 def voice_blob_hex(voice_blob: bytes) -> str:
-    return hashlib.sha256(voice_blob).hexdigest()
+    return blake3.blake3(voice_blob).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +179,9 @@ def test_dispatch_records_verified_inbound(
     ev = fp_events[0]
     assert ev["blob"] == voice_blob_hex
     assert ev["verified"] is True
-    assert ev["kind"] == "Real"
+    assert ev["kind"] == "Original"
+    assert ev["verification"] == "Sender signature confirmed"
+    assert "not the truth of a physical scene" in ev["scope"]
     assert ev["path"] == "Local network"
     assert ev["recording"] == "Not recording"
 

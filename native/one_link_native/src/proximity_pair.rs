@@ -1,18 +1,18 @@
 //! pyo3 wrapper for [`ol_proximity_pair`] — Coherence Mesh F1.4.
 //!
-//! Exposes the 4-stage channel-reciprocity pipeline to the Python
-//! daemon: quantize / reconcile / amplify, plus the multi-pass driver
-//! and the convenience one-shot `derive_factor2_secret`.
+//! Exposes research quantize / parity-align / hash primitives to Python,
+//! plus an explicitly unconfirmed one-shot candidate helper.
 //!
 //! The daemon supplies the OBSERVATIONS (WiFi/BLE/mDNS scan results);
-//! this layer crunches them to a 256-bit Factor-2 secret.
+//! this layer does not acquire observations or establish proximity, entropy,
+//! agreement, or authentication.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use ol_proximity_pair::{
-    block_syndrome, derive_factor2_secret, hamming_reconcile, multi_pass_reconcile,
+    block_syndrome, derive_unconfirmed_candidate, hamming_reconcile, multi_pass_reconcile,
     multi_pass_syndromes, parity_bits_for_string, permutation_for_pass, privacy_amplify,
     quantize_observations, reconcile_with_syndrome, PairError, PipelineConfig, QuantizeConfig,
     AMPLIFIED_KEY_BYTES, CASCADE_PASSES_DEFAULT, GUARD_BAND_DEFAULT, HAMMING_CODEWORD_BITS,
@@ -37,7 +37,7 @@ fn py_quantize_observations<'py>(
         guard_band,
     };
     let bits = quantize_observations(observations, &cfg).map_err(map_err)?;
-    Ok(PyBytes::new_bound(py, &bits))
+    Ok(PyBytes::new(py, &bits))
 }
 
 // ── Stage 3: Reconciliation ───────────────────────────────────────
@@ -49,7 +49,7 @@ fn py_quantize_observations<'py>(
 #[pyo3(signature = (bits, block_bits = SYNDROME_BLOCK_BITS_DEFAULT))]
 fn py_block_syndrome<'py>(py: Python<'py>, bits: &[u8], block_bits: usize) -> Bound<'py, PyBytes> {
     let s = block_syndrome(bits, block_bits);
-    PyBytes::new_bound(py, &s)
+    PyBytes::new(py, &s)
 }
 
 /// One-pass reconciliation: flip bit 0 of each block where my parity
@@ -64,7 +64,7 @@ fn py_reconcile_with_syndrome<'py>(
     block_bits: usize,
 ) -> Bound<'py, PyBytes> {
     let r = reconcile_with_syndrome(my_bits, peer_syndrome, block_bits);
-    PyBytes::new_bound(py, &r)
+    PyBytes::new(py, &r)
 }
 
 /// Multi-pass syndromes (one per CASCADE pass). The peer ships
@@ -80,7 +80,7 @@ fn py_multi_pass_syndromes<'py>(
 ) -> Vec<Bound<'py, PyBytes>> {
     multi_pass_syndromes(my_bits, block_bits, passes, permutation_seed)
         .into_iter()
-        .map(|s| PyBytes::new_bound(py, &s))
+        .map(|s| PyBytes::new(py, &s))
         .collect()
 }
 
@@ -98,7 +98,7 @@ fn py_multi_pass_reconcile<'py>(
 ) -> Bound<'py, PyBytes> {
     let syndromes: Vec<Vec<u8>> = peer_syndromes;
     let r = multi_pass_reconcile(my_bits, &syndromes, block_bits, passes, permutation_seed);
-    PyBytes::new_bound(py, &r)
+    PyBytes::new(py, &r)
 }
 
 /// Deterministic Fisher-Yates permutation. Surfaced so the daemon
@@ -118,7 +118,7 @@ fn py_permutation_for_pass(seed: u64, pass_idx: usize, n: usize) -> Vec<usize> {
 #[pyfunction]
 fn py_hamming_parity<'py>(py: Python<'py>, bits: &[u8]) -> Bound<'py, PyBytes> {
     let p = parity_bits_for_string(bits);
-    PyBytes::new_bound(py, &p)
+    PyBytes::new(py, &p)
 }
 
 /// One-pass Hamming reconciliation. Corrects up to 1 error per
@@ -132,7 +132,7 @@ fn py_hamming_reconcile<'py>(
     peer_parity: &[u8],
 ) -> Bound<'py, PyBytes> {
     let r = hamming_reconcile(my_bits, peer_parity);
-    PyBytes::new_bound(py, &r)
+    PyBytes::new(py, &r)
 }
 
 // ── Stage 4: Privacy Amplification ────────────────────────────────
@@ -156,16 +156,16 @@ fn py_privacy_amplify<'py>(
     let mut salt_arr = [0u8; 32];
     salt_arr.copy_from_slice(salt);
     let key = privacy_amplify(reconciled_bits, &salt_arr);
-    Ok(PyBytes::new_bound(py, &key))
+    Ok(PyBytes::new(py, &key))
 }
 
 // ── Convenience: one-shot full pipeline ──────────────────────────
 
-/// Run the FULL pipeline: quantize → reconcile (one-pass) → amplify.
-/// Returns the 32-byte Factor-2 secret.
+/// Run the research pipeline and return an unconfirmed 32-byte candidate.
+/// Never use this output directly as a traffic key or authentication result.
 #[pyfunction]
 #[pyo3(signature = (my_observations, peer_syndrome, salt, min_bytes = OBSERVATION_BYTES_DEFAULT, guard_band = GUARD_BAND_DEFAULT, block_bits = SYNDROME_BLOCK_BITS_DEFAULT))]
-fn py_derive_factor2_secret<'py>(
+fn py_derive_unconfirmed_candidate<'py>(
     py: Python<'py>,
     my_observations: &[u8],
     peer_syndrome: &[u8],
@@ -190,12 +190,13 @@ fn py_derive_factor2_secret<'py>(
         syndrome_block_bits: block_bits,
         amplify_salt: salt_arr,
     };
-    let key = derive_factor2_secret(my_observations, peer_syndrome, &cfg).map_err(map_err)?;
-    Ok(PyBytes::new_bound(py, &key))
+    let key =
+        derive_unconfirmed_candidate(my_observations, peer_syndrome, &cfg).map_err(map_err)?;
+    Ok(PyBytes::new(py, &key))
 }
 
 fn map_err(e: PairError) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    PyValueError::new_err(crate::errors::owned_error_message(e))
 }
 
 // ── Module registration ──────────────────────────────────────────
@@ -210,7 +211,7 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_hamming_parity, m)?)?;
     m.add_function(wrap_pyfunction!(py_hamming_reconcile, m)?)?;
     m.add_function(wrap_pyfunction!(py_privacy_amplify, m)?)?;
-    m.add_function(wrap_pyfunction!(py_derive_factor2_secret, m)?)?;
+    m.add_function(wrap_pyfunction!(py_derive_unconfirmed_candidate, m)?)?;
     // Friendly names: alias each py_* to its short name.
     for (short, long) in &[
         ("quantize_observations", "py_quantize_observations"),
@@ -222,7 +223,10 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         ("hamming_parity", "py_hamming_parity"),
         ("hamming_reconcile", "py_hamming_reconcile"),
         ("privacy_amplify", "py_privacy_amplify"),
-        ("derive_factor2_secret", "py_derive_factor2_secret"),
+        (
+            "derive_unconfirmed_candidate",
+            "py_derive_unconfirmed_candidate",
+        ),
     ] {
         let f = m.getattr(*long)?;
         m.add(*short, f)?;

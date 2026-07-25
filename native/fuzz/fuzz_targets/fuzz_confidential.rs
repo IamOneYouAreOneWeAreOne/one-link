@@ -5,8 +5,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use ol_confidential::{
-    sign_attestation, verify_attestation, AttestationDoc,
-    ConfidentialProvider, ProviderTag, SoftwareProvider, ATTESTATION_NONCE_LEN,
+    sign_attestation, verify_attestation, AttestationDoc, ConfidentialProvider, ProviderTag,
+    SoftwareProvider, ATTESTATION_NONCE_LEN,
 };
 use ol_pqsig::HybridSigningKey;
 use rand::SeedableRng;
@@ -55,7 +55,14 @@ fuzz_target!(|data: &[u8]| {
     let quote: Vec<u8> = data.iter().skip(3).take(64).copied().collect();
     let fuzz_sdp = [0u8; ol_confidential::ISSUER_SDP_PUBKEY_LEN];
     if let Ok(doc) = sign_attestation(
-        &sk, provider_tag, nonce, issued, deadline, None, quote, fuzz_sdp,
+        &sk,
+        provider_tag,
+        nonce,
+        issued,
+        deadline,
+        None,
+        quote,
+        fuzz_sdp,
     ) {
         let now = issued.saturating_add(offset / 2);
         let _ = verify_attestation(

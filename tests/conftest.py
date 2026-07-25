@@ -2,10 +2,29 @@
 
 from __future__ import annotations
 
+import atexit
 import os
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
+
+# Install a disposable default before importing *any* one_link module or test
+# module.  Function fixtures run too late to contain module import side effects
+# and higher-scoped fixtures, both of which are allowed to construct Daemon or
+# resolve data_dir().  Preserve the caller's environment so this guard remains
+# a well-behaved pytest-process boundary rather than a permanent shell change.
+_ONE_LINK_HOME_ENV = "ONE_LINK_HOME"
+_ORIGINAL_ONE_LINK_HOME_PRESENT = _ONE_LINK_HOME_ENV in os.environ
+_ORIGINAL_ONE_LINK_HOME = os.environ.get(_ONE_LINK_HOME_ENV)
+_PYTEST_SESSION_HOME_OWNER = tempfile.TemporaryDirectory(
+    prefix="one-link-pytest-session-",
+)
+_PYTEST_SESSION_ROOT = Path(_PYTEST_SESSION_HOME_OWNER.name).resolve()
+_PYTEST_SESSION_HOME = _PYTEST_SESSION_ROOT / "home"
+os.environ[_ONE_LINK_HOME_ENV] = str(_PYTEST_SESSION_HOME)
 
 from one_link.platform_guard import install_windows_platform_fastpath
 
@@ -51,6 +70,64 @@ os.environ.setdefault("ONE_LINK_DISABLE_AT_REST_ENCRYPTION", "1")
 # default the policy OFF for the suite. Tests that specifically cover
 # accept-first delenv / setenv this to control it explicitly.
 os.environ.setdefault("ONE_LINK_REQUIRE_FILE_ACCEPT", "0")
+
+
+_PYTEST_SESSION_HOME_CLEANED = False
+
+
+def _restore_and_cleanup_pytest_session_home() -> None:
+    """Restore the inherited environment and remove only our exact temp root."""
+
+    global _PYTEST_SESSION_HOME_CLEANED
+    if _PYTEST_SESSION_HOME_CLEANED:
+        return
+    _PYTEST_SESSION_HOME_CLEANED = True
+    if _ORIGINAL_ONE_LINK_HOME_PRESENT:
+        assert _ORIGINAL_ONE_LINK_HOME is not None
+        os.environ[_ONE_LINK_HOME_ENV] = _ORIGINAL_ONE_LINK_HOME
+    else:
+        os.environ.pop(_ONE_LINK_HOME_ENV, None)
+    _PYTEST_SESSION_HOME_OWNER.cleanup()
+
+
+# pytest_unconfigure is late enough that test and plugin session-finish hooks
+# can still resolve isolated product paths.  atexit is the fail-safe for an
+# interrupted pytest lifecycle that never reaches pytest_unconfigure.
+atexit.register(_restore_and_cleanup_pytest_session_home)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    del config
+    _restore_and_cleanup_pytest_session_home()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _hold_import_time_one_link_home_guard() -> Iterator[Path]:
+    """Prove session/module fixtures inherit the import-time containment."""
+
+    assert Path(os.environ[_ONE_LINK_HOME_ENV]).resolve() == _PYTEST_SESSION_HOME
+    yield _PYTEST_SESSION_HOME
+
+
+@pytest.fixture(autouse=True)
+def _isolate_default_one_link_home(tmp_path: Path, monkeypatch) -> Path:
+    """Fail closed against unit tests writing into the real user profile.
+
+    ``Daemon`` resolves its chunk cache, inbox, resume metadata, runtime port
+    files, and several key stores during construction. Requiring every test
+    author to remember an isolation fixture proved unsafe: a mocked finalizer
+    left hundreds of synthetic files in a developer's production inbox.
+
+    Import-time code plus session/module fixtures are contained by the
+    process-wide disposable home above. Every function-scoped test then gets
+    a distinct disposable default. Tests that intentionally exercise
+    platform-default path semantics must explicitly ``delenv("ONE_LINK_HOME")``
+    in their own scope, making that exceptional authority visible in the test.
+    """
+
+    home = tmp_path / "one-link-pytest-home"
+    monkeypatch.setenv("ONE_LINK_HOME", str(home))
+    return home
 
 
 @pytest.fixture

@@ -1,6 +1,6 @@
 //! Stripe descriptor for Reed-Solomon erasure coding per [ADR-0004].
 //!
-//! Phase A1 reserves the descriptor field in every chunk_log record so
+//! Phase A1 reserves the descriptor field in every `chunk_log` record so
 //! Phase C's encoder/decoder can plug in without a format break. In A1,
 //! every chunk has `role = NotStriped` and the other fields are zero.
 //!
@@ -65,7 +65,7 @@ impl StripeRole {
 pub struct StripeDescriptor {
     /// 64-bit prefix of the stripe identity (BLAKE3 of canonical stripe membership).
     pub stripe_id_lo64: u64,
-    /// Data / Parity / NotStriped.
+    /// `Data` / `Parity` / `NotStriped`.
     pub stripe_role: StripeRole,
     /// Position within stripe (`0..k` for Data, `0..m` for Parity).
     pub stripe_index: u8,
@@ -88,6 +88,50 @@ impl StripeDescriptor {
         stripe_m: 0,
         cohort_id_lo64: 0,
     };
+
+    /// Validate the cross-field stripe invariants.
+    ///
+    /// A standalone descriptor is the all-zero canonical value. Data and
+    /// parity descriptors require a non-empty `(k, m)` code and an index in
+    /// the role-specific range. Keeping this check separate from decoding
+    /// also protects records constructed directly through the Rust or Python
+    /// APIs.
+    pub fn validate(&self) -> Result<(), ChunkStoreError> {
+        match self.stripe_role {
+            StripeRole::NotStriped => {
+                if *self != Self::NONE {
+                    return Err(ChunkStoreError::InvalidStripeDescriptor(
+                        "not-striped descriptor must be the canonical all-zero value",
+                    ));
+                }
+            }
+            StripeRole::Data => {
+                if self.stripe_k == 0 || self.stripe_m == 0 {
+                    return Err(ChunkStoreError::InvalidStripeDescriptor(
+                        "striped descriptor requires non-zero k and m",
+                    ));
+                }
+                if self.stripe_index >= self.stripe_k {
+                    return Err(ChunkStoreError::InvalidStripeDescriptor(
+                        "data stripe_index must be less than stripe_k",
+                    ));
+                }
+            }
+            StripeRole::Parity => {
+                if self.stripe_k == 0 || self.stripe_m == 0 {
+                    return Err(ChunkStoreError::InvalidStripeDescriptor(
+                        "striped descriptor requires non-zero k and m",
+                    ));
+                }
+                if self.stripe_index >= self.stripe_m {
+                    return Err(ChunkStoreError::InvalidStripeDescriptor(
+                        "parity stripe_index must be less than stripe_m",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 
     /// Encode into a 24-byte buffer.
     #[must_use]
@@ -123,14 +167,16 @@ impl StripeDescriptor {
                 "reserved bytes non-zero",
             ));
         }
-        Ok(Self {
+        let descriptor = Self {
             stripe_id_lo64,
             stripe_role,
             stripe_index,
             stripe_k,
             stripe_m,
             cohort_id_lo64,
-        })
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
     }
 
     /// True iff this descriptor represents a non-striped chunk (the
@@ -213,5 +259,27 @@ mod tests {
         assert_eq!(StripeRole::Data.as_u8(), 0);
         assert_eq!(StripeRole::Parity.as_u8(), 1);
         assert_eq!(StripeRole::NotStriped.as_u8(), 2);
+    }
+
+    #[test]
+    fn rejects_noncanonical_standalone_descriptor() {
+        let descriptor = StripeDescriptor {
+            stripe_id_lo64: 1,
+            ..StripeDescriptor::NONE
+        };
+        assert!(descriptor.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_out_of_range_role_index() {
+        let descriptor = StripeDescriptor {
+            stripe_id_lo64: 1,
+            stripe_role: StripeRole::Data,
+            stripe_index: 3,
+            stripe_k: 3,
+            stripe_m: 1,
+            cohort_id_lo64: 2,
+        };
+        assert!(descriptor.validate().is_err());
     }
 }

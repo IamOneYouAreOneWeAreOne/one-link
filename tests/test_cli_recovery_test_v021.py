@@ -15,9 +15,7 @@ scripted into periodic-audit cron jobs.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
-import pytest
 from click.testing import CliRunner
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -33,6 +31,11 @@ def test_backup_test_returns_zero_for_matching_phrase(tmp_path, monkeypatch):
 
     monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
     seed = master_seed.load_or_create_seed(tmp_path)[0]
+    master_seed.install_seed_derived_authority(
+        tmp_path,
+        identity_path=paths.key_path(),
+        seed=seed,
+    )
     phrase = mnemonic.encode(seed)
     result = CliRunner().invoke(cli, ["backup", "test"] + phrase.split())
     assert result.exit_code == 0, result.output
@@ -106,7 +109,7 @@ def test_backup_test_help_text_documents_exit_codes():
 def test_backup_test_bundle_returns_zero_for_matching_phrase_and_bundle(tmp_path, monkeypatch):
     """Happy path: encode a real .olbak from a seed, then verify it
     decrypts cleanly with the corresponding phrase via the CLI."""
-    from one_link import backup_bundle, master_seed, mnemonic, paths
+    from one_link import backup_bundle, mnemonic, paths
     from one_link.cli import cli
 
     monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
@@ -211,6 +214,11 @@ def test_recovery_test_shares_returns_zero_for_matching_quorum(tmp_path, monkeyp
 
     monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
     seed = master_seed.load_or_create_seed(tmp_path)[0]
+    master_seed.install_seed_derived_authority(
+        tmp_path,
+        identity_path=paths.key_path(),
+        seed=seed,
+    )
     portables, _ = _make_portable_shares(seed, k=2, n=3)
     result = CliRunner().invoke(cli, ["recovery", "test-shares"] + portables)
     assert result.exit_code == 0, result.output

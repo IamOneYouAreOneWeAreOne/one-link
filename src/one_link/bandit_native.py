@@ -1,8 +1,9 @@
 """Adapter for the file-engine v2 native bandit (``ol_bandit`` via
 ``one_link_native``).
 
-Per ADR-0019: Beta-Bernoulli Thompson sampling. Replaces the daemon's
-``transfer_brain.py`` EMA route memory.
+Per ADR-0019: Beta-Bernoulli Thompson sampling. The production consumer
+currently uses it for the route-choice axis in ``transfer_brain.py``.
+Other proposed transfer-knob controllers are not production-active.
 """
 
 from __future__ import annotations

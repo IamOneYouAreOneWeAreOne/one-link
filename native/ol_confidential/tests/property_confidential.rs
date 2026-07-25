@@ -4,12 +4,13 @@ use proptest::prelude::*;
 use rand::rngs::OsRng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use std::sync::OnceLock;
 
 use ol_confidential::{
     sign_attestation, verify_attestation, ConfidentialProvider, ConfidentialTier, ProviderTag,
     SoftwareProvider, ATTESTATION_FRESHNESS_WINDOW_SECS, ISSUER_SDP_PUBKEY_LEN,
 };
-use ol_pqsig::HybridSigningKey;
+use ol_pqsig::{HybridSigningKey, HybridVerifyingKey};
 
 fn cheap_cases() -> u32 {
     if std::env::var("ONE_LINK_F1_GATE").as_deref() == Ok("1") {
@@ -31,6 +32,23 @@ fn heavy_cases() -> u32 {
 
 const TEST_SDP_PUBKEY: [u8; ISSUER_SDP_PUBKEY_LEN] = [0xD4; ISSUER_SDP_PUBKEY_LEN];
 
+/// The cheap properties vary transcript inputs, not the issuer key. Expanding
+/// an ML-DSA key for every one of their millions of cases dominates the entire
+/// workspace gate without increasing the state space under test. Generate the
+/// three deterministic public keys exactly once per test process while
+/// preserving the distinct AB/CD/EF fixtures each property used previously.
+fn transcript_verifying_keys() -> &'static [HybridVerifyingKey] {
+    static VERIFYING_KEYS: OnceLock<Box<[HybridVerifyingKey]>> = OnceLock::new();
+    VERIFYING_KEYS.get_or_init(|| {
+        vec![
+            HybridSigningKey::generate(&mut ChaCha20Rng::from_seed([0xAB; 32])).1,
+            HybridSigningKey::generate(&mut ChaCha20Rng::from_seed([0xCD; 32])).1,
+            HybridSigningKey::generate(&mut ChaCha20Rng::from_seed([0xEF; 32])).1,
+        ]
+        .into_boxed_slice()
+    })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: cheap_cases(),
@@ -47,12 +65,12 @@ proptest! {
         offset in 1u64..=ATTESTATION_FRESHNESS_WINDOW_SECS,
         witness_opt in proptest::option::of(any::<[u8; 32]>()),
     ) {
-        let (sk, vk) = HybridSigningKey::generate(&mut ChaCha20Rng::from_seed([0xAB; 32]));
+        let vk = &transcript_verifying_keys()[0];
         let deadline = issued.saturating_add(offset);
         let q = vec![0u8; 4];
         let t1 = ol_confidential::attestation::canonical_attestation_transcript(
             ProviderTag::Software,
-            &vk,
+            vk,
             &nonce,
             issued,
             deadline,
@@ -62,7 +80,7 @@ proptest! {
         );
         let t2 = ol_confidential::attestation::canonical_attestation_transcript(
             ProviderTag::Software,
-            &vk,
+            vk,
             &nonce,
             issued,
             deadline,
@@ -71,7 +89,6 @@ proptest! {
             &TEST_SDP_PUBKEY,
         );
         prop_assert_eq!(t1, t2);
-        let _ = sk;
     }
 
     /// Distinct peer nonces produce distinct transcript bytes (and
@@ -82,12 +99,12 @@ proptest! {
         nonce_b in any::<[u8; 32]>(),
     ) {
         prop_assume!(nonce_a != nonce_b);
-        let (_sk, vk) = HybridSigningKey::generate(&mut ChaCha20Rng::from_seed([0xCD; 32]));
+        let vk = &transcript_verifying_keys()[1];
         let t1 = ol_confidential::attestation::canonical_attestation_transcript(
-            ProviderTag::Software, &vk, &nonce_a, 100, 120, None, &[], &TEST_SDP_PUBKEY,
+            ProviderTag::Software, vk, &nonce_a, 100, 120, None, &[], &TEST_SDP_PUBKEY,
         );
         let t2 = ol_confidential::attestation::canonical_attestation_transcript(
-            ProviderTag::Software, &vk, &nonce_b, 100, 120, None, &[], &TEST_SDP_PUBKEY,
+            ProviderTag::Software, vk, &nonce_b, 100, 120, None, &[], &TEST_SDP_PUBKEY,
         );
         prop_assert_ne!(t1, t2);
     }
@@ -99,12 +116,12 @@ proptest! {
         nonce in any::<[u8; 32]>(),
         witness in any::<[u8; 32]>(),
     ) {
-        let (_sk, vk) = HybridSigningKey::generate(&mut ChaCha20Rng::from_seed([0xEF; 32]));
+        let vk = &transcript_verifying_keys()[2];
         let t_none = ol_confidential::attestation::canonical_attestation_transcript(
-            ProviderTag::Software, &vk, &nonce, 100, 120, None, &[], &TEST_SDP_PUBKEY,
+            ProviderTag::Software, vk, &nonce, 100, 120, None, &[], &TEST_SDP_PUBKEY,
         );
         let t_some = ol_confidential::attestation::canonical_attestation_transcript(
-            ProviderTag::Software, &vk, &nonce, 100, 120, Some(&witness), &[], &TEST_SDP_PUBKEY,
+            ProviderTag::Software, vk, &nonce, 100, 120, Some(&witness), &[], &TEST_SDP_PUBKEY,
         );
         prop_assert_ne!(t_none, t_some);
     }

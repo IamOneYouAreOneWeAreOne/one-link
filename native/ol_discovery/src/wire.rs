@@ -13,25 +13,25 @@
 //!
 //! Kind tags:
 //!   0x01 Ping       0x81 Pong
-//!   0x02 Store      0x82 StoreResult
-//!   0x04 FindNode   0x84 FindNodeResult
-//!   0x08 FindValue  0x88 FindValueResult
+//!   0x02 Store      0x82 `StoreResult`
+//!   0x04 `FindNode`   0x84 `FindNodeResult`
+//!   0x08 `FindValue`  0x88 `FindValueResult`
 //!
 //! Bodies:
 //!   - Ping / Pong: empty
-//!   - Store: SignedRecord encoding (4-byte u32 length + record
-//!     canonical_bytes + 64-byte signature)
-//!   - StoreResult: 1 byte outcome code
-//!   - FindNode / FindValue: 32-byte target
-//!   - FindNodeResult: 1-byte count + N × 32-byte NodeIds
-//!   - FindValueResult:
+//!   - Store: `SignedRecord` encoding (4-byte u32 length + record
+//!     `canonical_bytes` + 64-byte signature)
+//!   - `StoreResult`: 1 byte outcome code
+//!   - `FindNode` / `FindValue`: 32-byte target
+//!   - `FindNodeResult`: 1-byte count + N × 32-byte `NodeIds`
+//!   - `FindValueResult`:
 //!     - `0x01 + signed-record-bytes` (Found)
 //!     - `0x02 + 1-byte count + N×32` (Closer)
 
 use thiserror::Error;
 
 use crate::node_id::NodeId;
-use crate::record::{PeerRecord, SignedRecord};
+use crate::record::{PeerRecord, SignedRecord, MAX_ENDPOINTS, MAX_ENDPOINT_LEN};
 use crate::rpc::{
     FindValueOutcome, Header, Nonce, Request, Response, RpcEnvelope, StoreOutcome, MAX_FIND_RESULTS,
 };
@@ -61,7 +61,7 @@ const STORE_RESULT_RATE_LIMITED: u8 = 0x04;
 const FIND_VALUE_FOUND: u8 = 0x01;
 const FIND_VALUE_CLOSER: u8 = 0x02;
 
-/// Sanity cap to defeat DoS via huge payloads. UDP datagrams are
+/// Sanity cap to defeat `DoS` via huge payloads. UDP datagrams are
 /// typically ≤1500 bytes anyway; we allow a bit more for IPv6
 /// jumbograms but reject anything wildly out of profile.
 pub const MAX_WIRE_BYTES: usize = 4096;
@@ -104,6 +104,18 @@ pub enum WireError {
         /// Max permitted.
         max: usize,
     },
+
+    /// A locally constructed or decoded signed record violates its bounded
+    /// canonical shape.
+    #[error("invalid peer record: {0}")]
+    InvalidRecord(String),
+
+    /// Canonical envelopes and record bodies must be consumed exactly.
+    #[error("wire value has {got} trailing bytes")]
+    TrailingBytes {
+        /// Bytes remaining after the expected value.
+        got: usize,
+    },
 }
 
 /// Encode a request envelope to a UDP-ready byte buffer.
@@ -113,7 +125,7 @@ pub enum WireError {
 pub fn encode_request(env: &RpcEnvelope<Request>) -> Result<Vec<u8>, WireError> {
     let mut out = Vec::with_capacity(64);
     write_header(&mut out, &env.header, request_tag(&env.body));
-    encode_request_body(&mut out, &env.body);
+    encode_request_body(&mut out, &env.body)?;
     bounds_check(&out)?;
     Ok(out)
 }
@@ -136,27 +148,10 @@ pub fn encode_response(env: &RpcEnvelope<Response>) -> Result<Vec<u8>, WireError
 /// # Errors
 /// Any [`WireError`] variant.
 pub fn decode(bytes: &[u8]) -> Result<DecodedEnvelope, WireError> {
+    bounds_check(bytes)?;
     let mut c = Cursor::new(bytes);
-    let magic = c.take(4)?;
-    if magic != WIRE_MAGIC {
-        return Err(WireError::BadMagic);
-    }
-    let version = c.take_byte()?;
-    if version != WIRE_VERSION {
-        return Err(WireError::BadVersion { got: version });
-    }
-    let tag = c.take_byte()?;
-    let sender = NodeId::from_bytes(<[u8; 32]>::try_from(c.take(32)?).expect("32"));
-    let mut nonce: Nonce = [0u8; 16];
-    nonce.copy_from_slice(c.take(16)?);
-    let ts_bytes: [u8; 8] = c.take(8)?.try_into().expect("8");
-    let timestamp_unix = u64::from_be_bytes(ts_bytes);
-    let header = Header {
-        sender,
-        nonce,
-        timestamp_unix,
-    };
-    match tag {
+    let (header, tag) = decode_header(&mut c)?;
+    let decoded = match tag {
         TAG_PING => Ok(DecodedEnvelope::Request(RpcEnvelope {
             header,
             body: Request::Ping,
@@ -166,14 +161,18 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedEnvelope, WireError> {
             body: Response::Pong,
         })),
         TAG_FIND_NODE => {
-            let target = NodeId::from_bytes(<[u8; 32]>::try_from(c.take(32)?).expect("32"));
+            let mut target_bytes = [0u8; 32];
+            target_bytes.copy_from_slice(c.take(32)?);
+            let target = NodeId::from_bytes(target_bytes);
             Ok(DecodedEnvelope::Request(RpcEnvelope {
                 header,
                 body: Request::FindNode { target },
             }))
         }
         TAG_FIND_VALUE => {
-            let target = NodeId::from_bytes(<[u8; 32]>::try_from(c.take(32)?).expect("32"));
+            let mut target_bytes = [0u8; 32];
+            target_bytes.copy_from_slice(c.take(32)?);
+            let target = NodeId::from_bytes(target_bytes);
             Ok(DecodedEnvelope::Request(RpcEnvelope {
                 header,
                 body: Request::FindValue { target },
@@ -229,7 +228,39 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedEnvelope, WireError> {
             }))
         }
         other => Err(WireError::BadTag { got: other }),
+    }?;
+    if !c.is_empty() {
+        return Err(WireError::TrailingBytes { got: c.len() });
     }
+    Ok(decoded)
+}
+
+fn decode_header(c: &mut Cursor<'_>) -> Result<(Header, u8), WireError> {
+    let magic = c.take(4)?;
+    if magic != WIRE_MAGIC {
+        return Err(WireError::BadMagic);
+    }
+    let version = c.take_byte()?;
+    if version != WIRE_VERSION {
+        return Err(WireError::BadVersion { got: version });
+    }
+    let tag = c.take_byte()?;
+    let mut sender_bytes = [0u8; 32];
+    sender_bytes.copy_from_slice(c.take(32)?);
+    let sender = NodeId::from_bytes(sender_bytes);
+    let mut nonce: Nonce = [0u8; 16];
+    nonce.copy_from_slice(c.take(16)?);
+    let mut ts_bytes = [0u8; 8];
+    ts_bytes.copy_from_slice(c.take(8)?);
+    let timestamp_unix = u64::from_be_bytes(ts_bytes);
+    Ok((
+        Header {
+            sender,
+            nonce,
+            timestamp_unix,
+        },
+        tag,
+    ))
 }
 
 /// Decoded envelope — caller dispatches based on whether body is a
@@ -253,14 +284,15 @@ fn write_header(out: &mut Vec<u8>, h: &Header, tag: u8) {
     out.extend_from_slice(&h.timestamp_unix.to_be_bytes());
 }
 
-fn encode_request_body(out: &mut Vec<u8>, body: &Request) {
+fn encode_request_body(out: &mut Vec<u8>, body: &Request) -> Result<(), WireError> {
     match body {
         Request::Ping => {}
-        Request::Store(rec) => encode_signed_record(out, rec),
+        Request::Store(rec) => encode_signed_record(out, rec)?,
         Request::FindNode { target } | Request::FindValue { target } => {
             out.extend_from_slice(target.as_bytes());
         }
     }
+    Ok(())
 }
 
 fn encode_response_body(out: &mut Vec<u8>, body: &Response) -> Result<(), WireError> {
@@ -281,7 +313,7 @@ fn encode_response_body(out: &mut Vec<u8>, body: &Response) -> Result<(), WireEr
         }
         Response::FindValueResult(FindValueOutcome::Found(rec)) => {
             out.push(FIND_VALUE_FOUND);
-            encode_signed_record(out, rec);
+            encode_signed_record(out, rec)?;
         }
         Response::FindValueResult(FindValueOutcome::Closer(closer)) => {
             out.push(FIND_VALUE_CLOSER);
@@ -291,12 +323,18 @@ fn encode_response_body(out: &mut Vec<u8>, body: &Response) -> Result<(), WireEr
     Ok(())
 }
 
-fn encode_signed_record(out: &mut Vec<u8>, rec: &SignedRecord) {
+fn encode_signed_record(out: &mut Vec<u8>, rec: &SignedRecord) -> Result<(), WireError> {
+    rec.record
+        .validate()
+        .map_err(|error| WireError::InvalidRecord(error.to_string()))?;
     let body_bytes = rec.record.canonical_bytes();
-    let len = body_bytes.len() as u32;
+    let len = u32::try_from(body_bytes.len()).map_err(|_| WireError::TooLarge {
+        got: body_bytes.len(),
+    })?;
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(&body_bytes);
     out.extend_from_slice(&rec.signature);
+    Ok(())
 }
 
 fn encode_id_list(out: &mut Vec<u8>, ids: &[NodeId]) -> Result<(), WireError> {
@@ -324,17 +362,20 @@ fn decode_id_list(c: &mut Cursor) -> Result<Vec<NodeId>, WireError> {
     }
     let mut ids = Vec::with_capacity(count);
     for _ in 0..count {
-        let id_bytes: [u8; 32] = c.take(32)?.try_into().expect("32");
+        let mut id_bytes = [0u8; 32];
+        id_bytes.copy_from_slice(c.take(32)?);
         ids.push(NodeId::from_bytes(id_bytes));
     }
     Ok(ids)
 }
 
 fn decode_signed_record(c: &mut Cursor) -> Result<SignedRecord, WireError> {
-    let len_bytes: [u8; 4] = c.take(4)?.try_into().expect("4");
+    let mut len_bytes = [0u8; 4];
+    len_bytes.copy_from_slice(c.take(4)?);
     let body_len = u32::from_be_bytes(len_bytes) as usize;
     let body_bytes = c.take(body_len)?.to_vec();
-    let sig_bytes: [u8; 64] = c.take(64)?.try_into().expect("64");
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes.copy_from_slice(c.take(64)?);
     let record = parse_canonical_record(&body_bytes)?;
     Ok(SignedRecord {
         record,
@@ -350,26 +391,48 @@ fn parse_canonical_record(bytes: &[u8]) -> Result<PeerRecord, WireError> {
     if magic != b"OLR1" {
         return Err(WireError::BadMagic);
     }
-    let pk: [u8; 32] = c.take(32)?.try_into().expect("32");
-    let publish_bytes: [u8; 8] = c.take(8)?.try_into().expect("8");
-    let ttl_bytes: [u8; 8] = c.take(8)?.try_into().expect("8");
-    let n_eps_bytes: [u8; 2] = c.take(2)?.try_into().expect("2");
+    let mut pk = [0u8; 32];
+    pk.copy_from_slice(c.take(32)?);
+    let mut publish_bytes = [0u8; 8];
+    publish_bytes.copy_from_slice(c.take(8)?);
+    let mut ttl_bytes = [0u8; 8];
+    ttl_bytes.copy_from_slice(c.take(8)?);
+    let mut n_eps_bytes = [0u8; 2];
+    n_eps_bytes.copy_from_slice(c.take(2)?);
     let n_eps = u16::from_be_bytes(n_eps_bytes) as usize;
+    if n_eps > MAX_ENDPOINTS || n_eps > c.len() / 2 {
+        return Err(WireError::InvalidRecord(
+            "endpoint count exceeds record/structural bound".to_string(),
+        ));
+    }
     let mut endpoints = Vec::with_capacity(n_eps);
     for _ in 0..n_eps {
-        let len_bytes: [u8; 2] = c.take(2)?.try_into().expect("2");
+        let mut len_bytes = [0u8; 2];
+        len_bytes.copy_from_slice(c.take(2)?);
         let ep_len = u16::from_be_bytes(len_bytes) as usize;
+        if ep_len > MAX_ENDPOINT_LEN {
+            return Err(WireError::InvalidRecord(
+                "endpoint length exceeds MAX_ENDPOINT_LEN".to_string(),
+            ));
+        }
         let ep_bytes = c.take(ep_len)?;
         endpoints.push(
             String::from_utf8(ep_bytes.to_vec()).map_err(|_| WireError::BadTag { got: 0xFF })?,
         );
     }
-    Ok(PeerRecord {
+    if !c.is_empty() {
+        return Err(WireError::TrailingBytes { got: c.len() });
+    }
+    let record = PeerRecord {
         publisher_pubkey: pk,
         endpoints,
         publish_time_unix: u64::from_be_bytes(publish_bytes),
         ttl_secs: u64::from_be_bytes(ttl_bytes),
-    })
+    };
+    record
+        .validate()
+        .map_err(|error| WireError::InvalidRecord(error.to_string()))?;
+    Ok(record)
 }
 
 fn request_tag(body: &Request) -> u8 {
@@ -420,6 +483,12 @@ impl<'a> Cursor<'a> {
     }
     fn take_byte(&mut self) -> Result<u8, WireError> {
         Ok(self.take(1)?[0])
+    }
+    fn len(&self) -> usize {
+        self.buf.len()
+    }
+    fn is_empty(&self) -> bool {
+        self.buf.is_empty()
     }
 }
 
@@ -473,7 +542,7 @@ mod tests {
         let dec = decode(&bytes).unwrap();
         match dec {
             DecodedEnvelope::Request(r) => assert_eq!(r, env),
-            _ => panic!(),
+            DecodedEnvelope::Response(_) => panic!(),
         }
     }
 
@@ -489,7 +558,7 @@ mod tests {
         let dec = decode(&bytes).unwrap();
         match dec {
             DecodedEnvelope::Response(r) => assert_eq!(r, env),
-            _ => panic!(),
+            DecodedEnvelope::Request(_) => panic!(),
         }
     }
 
@@ -503,7 +572,7 @@ mod tests {
         let dec = decode(&bytes).unwrap();
         match dec {
             DecodedEnvelope::Response(r) => assert_eq!(r, env),
-            _ => panic!(),
+            DecodedEnvelope::Request(_) => panic!(),
         }
     }
 
@@ -524,7 +593,7 @@ mod tests {
             let dec = decode(&bytes).unwrap();
             match dec {
                 DecodedEnvelope::Response(r) => assert_eq!(r, env),
-                _ => panic!(),
+                DecodedEnvelope::Request(_) => panic!(),
             }
         }
     }
@@ -601,7 +670,52 @@ mod tests {
                     panic!();
                 }
             }
-            _ => panic!(),
+            DecodedEnvelope::Response(_) => panic!(),
         }
+    }
+
+    #[test]
+    fn decoder_rejects_oversize_and_noncanonical_trailing_bytes() {
+        let env = RpcEnvelope {
+            header: hdr(),
+            body: Request::Ping,
+        };
+        let mut trailing = encode_request(&env).unwrap();
+        trailing.push(0);
+        assert!(matches!(
+            decode(&trailing),
+            Err(WireError::TrailingBytes { got: 1 })
+        ));
+        assert!(matches!(
+            decode(&vec![0u8; MAX_WIRE_BYTES + 1]),
+            Err(WireError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn endpoint_count_is_bounded_before_allocation() {
+        use ed25519_dalek::SigningKey;
+        const ENVELOPE_HEADER: usize = 4 + 1 + 1 + 32 + 16 + 8;
+        const RECORD_ENDPOINT_COUNT_OFFSET: usize = 4 + 32 + 8 + 8;
+
+        let sk = SigningKey::from_bytes(&[3u8; 32]);
+        let signed = SignedRecord::sign(
+            PeerRecord {
+                publisher_pubkey: sk.verifying_key().to_bytes(),
+                endpoints: vec!["udp://127.0.0.1:1".to_string()],
+                publish_time_unix: 1_700_000_000,
+                ttl_secs: 86_400,
+            },
+            &sk,
+        )
+        .unwrap();
+        let env = RpcEnvelope {
+            header: hdr(),
+            body: Request::Store(signed),
+        };
+        let mut bytes = encode_request(&env).unwrap();
+        let count_offset = ENVELOPE_HEADER + 4 + RECORD_ENDPOINT_COUNT_OFFSET;
+        bytes[count_offset..count_offset + 2].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert!(matches!(decode(&bytes), Err(WireError::InvalidRecord(_))));
     }
 }

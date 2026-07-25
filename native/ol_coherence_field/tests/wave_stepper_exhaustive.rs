@@ -32,6 +32,10 @@ use proptest::prelude::*;
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
+fn fixture_index_as_f32(index: usize) -> f32 {
+    f32::from(u16::try_from(index).expect("wave fixtures stay within the u16 domain"))
+}
+
 /// 1D open chain: n0 — n1 — n2 — ... — n_{n-1}
 fn chain_neighbors(n: usize) -> HashMap<String, Vec<String>> {
     let mut out = HashMap::new();
@@ -43,7 +47,7 @@ fn chain_neighbors(n: usize) -> HashMap<String, Vec<String>> {
         if i < n - 1 {
             ns.push(format!("n{}", i + 1));
         }
-        out.insert(format!("n{}", i), ns);
+        out.insert(format!("n{i}"), ns);
     }
     out
 }
@@ -55,8 +59,8 @@ fn ring_neighbors(n: usize) -> HashMap<String, Vec<String>> {
         let prev = if i == 0 { n - 1 } else { i - 1 };
         let next = (i + 1) % n;
         out.insert(
-            format!("n{}", i),
-            vec![format!("n{}", prev), format!("n{}", next)],
+            format!("n{i}"),
+            vec![format!("n{prev}"), format!("n{next}")],
         );
     }
     out
@@ -92,7 +96,7 @@ proptest! {
         let mut w = WaveStepper::new()
             .with_wave_speed(c).unwrap()
             .with_damping(gamma).unwrap();
-        let node_strs: Vec<String> = (0..n_nodes).map(|i| format!("n{}", i)).collect();
+        let node_strs: Vec<String> = (0..n_nodes).map(|i| format!("n{i}")).collect();
         let initial: HashMap<String, f32> = node_strs.iter()
             .map(|n| (n.clone(), value))
             .collect();
@@ -106,8 +110,7 @@ proptest! {
             let drift = (v - value).abs();
             prop_assert!(
                 drift < 1e-3,
-                "node {} drifted from {} to {} (drift={})",
-                n, value, v, drift,
+                "node {n} drifted from {value} to {v} (drift={drift})",
             );
         }
     }
@@ -133,8 +136,9 @@ proptest! {
         for i in 0..n {
             // Triangular profile: peak at center, fall off linearly.
             let dist = i.abs_diff(n_half);
-            let val = center_height * (1.0 - dist as f32 / n_half as f32);
-            initial.insert(format!("n{}", i), val);
+            let val = center_height
+                * (1.0 - fixture_index_as_f32(dist) / fixture_index_as_f32(n_half));
+            initial.insert(format!("n{i}"), val);
         }
         w.seed(&initial);
         let neighbors = chain_neighbors(n);
@@ -142,13 +146,13 @@ proptest! {
         for _ in 0..10 {
             w.step(dt, &neighbors).unwrap();
             for i in 0..n_half {
-                let left = w.psi_at(&format!("n{}", i)).unwrap();
-                let right = w.psi_at(&format!("n{}", n - 1 - i)).unwrap();
+                let left = w.psi_at(&format!("n{i}")).unwrap();
+                let reflected = n - 1 - i;
+                let right = w.psi_at(&format!("n{reflected}")).unwrap();
                 let asym = (left - right).abs();
                 prop_assert!(
                     asym < 1e-4,
-                    "asymmetry at step: left[{}]={} right[{}]={} asym={}",
-                    i, left, n - 1 - i, right, asym,
+                    "asymmetry at step: left[{i}]={left} right[{reflected}]={right} asym={asym}",
                 );
             }
         }
@@ -175,8 +179,8 @@ proptest! {
         let mut initial = HashMap::new();
         // Random-ish but deterministic initial disturbance.
         for i in 0..n_nodes {
-            let v = ((i as f32) * 0.137).sin();
-            initial.insert(format!("n{}", i), v);
+            let v = (fixture_index_as_f32(i) * 0.137).sin();
+            initial.insert(format!("n{i}"), v);
         }
         let initial_max: f32 = initial.values().fold(0.0f32, |m, &v| m.max(v.abs()));
         w.seed(&initial);
@@ -186,12 +190,11 @@ proptest! {
             let current_max: f32 = w.iter().fold(0.0f32, |m, (_, &v)| m.max(v.abs()));
             prop_assert!(
                 current_max < initial_max * 100.0,
-                "magnitude exploded at step {}: max={} initial={}",
-                step, current_max, initial_max,
+                "magnitude exploded at step {step}: max={current_max} initial={initial_max}",
             );
             prop_assert!(
                 current_max.is_finite(),
-                "NaN/Inf appeared at step {}", step,
+                "NaN/Inf appeared at step {step}",
             );
         }
     }
@@ -209,7 +212,7 @@ proptest! {
         let mut w = WaveStepper::new()
             .with_wave_speed(c).unwrap();
         w.seed(&constant_field(
-            &(0..n_nodes).map(|i| Box::leak(format!("n{}", i).into_boxed_str()) as &str)
+            &(0..n_nodes).map(|i| Box::leak(format!("n{i}").into_boxed_str()) as &str)
                 .collect::<Vec<_>>(),
             0.5,
         ));
@@ -241,7 +244,7 @@ fn max_stable_dt_for_unit_speed() {
 #[test]
 fn max_stable_dt_for_zero_speed_is_infinity() {
     let w = WaveStepper::new().with_wave_speed(0.0).unwrap();
-    assert_eq!(w.max_stable_dt(), f32::INFINITY);
+    assert!(w.max_stable_dt().is_infinite() && w.max_stable_dt().is_sign_positive());
 }
 
 #[test]
@@ -256,7 +259,7 @@ fn disturbance_propagates_at_finite_speed() {
         .unwrap();
     let mut initial = HashMap::new();
     for i in 0..11 {
-        initial.insert(format!("n{}", i), 0.0);
+        initial.insert(format!("n{i}"), 0.0);
     }
     initial.insert("n5".to_string(), 1.0);
     w.seed(&initial);
@@ -266,26 +269,13 @@ fn disturbance_propagates_at_finite_speed() {
     // Immediate neighbors should have moved.
     let n4 = w.psi_at("n4").unwrap();
     let n6 = w.psi_at("n6").unwrap();
-    assert!(
-        n4.abs() > 1e-6,
-        "n4 should have received signal: got {}",
-        n4
-    );
-    assert!(
-        n6.abs() > 1e-6,
-        "n6 should have received signal: got {}",
-        n6
-    );
+    assert!(n4.abs() > 1e-6, "n4 should have received signal: got {n4}");
+    assert!(n6.abs() > 1e-6, "n6 should have received signal: got {n6}");
     // Symmetry — n4 == n6 to machine precision.
-    assert!(
-        (n4 - n6).abs() < 1e-6,
-        "broken symmetry: n4={} n6={}",
-        n4,
-        n6
-    );
+    assert!((n4 - n6).abs() < 1e-6, "broken symmetry: n4={n4} n6={n6}");
     // Distant nodes should still be (close to) zero.
     let n0 = w.psi_at("n0").unwrap();
-    assert!(n0.abs() < 1e-6, "n0 leaked signal: {}", n0);
+    assert!(n0.abs() < 1e-6, "n0 leaked signal: {n0}");
 }
 
 #[test]
@@ -300,7 +290,7 @@ fn ring_topology_periodic_wraparound() {
     let n = 8;
     let mut initial = HashMap::new();
     for i in 0..n {
-        initial.insert(format!("n{}", i), 0.0);
+        initial.insert(format!("n{i}"), 0.0);
     }
     initial.insert("n0".to_string(), 1.0);
     w.seed(&initial);
@@ -310,9 +300,7 @@ fn ring_topology_periodic_wraparound() {
     let n_last = w.psi_at(&format!("n{}", n - 1)).unwrap();
     assert!(
         (n1 - n_last).abs() < 1e-6,
-        "wraparound broken: n1={} n_last={}",
-        n1,
-        n_last
+        "wraparound broken: n1={n1} n_last={n_last}"
     );
 }
 
@@ -333,8 +321,8 @@ fn undamped_energy_drift_bounded() {
     let mut initial = HashMap::new();
     for i in 0..n {
         // Sine-wave initial profile — has well-defined energy.
-        let v = ((i as f32) * std::f32::consts::PI / 5.0).sin();
-        initial.insert(format!("n{}", i), v);
+        let v = (fixture_index_as_f32(i) * std::f32::consts::PI / 5.0).sin();
+        initial.insert(format!("n{i}"), v);
     }
     w.seed(&initial);
     let neighbors = ring_neighbors(n);
@@ -351,10 +339,7 @@ fn undamped_energy_drift_bounded() {
         let relative_drift = (final_energy - initial_energy).abs() / initial_energy;
         assert!(
             relative_drift < 0.5,
-            "energy drift too large: initial={} final={} drift={}",
-            initial_energy,
-            final_energy,
-            relative_drift,
+            "energy drift too large: initial={initial_energy} final={final_energy} drift={relative_drift}",
         );
     }
 }
@@ -372,8 +357,8 @@ fn damped_energy_decays_monotonically() {
     let n = 7;
     let mut initial = HashMap::new();
     for i in 0..n {
-        let v = ((i as f32) * 0.5).sin();
-        initial.insert(format!("n{}", i), v);
+        let v = (fixture_index_as_f32(i) * 0.5).sin();
+        initial.insert(format!("n{i}"), v);
     }
     w.seed(&initial);
     let neighbors = ring_neighbors(n);
@@ -389,9 +374,7 @@ fn damped_energy_decays_monotonically() {
     let late_energy = w.total_energy(dt, &neighbors);
     assert!(
         late_energy < early_energy,
-        "damped energy didn't decay: early={} late={}",
-        early_energy,
-        late_energy,
+        "damped energy didn't decay: early={early_energy} late={late_energy}",
     );
 }
 
@@ -405,19 +388,22 @@ fn stress_1000_nodes_100_steps_no_panic() {
     let mut neighbors: HashMap<String, Vec<String>> = HashMap::new();
     for i in 0..n {
         // Initial: small noise.
-        initial.insert(format!("n{}", i), ((i as f32 * 0.137).sin()) * 0.1);
+        initial.insert(
+            format!("n{i}"),
+            (fixture_index_as_f32(i) * 0.137).sin() * 0.1,
+        );
         // Each node connected to next 2 (degree 4 ring).
         let prev1 = if i == 0 { n - 1 } else { i - 1 };
         let prev2 = if i < 2 { n - 2 + i } else { i - 2 };
         let next1 = (i + 1) % n;
         let next2 = (i + 2) % n;
         neighbors.insert(
-            format!("n{}", i),
+            format!("n{i}"),
             vec![
-                format!("n{}", prev2),
-                format!("n{}", prev1),
-                format!("n{}", next1),
-                format!("n{}", next2),
+                format!("n{prev2}"),
+                format!("n{prev1}"),
+                format!("n{next1}"),
+                format!("n{next2}"),
             ],
         );
     }
@@ -425,11 +411,11 @@ fn stress_1000_nodes_100_steps_no_panic() {
     let dt = 0.3;
     for step in 0..100 {
         let r = w.step(dt, &neighbors);
-        assert!(r.is_ok(), "step {} failed: {:?}", step, r);
+        assert!(r.is_ok(), "step {step} failed: {r:?}");
     }
     // After 100 steps we shouldn't have any NaNs.
     for (node, value) in w.iter() {
-        assert!(value.is_finite(), "NaN at node {}: value {}", node, value);
+        assert!(value.is_finite(), "NaN at node {node}: value {value}");
     }
     assert_eq!(w.step_count(), 100);
 }
@@ -445,7 +431,7 @@ fn clamp_traps_runaway() {
     let n = 5;
     let mut initial = HashMap::new();
     for i in 0..n {
-        initial.insert(format!("n{}", i), 0.5);
+        initial.insert(format!("n{i}"), 0.5);
     }
     // Inject a big disturbance that the leapfrog will propagate
     // outside [0, 1].
@@ -472,7 +458,11 @@ fn step_atomicity_on_error() {
     let before = w.psi_at("n0").unwrap();
     let _ = w.step(0.3, &chain_neighbors(2)); // expected to error
     let after = w.psi_at("n0").unwrap();
-    assert_eq!(before, after, "snapshots advanced on error");
+    assert_eq!(
+        before.to_bits(),
+        after.to_bits(),
+        "snapshots advanced on error"
+    );
     assert_eq!(w.step_count(), 0, "step_count incremented on error");
 }
 
@@ -538,7 +528,7 @@ fn cfl_can_be_disabled_for_advanced_callers() {
         .with_cfl_enforce(false);
     let mut initial = HashMap::new();
     for i in 0..3 {
-        initial.insert(format!("n{}", i), 0.5);
+        initial.insert(format!("n{i}"), 0.5);
     }
     w.seed(&initial);
     // dt at courant ~ 2.83 — would normally fail.
@@ -586,8 +576,8 @@ fn reset_warnings_preserves_state() {
 #[test]
 fn defaults_unchanged_after_construction() {
     let w = WaveStepper::new();
-    assert_eq!(w.wave_speed(), DEFAULT_WAVE_SPEED);
-    assert_eq!(w.damping(), DEFAULT_DAMPING);
+    assert_eq!(w.wave_speed().to_bits(), DEFAULT_WAVE_SPEED.to_bits());
+    assert_eq!(w.damping().to_bits(), DEFAULT_DAMPING.to_bits());
     assert_eq!(w.step_count(), 0);
     assert_eq!(w.cascade_warnings(), 0);
     assert_eq!(w.clamp_range(), None);

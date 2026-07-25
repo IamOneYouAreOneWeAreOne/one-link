@@ -35,6 +35,25 @@ pub enum FecError {
         len: usize,
     },
 
+    /// A single shard exceeds the codec's per-shard resource envelope.
+    #[error("shard too large: {got} bytes > max {max} bytes")]
+    ShardTooLarge {
+        /// Requested or received shard length.
+        got: usize,
+        /// Maximum shard length.
+        max: usize,
+    },
+
+    /// The complete `(k + m) * shard_len` stripe exceeds the bounded
+    /// working-set envelope.
+    #[error("FEC stripe working set too large: {got} bytes > max {max} bytes")]
+    WorkingSetTooLarge {
+        /// Computed aggregate bytes, or `usize::MAX` on overflow.
+        got: usize,
+        /// Maximum aggregate bytes.
+        max: usize,
+    },
+
     /// `decode` was given the wrong total number of `present` slots.
     #[error("expected {expected} present slots, got {got}")]
     PresentSlotCount {
@@ -52,4 +71,8 @@ pub enum FecError {
         /// Number of `Some(...)` entries in `present`.
         got: usize,
     },
+
+    /// An allegedly Cauchy-derived recovery matrix was singular.
+    #[error("recovery matrix is singular or internally inconsistent")]
+    SingularMatrix,
 }

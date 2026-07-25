@@ -1,6 +1,6 @@
 //! Shared, CI-safe gate for the native crates' wall-clock timing tests.
 //!
-//! The constant-time tests (DuressGate::open, `*::ct_eq`, Sphinx peel,
+//! The constant-time tests (`DuressGate::open`, `*::ct_eq`, Sphinx peel,
 //! quorum / fan-out / liveness verify, ...) check side-channel
 //! resistance by MEASURING wall-clock time and asserting the variance
 //! across code paths stays under a ceiling. The actual *correctness*

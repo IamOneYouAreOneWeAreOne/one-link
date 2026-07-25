@@ -2,16 +2,14 @@
 # verify-release.sh — One-command verification of a One Link release artifact.
 #
 # Usage:
-#   bash scripts/verify-release.sh <artifact-path>
+#   bash scripts/verify-release.sh <artifact-path> <release-tag>
 #
 # Where <artifact-path> is a .tar.gz, .whl, or other release file
 # downloaded from https://github.com/IamOneYouAreOneWeAreOne/one-link/releases.
 #
 # What this script does, in order:
-#   1. Locates the matching SHA256SUMS + .sigstore bundle next to
-#      the artifact (or downloads them from the same release if
-#      the script can infer the version).
-#   2. Computes sha256sum of the artifact and confirms it appears
+#   1. Verifies the signed SHA256SUMS manifest next to the artifact.
+#   2. Computes sha256sum of the artifact and confirms an exact filename match
 #      in SHA256SUMS — proves the artifact wasn't tampered with
 #      between the published manifest and your disk.
 #   3. Verifies the Sigstore attestation bundle for the artifact:
@@ -25,9 +23,8 @@
 #
 # Sovereignty note: this script trusts only:
 #   - sha256sum (in coreutils, baseline-trusted)
-#   - python3 + sigstore-python (PyPI; package is itself signed
-#     via Sigstore so a tampered sigstore-python doesn't slip
-#     through unless the Sigstore log itself is broken)
+#   - A caller-provided sigstore-python installation, or the exact
+#     hash-locked sigstore environment in this repository's uv.lock
 #   - The Sigstore Rekor transparency log (Linux Foundation
 #     OpenSSF, append-only public log)
 # It does NOT trust:
@@ -43,16 +40,16 @@ WORKFLOW_PATH=".github/workflows/release.yml"
 OIDC_ISSUER="https://token.actions.githubusercontent.com"
 
 # ── argument parsing ──────────────────────────────────────────
-if [ "${1:-}" = "" ]; then
+if [ "$#" -ne 2 ]; then
   cat <<EOF
 verify-release.sh — verify a One Link release artifact
 
 Usage:
-  bash scripts/verify-release.sh <artifact-path>
+  bash scripts/verify-release.sh <artifact-path> <release-tag>
 
 Examples:
-  bash scripts/verify-release.sh one_link-0.20.7.tar.gz
-  bash scripts/verify-release.sh one_link-0.20.7-py3-none-any.whl
+  bash scripts/verify-release.sh one-link-linux-x86_64.zip v0.21.0-alpha
+  bash scripts/verify-release.sh one_link-0.21.0a0-py3-none-any.whl v0.21.0-alpha
 
 The directory containing <artifact-path> must also contain:
   - SHA256SUMS         (signed hash manifest)
@@ -66,11 +63,21 @@ EOF
 fi
 
 ARTIFACT="$1"
+RELEASE_TAG="$2"
 ARTIFACT_DIR="$(dirname "$ARTIFACT")"
 ARTIFACT_NAME="$(basename "$ARTIFACT")"
 SUMS="${ARTIFACT_DIR}/SHA256SUMS"
 SUMS_SIG="${ARTIFACT_DIR}/SHA256SUMS.sigstore"
 ARTIFACT_SIG="${ARTIFACT}.sigstore"
+
+# Artifact filenames are normalized differently by each packager (for example,
+# the project version `0.21.0-alpha` becomes `0.21.0a0` in wheel filenames),
+# and standalone binary names contain no version at all. Never guess signing
+# identity from a filename: require the release tag the user intended to trust.
+if [[ ! "$RELEASE_TAG" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]]; then
+  echo "ERROR: invalid release tag '$RELEASE_TAG' (expected v<version>, no slashes)" >&2
+  exit 1
+fi
 
 # ── prereq checks ─────────────────────────────────────────────
 if [ ! -f "$ARTIFACT" ]; then
@@ -87,6 +94,11 @@ if [ ! -f "$ARTIFACT_SIG" ]; then
   echo "Download it from the GitHub release page." >&2
   exit 1
 fi
+if [ ! -f "$SUMS_SIG" ]; then
+  echo "ERROR: signed-manifest bundle not found at $SUMS_SIG" >&2
+  echo "Download SHA256SUMS.sigstore from the same tagged release." >&2
+  exit 1
+fi
 
 if ! command -v sha256sum >/dev/null 2>&1; then
   if command -v shasum >/dev/null 2>&1; then
@@ -99,30 +111,30 @@ else
   sha256() { sha256sum "$@"; }
 fi
 
-if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
-  echo "ERROR: python3 not found. Install Python ≥3.11 to verify Sigstore bundle." >&2
-  exit 1
-fi
-PY="$(command -v python3 || command -v python)"
-if ! "$PY" -c "import sigstore" >/dev/null 2>&1; then
-  echo "Note: sigstore-python not installed. Installing into a temp venv..."
-  TMPVENV="$(mktemp -d)/venv"
-  "$PY" -m venv "$TMPVENV"
-  "$TMPVENV/bin/pip" install --quiet --upgrade pip sigstore
-  PY="$TMPVENV/bin/python"
+# Prefer the repository's reviewed, hash-locked verifier environment. If this
+# script was copied out of the repository, accept an already-installed Sigstore
+# client but never download or execute an unpinned package automatically.
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+if command -v uv >/dev/null 2>&1 \
+   && [ -f "$REPO_ROOT/uv.lock" ] \
+   && [ -f "$REPO_ROOT/pyproject.toml" ]; then
+  SIGSTORE=(uv run --project "$REPO_ROOT" --frozen --only-group release-tools python -m sigstore)
+else
+  if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
+    echo "ERROR: Python 3.11+ and sigstore-python 4.4.0 are required." >&2
+    exit 1
+  fi
+  PY="$(command -v python3 || command -v python)"
+  if ! "$PY" -c "import sigstore; assert sigstore.__version__ == '4.4.0'" >/dev/null 2>&1; then
+    echo "ERROR: sigstore-python 4.4.0 is not installed." >&2
+    echo "Use this repository's locked uv environment or provision the verifier explicitly." >&2
+    exit 1
+  fi
+  SIGSTORE=("$PY" -m sigstore)
 fi
 
-# ── derive expected workflow identity from artifact filename ──
-# Filename is one_link-X.Y.Z.tar.gz or one_link-X.Y.Z-py3-none-any.whl;
-# the version slot drives the expected --cert-identity value.
-VERSION="$(echo "$ARTIFACT_NAME" | sed -E 's/^one_link-//; s/(\.tar\.gz|-.+\.whl)$//')"
-if [ -z "$VERSION" ]; then
-  echo "WARNING: could not infer version from filename '$ARTIFACT_NAME'" >&2
-  echo "         Sigstore identity check will use 'master' as the fallback ref." >&2
-  EXPECTED_REF="refs/heads/master"
-else
-  EXPECTED_REF="refs/tags/v${VERSION}"
-fi
+EXPECTED_REF="refs/tags/${RELEASE_TAG}"
 EXPECTED_IDENTITY="https://github.com/${REPO}/${WORKFLOW_PATH}@${EXPECTED_REF}"
 
 echo "─────────────────────────────────────────────────"
@@ -132,15 +144,30 @@ echo "  expected tag:  ${EXPECTED_REF}"
 echo "  signing ident: ${EXPECTED_IDENTITY}"
 echo "─────────────────────────────────────────────────"
 
-# ── step 1: hash matches manifest ─────────────────────────────
-echo "[1/3] checking SHA-256 against manifest..."
+# ── step 1: authenticate the manifest before trusting its hashes ──
+echo "[1/3] verifying Sigstore attestation on SHA256SUMS..."
+"${SIGSTORE[@]}" verify identity \
+    --bundle "$SUMS_SIG" \
+    --cert-identity "$EXPECTED_IDENTITY" \
+    --cert-oidc-issuer "$OIDC_ISSUER" \
+    "$SUMS" \
+  || { echo "  FAIL: SHA256SUMS Sigstore signature does not verify" >&2; exit 1; }
+echo "  OK"
+
+# ── step 2: hash matches one exact manifest filename ─────────
+echo "[2/3] checking SHA-256 against authenticated manifest..."
 ACTUAL_HASH="$(sha256 "$ARTIFACT" | awk '{print $1}')"
-MANIFEST_LINE="$(grep -F "  ${ARTIFACT_NAME}" "$SUMS" || true)"
-if [ -z "$MANIFEST_LINE" ]; then
-  echo "  FAIL: $ARTIFACT_NAME not listed in $SUMS" >&2
+EXPECTED_HASHES="$(awk -v name="$ARTIFACT_NAME" 'NF == 2 && $2 == name { print $1 }' "$SUMS")"
+MATCH_COUNT="$(printf '%s\n' "$EXPECTED_HASHES" | awk 'NF { count++ } END { print count + 0 }')"
+if [ "$MATCH_COUNT" -ne 1 ]; then
+  echo "  FAIL: expected exactly one manifest entry for $ARTIFACT_NAME, found $MATCH_COUNT" >&2
   exit 1
 fi
-EXPECTED_HASH="$(echo "$MANIFEST_LINE" | awk '{print $1}')"
+EXPECTED_HASH="$EXPECTED_HASHES"
+if [[ ! "$EXPECTED_HASH" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "  FAIL: malformed SHA-256 for $ARTIFACT_NAME in signed manifest" >&2
+  exit 1
+fi
 if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
   echo "  FAIL: hash mismatch for $ARTIFACT_NAME" >&2
   echo "    expected: $EXPECTED_HASH" >&2
@@ -149,23 +176,9 @@ if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
 fi
 echo "  OK: $ACTUAL_HASH"
 
-# ── step 2: sigstore verify the manifest itself ──────────────
-if [ -f "$SUMS_SIG" ]; then
-  echo "[2/3] verifying Sigstore attestation on SHA256SUMS..."
-  "$PY" -m sigstore verify identity \
-      --bundle "$SUMS_SIG" \
-      --cert-identity "$EXPECTED_IDENTITY" \
-      --cert-oidc-issuer "$OIDC_ISSUER" \
-      "$SUMS" \
-    || { echo "  FAIL: SHA256SUMS Sigstore signature does not verify" >&2; exit 1; }
-  echo "  OK"
-else
-  echo "[2/3] no SHA256SUMS.sigstore — skipping (older release format)"
-fi
-
 # ── step 3: sigstore verify the artifact directly ────────────
 echo "[3/3] verifying Sigstore attestation on $ARTIFACT_NAME..."
-"$PY" -m sigstore verify identity \
+"${SIGSTORE[@]}" verify identity \
     --bundle "$ARTIFACT_SIG" \
     --cert-identity "$EXPECTED_IDENTITY" \
     --cert-oidc-issuer "$OIDC_ISSUER" \

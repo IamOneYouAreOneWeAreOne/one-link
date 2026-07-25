@@ -2,7 +2,7 @@
 name = "ol_proximity_pair"
 version = "0.21.0-alpha.0"
 edition = "2021"
-description = "One Link Coherence Mesh: channel-reciprocity proximity Factor-2 pair-trust (Phase F1.4, COHERENCE_MESH_PLAN.md)."
+description = "Research primitives for a future channel-reciprocity pairing factor; not a complete authentication protocol."
 license = "AGPL-3.0-or-later"
 publish = false
 

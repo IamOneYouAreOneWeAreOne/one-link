@@ -1,13 +1,12 @@
-"""Neural extrapolator — drop-in replacement for HoldLastExtrapolator
-in :mod:`predictive_continuity`.
+"""Research-only neural extrapolator for :mod:`predictive_continuity`.
 
-The original engine ships ``HoldLastExtrapolator``: when a frame is
+The stable metadata engine uses ``HoldLastExtrapolator``: when a frame is
 due and its real packet hasn't arrived, the predictor re-emits the
 LAST real frame. That's a correct reference implementation but
 limited — long gaps in voice / video produce audible / visible
 "stuck frame" artifacts.
 
-This module replaces the predictor's content-generation step with
+This module can replace the isolated predictor's content-generation step with
 the actual trained voice predictor's next-frame output. The
 predictor's hidden state already encodes temporal context, so the
 predicted frame is a real model-generated continuation, not a
@@ -22,10 +21,9 @@ Architecture:
     linearly with steps_ahead so that the Reality dot's PREDICTED
     label degrades gracefully.
 
-For Tier ζ semantic-voice peers, this extrapolator + the
-SemanticVoiceCodec produce real "predictive negative latency" —
-the receiver renders frames ahead of when they'd otherwise arrive
-across the wire.
+It is not connected to browser media capture or receiver playout, is excluded
+from stable artifacts, and must not be treated as predictive-continuity product
+capability evidence.
 
 Companion: docs/LIVING_PRESENCE_ARCHITECTURE.md §4.7
 """

@@ -18,10 +18,7 @@ After this change:
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
@@ -110,7 +107,6 @@ async def test_api_peers_exposes_peer_app_version_after_caps():
     After A→B sends a TEXT, B's session for A has peer_caps populated,
     so /api/peers on B should report A's app_version.
     """
-    from one_link import __version__
     from tests.harness import request as ctrl_request
 
     with daemon_pair() as p:

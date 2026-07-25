@@ -1,6 +1,6 @@
 //! Chunk-log record format per [ADR-0003](../../../docs/decisions/0003-on-disk-format.md).
 //!
-//! The chunk_log file (managed by [`ol_wal`]) stores records of this
+//! The `chunk_log` file (managed by [`ol_wal`]) stores records of this
 //! shape inside the WAL payload. The WAL header (kind + flags + length +
 //! CRC) wraps a 80-byte chunk-record header followed by the AEAD
 //! ciphertext bytes. From the perspective of [`ol_wal`]:
@@ -12,7 +12,7 @@
 //!   payload = [ChunkRecordHeader (80 bytes) || ciphertext (length_ciphertext bytes)]
 //! ```
 //!
-//! ChunkRecordHeader layout:
+//! `ChunkRecordHeader` layout:
 //!
 //! ```text
 //! +--------+------------------------------------------------------------------+
@@ -33,6 +33,9 @@ use crate::stripe::{StripeDescriptor, STRIPE_DESCRIPTOR_LEN};
 /// Length of the chunk-record header in bytes.
 pub const CHUNK_RECORD_HEADER_LEN: usize = 80;
 
+/// Maximum ciphertext body that still fits in one bounded WAL record.
+pub const MAX_CHUNK_CIPHERTEXT_LEN: usize = ol_wal::MAX_PAYLOAD_LEN - CHUNK_RECORD_HEADER_LEN;
+
 // ─── kind / flags enums ──────────────────────────────────────────────
 
 /// Kind byte for the chunk-log WAL record.
@@ -42,7 +45,7 @@ pub enum ChunkRecordKind {
     ChunkBlob,
     /// 0x02: a Reed-Solomon parity shard (Phase C onwards).
     StripeParity,
-    /// 0xFE: a tombstone reference. The chunk_id was reclaimed; the
+    /// 0xFE: a tombstone reference. The `chunk_id` was reclaimed; the
     /// address still resolves to "missing on purpose."
     TombstoneRef,
 }
@@ -151,10 +154,10 @@ pub mod flag_bits {
 // ─── the record itself ──────────────────────────────────────────────
 
 /// A complete chunk-log record (header + ciphertext) ready to be wrapped
-/// in a [`ol_wal::Record`] and appended to the chunk_log.
+/// in a [`ol_wal::Record`] and appended to the `chunk_log`.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ChunkRecord {
-    /// Top-level kind (ChunkBlob / StripeParity / TombstoneRef).
+    /// Top-level kind (`ChunkBlob` / `StripeParity` / `TombstoneRef`).
     pub kind: ChunkRecordKind,
     /// Whether `chunk_id` is raw or convergent BLAKE3.
     pub address_kind: ChunkAddressKind,
@@ -168,15 +171,74 @@ pub struct ChunkRecord {
     pub length_plaintext: u32,
     /// 32-byte BLAKE3 chunk address.
     pub chunk_id: [u8; 32],
-    /// 16-byte ratchet_key_id (per ADR-0006 Rule 4).
+    /// 16-byte `ratchet_key_id` (per ADR-0006 Rule 4).
     pub ratchet_key_id: [u8; 16],
     /// Stripe descriptor (24 bytes per ADR-0004; `NONE` in Phase A1).
     pub stripe_descriptor: StripeDescriptor,
-    /// AEAD ciphertext bytes (length = length_plaintext + frame_count * 16).
+    /// AEAD ciphertext bytes. Atomic sessions add one 16-byte tag; streaming
+    /// sessions add one tag per 16 KiB frame.
     pub ciphertext: Vec<u8>,
 }
 
 impl ChunkRecord {
+    /// Validate all size and cross-field invariants without allocating.
+    pub fn validate(&self) -> Result<(), ChunkStoreError> {
+        if self.length_plaintext as usize > ol_aead::frame::MAX_CHUNK_PLAINTEXT_LEN {
+            return Err(ChunkStoreError::MalformedRecord {
+                offset: 0,
+                reason: "length_plaintext exceeds chunk pipeline maximum",
+            });
+        }
+        if self.ciphertext.len() > MAX_CHUNK_CIPHERTEXT_LEN {
+            return Err(ChunkStoreError::MalformedRecord {
+                offset: 0,
+                reason: "ciphertext exceeds WAL record maximum",
+            });
+        }
+        self.stripe_descriptor.validate()?;
+        match (self.kind, self.stripe_descriptor.stripe_role) {
+            (ChunkRecordKind::StripeParity, crate::stripe::StripeRole::Parity)
+            | (
+                ChunkRecordKind::ChunkBlob,
+                crate::stripe::StripeRole::Data | crate::stripe::StripeRole::NotStriped,
+            )
+            | (ChunkRecordKind::TombstoneRef, crate::stripe::StripeRole::NotStriped) => {}
+            _ => {
+                return Err(ChunkStoreError::InvalidStripeDescriptor(
+                    "record kind and stripe role disagree",
+                ));
+            }
+        }
+        if matches!(self.kind, ChunkRecordKind::TombstoneRef) {
+            if self.length_plaintext != 0 || !self.ciphertext.is_empty() {
+                return Err(ChunkStoreError::MalformedRecord {
+                    offset: 0,
+                    reason: "tombstone must have zero lengths",
+                });
+            }
+        } else if !self.compressed {
+            let plaintext_len = self.length_plaintext as usize;
+            // The negotiated native-transfer backend is intentionally not an
+            // on-disk flag: both layouts use the same AEAD kind and the store
+            // is an opaque ciphertext cache. The production fast path seals an
+            // atomic chunk with one tag, while the native streaming path seals
+            // each 16 KiB frame independently. Accept those two exact shapes
+            // and reject every ambiguous/truncated/extended length.
+            let expected_atomic = plaintext_len + ol_chunk::AEAD_TAG_LEN;
+            let expected_streaming = plaintext_len
+                + ol_chunk::frame_count_for_plaintext(plaintext_len) * ol_chunk::AEAD_TAG_LEN;
+            if self.ciphertext.len() != expected_atomic
+                && self.ciphertext.len() != expected_streaming
+            {
+                return Err(ChunkStoreError::MalformedRecord {
+                    offset: 0,
+                    reason: "uncompressed ciphertext length has no supported AEAD framing",
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Compute the flags byte from the boolean fields.
     #[inline]
     #[must_use]
@@ -222,22 +284,27 @@ impl ChunkRecord {
         Ok((address_kind, aead_kind, compressed, format_aware))
     }
 
-    /// Encode to a (kind_byte, flags_byte, payload_bytes) tuple suitable
+    /// Encode to a (`kind_byte`, `flags_byte`, `payload_bytes`) tuple suitable
     /// for [`ol_wal::Record`] construction.
-    pub fn encode(&self) -> (u8, u8, Vec<u8>) {
+    pub fn encode(&self) -> Result<(u8, u8, Vec<u8>), ChunkStoreError> {
+        self.validate()?;
         let mut payload = Vec::with_capacity(CHUNK_RECORD_HEADER_LEN + self.ciphertext.len());
         payload.extend_from_slice(&self.length_plaintext.to_le_bytes());
-        let length_ciphertext = self.ciphertext.len() as u32;
+        let length_ciphertext =
+            u32::try_from(self.ciphertext.len()).map_err(|_| ChunkStoreError::MalformedRecord {
+                offset: 0,
+                reason: "ciphertext length cannot be represented on disk",
+            })?;
         payload.extend_from_slice(&length_ciphertext.to_le_bytes());
         payload.extend_from_slice(&self.chunk_id);
         payload.extend_from_slice(&self.ratchet_key_id);
         payload.extend_from_slice(&self.stripe_descriptor.encode());
         debug_assert_eq!(payload.len(), CHUNK_RECORD_HEADER_LEN);
         payload.extend_from_slice(&self.ciphertext);
-        (self.kind.as_u8(), self.flags_byte(), payload)
+        Ok((self.kind.as_u8(), self.flags_byte(), payload))
     }
 
-    /// Decode from a (kind_byte, flags_byte, payload_bytes) tuple.
+    /// Decode from a (`kind_byte`, `flags_byte`, `payload_bytes`) tuple.
     ///
     /// # Errors
     ///
@@ -274,7 +341,7 @@ impl ChunkRecord {
             });
         }
         let ciphertext = payload[ciphertext_start..ciphertext_end].to_vec();
-        Ok(Self {
+        let record = Self {
             kind,
             address_kind,
             aead_kind,
@@ -285,7 +352,9 @@ impl ChunkRecord {
             ratchet_key_id,
             stripe_descriptor,
             ciphertext,
-        })
+        };
+        record.validate()?;
+        Ok(record)
     }
 }
 
@@ -312,7 +381,7 @@ mod tests {
     #[test]
     fn round_trip_default() {
         let r = sample_record();
-        let (kind, flags, payload) = r.encode();
+        let (kind, flags, payload) = r.encode().unwrap();
         let parsed = ChunkRecord::decode(kind, flags, &payload).unwrap();
         assert_eq!(parsed, r);
     }
@@ -324,7 +393,7 @@ mod tests {
         r.aead_kind = ChunkAeadKind::ChaCha20Poly1305;
         r.compressed = true;
         r.format_aware = true;
-        let (kind, flags, payload) = r.encode();
+        let (kind, flags, payload) = r.encode().unwrap();
         // Verify all four flag bits are set.
         assert_eq!(
             flags,
@@ -374,7 +443,7 @@ mod tests {
             stripe_m: 4,
             cohort_id_lo64: 0xCAFE_BABE_F00D_BAAD,
         };
-        let (kind, flags, payload) = r.encode();
+        let (kind, flags, payload) = r.encode().unwrap();
         let parsed = ChunkRecord::decode(kind, flags, &payload).unwrap();
         assert_eq!(parsed, r);
         assert!(!parsed.stripe_descriptor.is_not_striped());
@@ -383,7 +452,7 @@ mod tests {
     #[test]
     fn rejects_reserved_flag_bits() {
         let r = sample_record();
-        let (kind, mut flags, payload) = r.encode();
+        let (kind, mut flags, payload) = r.encode().unwrap();
         flags |= 0b1000_0000; // poison reserved bit
         let result = ChunkRecord::decode(kind, flags, &payload);
         assert!(matches!(
@@ -395,7 +464,7 @@ mod tests {
     #[test]
     fn rejects_unknown_kind() {
         let r = sample_record();
-        let (_kind, flags, payload) = r.encode();
+        let (_kind, flags, payload) = r.encode().unwrap();
         let result = ChunkRecord::decode(0x99, flags, &payload);
         assert!(matches!(
             result,
@@ -415,7 +484,7 @@ mod tests {
     #[test]
     fn rejects_length_ciphertext_mismatch() {
         let r = sample_record();
-        let (kind, flags, mut payload) = r.encode();
+        let (kind, flags, mut payload) = r.encode().unwrap();
         // Truncate ciphertext but leave header claiming the full length.
         payload.pop();
         let result = ChunkRecord::decode(kind, flags, &payload);
@@ -426,12 +495,43 @@ mod tests {
     }
 
     #[test]
+    fn accepts_atomic_and_streaming_aead_shapes_but_no_intermediate_length() {
+        let mut record = sample_record();
+        record.length_plaintext = 32 * 1024;
+
+        record.ciphertext = vec![0x11; record.length_plaintext as usize + 16];
+        assert!(
+            record.encode().is_ok(),
+            "atomic one-tag shape must be valid"
+        );
+
+        record.ciphertext = vec![0x22; record.length_plaintext as usize + 32];
+        assert!(record.encode().is_ok(), "two-frame shape must be valid");
+
+        record.ciphertext = vec![0x33; record.length_plaintext as usize + 17];
+        assert!(matches!(
+            record.encode(),
+            Err(ChunkStoreError::MalformedRecord { .. })
+        ));
+    }
+
+    #[test]
+    fn encode_rejects_record_kind_stripe_role_mismatch() {
+        let mut record = sample_record();
+        record.kind = ChunkRecordKind::StripeParity;
+        assert!(matches!(
+            record.encode(),
+            Err(ChunkStoreError::InvalidStripeDescriptor(_))
+        ));
+    }
+
+    #[test]
     fn tombstone_round_trip() {
         let mut r = sample_record();
         r.kind = ChunkRecordKind::TombstoneRef;
         r.length_plaintext = 0;
         r.ciphertext = Vec::new();
-        let (kind, flags, payload) = r.encode();
+        let (kind, flags, payload) = r.encode().unwrap();
         let parsed = ChunkRecord::decode(kind, flags, &payload).unwrap();
         assert_eq!(parsed.kind, ChunkRecordKind::TombstoneRef);
     }

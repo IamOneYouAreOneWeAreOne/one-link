@@ -14,10 +14,9 @@ crate-type = ["lib"]
 thiserror = { workspace = true }
 ol_fuse   = { path = "../ol_fuse" }
 
-# FSKit is macOS 15+ (Sequoia). Crate's Swift/ObjC bindings land in
-# the `macos-mount` feature. Without it, mount() returns
-# `MountError::UnsupportedPlatform` on non-macOS and a typed
-# "feature required" error on macOS.
+# FSKit is available beginning with macOS 15.4. `macos-mount` is a
+# reserved compatibility gate only; no Swift/Objective-C app-extension
+# adapter is currently linked, and enabling it must not report readiness.
 [features]
 default = []
 macos-mount = []

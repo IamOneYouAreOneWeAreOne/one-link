@@ -7,7 +7,7 @@
 //! 2. The set of source-symbol indices sampled for a given `symbol_id`.
 //!
 //! We derive a per-`symbol_id` seed via BLAKE3 keyed hash, then run a
-//! tiny SplitMix64-compatible PRNG over it. SplitMix64 is exact,
+//! tiny `SplitMix64`-compatible PRNG over it. `SplitMix64` is exact,
 //! deterministic, and 1 multiply + 1 shift per 64-bit draw — fast
 //! enough that encoding never bottlenecks on RNG.
 
@@ -15,7 +15,7 @@ const SEED_CONTEXT: &str = "ol-fountain-lt-v1";
 
 /// Derive a 64-bit seed for `(k, symbol_id)`.
 ///
-/// Uses BLAKE3.derive_key with [`SEED_CONTEXT`] and the 8-byte key
+/// Uses `BLAKE3.derive_key` with [`SEED_CONTEXT`] and the 8-byte key
 /// `[k_le; 4][symbol_id_le; 4]` → take the first 8 bytes of the output.
 #[inline]
 #[must_use]
@@ -24,10 +24,12 @@ pub fn seed_for(k: u32, symbol_id: u32) -> u64 {
     input[0..4].copy_from_slice(&k.to_le_bytes());
     input[4..8].copy_from_slice(&symbol_id.to_le_bytes());
     let key = blake3::derive_key(SEED_CONTEXT, &input);
-    u64::from_le_bytes(key[..8].try_into().expect("8 bytes"))
+    let mut seed = [0u8; 8];
+    seed.copy_from_slice(&key[..8]);
+    u64::from_le_bytes(seed)
 }
 
-/// SplitMix64 deterministic PRNG. See https://prng.di.unimi.it/splitmix64.c
+/// `SplitMix64` deterministic PRNG. See <https://prng.di.unimi.it/splitmix64.c>.
 ///
 /// One `next` call is 1 multiply + 1 add + 1 xor; ~2 cycles on x86.
 #[derive(Debug, Clone, Copy)]
@@ -75,7 +77,11 @@ impl SplitMix64 {
     pub fn next_f64_01(&mut self) -> f64 {
         // 53-bit mantissa.
         let bits = self.next_u64() >> 11;
-        bits as f64 * (1.0 / ((1u64 << 53) as f64))
+        let high = u32::try_from(bits >> 32).expect("53-bit sample high half fits in u32");
+        let low =
+            u32::try_from(bits & u64::from(u32::MAX)).expect("masked sample low half fits in u32");
+        let value = f64::from(high).mul_add(4_294_967_296.0, f64::from(low));
+        value * (1.0 / 9_007_199_254_740_992.0)
     }
 }
 

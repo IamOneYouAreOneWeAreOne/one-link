@@ -108,7 +108,8 @@ pub fn emit_rust_enum(parsed: &ParsedEnum, opts: &EmitOptions) -> Result<String,
     writeln!(out, "        let mut out = Vec::new();").map_err(|_| EmitError::FmtFailed)?;
     writeln!(out, "        match self {{").map_err(|_| EmitError::FmtFailed)?;
     for (idx, variant) in parsed.variants.iter().enumerate() {
-        let tag = idx as u8;
+        let tag =
+            u8::try_from(idx).map_err(|_| EmitError::TooManyVariants(parsed.variants.len()))?;
         emit_match_arm(&mut out, &parsed.name, variant, tag)?;
     }
     writeln!(out, "        }}").map_err(|_| EmitError::FmtFailed)?;
@@ -155,14 +156,14 @@ fn field_to_rust_ty(ty: &FieldType) -> String {
         FieldType::U16 => "u16".into(),
         FieldType::U32 => "u32".into(),
         FieldType::U64 => "u64".into(),
-        FieldType::ByteArray(n) => format!("[u8; {}]", n),
+        FieldType::ByteArray(n) => format!("[u8; {n}]"),
         FieldType::String => "String".into(),
     }
 }
 
 fn emit_encode_field(out: &mut String, field: &ParsedField, prefix: &str) -> Result<(), EmitError> {
     let name = &field.name;
-    let access = format!("{}{}", prefix, name);
+    let access = format!("{prefix}{name}");
     write_encode_expr(out, &field.ty, &access, name, "        ")
 }
 
@@ -188,8 +189,7 @@ fn emit_match_arm(
                 enum_name, variant.name
             )
             .map_err(|_| EmitError::FmtFailed)?;
-            writeln!(out, "                out.push({});", tag)
-                .map_err(|_| EmitError::FmtFailed)?;
+            writeln!(out, "                out.push({tag});").map_err(|_| EmitError::FmtFailed)?;
             // For the variant payload we encode the value through a
             // shared expression-level emitter; access path is
             // ``__payload`` (the binding from the match arm).
@@ -243,32 +243,26 @@ fn write_encode_expr(
             // binding is already a reference. Matches the prior wire
             // layout byte-for-byte.
             if access.starts_with("__") {
-                writeln!(out, "{}out.extend_from_slice({});", indent, access)
+                writeln!(out, "{indent}out.extend_from_slice({access});")
                     .map_err(|_| EmitError::FmtFailed)
             } else {
-                writeln!(out, "{}out.extend_from_slice(&{});", indent, access)
+                writeln!(out, "{indent}out.extend_from_slice(&{access});")
                     .map_err(|_| EmitError::FmtFailed)
             }
         }
         FieldType::String => {
             writeln!(
                 out,
-                "{}let __{}_bytes = {}.as_bytes();",
-                indent, local_name, access
+                "{indent}let __{local_name}_bytes = {access}.as_bytes();"
             )
             .map_err(|_| EmitError::FmtFailed)?;
             writeln!(
                 out,
-                "{}out.extend_from_slice(&(__{}_bytes.len() as u32).to_le_bytes());",
-                indent, local_name
+                "{indent}out.extend_from_slice(&(__{local_name}_bytes.len() as u32).to_le_bytes());"
             )
             .map_err(|_| EmitError::FmtFailed)?;
-            writeln!(
-                out,
-                "{}out.extend_from_slice(__{}_bytes);",
-                indent, local_name
-            )
-            .map_err(|_| EmitError::FmtFailed)
+            writeln!(out, "{indent}out.extend_from_slice(__{local_name}_bytes);")
+                .map_err(|_| EmitError::FmtFailed)
         }
     }
 }
@@ -280,7 +274,7 @@ fn write_encode_expr(
 /// minimal but covers both call sites the emitter actually generates.
 fn deref_value(access: &str, _expected_ty: &str) -> String {
     if access.starts_with("__") {
-        format!("(*{})", access)
+        format!("(*{access})")
     } else {
         access.to_string()
     }
@@ -372,7 +366,7 @@ mod tests {
         use crate::parser::{ParsedEnum, ParsedVariant};
         let variants = (0..256u32)
             .map(|i| ParsedVariant {
-                name: format!("V{}", i),
+                name: format!("V{i}"),
                 payload: None,
             })
             .collect();

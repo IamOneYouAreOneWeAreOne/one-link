@@ -1,10 +1,10 @@
-//! Pinned KAT vectors for the Row 7 transport_obfs layer.
+//! Pinned KAT vectors for the Row 7 `transport_obfs` layer.
 //!
 //! Pins:
 //!   1. `derive_nonce(conn_id, counter)` byte-format.
 //!   2. `obfuscate(key, nonce, plaintext)` keystream output.
-//!   3. Handshake message length constants (BridgeKeypair, MAC, total).
-//!   4. Round-trip seal_outbound + open_inbound with seeded keys.
+//!   3. Handshake message length constants (`BridgeKeypair`, MAC, total).
+//!   4. Round-trip `seal_outbound` + `open_inbound` with seeded keys.
 //!
 //! ## Regenerating
 //!
@@ -19,6 +19,7 @@ use ol_onion::transport_obfs::handshake::{
 };
 use ol_onion::transport_obfs::primitive::{derive_nonce, obfuscate, OBFS_KEY_LEN, OBFS_NONCE_LEN};
 use ol_onion::transport_obfs::session::{Session, SESSION_KEY_LEN};
+use std::fmt::Write as _;
 
 const KEY_FIXED: [u8; OBFS_KEY_LEN] = [
     0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
@@ -28,13 +29,14 @@ const KEY_FIXED: [u8; OBFS_KEY_LEN] = [
 const NONCE_FIXED: [u8; OBFS_NONCE_LEN] = [
     0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
 ];
+const EXPECTED_SESSION_CIPHER_FIRST16_HEX: &str = "be394f65b06edcb69ea94f0b902a806c";
 
 /// `derive_nonce(0xDEADBEEF, 0x123456789ABCDEF0)` — pinned.
 const EXPECTED_DERIVED_NONCE_HEX: &str = "deadbeef123456789abcdef0";
 
-/// `obfuscate(KEY_FIXED, NONCE_FIXED, [0; 32])` — i.e. raw ChaCha20
+/// `obfuscate(KEY_FIXED, NONCE_FIXED, [0; 32])` — i.e. raw `ChaCha20`
 /// keystream first 32 bytes under the fixed key/nonce. Drift here
-/// means ChaCha20 swapped impl or our wrapping changed.
+/// means `ChaCha20` swapped impl or our wrapping changed.
 const EXPECTED_KEYSTREAM_HEX: &str =
     "e7a333c2a548179fbc60220459847aa60fb23c46ec527bcb3091b4e088ae900e";
 
@@ -46,12 +48,16 @@ fn check_regen<F: FnOnce()>(label: &str, dump: F) {
 }
 
 fn to_hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    let mut output = String::with_capacity(b.len() * 2);
+    for byte in b {
+        write!(&mut output, "{byte:02x}").expect("writing to String is infallible");
+    }
+    output
 }
 
 #[test]
 fn kat_derive_nonce_byte_format_pinned() {
-    let n = derive_nonce(0xDEADBEEF, 0x123456789ABCDEF0);
+    let n = derive_nonce(0xDEAD_BEEF, 0x1234_5678_9ABC_DEF0);
     let hex = to_hex(&n);
     check_regen("derive_nonce(0xDEADBEEF, 0x123456789ABCDEF0)", || {
         eprintln!("    EXPECTED_DERIVED_NONCE_HEX = \"{hex}\"");
@@ -116,7 +122,6 @@ fn kat_session_round_trip_pinned() {
             eprintln!("    EXPECTED_SESSION_CIPHER_FIRST16_HEX = \"{first16_hex}\"");
         },
     );
-    const EXPECTED_SESSION_CIPHER_FIRST16_HEX: &str = "be394f65b06edcb69ea94f0b902a806c";
     assert_eq!(
         first16_hex, EXPECTED_SESSION_CIPHER_FIRST16_HEX,
         "Session.seal_outbound byte format drift"

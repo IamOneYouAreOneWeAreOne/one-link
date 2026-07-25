@@ -12,7 +12,7 @@
 //!      threshold.
 //!   4. `stale_buckets` indices are always in-range and unique.
 //!
-//! Gate ladder: CI default 5k iters (DhtNode build is socket-bound);
+//! Gate ladder: CI default 5k iters (`DhtNode` build is socket-bound);
 //! nightly 50k iters via `ONE_LINK_F1_GATE=1`.
 
 use std::net::SocketAddr;
@@ -72,7 +72,8 @@ proptest! {
         let own_id = NodeId::from_bytes(own);
         let mut t = RoutingTable::new(own_id);
         for (i, p) in peers.iter().enumerate() {
-            let _ = t.insert(NodeId::from_bytes(*p), i as u64);
+            let timestamp = u64::try_from(i).expect("property peer index fits in u64");
+            let _ = t.insert(NodeId::from_bytes(*p), timestamp);
         }
         let stale = t.stale_buckets(now, max_age);
         for idx in &stale {
@@ -80,7 +81,7 @@ proptest! {
         }
         // Indices unique.
         let mut sorted = stale.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         sorted.dedup();
         prop_assert_eq!(sorted.len(), stale.len());
     }
@@ -96,7 +97,8 @@ proptest! {
         let own_id = NodeId::from_bytes(own);
         let mut t = RoutingTable::new(own_id);
         for (i, p) in peers.iter().enumerate() {
-            let _ = t.insert(NodeId::from_bytes(*p), i as u64);
+            let timestamp = u64::try_from(i).expect("property peer index fits in u64");
+            let _ = t.insert(NodeId::from_bytes(*p), timestamp);
         }
         let stale = t.stale_buckets(now, max_age);
         let sizes = t.bucket_sizes();
@@ -164,7 +166,7 @@ proptest! {
         node.shutdown();
     }
 
-    /// republish_records count == records older than threshold.
+    /// Without reachable peers, no record can be reported as acknowledged.
     #[test]
     fn republish_count_matches_aged_records(
         now in 1_000_000u64..2_000_000u64,
@@ -174,14 +176,11 @@ proptest! {
         for age in &ages {
             let pub_time = now.saturating_sub(*age);
             let rec = make_record(pub_time);
-            node.publish_self_record(rec);
+            node.cache_verified_record(rec).unwrap();
         }
-        // With max_age = 0, every record older than `now` counts.
+        // With no routing peers there can be no STORE acknowledgement.
         let count = node.republish_records(now, 0);
-        let expected = ages.len();
-        // make_node() publishes nothing; ages.len() records inserted; all
-        // have publish_time <= now → all count.
-        prop_assert_eq!(count, expected);
+        prop_assert_eq!(count, 0);
         node.shutdown();
     }
 
@@ -196,7 +195,7 @@ proptest! {
         for age in &ages {
             let pub_time = now.saturating_sub(*age);
             let rec = make_record(pub_time);
-            node.publish_self_record(rec);
+            node.cache_verified_record(rec).unwrap();
         }
         let count = node.republish_records(now, u64::MAX);
         prop_assert_eq!(count, 0);

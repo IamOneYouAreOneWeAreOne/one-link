@@ -124,8 +124,7 @@ mod tests {
         let relative_error = (g_a - G_A_GALAXY_PLANCK).abs() / G_A_GALAXY_PLANCK;
         assert!(
             relative_error < 0.01,
-            "g_A from formula = {g_a}; expected ≈ {} (galaxy reference)",
-            G_A_GALAXY_PLANCK
+            "g_A from formula = {g_a}; expected ≈ {G_A_GALAXY_PLANCK} (galaxy reference)"
         );
     }
 }

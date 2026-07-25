@@ -1,14 +1,14 @@
-//! `Memtable` — in-memory chunk_id → location index with a Bloom filter
+//! `Memtable` — in-memory `chunk_id` → location index with a Bloom filter
 //! front for sub-microsecond presence checks.
 //!
 //! Per [ADR-0003](../../../docs/decisions/0003-on-disk-format.md) the
 //! Bloom filter sits in front of the LSM SST files; while we don't
-//! persist SSTs in Phase A1 (rebuilt from the chunk_log on every boot),
+//! persist SSTs in Phase A1 (rebuilt from the `chunk_log` on every boot),
 //! we still expose the bloom interface so the higher layers can use it
 //! the same way Phase B's flushed SSTs will.
 //!
 //! Bloom parameters:
-//! - 10 bits per chunk_id (~1% false-positive rate)
+//! - 10 bits per `chunk_id` (~1% false-positive rate)
 //! - SipHash-1-3 (the `bloomfilter` crate's default) — deterministic
 //!   under a fixed seed, hardware-friendly
 //! - Capacity grows with the chunk count via re-allocation when the
@@ -29,25 +29,29 @@ use crate::location::ChunkLocation;
 /// 64K chunks ≈ 4 GiB at the 64 KiB ADR-0001 mean — generous default
 /// that doesn't waste memory on empty stores.
 const DEFAULT_BLOOM_CAPACITY: usize = 64 * 1024;
+/// Maximum allocation influenced by the caller's capacity hint. The table can
+/// still grow as real records are inserted; this only prevents an untrusted
+/// hint from causing a large eager allocation.
+pub const MAX_MEMTABLE_CAPACITY_HINT: usize = 256 * 1024;
 
-/// In-memory chunk_id → ChunkLocation index.
+/// In-memory `chunk_id` → `ChunkLocation` index.
 ///
-/// Maintained by [`crate::store::ChunkStore`] across the chunk_log
+/// Maintained by [`crate::store::ChunkStore`] across the `chunk_log`
 /// replay and live writes. Lookups go through the Bloom filter first so
 /// negative answers cost ~100 ns; positive bloom hits go to the
 /// hashmap for the actual location.
 pub struct Memtable {
-    /// chunk_id → location.
+    /// `chunk_id` → location.
     map: HashMap<[u8; 32], ChunkLocation>,
     /// Presence-only bloom for fast negative lookups.
-    bloom: Bloom<[u8; 32]>,
+    bloom: Option<Bloom<[u8; 32]>>,
 }
 
 impl std::fmt::Debug for Memtable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Memtable")
             .field("len", &self.map.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -63,9 +67,16 @@ impl Memtable {
     #[must_use]
     pub fn with_capacity(expected_chunks: usize) -> Self {
         // bloomfilter::Bloom needs at least 1 bit. Clamp.
-        let n = expected_chunks.max(8);
+        let n = expected_chunks.clamp(8, MAX_MEMTABLE_CAPACITY_HINT);
         // 1% FP rate → ~10 bits/key, ~7 hash functions.
-        let bloom = Bloom::new_for_fp_rate(n, 0.01).expect("bloom params valid");
+        let bloom = Bloom::new_for_fp_rate(n, 0.01)
+            .or_else(|_| {
+                // Entropy failure must not make opening a local store panic. A
+                // deterministic fallback preserves correctness; it only weakens
+                // adversarial false-positive resistance for this process.
+                Bloom::new_for_fp_rate_with_seed(n, 0.01, &[0xA5; 32])
+            })
+            .ok();
         Self {
             map: HashMap::with_capacity(n),
             bloom,
@@ -86,10 +97,12 @@ impl Memtable {
         self.map.is_empty()
     }
 
-    /// Insert a chunk_id → location pair. Updates both the hashmap and
+    /// Insert a `chunk_id` → location pair. Updates both the hashmap and
     /// the bloom.
     pub fn insert(&mut self, chunk_id: [u8; 32], location: ChunkLocation) {
-        self.bloom.set(&chunk_id);
+        if let Some(bloom) = &mut self.bloom {
+            bloom.set(&chunk_id);
+        }
         self.map.insert(chunk_id, location);
     }
 
@@ -98,35 +111,37 @@ impl Memtable {
     #[inline]
     #[must_use]
     pub fn bloom_check(&self, chunk_id: &[u8; 32]) -> bool {
-        self.bloom.check(chunk_id)
+        self.bloom
+            .as_ref()
+            .is_none_or(|bloom| bloom.check(chunk_id))
     }
 
     /// Authoritative presence check (bloom + hashmap).
     #[inline]
     #[must_use]
     pub fn contains(&self, chunk_id: &[u8; 32]) -> bool {
-        self.bloom.check(chunk_id) && self.map.contains_key(chunk_id)
+        self.bloom_check(chunk_id) && self.map.contains_key(chunk_id)
     }
 
     /// Look up a location. Returns `None` if absent.
     #[inline]
     #[must_use]
     pub fn get(&self, chunk_id: &[u8; 32]) -> Option<&ChunkLocation> {
-        if !self.bloom.check(chunk_id) {
+        if !self.bloom_check(chunk_id) {
             return None;
         }
         self.map.get(chunk_id)
     }
 
-    /// Remove a chunk_id from the index. Note: the bloom filter cannot
-    /// "unset" a key; later bloom_check() may still return true (false
+    /// Remove a `chunk_id` from the index. Note: the bloom filter cannot
+    /// "unset" a key; later `bloom_check()` may still return true (false
     /// positive). The hashmap is the source of truth for definitive
     /// presence.
     pub fn remove(&mut self, chunk_id: &[u8; 32]) -> Option<ChunkLocation> {
         self.map.remove(chunk_id)
     }
 
-    /// Iterate (chunk_id, location) pairs. Order is HashMap iteration
+    /// Iterate (`chunk_id`, location) pairs. Order is `HashMap` iteration
     /// order — non-deterministic; callers that need order must sort.
     pub fn iter(&self) -> impl Iterator<Item = (&[u8; 32], &ChunkLocation)> {
         self.map.iter()
@@ -221,7 +236,16 @@ mod tests {
     #[test]
     fn debug_does_not_panic() {
         let m = Memtable::with_capacity(16);
-        let s = format!("{:?}", m);
+        let s = format!("{m:?}");
         assert!(s.contains("Memtable"));
+    }
+
+    #[test]
+    fn capacity_hint_is_bounded_before_allocation() {
+        let memtable = Memtable::with_capacity(usize::MAX);
+        // HashMap rounds requested capacity up for its load factor, but the
+        // allocation remains proportional to the capped hint rather than the
+        // attacker-provided usize::MAX.
+        assert!(memtable.map.capacity() <= MAX_MEMTABLE_CAPACITY_HINT * 2);
     }
 }

@@ -14,14 +14,10 @@ launcher's retry-on-failure plumbing.
 from __future__ import annotations
 
 import inspect
-import os
 import subprocess
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
-
-import pytest
 
 
 # ─── splash ─────────────────────────────────────────────────────────────
@@ -108,19 +104,13 @@ def test_read_log_tail_seek_negative_safely(tmp_path):
 def test_reveal_in_file_manager_uses_platform_command(tmp_path, monkeypatch):
     from one_link import error_dialog
     calls = []
-    monkeypatch.setattr(error_dialog.subprocess, "Popen",
-                        lambda args, **kw: calls.append(args))
-    if os.name == "nt":
-        startfile_calls = []
-        monkeypatch.setattr(error_dialog.os, "startfile",
-                            lambda p: startfile_calls.append(p),
-                            raising=False)
-        error_dialog._reveal_in_file_manager(tmp_path)
-        assert startfile_calls == [str(tmp_path)]
-        assert calls == []
-    else:
-        error_dialog._reveal_in_file_manager(tmp_path)
-        assert calls and calls[0][0] in ("open", "xdg-open")
+    monkeypatch.setattr(
+        error_dialog,
+        "launch_system_opener",
+        lambda path, **kw: calls.append((path, kw)),
+    )
+    error_dialog._reveal_in_file_manager(tmp_path)
+    assert calls == [(tmp_path, {})]
 
 
 def test_reveal_in_file_manager_swallows_errors(tmp_path, monkeypatch):
@@ -129,9 +119,7 @@ def test_reveal_in_file_manager_swallows_errors(tmp_path, monkeypatch):
     from one_link import error_dialog
     def _boom(*a, **k):
         raise OSError("simulated")
-    monkeypatch.setattr(error_dialog.subprocess, "Popen", _boom)
-    if os.name == "nt":
-        monkeypatch.setattr(error_dialog.os, "startfile", _boom, raising=False)
+    monkeypatch.setattr(error_dialog, "launch_system_opener", _boom)
     error_dialog._reveal_in_file_manager(tmp_path)  # must not raise
 
 
@@ -170,7 +158,7 @@ def test_spawn_splash_command_targets_correct_entry(monkeypatch):
     monkeypatch.setattr(app_mod.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(app_mod.sys, "frozen", False, raising=False)
     app_mod._spawn_splash()
-    assert captured["args"][1:] == ["-m", "one_link.splash"]
+    assert captured["args"][1:] == ["-P", "-m", "one_link.splash"]
 
 
 def test_close_splash_handles_none():

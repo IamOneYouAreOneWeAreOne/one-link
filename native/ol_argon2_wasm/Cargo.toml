@@ -1,0 +1,17 @@
+[package]
+name = "ol_argon2_wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Fail-closed Argon2id WebAssembly KDF for One Link browser identity wrapping"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+argon2 = { version = "=0.5.3", default-features = false, features = ["alloc", "zeroize"] }
+subtle = { workspace = true }
+zeroize = { workspace = true }
+
+[lints]
+workspace = true

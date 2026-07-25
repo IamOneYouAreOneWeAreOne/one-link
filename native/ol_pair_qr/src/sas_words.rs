@@ -89,7 +89,7 @@ mod tests {
         for i in 1..=la {
             curr[0] = i;
             for j in 1..=lb {
-                let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+                let cost = usize::from(a[i - 1] != b[j - 1]);
                 curr[j] = (curr[j - 1] + 1).min(prev[j] + 1).min(prev[j - 1] + cost);
             }
             std::mem::swap(&mut prev, &mut curr);

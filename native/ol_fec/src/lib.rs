@@ -29,5 +29,11 @@ pub use cauchy::CauchyMatrix;
 pub use codec::Codec;
 pub use error::FecError;
 
+/// Maximum bytes in one FEC shard at the public trust boundary.
+pub const MAX_FEC_SHARD_BYTES: usize = 1024 * 1024;
+
+/// Maximum aggregate bytes represented by one `(k + m)` FEC stripe.
+pub const MAX_FEC_WORKING_SET_BYTES: usize = 64 * 1024 * 1024;
+
 /// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

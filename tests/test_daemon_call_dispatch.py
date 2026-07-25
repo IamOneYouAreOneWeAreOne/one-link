@@ -23,10 +23,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import blake3
 
 from one_link.call_manager import ManagerEventKind
-from one_link.call_signaling import CALL_ACCEPT, CALL_INVITE, CallPhase
+from one_link.call_signaling import CALL_ACCEPT, CallPhase
 from one_link.daemon import Daemon
 from one_link.identity import Identity
-from one_link.recording_consent import RECORDING_GRANT, RECORDING_REQUEST
 from one_link.wire import decode_msg
 
 
@@ -99,6 +98,9 @@ class _FakeChannel:
         self.peer_ed_pub = peer_ed_pub
         self.peer_short_id = peer_short_id
         self.peer_caps = {"features": ["chat", "frame_provenance_v1"]}
+        self.transcript_hash = blake3.blake3(
+            b"test-call-dispatch-transcript-v1\x00" + peer_ed_pub
+        ).digest()
         self.sent: list[bytes] = []
 
     async def send(self, payload: bytes) -> None:
@@ -430,6 +432,37 @@ def test_inbound_call_end_for_unknown_call_is_dropped(
         loop.close()
     # No manager created (only CALL_INVITE opens a new manager)
     assert mom_daemon._call_registry.get("ghost-call") is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_invite_timer_expires_unanswered_incoming_ring(
+    mom_daemon: Daemon,
+    alice: Identity,
+    mom: Identity,
+) -> None:
+    from one_link.call_manager import ManagerEvent
+
+    mgr = mom_daemon._call_registry.open(
+        call_id="runtime-ring-expiry",
+        peer_master_vk_hex=alice.fingerprint,
+        local_role="recipient",
+        local_master_vk_hex=mom.fingerprint,
+        started_at_ms=1_000,
+    )
+    mgr.handle(ManagerEvent(ManagerEventKind.WIRE_CALL_INVITE, 1_000))
+    mom_daemon._broadcast_tail = lambda _event: None  # type: ignore[method-assign]
+    mom_daemon._save_call_resume_ledger = lambda: None  # type: ignore[method-assign]
+
+    assert await mom_daemon._expire_call_invite_if_due(
+        mgr,
+        now_ms=30_999,
+    ) is False
+    assert mgr.phase == CallPhase.RINGING
+    assert await mom_daemon._expire_call_invite_if_due(
+        mgr,
+        now_ms=31_000,
+    ) is True
+    assert mom_daemon._call_registry.get("runtime-ring-expiry") is None
 
 
 def test_outbound_messages_flow_back_to_channel(

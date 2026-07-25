@@ -19,10 +19,18 @@ use ol_pair_qr::invite::{CapabilityScope, Invite};
 use ol_pair_qr::sas::Sas;
 use ol_pair_qr::{Inviter, PairError, Scanner};
 
+type DecodedInvite<'py> = (
+    Bound<'py, PyBytes>,
+    Bound<'py, PyBytes>,
+    Bound<'py, PyBytes>,
+    u64,
+    Bound<'py, PyBytes>,
+);
+
 // ── Helpers ───────────────────────────────────────────────────────
 
 fn map_err(e: PairError) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    PyValueError::new_err(crate::errors::owned_error_message(e))
 }
 
 fn signing_key_from_seed(seed: &[u8]) -> PyResult<SigningKey> {
@@ -45,9 +53,10 @@ fn signing_key_from_seed(seed: &[u8]) -> PyResult<SigningKey> {
 /// 1. `PyInviter(id_seed, expiry_unix, scope=b"")` — generate.
 /// 2. `.invite_bytes()` — bytes to encode as QR.
 /// 3. `.receive_response(response_bytes)` → returns SAS string.
-/// 4. After user confirms SAS: `.confirm()` or
-///    `.confirm_with_factor2(factor2_key)` →
-///    `(confirm_bytes, chain_key)`.
+/// 4. After user confirms SAS: `.confirm()` returns the plain-path confirm
+///    and key. The Factor-2 path starts with
+///    `.confirm_with_factor2(factor2_key)` and withholds its key until
+///    `.receive_factor2_ack(ack)` succeeds.
 #[pyclass(name = "Inviter")]
 pub struct PyInviter {
     inner: Option<Inviter>,
@@ -74,7 +83,7 @@ impl PyInviter {
             .inner
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("Inviter already consumed"))?;
-        Ok(PyBytes::new_bound(py, &inv.invite_bytes()))
+        Ok(PyBytes::new(py, &inv.invite_bytes()))
     }
 
     /// Identity pubkey baked into the invite.
@@ -83,7 +92,7 @@ impl PyInviter {
             .inner
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("Inviter already consumed"))?;
-        Ok(PyBytes::new_bound(py, &inv.invite().id_pubkey))
+        Ok(PyBytes::new(py, &inv.invite().id_pubkey))
     }
 
     /// Current state name (for logging).
@@ -112,11 +121,11 @@ impl PyInviter {
             .inner
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("Inviter already consumed"))?;
-        Ok(inv.sas().map(|s| s.display()))
+        Ok(inv.sas().map(ol_pair_qr::Sas::display))
     }
 
     /// User confirmed the SAS matches. Sign the final confirm + emit
-    /// the chain key. Returns (confirm_bytes, chain_key) as bytes.
+    /// the chain key. Returns (`confirm_bytes`, `chain_key`) as bytes.
     fn confirm<'py>(
         &mut self,
         py: Python<'py>,
@@ -127,17 +136,18 @@ impl PyInviter {
             .ok_or_else(|| PyRuntimeError::new_err("Inviter already consumed"))?;
         let (confirm_bytes, key) = inv.confirm().map_err(map_err)?;
         Ok((
-            PyBytes::new_bound(py, &confirm_bytes),
-            PyBytes::new_bound(py, key.as_bytes()),
+            PyBytes::new(py, &confirm_bytes),
+            PyBytes::new(py, key.as_bytes()),
         ))
     }
 
-    /// Like `confirm()` but mixes in a 32-byte Factor-2 key.
+    /// Start Factor-2 key confirmation. Returns only the confirmation frame;
+    /// the chain key remains sealed until `receive_factor2_ack` succeeds.
     fn confirm_with_factor2<'py>(
         &mut self,
         py: Python<'py>,
         factor2_key: &[u8],
-    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+    ) -> PyResult<Bound<'py, PyBytes>> {
         if factor2_key.len() != 32 {
             return Err(PyValueError::new_err(format!(
                 "factor2_key must be 32 bytes, got {}",
@@ -150,11 +160,23 @@ impl PyInviter {
             .inner
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("Inviter already consumed"))?;
-        let (confirm_bytes, key) = inv.confirm_with_factor2(&f2).map_err(map_err)?;
-        Ok((
-            PyBytes::new_bound(py, &confirm_bytes),
-            PyBytes::new_bound(py, key.as_bytes()),
-        ))
+        let confirm_bytes = inv.confirm_with_factor2(&f2).map_err(map_err)?;
+        Ok(PyBytes::new(py, &confirm_bytes))
+    }
+
+    /// Verify the scanner's Factor-2 acknowledgement and release the
+    /// mutually confirmed final chain key.
+    fn receive_factor2_ack<'py>(
+        &mut self,
+        py: Python<'py>,
+        ack: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let inv = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("Inviter already consumed"))?;
+        let key = inv.receive_factor2_ack(ack).map_err(map_err)?;
+        Ok(PyBytes::new(py, key.as_bytes()))
     }
 
     /// User said the SAS doesn't match (or aborted out-of-band).
@@ -173,9 +195,9 @@ impl PyInviter {
 /// 1. `PyScanner.scan(id_seed, invite_bytes, now_unix)` →
 ///    `(scanner, response_bytes)`.
 /// 2. UI displays `.sas()`, user compares with inviter's display.
-/// 3. After user confirms SAS: `.receive_confirm(confirm_bytes)`
-///    or `.receive_confirm_with_factor2(confirm_bytes, factor2_key)`
-///    → `chain_key`.
+/// 3. After user confirms SAS: `.receive_confirm(confirm_bytes)` returns the
+///    plain-path key. The Factor-2 method returns `(ack, chain_key)` only
+///    after verifying that the inviter holds the same mixed key.
 #[pyclass(name = "Scanner")]
 pub struct PyScanner {
     inner: Option<Scanner>,
@@ -199,7 +221,7 @@ impl PyScanner {
             Self {
                 inner: Some(scanner),
             },
-            PyBytes::new_bound(py, &response_bytes),
+            PyBytes::new(py, &response_bytes),
         ))
     }
 
@@ -218,7 +240,7 @@ impl PyScanner {
             .inner
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("Scanner already consumed"))?;
-        Ok(PyBytes::new_bound(py, s.inviter_pubkey()))
+        Ok(PyBytes::new(py, s.inviter_pubkey()))
     }
 
     /// Current state name (for logging).
@@ -241,16 +263,16 @@ impl PyScanner {
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("Scanner already consumed"))?;
         let key = s.receive_confirm(confirm_bytes).map_err(map_err)?;
-        Ok(PyBytes::new_bound(py, key.as_bytes()))
+        Ok(PyBytes::new(py, key.as_bytes()))
     }
 
-    /// Accept inviter's confirm + mix in factor-2 key.
+    /// Verify the inviter's Factor-2 proof and return `(ack, chain_key)`.
     fn receive_confirm_with_factor2<'py>(
         &mut self,
         py: Python<'py>,
         confirm_bytes: &[u8],
         factor2_key: &[u8],
-    ) -> PyResult<Bound<'py, PyBytes>> {
+    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
         if factor2_key.len() != 32 {
             return Err(PyValueError::new_err(format!(
                 "factor2_key must be 32 bytes, got {}",
@@ -263,10 +285,10 @@ impl PyScanner {
             .inner
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("Scanner already consumed"))?;
-        let key = s
+        let (ack, key) = s
             .receive_confirm_with_factor2(confirm_bytes, &f2)
             .map_err(map_err)?;
-        Ok(PyBytes::new_bound(py, key.as_bytes()))
+        Ok((PyBytes::new(py, &ack), PyBytes::new(py, key.as_bytes())))
     }
 
     /// User said the SAS doesn't match (or aborted out-of-band).
@@ -283,30 +305,21 @@ impl PyScanner {
 /// `(id_pubkey, ephemeral_x25519_pk, nonce, expiry_unix,
 /// scope_bytes)`. Useful for UI display before the scanner agrees.
 #[pyfunction]
-fn decode_invite<'py>(
-    py: Python<'py>,
-    invite_bytes: &[u8],
-) -> PyResult<(
-    Bound<'py, PyBytes>,
-    Bound<'py, PyBytes>,
-    Bound<'py, PyBytes>,
-    u64,
-    Bound<'py, PyBytes>,
-)> {
+fn decode_invite<'py>(py: Python<'py>, invite_bytes: &[u8]) -> PyResult<DecodedInvite<'py>> {
     let inv = Invite::decode_and_verify(invite_bytes).map_err(map_err)?;
     Ok((
-        PyBytes::new_bound(py, &inv.id_pubkey),
-        PyBytes::new_bound(py, &inv.ephemeral_x25519_pk),
-        PyBytes::new_bound(py, &inv.nonce),
+        PyBytes::new(py, &inv.id_pubkey),
+        PyBytes::new(py, &inv.ephemeral_x25519_pk),
+        PyBytes::new(py, &inv.nonce),
         inv.expiry_unix,
-        PyBytes::new_bound(py, inv.scope.as_bytes()),
+        PyBytes::new(py, inv.scope.as_bytes()),
     ))
 }
 
 /// Derive the SAS for a 32-byte transcript hash. Useful for tests
 /// that want to compute the SAS from a known transcript.
 #[pyfunction]
-fn sas_from_transcript<'py>(_py: Python<'py>, transcript: &[u8]) -> PyResult<String> {
+fn sas_from_transcript(_py: Python<'_>, transcript: &[u8]) -> PyResult<String> {
     if transcript.len() != 32 {
         return Err(PyValueError::new_err(format!(
             "transcript must be 32 bytes, got {}",
@@ -328,6 +341,10 @@ pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("SAS_WORD_COUNT", ol_pair_qr::SAS_WORD_COUNT)?;
     m.add("SAS_BITS", ol_pair_qr::SAS_BITS)?;
     m.add("CHAIN_KEY_LEN", ol_pair_qr::CHAIN_KEY_LEN)?;
+    m.add(
+        "FACTOR2_CONFIRMATION_TAG_LEN",
+        ol_pair_qr::FACTOR2_CONFIRMATION_TAG_LEN,
+    )?;
     m.add("INVITE_NONCE_LEN", ol_pair_qr::INVITE_NONCE_LEN)?;
     m.add("INVITE_MAX_BYTES", ol_pair_qr::INVITE_MAX_BYTES)?;
     m.add("INVITE_VERSION", ol_pair_qr::INVITE_VERSION)?;

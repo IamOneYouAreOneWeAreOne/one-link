@@ -154,7 +154,14 @@ def test_call_driver_backfills_incoming_rings_from_call_list(index_html: str) ->
     assert "call.pending_sdp_offer" in snippet
     assert "call.pending_sdp_answer" in snippet
     assert "showIncomingRing" in snippet
-    assert "setInterval(backfillLivingPresenceCalls, 1500)" in index_html
+    # WebSocket events are primary; the HTTP reconciliation backstop adapts
+    # between active-call, visible-idle, and hidden-idle cadences and never
+    # overlaps itself.
+    assert "function callBackfillDelayMs()" in index_html
+    assert "if (_callBackfillRunning) return" in index_html
+    assert 'document.getElementById("peers-count")' in index_html
+    assert "return peerCount > 0 ? 5000 : 10000" in index_html
+    assert "? 5000 : 30000" in index_html
 
 
 def test_call_driver_queues_ice_until_remote_description(index_html: str) -> None:
@@ -375,7 +382,9 @@ def test_call_driver_can_send_files_inside_call(index_html: str) -> None:
     idx = index_html.find('const callFileInput = $$("#call-file-input")')
     assert idx > 0
     snippet = index_html[idx:idx + 2200]
-    assert "api.upload(callUI.activeCallPeerFp, file)" in snippet
+    assert "async function _sendCallFileIntents(intents)" in snippet
+    assert "api.upload(peerId, file, {clientDeliveryId})" in snippet
+    assert "_callFileSendInFlight" in snippet
     assert "Sending ${file.name} without leaving the call." in snippet
     assert "trusted file fabric" in snippet
 

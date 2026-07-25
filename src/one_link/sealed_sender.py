@@ -1,27 +1,30 @@
 """Sealed Sender — strip the sender identity off the wire.
 
-Today when peer A sends a message to peer B via the One Link relay
-(NAT-traversed flow), the relay sees:
-
-  - A's identity pubkey (from the framing envelope)
-  - B's identity pubkey (the routing target)
-  - encrypted message body
-
-The relay can't read the content — that's done. But the relay
-CAN build a social graph: who-talks-to-whom, when, how often.
-Even without content, that metadata is the substance of intelligence
-collection (cf. NSA's "we kill people based on metadata").
+Historically, relay framing exposed the sender identity and the legacy route
+exposed the destination public key. The live v2 transport now addresses an
+already-paired recipient with a rotating secret tag, while this envelope keeps
+the sender identity inside recipient-only ciphertext. A relay still observes
+socket, timing, byte-count, and tag-activity metadata.
 
 Sealed Sender (Signal, 2018) hides the sender identity from the
-relay. The wire frame is encrypted to the recipient's identity;
+relay payload. The wire frame is encrypted to the recipient's identity;
 the *sender* identity is encrypted INSIDE that envelope. The
-relay sees an opaque envelope addressed to B; it cannot tell that
-A sent it. B decrypts, learns the sender identity + verifies the
+relay sees an opaque envelope carried under a blinded tag. B decrypts, learns
+the sender identity + verifies the
 sender is in B's paired-peer set.
 
-The recipient identity remains on the wire (the relay needs it to
-route). A future onion-routed relay path can hide that too — out
-of scope for this bundle.
+Embedding protocols pass a bounded ``aad_context``. Its hash is bound into
+both HKDF info and AEAD associated data, so a valid envelope minted for one
+protocol role cannot be replayed into another.
+
+This envelope does not itself address the recipient. The live relay's v2
+transport now uses a rotating pairwise route tag, so neither identity public
+key is present on that relay protocol wire. The relay still observes socket,
+timing, size, and per-tag metadata; this primitive does not claim anonymity.
+Because the recipient side uses a long-term identity-derived X25519 key, a
+later compromise of that recipient identity seed can open previously recorded
+envelopes. This envelope provides sender-identity confidentiality in transit,
+not metadata forward secrecy against endpoint-key compromise.
 
 Wire format
 -----------
@@ -62,6 +65,7 @@ anyone.
 """
 from __future__ import annotations
 
+import hashlib
 import secrets
 import struct
 import time
@@ -93,6 +97,7 @@ HKDF_INFO = b"OL/sealed-sender/v1|"
 # matches Signal's; tighter = more time-sync sensitivity, looser =
 # wider replay window. Adjustable per-call.
 DEFAULT_FRESHNESS_MS = 5 * 60 * 1000
+MAX_AAD_CONTEXT_BYTES = 1024
 
 
 @dataclass(frozen=True)
@@ -128,7 +133,6 @@ def _ed25519_priv_seed_to_x25519(ed_priv_seed: bytes) -> bytes:
     Same construction as social_recovery."""
     if len(ed_priv_seed) != 32:
         raise ValueError("ed_priv_seed must be 32 bytes")
-    import hashlib
     h = bytearray(hashlib.sha512(ed_priv_seed).digest()[:32])
     h[0] &= 248
     h[31] &= 127
@@ -143,6 +147,18 @@ def _derive_aead_key(shared: bytes, *, info_extra: bytes = b"") -> bytes:
         salt=None,
         info=HKDF_INFO + info_extra,
     ).derive(shared)
+
+
+def _context_binding(aad_context: bytes) -> bytes:
+    if not isinstance(aad_context, bytes):
+        raise ValueError("aad_context must be bytes")
+    if len(aad_context) > MAX_AAD_CONTEXT_BYTES:
+        raise ValueError(
+            f"aad_context exceeds {MAX_AAD_CONTEXT_BYTES}-byte bound"
+        )
+    if not aad_context:
+        return b""
+    return b"context-sha256|" + hashlib.sha256(aad_context).digest()
 
 
 def _sig_input(version: int, sender_ed_pub: bytes, timestamp_ms: int, body: bytes) -> bytes:
@@ -162,6 +178,7 @@ def seal(
     sender_ed_pub: bytes,
     recipient_ed_pub: bytes,
     timestamp_ms: Optional[int] = None,
+    aad_context: bytes = b"",
 ) -> bytes:
     """Encrypt + sign a message such that only the recipient can
     learn the sender identity. Returns the wire blob: ephemeral
@@ -169,7 +186,9 @@ def seal(
 
     The wire blob carries no sender identity. A relay routing this
     blob to ``recipient_ed_pub`` learns nothing about the sender
-    beyond "a peer with a valid X25519 ephemeral".
+    beyond "a peer with a valid X25519 ephemeral". ``aad_context`` is
+    domain separation supplied by the embedding protocol; both sides must use
+    the exact same value.
     """
     if len(sender_ed_priv_seed) != 32:
         raise ValueError("sender_ed_priv_seed must be 32 bytes")
@@ -192,7 +211,8 @@ def seal(
         raise ValueError(f"recipient pubkey not Ed25519→X25519 valid: {e}") from None
     if shared == b"\x00" * 32:
         raise ValueError("recipient pub yielded zero shared secret")
-    key = _derive_aead_key(shared)
+    context_binding = _context_binding(aad_context)
+    key = _derive_aead_key(shared, info_extra=context_binding)
 
     # Ed25519 sign over (version || sender_pub || ts || body).
     sender_priv = Ed25519PrivateKey.from_private_bytes(sender_ed_priv_seed)
@@ -209,7 +229,7 @@ def seal(
     nonce = secrets.token_bytes(NONCE_LEN)
     # Bind the ephemeral pubkey into the AAD so a relay can't swap
     # it without invalidating the tag.
-    aad = b"OL/sealed-sender/aad/v1|" + eph_pub
+    aad = b"OL/sealed-sender/aad/v1|" + eph_pub + context_binding
     ct = AESGCM(key).encrypt(nonce, inner, aad)
     return eph_pub + nonce + ct
 
@@ -221,6 +241,7 @@ def unseal(
     paired_ed_pubs: Optional[Iterable[bytes]] = None,
     freshness_window_ms: int = DEFAULT_FRESHNESS_MS,
     now_ms: Optional[int] = None,
+    aad_context: bytes = b"",
 ) -> UnsealedMessage:
     """Decrypt + verify a sealed-sender blob. Returns the
     ``UnsealedMessage`` with sender identity, timestamp, and body.
@@ -232,6 +253,7 @@ def unseal(
       - sender pub not in ``paired_ed_pubs`` (when supplied)
       - timestamp older / newer than ``freshness_window_ms`` either
         side of ``now_ms``
+      - a wrong embedding ``aad_context`` (reported as AEAD failure)
     """
     if len(my_ed_priv_seed) != 32:
         raise ValueError("my_ed_priv_seed must be 32 bytes")
@@ -251,8 +273,9 @@ def unseal(
         raise ValueError(f"shared-secret derive failed: {e}") from None
     if shared == b"\x00" * 32:
         raise ValueError("ECDH yielded zero shared secret")
-    key = _derive_aead_key(shared)
-    aad = b"OL/sealed-sender/aad/v1|" + eph_pub
+    context_binding = _context_binding(aad_context)
+    key = _derive_aead_key(shared, info_extra=context_binding)
+    aad = b"OL/sealed-sender/aad/v1|" + eph_pub + context_binding
     try:
         inner = AESGCM(key).decrypt(nonce, ct, aad)
     except Exception as e:

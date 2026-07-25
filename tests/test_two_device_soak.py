@@ -27,7 +27,6 @@ was missing.
 
 from __future__ import annotations
 
-import os
 import time
 
 import pytest
@@ -112,7 +111,7 @@ _SILENT_FALLBACK_KINDS = frozenset({
     "native_transfer_unavailable",
     "native_transfer_receiver_unavailable",
     "stream_quic_batch_failed",
-    "quic_accept_fifo_race_window",
+    "quic_accept_identity_binding_rejected",
     "file_offer_batch_inner_failed",
     "provenance_broadcast_failed",
 })
@@ -147,7 +146,7 @@ def test_soak_chat_50_messages():
     4 expected bytes" error that's unrelated to daemon behaviour.
     50 + pacing is still hundreds of round-trips through the actual
     chat pipeline."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         # 2026-05-21 audit T3-N: track exact counts via Counter so a
         # bug that delivers the same body twice while losing another
         # still surfaces as a failure (set diff would say "all there"
@@ -196,7 +195,7 @@ def test_soak_long_message():
     """A 1000-char paste must round-trip intact. This is the surface
     that the collapsible-long-message UI feature targets."""
     body = "x" * 1000
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         res = request(p.a.control_port, cmd="send",
                       peer=p.b.short_id, body=body)
         assert res["ok"]
@@ -212,7 +211,7 @@ def test_soak_unicode_emoji_burst():
     bodies = [
         f"msg-{i} résumé 日本 🌍 مرحبا" for i in range(20)
     ]
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         for body in bodies:
             res = request(p.a.control_port, cmd="send",
                           peer=p.b.short_id, body=body)
@@ -245,7 +244,7 @@ def test_soak_small_file_round_trip(tmp_path):
     payload = b"abc123\n" * 128  # ~896 bytes
     src = tmp_path / "small.bin"
     src.write_bytes(payload)
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         res = request(p.a.control_port, cmd="send_file",
                       peer=p.b.short_id, path=str(src))
         assert res["ok"], res
@@ -291,7 +290,7 @@ def test_soak_burst_10_messages():
     """10 messages in <1s. Stresses the per-peer send pipeline + the
     ACK plumbing. If anything ratchets / re-queues incorrectly under
     load, this fails."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         for i in range(10):
             res = request(p.a.control_port, cmd="send",
                           peer=p.b.short_id, body=f"burst-{i}")
@@ -321,7 +320,7 @@ def test_soak_peer_caps_advertised():
     """After a brief settle, the peers entry on both sides should
     expose the capability set (app_version + features). Verifies
     that CAPS exchange completes within a single test window."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         # Trigger a single send to force a handshake.
         request(p.a.control_port, cmd="send",
                 peer=p.b.short_id, body="warmup")
@@ -365,7 +364,7 @@ def test_soak_no_silent_drops():
     ``assert True`` — passing on any state. Now it actively
     interrogates the daemon's structured-degradation surface.
     """
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         diag_a = request(p.a.control_port, cmd="transfer_diagnostics")
         diag_b = request(p.b.control_port, cmd="transfer_diagnostics")
         events_a = diag_a.get("degradation_events") or []
@@ -387,7 +386,7 @@ def test_soak_large_file_round_trip(tmp_path):
     payload = b"abcdefgh" * (10 * 1024 * 1024 // 8)  # 10 MiB
     src = tmp_path / "large.bin"
     src.write_bytes(payload)
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         res = request(
             p.a.control_port, cmd="send_file",
             peer=p.b.short_id, path=str(src), timeout=60,
@@ -423,7 +422,7 @@ def test_soak_message_after_reconnect():
     sender sends a fresh message → receiver gets it. Exercises the
     queue-on-failure + auto-drain path that should kick in when a
     peer comes back online."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         # Warmup: one message lands cleanly.
         res = request(p.a.control_port, cmd="send",
                       peer=p.b.short_id, body="before-reconnect")
@@ -444,7 +443,7 @@ def test_soak_send_after_brief_idle():
     re-establishes silently (or fails silently). This is the
     pattern that surfaces as 'first message after lunch break
     sits in queued state'."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         # First send to warm up the channel.
         res = request(p.a.control_port, cmd="send",
                       peer=p.b.short_id, body="warmup")
@@ -466,7 +465,7 @@ def test_soak_bidi_interleaved():
     """A and B send alternating messages without waiting for each
     other's ACK. Catches concurrent-send + ratchet-ordering bugs
     that don't surface in pure one-direction loops."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         N = 10
         for i in range(N):
             res_a = request(p.a.control_port, cmd="send",
@@ -520,7 +519,7 @@ def test_soak_long_body_round_trip():
     long pastes (like the wall-of-instructions Alex sent in the
     session that started this whole audit)."""
     body = "long-soak-message " * 280  # ~5 KB
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         res = request(p.a.control_port, cmd="send",
                       peer=p.b.short_id, body=body)
         assert res["ok"]

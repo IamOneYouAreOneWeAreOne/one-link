@@ -1,4 +1,4 @@
-//! Minimal length-prefixed byte reader/writer for ol_onion wire frames.
+//! Minimal length-prefixed byte reader/writer for `ol_onion` wire frames.
 //!
 //! Strictly positional, no per-field type tags — onion packets have
 //! a fixed structure and the goal is auditability + zero overhead

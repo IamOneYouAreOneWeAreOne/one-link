@@ -22,8 +22,14 @@ not gate decisions on it.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from one_link_native.coherence_field import FieldObservations
 
 log = logging.getLogger(__name__)
+
+_FieldObservations: type[FieldObservations] | None
 
 try:
     from one_link_native import coherence_field as _native_cf  # type: ignore[import-not-found]
@@ -59,14 +65,15 @@ def field_observations(alpha: float = 0.05, initial_value: float = 0.5):
         trust = self._peer_trust_score(peer_fp) or 0.5
         self._field_obs.update(peer_fp, observed_tau, trust)
     """
-    _require_native()
-    return _FieldObservations(alpha, initial_value)
+    return _require_native()(alpha, initial_value)
 
 
-def _require_native() -> None:
-    if not HAS_NATIVE:
+def _require_native() -> type[FieldObservations]:
+    factory = _FieldObservations
+    if not HAS_NATIVE or factory is None:
         raise RuntimeError(
             "one_link_native.coherence_field.FieldObservations required "
             "but not available; build via `cd native && maturin develop "
             "--release`."
         )
+    return factory

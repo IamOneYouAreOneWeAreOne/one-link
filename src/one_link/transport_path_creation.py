@@ -9,13 +9,23 @@ behind explicit safety gates.
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import platform
+import posixpath
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Iterable, Mapping, cast
 
 from .hardware_inventory import HardwareInventory, HardwarePath
+from .process_security import (
+    hidden_creationflags,
+    launch_explicit_command,
+    launch_system_command,
+    resolve_argv,
+    trusted_process_env,
+)
 
 
 CREATE_STATES = {"ready", "needs_user", "blocked", "unsupported"}
@@ -504,18 +514,30 @@ def _base_safeguards() -> tuple[str, ...]:
 def _default_launcher(plan: PathCreationPlan, system: str) -> None:
     target = plan.settings_uri
     if target and system == "windows":
-        import os
-
-        os.startfile(target)  # type: ignore[attr-defined]
+        allowed_settings = {
+            "ms-settings:network-mobilehotspot",
+            "ms-settings:network-wifi",
+            "ms-settings:bluetooth",
+        }
+        if target not in allowed_settings:
+            raise ValueError("unapproved Windows settings URI")
+        # ShellExecute is the Windows API for registered settings URIs.  The
+        # exact allowlist above prevents this from becoming a generic URL or
+        # file launcher, and no command shell/PATH lookup is involved.
+        os.startfile(target, "open")  # type: ignore[attr-defined]  # nosec B606
         return
     if target and system == "darwin":
-        subprocess.Popen(["open", target])
+        launch_system_command(["open", target], platform_name="darwin")
         return
     if target:
-        subprocess.Popen(["xdg-open", target])
+        launch_system_command(["xdg-open", target], platform_name="posix")
         return
     if plan.command:
-        subprocess.Popen(list(plan.command))
+        cmd0 = str(plan.command[0])
+        if ntpath.isabs(cmd0) or posixpath.isabs(cmd0):
+            launch_explicit_command(list(plan.command), platform_name=system)
+        else:
+            launch_system_command(list(plan.command), platform_name=system)
         return
     raise ValueError("path creation plan has no launchable OS ceremony")
 
@@ -712,14 +734,27 @@ def _validate_hotspot_passphrase(value: str | None) -> str:
 
 
 def _run_native_command(argv: list[str], timeout: float) -> tuple[int, str, str]:
+    if not 0.0 < float(timeout) <= 60.0:
+        raise ValueError("native command timeout must be in (0, 60]")
+    cmd0 = str(argv[0]) if argv else ""
+    is_explicit = ntpath.isabs(cmd0) or posixpath.isabs(cmd0)
+    safe_argv = resolve_argv(argv, system_tool=not is_explicit)
     proc = subprocess.run(
-        argv,
+        safe_argv,
         capture_output=True,
         text=True,
         timeout=timeout,
         check=False,
+        creationflags=hidden_creationflags(),
+        cwd=str(Path(safe_argv[0]).parent),
+        env=trusted_process_env(),
+        shell=False,
     )
-    return int(proc.returncode), proc.stdout or "", proc.stderr or ""
+    return (
+        int(proc.returncode),
+        (proc.stdout or "")[:262_144],
+        (proc.stderr or "")[:262_144],
+    )
 
 
 def _path_from_probe(probe: Mapping[str, object]) -> HardwarePath:

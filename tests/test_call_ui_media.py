@@ -22,10 +22,7 @@ from pathlib import Path
 import pytest
 
 
-INDEX_HTML_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "src" / "one_link" / "web" / "index.html"
-)
+INDEX_HTML_PATH = Path(__file__).resolve().parent.parent / "src" / "one_link" / "web" / "index.html"
 
 
 @pytest.fixture(scope="module")
@@ -37,11 +34,12 @@ def index_html() -> str:
 # Video elements
 # ---------------------------------------------------------------------------
 
+
 def test_remote_video_element_present(index_html: str) -> None:
     assert 'id="call-remote-video"' in index_html
     # autoplay + playsinline are needed for cross-browser stream rendering
     idx = index_html.find('id="call-remote-video"')
-    snippet = index_html[idx:idx + 300]
+    snippet = index_html[idx : idx + 300]
     assert "autoplay" in snippet
     assert "playsinline" in snippet
 
@@ -49,7 +47,7 @@ def test_remote_video_element_present(index_html: str) -> None:
 def test_remote_audio_sink_present(index_html: str) -> None:
     assert 'id="call-remote-audio"' in index_html
     idx = index_html.find('id="call-remote-audio"')
-    snippet = index_html[idx:idx + 260]
+    snippet = index_html[idx : idx + 260]
     assert "autoplay" in snippet
     assert "Remote audio stream" in snippet
 
@@ -57,7 +55,7 @@ def test_remote_audio_sink_present(index_html: str) -> None:
 def test_local_video_element_present(index_html: str) -> None:
     assert 'id="call-local-video"' in index_html
     idx = index_html.find('id="call-local-video"')
-    snippet = index_html[idx:idx + 300]
+    snippet = index_html[idx : idx + 300]
     # Local preview must be muted to avoid feedback.
     assert "muted" in snippet
 
@@ -72,13 +70,14 @@ def test_local_video_styled_picture_in_picture(index_html: str) -> None:
     assert ".call-local-video" in index_html
     # The CSS rule should target positioning, not just look.
     idx = index_html.find(".call-local-video {")
-    snippet = index_html[idx:idx + 400]
+    snippet = index_html[idx : idx + 400]
     assert "position: absolute" in snippet
 
 
 # ---------------------------------------------------------------------------
 # getUserMedia + RTC wiring
 # ---------------------------------------------------------------------------
+
 
 def test_get_user_media_audio_and_video(index_html: str) -> None:
     """When a call starts, the browser requests audio + video.
@@ -112,16 +111,126 @@ def test_call_engine_tracks_ice_route_readiness(index_html: str) -> None:
     assert "routePolicy" in index_html
     assert "forceRelayOnRepair" in index_html
     assert "ice_host_only_mode" in index_html
+    assert "ice_config_unavailable" in index_html
     assert "ice_relay_ready" in index_html
     assert "function selectedCandidatePairFromStats" in index_html
     assert "selectedCandidatePairId" in index_html
     idx = index_html.find("async function reportCallMetricsOnce")
-    snippet = index_html[idx:idx + 8600]
+    snippet = index_html[idx : idx + 8600]
     assert "selected_candidate_type" in snippet
     assert "selected_candidate_protocol" in snippet
     assert "selected_candidate_network" in snippet
     assert '"Direct only"' in snippet
     assert "relay_escape_active" in snippet
+
+
+def test_firefox_mdns_call_candidates_gain_scoped_local_numeric_routes(
+    index_html: str,
+) -> None:
+    """The authenticated call path consumes only the daemon-scoped assist.
+
+    Firefox keeps its browser-authored mDNS route, while the same call API
+    receives numeric equivalents using the original socket port and ICE
+    metadata.  No UA branch or third-party address oracle is involved.
+    """
+
+    assert "function _callValidObservedCandidateAddress" in index_html
+    assert "function _callLocalAddressesFromIceConfig" in index_html
+    assert 'assist.scope !== "same-device-or-lan"' in index_html
+    assert "assist.external !== false" in index_html
+    assert "function _callNumericCandidateLine" in index_html
+    assert "function _callCandidateLinesForSignal" in index_html
+    setup_at = index_html.index("function setupRtcPeerConnection")
+    setup = index_html[setup_at : setup_at + 10_000]
+    assert "media.localCandidateAddresses = _callLocalAddressesFromIceConfig(cfg)" in setup
+    assert "_callCandidateLinesForSignal(" in setup
+    assert "_queueCallIcePayloads(candidateLines.map((candidate)" in setup
+    assert "_queueCallIcePayloads([{" in setup
+    assert "iceSignalChain" in setup
+    assert 'reportCallEvent("ice_local_numeric_candidate"' in setup
+    refresh_at = index_html.index("async function refreshIceConfigForCall")
+    refresh = index_html[refresh_at : refresh_at + 3200]
+    assert "media.localCandidateAddresses = _callLocalAddressesFromIceConfig(cfg)" in refresh
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_call_numeric_candidate_helpers_execute_with_strict_bounds(
+    index_html: str,
+) -> None:
+    """Execute the shipped helpers, including preservation and rejection cases."""
+
+    start = index_html.index("function _callValidObservedCandidateAddress")
+    end = index_html.index("function setupRtcPeerConnection", start)
+    helpers = index_html[start:end]
+    harness = f"""
+{helpers}
+const candidate = "candidate:123 1 udp 2122260223 abcdef.local 54321 typ host generation 0 ufrag xyz network-cost 50";
+const config = {{
+  local_address_discovery: {{
+    enabled: true,
+    external: false,
+    scope: "same-device-or-lan",
+    candidate_addresses: ["127.0.0.1", "192.168.50.7", "192.168.50.7", "not-an-ip"],
+  }},
+}};
+const addresses = _callLocalAddressesFromIceConfig(config);
+const output = _callCandidateLinesForSignal(candidate, addresses);
+const numericInput = "candidate:9 1 udp 2122260223 192.168.50.7 54321 typ host";
+const componentTwo = "candidate:9 2 udp 2122260223 abcdef.local 54322 typ host";
+const external = _callLocalAddressesFromIceConfig({{
+  local_address_discovery: {{
+    enabled: true,
+    external: true,
+    scope: "same-device-or-lan",
+    candidate_addresses: ["192.168.50.7"],
+  }},
+}});
+console.log(JSON.stringify({{
+  addresses,
+  output,
+  numeric: _callCandidateLinesForSignal(numericInput, addresses),
+  componentTwo: _callCandidateLinesForSignal(componentTwo, addresses),
+  external,
+}}));
+"""
+    with tempfile.NamedTemporaryFile("w", suffix=".cjs", delete=False, encoding="utf-8") as tmp:
+        tmp.write(harness)
+        tmp_path = Path(tmp.name)
+    try:
+        proc = subprocess.run(
+            ["node", str(tmp_path)],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["addresses"] == ["127.0.0.1", "192.168.50.7"]
+    assert result["output"][0] == (
+        "candidate:123 1 udp 2122260223 abcdef.local 54321 typ host "
+        "generation 0 ufrag xyz network-cost 50"
+    )
+    assert len(result["output"]) == 3
+    for line, address in zip(
+        result["output"][1:],
+        result["addresses"],
+        strict=True,
+    ):
+        parts = line.split()
+        assert parts[0].startswith("candidate:ol")
+        assert parts[1:4] == ["1", "udp", "2122260223"]
+        assert parts[4:8] == [address, "54321", "typ", "host"]
+        assert parts[8:] == ["generation", "0", "ufrag", "xyz", "network-cost", "50"]
+    assert result["numeric"] == [
+        "candidate:9 1 udp 2122260223 192.168.50.7 54321 typ host"
+    ]
+    assert result["componentTwo"] == [
+        "candidate:9 2 udp 2122260223 abcdef.local 54322 typ host"
+    ]
+    assert result["external"] == []
 
 
 def test_sdp_waits_for_ice_config(index_html: str) -> None:
@@ -130,12 +239,12 @@ def test_sdp_waits_for_ice_config(index_html: str) -> None:
     Otherwise the call can connect at the UI layer while media remains
     host-candidate-only."""
     offer_idx = index_html.find("async function sendLocalSdpOffer")
-    offer_snippet = index_html[offer_idx:offer_idx + 900]
+    offer_snippet = index_html[offer_idx : offer_idx + 900]
     assert "await media.iceConfigReady" in offer_snippet
     assert offer_snippet.find("await media.iceConfigReady") < offer_snippet.find("createOffer")
 
     answer_idx = index_html.find("async function sendLocalSdpAnswer")
-    answer_snippet = index_html[answer_idx:answer_idx + 600]
+    answer_snippet = index_html[answer_idx : answer_idx + 600]
     assert "await media.iceConfigReady" in answer_snippet
     assert answer_snippet.find("await media.iceConfigReady") < answer_snippet.find("createAnswer")
 
@@ -143,7 +252,7 @@ def test_sdp_waits_for_ice_config(index_html: str) -> None:
 def test_ontrack_attaches_remote_stream(index_html: str) -> None:
     idx = index_html.find("pc.ontrack")
     assert idx > 0
-    snippet = index_html[idx:idx + 800]
+    snippet = index_html[idx : idx + 800]
     assert "attachRemoteStream" in snippet
     assert "stream.addTrack(ev.track)" in snippet
     assert snippet.find("stream.addTrack(ev.track)") < snippet.find("attachRemoteStream(stream)")
@@ -152,7 +261,7 @@ def test_ontrack_attaches_remote_stream(index_html: str) -> None:
 
 def test_report_metrics_includes_media_state(index_html: str) -> None:
     idx = index_html.find("async function reportCallMetricsOnce")
-    snippet = index_html[idx:idx + 6400]
+    snippet = index_html[idx : idx + 6400]
     assert "ice_connection_state" in snippet
     assert "remote_audio_tracks" in snippet
     assert "remote_video_tracks" in snippet
@@ -170,18 +279,18 @@ def test_media_watchdog_restarts_stuck_negotiation(index_html: str) -> None:
     assert 'ensureMediaNegotiation("watchdog")' in index_html
     assert "function ensureLocalTracksOnPeerConnection" in index_html
     idx = index_html.find("async function ensureMediaNegotiation")
-    snippet = index_html[idx:idx + 1400]
+    snippet = index_html[idx : idx + 1400]
     assert "ensureLocalTracksOnPeerConnection()" in snippet
     assert "callUI.localMediaReady = true" in snippet
     assert "media.pc.localDescription" in snippet
     assert "media.pc.signalingState" in snippet
     assert "sendLocalSdpOffer" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 15000]
+    metrics_snippet = index_html[metrics_idx : metrics_idx + 15000]
     assert 'ensureMediaNegotiation("metrics").catch' in metrics_snippet
-    active_idx = index_html.find('window.handleLivingPresenceCallEvent = function')
+    active_idx = index_html.find("window.handleLivingPresenceCallEvent = function")
     active_idx = index_html.find('if (phase === "active")', active_idx)
-    active_snippet = index_html[active_idx:active_idx + 700]
+    active_snippet = index_html[active_idx : active_idx + 700]
     assert 'ensureMediaNegotiation("active")' in active_snippet
 
 
@@ -190,7 +299,7 @@ def test_accept_answers_pending_offer_before_self_offer(index_html: str) -> None
     waiting. That causes WebRTC glare and can strand media setup."""
     idx = index_html.find("async function acceptInboundCall")
     assert idx > 0
-    snippet = index_html[idx:idx + 1800]
+    snippet = index_html[idx : idx + 1800]
     pending_idx = snippet.find("if (callUI.pendingRemoteOffer)")
     apply_idx = snippet.find("await applyRemoteSdpOffer")
     wait_idx = snippet.find('addOneCallEvent("Waiting for media offer...")')
@@ -206,11 +315,11 @@ def test_remote_sdp_backfill_is_deduped(index_html: str) -> None:
     assert "appliedRemoteAnswerKeys: new Set()" in index_html
     assert "function sdpKey" in index_html
     offer_idx = index_html.find("async function applyRemoteSdpOffer")
-    offer_snippet = index_html[offer_idx:offer_idx + 2200]
+    offer_snippet = index_html[offer_idx : offer_idx + 2200]
     assert "appliedRemoteOfferKeys.has(key)" in offer_snippet
     assert 'media.pc.signalingState !== "stable"' in offer_snippet
     answer_idx = index_html.find("async function applyRemoteSdpAnswer")
-    answer_snippet = index_html[answer_idx:answer_idx + 1200]
+    answer_snippet = index_html[answer_idx : answer_idx + 1200]
     assert "appliedRemoteAnswerKeys.has(key)" in answer_snippet
     assert 'media.pc.signalingState !== "have-local-offer"' in answer_snippet
 
@@ -224,11 +333,11 @@ def test_sdp_offer_answer_retries_when_signaling_is_lost(index_html: str) -> Non
     assert "async function resendLocalSdpOffer" in index_html
     assert "async function resendLocalSdpAnswer" in index_html
     ensure_idx = index_html.find("async function ensureMediaNegotiation")
-    ensure_snippet = index_html[ensure_idx:ensure_idx + 1800]
+    ensure_snippet = index_html[ensure_idx : ensure_idx + 1800]
     assert 'media.pc.signalingState === "have-local-offer"' in ensure_snippet
     assert "await resendLocalSdpOffer" in ensure_snippet
     offer_idx = index_html.find("async function applyRemoteSdpOffer")
-    offer_snippet = index_html[offer_idx:offer_idx + 3000]
+    offer_snippet = index_html[offer_idx : offer_idx + 3000]
     assert "remote_offer_echo_ignored" in offer_snippet
     assert 'await resendLocalSdpOffer("offer_echo")' in offer_snippet
     assert "recoverRemoteOfferCollision" in offer_snippet
@@ -245,7 +354,7 @@ def test_offer_collision_rolls_back_and_answers_remote_offer(index_html: str) ->
     assert "lastLocalOfferCreatedMs" in index_html
     idx = index_html.find("async function recoverRemoteOfferCollision")
     assert idx > 0
-    snippet = index_html[idx:idx + 2600]
+    snippet = index_html[idx : idx + 2600]
     assert "remoteOfferCollisionCount >= 2" in snippet
     assert "ageMs > 7000" in snippet
     assert 'setLocalDescription({ type: "rollback" })' in snippet
@@ -291,37 +400,37 @@ def test_remote_surface_reconciles_renderer_state(index_html: str) -> None:
     assert "function remoteVideoSurfaceState" in index_html
     assert "function syncRemoteMediaSurface" in index_html
     sync_idx = index_html.find("function syncRemoteMediaSurface")
-    sync_snippet = index_html[sync_idx:sync_idx + 2600]
+    sync_snippet = index_html[sync_idx : sync_idx + 2600]
     assert 'reportCallEvent("remote_surface_synced"' in sync_snippet
     assert "videoEl.srcObject !== state.stream" in sync_snippet
     assert "audioEl.srcObject !== state.stream" in sync_snippet
     assert 'classList.toggle("show", state.hasRenderableVideo)' in sync_snippet
     assert 'classList.toggle("has-remote-video", state.hasRenderableVideo)' in sync_snippet
     attach_idx = index_html.find("function attachRemoteStream")
-    attach_snippet = index_html[attach_idx:attach_idx + 260]
+    attach_snippet = index_html[attach_idx : attach_idx + 260]
     assert 'syncRemoteMediaSurface("attach_remote_stream")' in attach_snippet
 
 
 def test_remote_surface_sync_runs_on_track_events_and_watchdog(index_html: str) -> None:
     track_idx = index_html.find("function bindRemoteTrackDiagnostics")
-    track_snippet = index_html[track_idx:track_idx + 1100]
+    track_snippet = index_html[track_idx : track_idx + 1100]
     assert "remote_${track.kind}_muted" in track_snippet
     assert "remote_${track.kind}_unmuted" in track_snippet
     assert "remote_${track.kind}_ended" in track_snippet
     video_idx = index_html.find("function bindRemoteVideoElementDiagnostics")
-    video_snippet = index_html[video_idx:video_idx + 700]
+    video_snippet = index_html[video_idx : video_idx + 700]
     assert "syncRemoteMediaSurface(event)" in video_snippet
     revive_idx = index_html.find("function reviveRemotePlayback")
-    revive_snippet = index_html[revive_idx:revive_idx + 500]
+    revive_snippet = index_html[revive_idx : revive_idx + 500]
     assert 'syncRemoteMediaSurface(reason || "playback_revive")' in revive_snippet
     watchdog_idx = index_html.find("function startMediaWatchdog")
-    watchdog_snippet = index_html[watchdog_idx:watchdog_idx + 600]
+    watchdog_snippet = index_html[watchdog_idx : watchdog_idx + 600]
     assert 'syncRemoteMediaSurface("watchdog")' in watchdog_snippet
 
 
 def test_call_media_recorder_start_is_nonfatal(index_html: str) -> None:
     idx = index_html.find("function startAttestStream")
-    snippet = index_html[idx:idx + 1200]
+    snippet = index_html[idx : idx + 1200]
     assert "attest.recorder.start(200)" in snippet
     assert "attest_recorder_start_failed" in snippet
     assert "try {" in snippet
@@ -341,26 +450,26 @@ def test_call_has_device_settings_and_video_fit_controls(index_html: str) -> Non
 def test_call_media_watchdog_repairs_stalled_frames(index_html: str) -> None:
     assert "async function repairMediaPath" in index_html
     idx = index_html.find("async function repairMediaPath")
-    snippet = index_html[idx:idx + 4200]
+    snippet = index_html[idx : idx + 4200]
     assert "restartIce" in snippet
     assert "media_path_repair" in snippet
     assert "sendLocalSdpOffer" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 14000]
+    metrics_snippet = index_html[metrics_idx : metrics_idx + 14000]
     assert "stalledMediaTicks" in metrics_snippet
     assert 'repairMediaPath("stalled_media")' in metrics_snippet
 
 
 def test_call_engine_detects_frozen_media_and_network_resume(index_html: str) -> None:
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 14500]
+    metrics_snippet = index_html[metrics_idx : metrics_idx + 14500]
     assert "frozenMediaTicks" in metrics_snippet
     assert "videoElementFrozen" in metrics_snippet
     assert "audioElementFrozen" in metrics_snippet
     assert "remote_media_frozen" in metrics_snippet
     assert 'repairMediaPath("frozen_media")' in metrics_snippet
     watchdog_idx = index_html.find("function startMediaWatchdog")
-    watchdog_snippet = index_html[watchdog_idx:watchdog_idx + 1000]
+    watchdog_snippet = index_html[watchdog_idx : watchdog_idx + 1000]
     assert "watchdog_no_media_movement" in watchdog_snippet
     assert 'window.addEventListener("online"' in index_html
     assert "network_resume_repair" in index_html
@@ -403,9 +512,32 @@ def test_call_room_parity_controls_present(index_html: str) -> None:
     assert "autoGainControl" in index_html
 
 
+def test_call_captions_require_on_device_recognition_and_roll_back_state(
+    index_html: str,
+) -> None:
+    start = index_html.index("async function toggleCaptions()")
+    end = index_html.index("function stopAllMedia()", start)
+    snippet = index_html[start:end]
+
+    assert "const SpeechRecognition = window.SpeechRecognition;" in snippet
+    assert "window.webkitSpeechRecognition" not in snippet
+    assert '!("processLocally" in rec)' in snippet
+    assert "rec.processLocally = true;" in snippet
+    assert "rec.processLocally !== true" in snippet
+    assert "SpeechRecognition.available" in snippet
+    assert "processLocally: true" in snippet
+    assert 'quality: "conversation"' in snippet
+    assert "media.captionRecognizer = null;" in snippet
+    assert "media.captionsStarting = false;" in snippet
+    assert "_setCaptionsEnabled(false);" in snippet
+    assert "No call audio was sent to a cloud recognizer" in snippet
+    assert "One Link never falls back to a vendor cloud recognizer" in index_html
+    assert "Nothing is recorded or sent anywhere except to this call" not in index_html
+
+
 def test_call_room_live_panels_update_from_metrics(index_html: str) -> None:
     idx = index_html.find("async function reportCallMetricsOnce")
-    snippet = index_html[idx:idx + 9800]
+    snippet = index_html[idx : idx + 9800]
     assert "renderParticipants()" in snippet
     assert "renderLiveStats(callUI.lastMetricsSnapshot)" in snippet
     assert "classifyCallQuality" in snippet
@@ -442,7 +574,7 @@ def test_call_quality_uses_hysteresis_and_tau_adaptation(index_html: str) -> Non
 
 def test_call_quality_does_not_claim_good_while_media_waits(index_html: str) -> None:
     idx = index_html.find("function classifyCallQuality")
-    snippet = index_html[idx:idx + 1100]
+    snippet = index_html[idx : idx + 1100]
     assert 'ice === "checking"' in snippet
     assert 'conn === "connecting"' in snippet
     assert "!hasLocal || !hasRemote" in snippet
@@ -451,7 +583,7 @@ def test_call_quality_does_not_claim_good_while_media_waits(index_html: str) -> 
     assert 'health.state === "renderer_detached"' in snippet
     assert 'return "connecting"' in snippet
     quality_idx = index_html.find("function updateCallQuality")
-    quality_snippet = index_html[quality_idx:quality_idx + 900]
+    quality_snippet = index_html[quality_idx : quality_idx + 900]
     assert '"connecting"' in quality_snippet
     assert "Connecting media" in quality_snippet
 
@@ -459,7 +591,7 @@ def test_call_quality_does_not_claim_good_while_media_waits(index_html: str) -> 
 def test_call_engine_has_single_media_health_classifier(index_html: str) -> None:
     assert "function classifyMediaHealth" in index_html
     idx = index_html.find("function classifyMediaHealth")
-    snippet = index_html[idx:idx + 4300]
+    snippet = index_html[idx : idx + 4300]
     for state in [
         "signaling_incomplete",
         "ice_failed",
@@ -474,7 +606,7 @@ def test_call_engine_has_single_media_health_classifier(index_html: str) -> None
     assert "remote_audio_src_attached" in snippet
     assert "seconds_since_media_moving" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 13000]
+    metrics_snippet = index_html[metrics_idx : metrics_idx + 13000]
     assert "const mediaHealth = classifyMediaHealth(selected)" in metrics_snippet
     assert "media_health_state" in metrics_snippet
     assert "media_health_strategy" in metrics_snippet
@@ -484,18 +616,18 @@ def test_call_engine_has_single_media_health_classifier(index_html: str) -> None
 
 def test_call_rail_suppresses_noisy_internal_media_events(index_html: str) -> None:
     idx = index_html.find("function isNoisyCallEvent")
-    snippet = index_html[idx:idx + 650]
+    snippet = index_html[idx : idx + 650]
     assert "Resending media" in snippet
     assert "Repairing media" in snippet
     assert "Media route" in snippet
     add_idx = index_html.find("function addOneCallEvent")
-    add_snippet = index_html[add_idx:add_idx + 400]
+    add_snippet = index_html[add_idx : add_idx + 400]
     assert "isNoisyCallEvent(text)" in add_snippet
 
 
 def test_call_metrics_use_smoothed_interval_loss(index_html: str) -> None:
     idx = index_html.find("async function reportCallMetricsOnce")
-    snippet = index_html[idx:idx + 10400]
+    snippet = index_html[idx : idx + 10400]
     assert "deltaLost" in snippet
     assert "deltaReceived" in snippet
     assert "qualityEwmaRttMs" in snippet
@@ -510,7 +642,7 @@ def test_call_repair_has_staged_recovery_and_rebuild(index_html: str) -> None:
     assert "function diagnoseMediaRepair" in index_html
     assert "function markMediaRepairHealthy" in index_html
     idx = index_html.find("async function repairMediaPath")
-    snippet = index_html[idx:idx + 4200]
+    snippet = index_html[idx : idx + 4200]
     assert "mediaRepairStage" in snippet
     assert "diagnoseMediaRepair" in snippet
     assert "media_repair_diagnosis" in snippet
@@ -533,16 +665,16 @@ def test_call_watchdog_repairs_missing_expected_remote_media(index_html: str) ->
     assert "expectRemoteVideo" in index_html
     assert "ensureMediaTransceivers" in index_html
     idx = index_html.find("async function reportCallMetricsOnce")
-    snippet = index_html[idx:idx + 14000]
+    snippet = index_html[idx : idx + 14000]
     assert "classifyMediaHealth(selected)" in snippet
     assert 'mediaHealth.state === "remote_media_missing"' in snippet
-    assert "repairMediaPath(\"stalled_media\")" in snippet
+    assert 'repairMediaPath("stalled_media")' in snippet
 
 
 def test_backend_recommendation_executor_controls_media_repairs(index_html: str) -> None:
     assert "async function applyBackendPathRecommendation" in index_html
     idx = index_html.find("async function applyBackendPathRecommendation")
-    snippet = index_html[idx:idx + 5200]
+    snippet = index_html[idx : idx + 5200]
     for action in [
         "revive_playback",
         "downshift",
@@ -561,7 +693,7 @@ def test_backend_recommendation_executor_controls_media_repairs(index_html: str)
     assert "backend_recommendation_received" in index_html
     assert "backend_recommendation_applied" in index_html
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 15000]
+    metrics_snippet = index_html[metrics_idx : metrics_idx + 15000]
     assert "const metricsResult = await callApiPost" in metrics_snippet
     assert "applyBackendPathRecommendation(" in metrics_snippet
     assert "metricsResult && metricsResult.recommendation" in metrics_snippet
@@ -580,18 +712,18 @@ def test_call_repair_keeps_strict_offer_answer_roles(index_html: str) -> None:
     assert "activeCallLocalRole" in index_html
     assert "function isLocalOfferOwner" in index_html
     offer_idx = index_html.find("async function sendLocalSdpOffer")
-    offer_snippet = index_html[offer_idx:offer_idx + 2600]
+    offer_snippet = index_html[offer_idx : offer_idx + 2600]
     assert "offer_suppressed_by_role" in offer_snippet
     assert "isLocalOfferOwner()" in offer_snippet
 
     repair_idx = index_html.find("async function repairMediaPath")
-    repair_snippet = index_html[repair_idx:repair_idx + 5200]
+    repair_snippet = index_html[repair_idx : repair_idx + 5200]
     assert "recipient_repair_waiting_for_offer" in repair_snippet
     assert "recipient_offer_rollback" in repair_snippet
     assert "await resendLocalSdpAnswer" in repair_snippet
 
     remote_offer_idx = index_html.find("async function applyRemoteSdpOffer")
-    remote_offer_snippet = index_html[remote_offer_idx:remote_offer_idx + 2600]
+    remote_offer_snippet = index_html[remote_offer_idx : remote_offer_idx + 2600]
     assert "remote_offer_rejected_by_role" in remote_offer_snippet
     assert "unexpected_remote_offer" in remote_offer_snippet
 
@@ -599,7 +731,7 @@ def test_call_repair_keeps_strict_offer_answer_roles(index_html: str) -> None:
 def test_backend_session_authority_drives_recovery_ui(index_html: str) -> None:
     assert "function applyBackendSessionAuthority" in index_html
     idx = index_html.find("function applyBackendSessionAuthority")
-    snippet = index_html[idx:idx + 3600]
+    snippet = index_html[idx : idx + 3600]
     for state in [
         "reconnecting",
         "degraded",
@@ -615,7 +747,7 @@ def test_backend_session_authority_drives_recovery_ui(index_html: str) -> None:
     assert "setReconnectState(false)" in snippet
     assert "updateCallQuality" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 15500]
+    metrics_snippet = index_html[metrics_idx : metrics_idx + 15500]
     assert "applyBackendSessionAuthority(" in metrics_snippet
     assert "metricsResult && metricsResult.session_authority" in metrics_snippet
     assert "session_authority: callUI.lastSessionAuthority" in index_html
@@ -624,7 +756,7 @@ def test_backend_session_authority_drives_recovery_ui(index_html: str) -> None:
 def test_backend_recovery_intent_drives_repair_actions(index_html: str) -> None:
     assert "async function applyBackendRecoveryIntent" in index_html
     idx = index_html.find("async function applyBackendRecoveryIntent")
-    snippet = index_html[idx:idx + 6200]
+    snippet = index_html[idx : idx + 6200]
     for action in [
         "revive_playback",
         "downshift",
@@ -643,7 +775,7 @@ def test_backend_recovery_intent_drives_repair_actions(index_html: str) -> None:
     assert "applyBackendPathRecommendation" in snippet
     assert "backendActionAllowed(`intent_${action}`" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 16000]
+    metrics_snippet = index_html[metrics_idx : metrics_idx + 16000]
     assert "applyBackendRecoveryIntent(" in metrics_snippet
     assert "metricsResult && metricsResult.recovery_intent" in metrics_snippet
     assert "recovery_intent: callUI.lastRecoveryIntent" in index_html
@@ -654,7 +786,7 @@ def test_call_metrics_reports_relay_policy_truth(index_html: str) -> None:
     assert "bestRelayHealth" in index_html
     assert "turnCredentialExpiresAtMs" in index_html
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 16000]
+    metrics_snippet = index_html[metrics_idx : metrics_idx + 16000]
     assert "best_relay_health: media.bestRelayHealth" in metrics_snippet
     assert "best_relay_score: media.bestRelayScore" in metrics_snippet
     assert "metricsResult.routePolicy" in metrics_snippet
@@ -663,7 +795,7 @@ def test_call_metrics_reports_relay_policy_truth(index_html: str) -> None:
 def test_call_ui_proactively_probes_relay_health(index_html: str) -> None:
     assert "async function requestRelayHealthProbe" in index_html
     idx = index_html.find("async function requestRelayHealthProbe")
-    snippet = index_html[idx:idx + 2300]
+    snippet = index_html[idx : idx + 2300]
     assert "/api/peer-rtc/relay-probe" in snippet
     assert "lastRelayProbeMs" in snippet
     assert "relay_probe_completed" in snippet
@@ -676,20 +808,20 @@ def test_call_ui_refreshes_expiring_turn_credentials(index_html: str) -> None:
     assert "async function refreshIceConfigForCall" in index_html
     assert "function maybeRefreshTurnCredentials" in index_html
     idx = index_html.find("async function refreshIceConfigForCall")
-    snippet = index_html[idx:idx + 3200]
+    snippet = index_html[idx : idx + 3200]
     assert "/api/peer-rtc/ice-config?call_id=" in snippet
     assert "media.pc.setConfiguration" in snippet
     assert "turn_credentials_refreshed" in snippet
     assert "turn_credentials_refresh_failed" in snippet
     metrics_idx = index_html.find("async function reportCallMetricsOnce")
-    metrics_snippet = index_html[metrics_idx:metrics_idx + 15500]
+    metrics_snippet = index_html[metrics_idx : metrics_idx + 15500]
     assert 'maybeRefreshTurnCredentials("metrics")' in metrics_snippet
 
 
 def test_call_trace_export_downloads_backend_flight_recorder(index_html: str) -> None:
     assert 'id="btn-call-export-trace"' in index_html
     idx = index_html.find('"#btn-call-export-trace"')
-    snippet = index_html[idx:idx + 1800]
+    snippet = index_html[idx : idx + 1800]
     assert "/api/v1/calls/" in snippet
     assert "/trace" in snippet
     assert "backend_trace" in snippet
@@ -701,7 +833,7 @@ def test_call_trace_export_downloads_backend_flight_recorder(index_html: str) ->
 
 def test_inbound_accept_waits_for_offer_instead_of_self_offering(index_html: str) -> None:
     idx = index_html.find("async function acceptInboundCall")
-    snippet = index_html[idx:idx + 1800]
+    snippet = index_html[idx : idx + 1800]
     assert 'addOneCallEvent("Waiting for media offer...")' in snippet
     assert 'reportCallEvent("waiting_for_media_offer"' in snippet
     assert 'await ensureMediaNegotiation("accept")' not in snippet
@@ -709,7 +841,7 @@ def test_inbound_accept_waits_for_offer_instead_of_self_offering(index_html: str
 
 def test_call_sas_prompt_never_shows_empty_words(index_html: str) -> None:
     idx = index_html.find('if (tail === "sas_verification_required")')
-    snippet = index_html[idx:idx + 700]
+    snippet = index_html[idx : idx + 700]
     assert "sas_words_missing" in snippet
     assert "No verification words were supplied" in snippet
     assert 'pane.classList.add("show")' in snippet
@@ -726,7 +858,7 @@ def test_outgoing_overlay_does_not_stop_active_call_stream(index_html: str) -> N
     Hiding the ringing overlay must detach that preview without stopping
     the tracks already attached to RTCPeerConnection."""
     idx = index_html.find("function hideOutgoingOverlay")
-    snippet = index_html[idx:idx + 1200]
+    snippet = index_html[idx : idx + 1200]
     assert "selfPrev.srcObject !== media.localStream" in snippet
     assert "selfPrev.srcObject = null" in snippet
 
@@ -796,6 +928,7 @@ function el(selector) {{
 }}
 
 const pcInstances = [];
+const fetchBodies = [];
 class FakeRTCPeerConnection {{
   constructor() {{
     this.signalingState = "stable";
@@ -849,10 +982,23 @@ const context = {{
   stopCallRing() {{}},
   fetch: async (_url, opts) => {{
     const body = opts && opts.body ? JSON.parse(opts.body) : {{}};
+    fetchBodies.push({{ url: String(_url || ""), body }});
     return {{
       ok: true,
       json: async () => {{
         if (body.action === "initiate") return {{ ok: true, call_id: "call-runtime-1" }};
+        if (String(_url || "").includes("/api/peer-rtc/ice-config")) {{
+          return {{
+            ok: true,
+            iceServers: [{{ urls: "stun:127.0.0.1:45678" }}],
+            local_address_discovery: {{
+              enabled: true,
+              external: false,
+              scope: "same-device-or-lan",
+              candidate_addresses: ["127.0.0.1", "192.168.50.7"],
+            }},
+          }};
+        }}
         return {{ ok: true, call_id: body.call_id || "call-runtime-1", iceServers: [] }};
       }},
     }};
@@ -900,6 +1046,33 @@ vm.runInContext(driver, context, {{ timeout: 1000 }});
   const after = pc.getSenders().map((s) => s.track.readyState).join(",");
   if (before !== "live,live") throw new Error("tracks were not live before active transition: " + before);
   if (after !== "live,live") throw new Error("active transition stopped sender tracks: " + after);
+  const mdnsCandidate = "candidate:123 1 udp 2122260223 abcdef.local 54321 typ host generation 0 ufrag xyz";
+  pc.onicecandidate({{
+    candidate: {{
+      candidate: mdnsCandidate,
+      sdpMid: "0",
+      sdpMLineIndex: 0,
+    }},
+  }});
+  await context.window._livingPresenceMedia.iceSignalChain;
+  const icePosts = fetchBodies
+    .map((entry) => entry.body)
+    .filter((body) => body.action === "send_ice_candidate" && !body.end_of_candidates);
+  if (icePosts.length !== 3) {{
+    throw new Error("expected original + 2 numeric ICE posts, got " + JSON.stringify(icePosts));
+  }}
+  if (icePosts[0].candidate !== mdnsCandidate) {{
+    throw new Error("browser-authored mDNS candidate was not preserved first");
+  }}
+  const expectedAddresses = ["127.0.0.1", "192.168.50.7"];
+  icePosts.slice(1).forEach((post, index) => {{
+    const parts = String(post.candidate || "").split(/\\s+/);
+    if (!parts[0].startsWith("candidate:ol")) throw new Error("numeric foundation missing");
+    if (parts[4] !== expectedAddresses[index]) throw new Error("wrong numeric ICE address");
+    if (parts[5] !== "54321" || parts.slice(6).join(" ") !== "typ host generation 0 ufrag xyz") {{
+      throw new Error("browser ICE port/extensions changed");
+    }}
+  }});
 }})().catch((err) => {{
   console.error(err && err.stack ? err.stack : err);
   process.exit(1);
@@ -929,7 +1102,7 @@ def test_addtrack_on_call_start(index_html: str) -> None:
     """When startLivingPresenceCall fires + media comes up,
     each track is added to the RTCPeerConnection. Pin the wiring."""
     idx = index_html.find("window.startLivingPresenceCall = async function")
-    snippet = index_html[idx:idx + 3400]
+    snippet = index_html[idx : idx + 3400]
     assert "ensureLocalTracksOnPeerConnectionSettled" in snippet
     assert "media.pc.addTrack" in index_html
 
@@ -939,13 +1112,14 @@ def test_addtrack_on_accept(index_html: str) -> None:
     # The accept handler is registered in the JS driver section.
     idx = index_html.find('const acceptBtn = $$("#btn-call-accept");')
     assert idx > 0
-    snippet = index_html[idx:idx + 1500]
+    snippet = index_html[idx : idx + 1500]
     assert "media.pc.addTrack" in snippet
 
 
 # ---------------------------------------------------------------------------
 # Mute / Camera toggles
 # ---------------------------------------------------------------------------
+
 
 def test_mute_button_in_active_surface(index_html: str) -> None:
     assert 'id="btn-call-mute"' in index_html
@@ -963,7 +1137,7 @@ def test_mute_toggles_audio_track_enabled(index_html: str) -> None:
         'if (muteBtn) muteBtn.addEventListener("click"',
     )
     assert idx > 0
-    snippet = index_html[idx:idx + 500]
+    snippet = index_html[idx : idx + 500]
     assert "getAudioTracks" in snippet
     assert "t.enabled" in snippet
 
@@ -973,7 +1147,7 @@ def test_camera_toggles_video_track_enabled(index_html: str) -> None:
         'if (cameraBtn) cameraBtn.addEventListener("click"',
     )
     assert idx > 0
-    snippet = index_html[idx:idx + 500]
+    snippet = index_html[idx : idx + 500]
     assert "getVideoTracks" in snippet
     assert "t.enabled" in snippet
 
@@ -989,13 +1163,14 @@ def test_mute_button_aria_pressed_synced(index_html: str) -> None:
 # Media teardown on hangup / phase transitions
 # ---------------------------------------------------------------------------
 
+
 def test_stop_all_media_function_defined(index_html: str) -> None:
     assert "function stopAllMedia" in index_html
 
 
 def test_stop_all_media_stops_tracks(index_html: str) -> None:
     idx = index_html.find("function stopAllMedia")
-    snippet = index_html[idx:idx + 1200]
+    snippet = index_html[idx : idx + 1200]
     assert "t.stop()" in snippet
     # Closes the RTCPeerConnection
     assert "media.pc.close()" in snippet
@@ -1004,7 +1179,7 @@ def test_stop_all_media_stops_tracks(index_html: str) -> None:
 def test_hangup_button_calls_stop_all_media(index_html: str) -> None:
     idx = index_html.find('const hangupBtn = $$("#btn-call-hangup");')
     assert idx > 0
-    snippet = index_html[idx:idx + 600]
+    snippet = index_html[idx : idx + 600]
     assert "stopAllMedia()" in snippet
 
 
@@ -1013,13 +1188,14 @@ def test_phase_ended_stops_media(index_html: str) -> None:
     async_capture), the browser tears down media too — otherwise
     the camera stays on after the peer ends."""
     idx = index_html.find('phase === "ended"')
-    snippet = index_html[idx:idx + 800]
+    snippet = index_html[idx : idx + 800]
     assert "stopAllMedia()" in snippet
 
 
 # ---------------------------------------------------------------------------
 # Call Mom button on contact rows
 # ---------------------------------------------------------------------------
+
 
 def test_call_button_on_pinned_peers(index_html: str) -> None:
     """May 15 2026 — the single 📞 call button was split into two
@@ -1034,7 +1210,7 @@ def test_call_button_only_for_pinned_trust(index_html: str) -> None:
     don't get either call button."""
     idx = index_html.find('el("button", "call-btn-voice"')
     # Search backwards for the conditional.
-    pre = index_html[max(0, idx - 800):idx]
+    pre = index_html[max(0, idx - 800) : idx]
     assert 'p.trust === "pinned"' in pre
 
 
@@ -1043,12 +1219,12 @@ def test_call_button_calls_startlivingpresencecall(index_html: str) -> None:
     fingerprint, display name, AND an explicit {video:bool} opts so
     the camera state matches the icon clicked."""
     idx_v = index_html.find('el("button", "call-btn-voice"')
-    voice_snippet = index_html[idx_v:idx_v + 1200]
+    voice_snippet = index_html[idx_v : idx_v + 1200]
     assert "startLivingPresenceCall(" in voice_snippet
     assert "p.fingerprint" in voice_snippet
     assert "{ video: false }" in voice_snippet
     idx_V = index_html.find('el("button", "call-btn-video"')
-    video_snippet = index_html[idx_V:idx_V + 1200]
+    video_snippet = index_html[idx_V : idx_V + 1200]
     assert "startLivingPresenceCall(" in video_snippet
     assert "p.fingerprint" in video_snippet
     assert "{ video: true }" in video_snippet
@@ -1058,13 +1234,13 @@ def test_call_button_has_aria_label(index_html: str) -> None:
     """Doctrine §5.b — every button is screen-reader accessible.
     Both voice + video buttons set aria-label distinctly."""
     idx_v = index_html.find('el("button", "call-btn-voice"')
-    voice_snippet = index_html[idx_v:idx_v + 800]
+    voice_snippet = index_html[idx_v : idx_v + 800]
     assert 'setAttribute("aria-label"' in voice_snippet
-    assert 'Voice call' in voice_snippet
+    assert "Voice call" in voice_snippet
     idx_V = index_html.find('el("button", "call-btn-video"')
-    video_snippet = index_html[idx_V:idx_V + 800]
+    video_snippet = index_html[idx_V : idx_V + 800]
     assert 'setAttribute("aria-label"' in video_snippet
-    assert 'Video call' in video_snippet
+    assert "Video call" in video_snippet
 
 
 def test_call_button_styled(index_html: str) -> None:

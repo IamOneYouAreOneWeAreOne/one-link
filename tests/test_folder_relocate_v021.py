@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -83,7 +82,9 @@ def test_state_set_folder_local_path_rejects_empty(tmp_path: Path):
 # ── FolderEngine.relocate_folder ─────────────────────────────────
 
 
-def _make_engine(tmp_path: Path) -> tuple[FolderEngine, State]:
+def _make_engine(
+    tmp_path: Path,
+) -> tuple[FolderEngine, State, asyncio.AbstractEventLoop]:
     state = State(db_path=tmp_path / "s.db")
     blob_store = BlobStore(root=tmp_path / "blobs")
     me = _identity()
@@ -92,59 +93,76 @@ def _make_engine(tmp_path: Path) -> tuple[FolderEngine, State]:
         state=state, blob_store=blob_store,
         my_fingerprint=me.fingerprint, loop=loop,
     )
-    return engine, state
+    return engine, state, loop
+
+
+def _close_engine(
+    engine: FolderEngine,
+    state: State,
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Release watcher, database, and explicit event-loop ownership."""
+    for folder_name in tuple(engine._folders):
+        engine.remove_folder(folder_name)
+    state.close()
+    loop.close()
 
 
 def test_engine_relocate_swaps_watcher_root(tmp_path: Path):
-    engine, state = _make_engine(tmp_path)
-    src = tmp_path / "src"
-    dst = tmp_path / "dst"
-    src.mkdir()
-    dst.mkdir()
-    engine.add_folder(name="x", local_path=src, shared_with=[])
-    assert engine._folders["x"].root == src.resolve()
-    row = engine.relocate_folder("x", dst)
-    assert row["local_path"] == str(dst.resolve())
-    assert engine._folders["x"].root == dst.resolve()
-    engine.remove_folder("x")
-    state.close()
+    engine, state, loop = _make_engine(tmp_path)
+    try:
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        src.mkdir()
+        dst.mkdir()
+        engine.add_folder(name="x", local_path=src, shared_with=[])
+        assert engine._folders["x"].root == src.resolve()
+        row = engine.relocate_folder("x", dst)
+        assert row["local_path"] == str(dst.resolve())
+        assert engine._folders["x"].root == dst.resolve()
+    finally:
+        _close_engine(engine, state, loop)
 
 
 def test_engine_relocate_creates_missing_target(tmp_path: Path):
     """If the new path doesn't exist yet, relocate must create it
     (mkdir parents=True) — same semantics as add_folder."""
-    engine, state = _make_engine(tmp_path)
-    src = tmp_path / "src"
-    src.mkdir()
-    engine.add_folder(name="x", local_path=src, shared_with=[])
-    new = tmp_path / "fresh" / "subdir"
-    assert not new.exists()
-    engine.relocate_folder("x", new)
-    assert new.is_dir()
-    engine.remove_folder("x")
-    state.close()
+    engine, state, loop = _make_engine(tmp_path)
+    try:
+        src = tmp_path / "src"
+        src.mkdir()
+        engine.add_folder(name="x", local_path=src, shared_with=[])
+        new = tmp_path / "fresh" / "subdir"
+        assert not new.exists()
+        engine.relocate_folder("x", new)
+        assert new.is_dir()
+    finally:
+        _close_engine(engine, state, loop)
 
 
 def test_engine_relocate_rejects_file_target(tmp_path: Path):
     """Target path that exists as a FILE (not a directory) must
     raise NotADirectoryError — you can't watch a file as a folder."""
-    engine, state = _make_engine(tmp_path)
-    src = tmp_path / "src"
-    src.mkdir()
-    engine.add_folder(name="x", local_path=src, shared_with=[])
-    file_target = tmp_path / "this-is-a-file.txt"
-    file_target.write_text("hello", encoding="utf-8")
-    with pytest.raises(NotADirectoryError):
-        engine.relocate_folder("x", file_target)
-    engine.remove_folder("x")
-    state.close()
+    engine, state, loop = _make_engine(tmp_path)
+    try:
+        src = tmp_path / "src"
+        src.mkdir()
+        engine.add_folder(name="x", local_path=src, shared_with=[])
+        file_target = tmp_path / "this-is-a-file.txt"
+        file_target.write_text("hello", encoding="utf-8")
+        with pytest.raises(NotADirectoryError):
+            engine.relocate_folder("x", file_target)
+    finally:
+        _close_engine(engine, state, loop)
 
 
 def test_engine_relocate_raises_on_unknown_folder(tmp_path: Path):
-    engine, state = _make_engine(tmp_path)
-    with pytest.raises(KeyError):
-        engine.relocate_folder("ghost", tmp_path / "anywhere")
-    state.close()
+    engine, state, loop = _make_engine(tmp_path)
+    try:
+        with pytest.raises(KeyError):
+            engine.relocate_folder("ghost", tmp_path / "anywhere")
+    finally:
+        _close_engine(engine, state, loop)
 
 
 # ── POST /api/folders/{name}/relocate endpoint ────────────────────

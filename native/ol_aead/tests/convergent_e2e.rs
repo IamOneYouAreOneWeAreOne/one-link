@@ -33,19 +33,26 @@ fn cross_sender_determinism_aes_gcm() {
     let alice_cipher = cipher_for_key(&alice_key);
     let bob_cipher = cipher_for_key(&bob_key);
 
-    let alice_ct = encrypt_chunk(&alice_cipher, &alice_addr, &plaintext).unwrap();
-    let bob_ct = encrypt_chunk(&bob_cipher, &bob_addr, &plaintext).unwrap();
+    let alice_ciphertext = encrypt_chunk(&alice_cipher, &alice_addr, &plaintext).unwrap();
+    let bob_ciphertext = encrypt_chunk(&bob_cipher, &bob_addr, &plaintext).unwrap();
 
     assert_eq!(
-        alice_ct, bob_ct,
+        alice_ciphertext, bob_ciphertext,
         "convergent encryption must produce identical ciphertext for identical plaintext"
     );
 
     // And both decrypt to the original plaintext.
-    let alice_pt = decrypt_chunk(&alice_cipher, &alice_addr, plaintext.len(), &alice_ct).unwrap();
-    let bob_pt = decrypt_chunk(&bob_cipher, &bob_addr, plaintext.len(), &bob_ct).unwrap();
-    assert_eq!(alice_pt, plaintext);
-    assert_eq!(bob_pt, plaintext);
+    let alice_recovered = decrypt_chunk(
+        &alice_cipher,
+        &alice_addr,
+        plaintext.len(),
+        &alice_ciphertext,
+    )
+    .unwrap();
+    let bob_recovered =
+        decrypt_chunk(&bob_cipher, &bob_addr, plaintext.len(), &bob_ciphertext).unwrap();
+    assert_eq!(alice_recovered, plaintext);
+    assert_eq!(bob_recovered, plaintext);
 }
 
 #[test]
@@ -68,8 +75,8 @@ fn distinct_plaintexts_diverge() {
 #[test]
 fn convergent_dedup_64k_chunk() {
     // A full-size 64 KiB chunk: two senders, byte-identical ciphertext.
-    let plaintext: Vec<u8> = (0..(64 * 1024))
-        .map(|i| ((i as u32).wrapping_mul(0x9E3779B9) ^ ((i as u32) >> 5)) as u8)
+    let plaintext: Vec<u8> = (0..(64 * 1024u32))
+        .map(|i| (i.wrapping_mul(0x9E37_79B9) ^ (i >> 5)).to_le_bytes()[0])
         .collect();
     let key = derive_convergent_aead_key(&plaintext);
     let addr = chunk_address_convergent(&plaintext);

@@ -27,6 +27,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.daemon import Daemon
 from one_link.identity import Identity, fingerprint_of
+from one_link.relay_client import SEALED_RELAY_HANDSHAKE_MAGIC
+from one_link.relay_proto import FRAME_DATA, SESSION_ID_BYTES
 from one_link.rendezvous_server import RendezvousApp, ServerConfig
 from one_link.state import State
 
@@ -68,15 +70,44 @@ async def relay_rendezvous() -> AsyncIterator[tuple[str, RendezvousApp]]:
         yield base, rdz
     finally:
         await runner.cleanup()
+        # aiohttp closes plain-TCP transports asynchronously after session,
+        # websocket, and runner cleanup.  Yield one loop turn so those close
+        # callbacks finish before pytest collects unclosed connections under
+        # ``-W error`` or tears down the test loop.
+        await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
-async def test_chat_through_encrypted_relay(relay_rendezvous, tmp_path: Path):
+async def test_chat_through_encrypted_relay(
+    relay_rendezvous,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Both daemons configured with the same relay-enabled rendezvous.
     A's _dial_peer for B finds NO direct candidates (B isn't on mDNS,
     has no advertised endpoints with usable ports), so falls through
     to relay. Real chat message → ACK round-trip → persisted in B."""
-    base, _rdz = relay_rendezvous
+    base, rdz = relay_rendezvous
+
+    # Capture the exact DATA payloads parsed by the relay in both directions.
+    # This is intentionally below the client abstractions: a routing-table or
+    # log-only assertion would miss identity keys in channel HELLO/REPLY.
+    import one_link.rendezvous_server as rendezvous_server_module
+
+    relay_wire_payloads: list[bytes] = []
+    original_frame_metadata = rendezvous_server_module._relay_frame_metadata
+
+    def _capture_relay_frame(buf: bytes) -> tuple[int, bytes, int]:
+        result = original_frame_metadata(buf)
+        if result[0] == FRAME_DATA:
+            relay_wire_payloads.append(bytes(memoryview(buf)[1 + SESSION_ID_BYTES :]))
+        return result
+
+    monkeypatch.setattr(
+        rendezvous_server_module,
+        "_relay_frame_metadata",
+        _capture_relay_frame,
+    )
 
     me_a = _new_identity("alice-laptop")
     me_b = _new_identity("bob-laptop")
@@ -123,13 +154,33 @@ async def test_chat_through_encrypted_relay(relay_rendezvous, tmp_path: Path):
 
     try:
         # Confirm B's relay listener is registered on the rendezvous.
-        from one_link.relay_proto import _b64  # type: ignore
         async with aiohttp.ClientSession() as s:
             async with s.get(f"{base}/metrics") as r:
                 m = await r.json()
         assert m["relay_listeners_active"] >= 2, (
             f"both daemons should have registered relay listeners: {m!r}"
         )
+        assert m["relay_blinded_listeners_active"] >= 2
+        assert m["relay_legacy_identity_listeners_active"] == 0
+        assert m["relay_destination_identity_exposure"] is False
+        assert me_a.public_bytes not in rdz._relay_listeners
+        assert me_b.public_bytes not in rdz._relay_listeners
+        assert all(
+            listener.routing_mode == "pairwise_blinded_v1"
+            for listener in rdz._unique_relay_listeners()
+        )
+        for daemon in (daemon_a, daemon_b):
+            relay_truth = daemon.relay_routing_runtime_truth()
+            assert relay_truth["pairwise_blinded_active"] is True
+            assert relay_truth["legacy_identity_route_active"] is False
+            assert (
+                relay_truth["destination_identity_exposure"]
+                == "no_identity_public_key_on_relay_wire"
+            )
+            assert (
+                relay_truth["identity_bearing_channel_first_flight"]
+                == "sealed_recipient_only_v1"
+            )
 
         # Synthesize a peer record for B as A would learn it (no direct
         # endpoint, just pubkey). _dial_peer should find no direct
@@ -173,6 +224,23 @@ async def test_chat_through_encrypted_relay(relay_rendezvous, tmp_path: Path):
                 m = await r.json()
         assert m["relay_sessions_total"] >= 1
         assert m["relay_bytes_forwarded"] > 0
+
+        # Both identity-bearing channel first flights must be sealed before
+        # the relay parses them. Every later channel frame is already AEAD
+        # ciphertext. Assert against the relay's exact observed DATA bytes,
+        # not merely client-side serialization or server routing state.
+        assert relay_wire_payloads
+        sealed_first_flights = [
+            payload
+            for payload in relay_wire_payloads
+            if len(payload) >= 4 + len(SEALED_RELAY_HANDSHAKE_MAGIC)
+            and payload[4 : 4 + len(SEALED_RELAY_HANDSHAKE_MAGIC)]
+            == SEALED_RELAY_HANDSHAKE_MAGIC
+        ]
+        assert len(sealed_first_flights) == 2
+        observed_relay_data = b"".join(relay_wire_payloads)
+        assert me_a.public_bytes not in observed_relay_data
+        assert me_b.public_bytes not in observed_relay_data
     finally:
         for fp in list(daemon_a._outbound_sessions):  # type: ignore[attr-defined]
             await daemon_a._drop_outbound_session(fp)

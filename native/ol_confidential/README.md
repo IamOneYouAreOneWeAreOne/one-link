@@ -1,9 +1,11 @@
-# `ol_confidential` — Row 10 of the Coherence Mesh
+# `ol_confidential` — Row 10 confidential-operation primitives
 
-**Confidential-compute daemon.** Where hardware supports it, the
-daemon runs (or at minimum the key-handling subsystem runs) inside a
-hardware-attested enclave. Even local malware can't extract identity
-keys.
+> **Capability boundary:** this crate supplies sealed-blob, signed-envelope,
+> and optional Windows PCP-key primitives. It does not place the daemon or
+> master identity inside an enclave, does not make the software provider safe
+> from same-user process inspection, and does not provide a vendor/EK
+> attestation chain proving remote TPM residency. The live daemon must report
+> its own wiring and tier; crate presence is not confidential-compute proof.
 
 ## Layered model
 
@@ -28,12 +30,15 @@ keys.
 
 The master hybrid signature (Ed25519 + ML-DSA-65) covers the FULL
 canonical transcript, which includes the `platform_quote` bytes.
-So:
+So, within this envelope protocol:
 
 - A peer that pins only the master VK still gets tamper detection
   on the platform_quote (master sig fails if quote is swapped).
-- A peer that ALSO validates the platform_quote gets a
-  hardware-bound chain (this doc was minted on the specific TPM).
+- A peer that validates the platform signature proves possession of the
+  included ECDSA private key. The current envelope contains no TPM EK/vendor
+  certificate or standard TPM quote, so a remote peer cannot infer hardware
+  residency merely from that self-contained key/signature. Pinning the public
+  blob can establish continuity for later documents.
 
 ## Tiers
 
@@ -49,8 +54,8 @@ pub enum ConfidentialTier {
 
 | Tag | Backend | Status |
 |---|---|---|
-| `Software` | ChaCha20-Poly1305 sealing under per-process ephemeral key, Zeroize on drop | ✓ shipped |
-| `WindowsTpm` | NCrypt Platform Crypto Provider, ECDSA-P256 in the TPM, user-mode, no admin | ✓ shipped (this crate, `windows-tpm` feature) |
+| `Software` | ChaCha20-Poly1305 sealing under a key in the same process | Implemented primitive; at-rest/process-lifetime boundary only |
+| `WindowsTpm` | NCrypt Platform Crypto Provider ECDSA-P256 attestation-key path | Feature-gated primitive; no vendor/EK chain, master seal/sign remain software, physical/package qualification required |
 | `AppleSecureEnclave` | `security-framework` crate | future ship |
 | `AndroidStrongBox` | Android KeyStore + StrongBox attestation | future ship |
 | `IntelSgx` | `fortanix-sgx` | future ship |
@@ -59,12 +64,14 @@ pub enum ConfidentialTier {
 
 ## Threat coverage
 
-| Threat | Software | WindowsTpm |
-|---|:-:|:-:|
-| T-LOCAL-MAL-USER (user-mode malware grabs key from process memory) | ✓ | ✓ |
-| T-REMOTE-IMPERSONATE (replay attestation across challenges) | ✓ | ✓ |
-| T-REMOTE-IMPERSONATE-PHYSICAL (replay attestation across hosts) | ✓ via field witness | ✓ via TPM identity binding |
-| T-LOCAL-MAL-ROOT (root malware reads /proc/mem, kernel debugger) | ✗ | ✓ for platform_quote ECDSA key; ✗ for master PQ-hybrid (TPM can't sign PQ) |
+| Threat/property | Software | Windows PCP-key path |
+|---|---|---|
+| Plaintext at rest outside the live provider process | AEAD sealed blob, subject to caller/key-lifecycle correctness | Same software master-key boundary |
+| Same-user malware able to inspect/inject into the daemon process | **Not defeated** | **Not defeated for the master key/sign path** |
+| Replay of a document against a fresh independent challenge | Nonce/deadline checks reject a stale transcript when the challenge channel is authentic | Same, plus platform-key signature continuity |
+| Proof that two parties supplied the same field bytes | Signed commitment equality only; not physical-host attestation | Same |
+| Remote proof that the signing key is TPM-resident | None | **Not provided by the current self-contained public blob/signature; needs an authenticated EK/vendor attestation chain** |
+| Root/kernel/cold-boot compromise of master material | **Not defeated** | **Not defeated; only the platform ECDSA attestation key is requested through PCP** |
 
 ## Quickstart
 
@@ -84,11 +91,35 @@ With Windows TPM:
 
 ```rust
 #[cfg(all(target_os = "windows", feature = "windows-tpm"))]
-use ol_confidential::windows_tpm::{TpmAttestationKey, attest_with_tpm, verify_attestation_with_tpm};
+use ol_confidential::windows_tpm::{
+    attest_with_tpm, verify_attestation_with_tpm, TpmAttestationClaims,
+    TpmAttestationKey,
+};
 
 let tpm = TpmAttestationKey::acquire_or_create("OL-confidential-attestation-v1")?;
-let doc = attest_with_tpm(&provider, &sealed, &tpm, nonce, now_unix, now_unix + 30, None)?;
-let tpm_pub = verify_attestation_with_tpm(&doc, &nonce, None, peer_now)?;  // returns TPM pub-blob for pinning
+let issuer_sdp_pubkey = [0u8; ISSUER_SDP_PUBKEY_LEN];
+let doc = attest_with_tpm(
+    &provider,
+    &sealed,
+    &tpm,
+    TpmAttestationClaims {
+        peer_nonce: nonce,
+        issued_unix: now_unix,
+        deadline_unix: now_unix + 30,
+        field_witness: None,
+        issuer_sdp_pubkey,
+    },
+)?;
+let tpm_pub = verify_attestation_with_tpm(
+    &doc,
+    &nonce,
+    None,
+    peer_now,
+    ConfidentialTier::HardwareBound,
+    &issuer_sdp_pubkey,
+)?; // returns TPM pub-blob for pinning
 ```
 
-See `BENCH_RESULTS.md` for performance numbers and `docs/formal/confidential_attestation.tla` for the design-time TLA+ spec.
+See `BENCH_RESULTS.md` for historical performance measurements and
+`docs/formal/confidential_attestation.tla` for an abstract design-time model.
+Neither is a runtime hardware-attestation or security certification.

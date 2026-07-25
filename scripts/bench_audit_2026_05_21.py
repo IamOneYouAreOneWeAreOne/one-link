@@ -30,7 +30,7 @@ from __future__ import annotations
 import os
 import statistics
 import time
-from typing import Callable
+from typing import Callable, cast
 
 import sys
 from pathlib import Path
@@ -90,26 +90,26 @@ def _bench_dr_decrypt() -> dict:
     # in order. After exhausting, re-bootstrap. Wrap mutable state in a
     # single-element list so the closure doesn't need ``nonlocal``.
     def make_run() -> Callable[[], None]:
-        state = {"pair": init_pair(os.urandom(32)), "i": 0}
-        state["pool"] = [
-            encrypt(state["pair"][0], b"benchmark payload of fixed size")
+        pair = init_pair(os.urandom(32))
+        index = 0
+        pool = [
+            encrypt(pair[0], b"benchmark payload of fixed size")
             for _ in range(2_000)
         ]
 
         def run() -> None:
-            i = state["i"]
-            if i >= len(state["pool"]):
+            nonlocal index, pair, pool
+            if index >= len(pool):
                 # Reset matched pair; cost amortized across iters.
-                state["pair"] = init_pair(os.urandom(32))
-                state["pool"] = [
-                    encrypt(state["pair"][0], b"benchmark payload of fixed size")
+                pair = init_pair(os.urandom(32))
+                pool = [
+                    encrypt(pair[0], b"benchmark payload of fixed size")
                     for _ in range(2_000)
                 ]
-                state["i"] = 0
-                i = 0
-            h, ct = state["pool"][i]
-            decrypt(state["pair"][1], h, ct)
-            state["i"] = i + 1
+                index = 0
+            h, ct = pool[index]
+            decrypt(pair[1], h, ct)
+            index += 1
         return run
 
     return _bench("dr_decrypt (T1-A snapshot/revert)", make_run(), iters=2_000)
@@ -122,7 +122,7 @@ def _bench_dr_decrypt_pre_t1a() -> dict:
     a faithful copy of the pre-patch logic.
     """
     from one_link.double_ratchet import (
-        encrypt, init_pair, Header, MAX_SKIP_KEYS,
+        encrypt, init_pair, MAX_SKIP_KEYS,
         _try_skipped, _dh_ratchet, _skip_recv_keys,
         _aead_nonce, _aead_for, kdf_chain,
     )
@@ -153,25 +153,25 @@ def _bench_dr_decrypt_pre_t1a() -> dict:
         return pt
 
     def make_run() -> Callable[[], None]:
-        state = {"pair": init_pair(os.urandom(32)), "i": 0}
-        state["pool"] = [
-            encrypt(state["pair"][0], b"benchmark payload of fixed size")
+        pair = init_pair(os.urandom(32))
+        index = 0
+        pool = [
+            encrypt(pair[0], b"benchmark payload of fixed size")
             for _ in range(2_000)
         ]
 
         def run() -> None:
-            i = state["i"]
-            if i >= len(state["pool"]):
-                state["pair"] = init_pair(os.urandom(32))
-                state["pool"] = [
-                    encrypt(state["pair"][0], b"benchmark payload of fixed size")
+            nonlocal index, pair, pool
+            if index >= len(pool):
+                pair = init_pair(os.urandom(32))
+                pool = [
+                    encrypt(pair[0], b"benchmark payload of fixed size")
                     for _ in range(2_000)
                 ]
-                state["i"] = 0
-                i = 0
-            h, ct = state["pool"][i]
-            _decrypt_pre_t1a(state["pair"][1], h, ct)
-            state["i"] = i + 1
+                index = 0
+            h, ct = pool[index]
+            _decrypt_pre_t1a(pair[1], h, ct)
+            index += 1
         return run
 
     return _bench("dr_decrypt (pre-T1-A baseline)", make_run(), iters=2_000)
@@ -207,10 +207,7 @@ def _bench_safe_transfer_name() -> dict:
     # Reserved-names lookup is a class attribute; instantiate a stub
     # only enough to satisfy the bound-method dispatch.
 
-    class _Stub:
-        _WINDOWS_RESERVED_BASENAMES = Daemon._WINDOWS_RESERVED_BASENAMES
-
-    stub = _Stub()
+    stub = cast(Daemon, object.__new__(Daemon))
     names = [
         "normal_file.pdf",
         "with spaces in name.docx",
@@ -231,19 +228,19 @@ def _bench_safe_transfer_name() -> dict:
 # ── _csrf_origin_ok ────────────────────────────────────────────────
 
 def _bench_csrf_origin_ok() -> dict:
+    from aiohttp import web
     from one_link.server import UIServer
 
-    class _Stub:
-        bind_host = "127.0.0.1"
-
-    stub = _Stub()
+    stub = cast(UIServer, object.__new__(UIServer))
     csrf = UIServer._csrf_origin_ok
 
     # Synthesise the lightest possible request-shaped object: server only
     # reads headers + the helper's own attributes.
     class _Req:
         def __init__(self, origin: str | None, bearer: bool) -> None:
-            self.headers: dict = {}
+            self.headers: dict[str, str] = {}
+            self.scheme = "http"
+            self.host = "127.0.0.1:7117"
             if origin:
                 self.headers["Origin"] = origin
             if bearer:
@@ -259,7 +256,8 @@ def _bench_csrf_origin_ok() -> dict:
     counter = {"i": 0}
 
     def run() -> None:
-        csrf(stub, reqs[counter["i"] % len(reqs)])
+        request = cast(web.Request, reqs[counter["i"] % len(reqs)])
+        csrf(stub, request)
         counter["i"] += 1
 
     return _bench("csrf_origin_ok (T2-O)", run, iters=50_000)
@@ -275,6 +273,8 @@ def _bench_file_wants_bounds() -> dict:
     def run() -> None:
         wanted: set[int] = set()
         for x in raw:
+            if not isinstance(x, (int, str)):
+                continue
             try:
                 i = int(x)
             except (TypeError, ValueError):
@@ -313,7 +313,8 @@ def _bench_update_transfer() -> dict:
         chunks_total=4,
         raw_bytes=0,
         wire_bytes=0,
-        metadata={"path": "/tmp/bench.bin"},
+        # Synthetic metadata only: no file is created or opened at this path.
+        metadata={"path": "/tmp/bench.bin"},  # nosec B108
     )
     progress = {"n": 0}
 
@@ -448,18 +449,19 @@ def _bench_native_aead_t1b_candidate() -> dict:
     base_secret = b"\xaa" * 32
     plaintext = b"\xcc" * (256 * 1024)
     chunk_id = b"\xdd" * 32
-    state = {"idx": 0, "ck": base_secret}
+    index = 0
+    chain_key = base_secret
 
     def run() -> None:
+        nonlocal chain_key, index
         # KDF chain step (BLAKE3 stand-in via SHA256 since blake3 is
         # already heavily benchmarked elsewhere).
-        ck = state["ck"]
-        chunk_key = hashlib.sha256(b"\x01" + ck).digest()
-        state["ck"] = hashlib.sha256(b"\x02" + ck).digest()
+        chunk_key = hashlib.sha256(b"\x01" + chain_key).digest()
+        chain_key = hashlib.sha256(b"\x02" + chain_key).digest()
         aead = ChaCha20Poly1305(chunk_key)
-        nonce = state["idx"].to_bytes(12, "little")
+        nonce = index.to_bytes(12, "little")
         aead.encrypt(nonce, plaintext, chunk_id)
-        state["idx"] += 1
+        index += 1
 
     return _bench(
         "native_aead T1-B candidate (per-chunk key, 256 KiB)",

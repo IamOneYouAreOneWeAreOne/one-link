@@ -35,7 +35,7 @@ use crate::context::Context;
 pub trait Decide<Action> {
     /// Compute the action for this context.
     ///
-    /// This is the "smart" path: full Smart-Rules / UnifiedMin / mode
+    /// This is the "smart" path: full Smart-Rules / `UnifiedMin` / mode
     /// awareness etc. Should never panic; if logic is undecidable for
     /// some input, fall through to [`safe_default`](Self::safe_default).
     fn decide(&self, ctx: &Context) -> Action;

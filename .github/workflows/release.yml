@@ -1,8 +1,9 @@
 name: release
 
-# Reproducible-build + signed-attestation pipeline for tagged releases.
+# Locked build + signed-provenance pipeline for tagged releases.
 # Goals:
-#   1. Anyone can rebuild from source and get the same binary.
+#   1. Every artifact is built from reviewed locks after the tagged commit
+#      passes the native, Python, browser, performance, and security gates.
 #   2. Each release artifact carries a Sigstore attestation in the
 #      public Rekor transparency log so consumers can verify
 #      "this artifact was built from this commit by GitHub Actions
@@ -28,33 +29,41 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write    # create release + upload assets
-  id-token: write    # OIDC token for Sigstore keyless signing
-  attestations: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   call_reliability_gate:
     name: call reliability release gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
+      - name: setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: false
+
       - name: install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+        run: uv sync --frozen --python python --extra dev
 
       - name: deterministic call reliability soak
         run: |
-          python scripts/call_reliability_soak_gate.py --iterations 640 --out benchmarks/results/release-call-reliability-soak.json
+          uv run --frozen --extra dev python scripts/call_reliability_soak_gate.py --iterations 640 --out benchmarks/results/release-call-reliability-soak.json
 
       - name: upload call reliability evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: release-call-reliability-soak
@@ -63,36 +72,301 @@ jobs:
             benchmarks/results/release-call-reliability-soak.jsonl
           if-no-files-found: warn
 
+  # A tag is an independent publication event: branch-protection checks do not
+  # automatically follow it. Re-run the exact release-critical gates against
+  # the tagged commit so a stale, manually-created, or otherwise unchecked tag
+  # can never acquire signatures or public release assets.
+  release_quality_linux:
+    name: tagged commit quality / Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: false
+
+      - name: install checksummed Node.js LTS without a shared package cache
+        env:
+          NODE_VERSION: "24.18.0"
+          NODE_ARCHIVE_SHA256: "55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742"
+        run: |
+          set -euo pipefail
+          archive="node-v${NODE_VERSION}-linux-x64.tar.xz"
+          install_dir="$RUNNER_TEMP/node-${NODE_VERSION}"
+          curl --fail --silent --show-error --location \
+            "https://nodejs.org/dist/v${NODE_VERSION}/${archive}" \
+            --output "$archive"
+          printf '%s  %s\n' "$NODE_ARCHIVE_SHA256" "$archive" | sha256sum --check --strict
+          mkdir -p "$install_dir"
+          tar --extract --xz --file "$archive" --directory "$install_dir" --strip-components=1
+          test "$("$install_dir/bin/node" --version)" = "v${NODE_VERSION}"
+          echo "$install_dir/bin" >> "$GITHUB_PATH"
+
+      - name: install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --component clippy,rustfmt --no-self-update
+          rustup default 1.96.0
+          rustup target add wasm32-unknown-unknown --toolchain 1.96.0
+
+      - name: verify lock and install the reviewed quality toolchain
+        run: |
+          uv lock --check
+          uv sync --frozen --python python --extra dev --extra e2e --extra release --extra security
+
+      - name: build tagged native Python binding
+        working-directory: native
+        run: uv run --project .. --frozen --extra dev --extra release maturin develop --release --locked
+
+      - name: native formatting and lint gates
+        working-directory: native
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --workspace --all-targets --all-features --exclude one_link_native -- -D warnings
+
+      - name: native release tests
+        working-directory: native
+        timeout-minutes: 55
+        # The pyo3 cdylib is built by maturin above and exercised by the full
+        # Python suite below. Keep the pure-Rust test command identical to the
+        # canonical native workflow so it never relies on Python linker quirks.
+        run: >-
+          cargo test --locked --workspace --all-targets --all-features
+          --exclude one_link_native --release
+
+      - name: reproduce browser Argon2id WASM exactly
+        run: python scripts/verify_browser_argon2_wasm.py --rebuild
+
+      - name: reproduce browser Ed25519 WASM exactly
+        run: python scripts/verify_browser_ed25519_wasm.py --rebuild
+
+      - name: Python correctness lint
+        run: uv run --frozen --extra dev ruff check src/one_link
+
+      - name: full Python suite for tagged source
+        env:
+          ONE_LINK_RUN_LIVE_INTEGRATION: "1"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          uv run --frozen --extra dev python -m pytest tests/ \
+            --ignore=tests/e2e \
+            --ignore=tests/test_call_reliability_soak.py \
+            -q --tb=short --maxfail=20
+
+      - name: install browser and run non-skippable E2E gate
+        env:
+          ONE_LINK_RUN_BROWSER_E2E: "1"
+        run: |
+          uv run --frozen --extra e2e playwright install --with-deps chromium firefox
+          uv run --frozen --extra e2e python -m pytest tests/e2e/ -v --tb=short --browser chromium
+          uv run --frozen --extra e2e python -m pytest tests/e2e/test_peer_live_transport.py::test_two_isolated_peer_pages_complete_manual_webrtc_and_exchange_probe tests/e2e/test_browser_identity_possession_live.py::test_required_mode_live_pair_owner_request_and_immediate_revoke tests/e2e/test_call_local_candidate_live.py::test_call_media_local_candidate_augmentation_uses_real_browser_ice -v --tb=short --browser firefox
+
+      - name: exact JavaScript dependency and static-contract gates
+        working-directory: tests/js
+        run: |
+          npm ci --ignore-scripts
+          npm audit --audit-level=moderate
+          npm test
+
+      - name: GitHub Actions security gate
+        run: >-
+          uv run --frozen --extra security zizmor
+          --pedantic --strict-collection .github
+
+      - name: Python dependency and source security gates
+        run: |
+          # The local `native` extra has no registry hash and is covered by the
+          # locked RustSec gates below; audit every registry-backed Python extra
+          # and dependency group without invoking pip's resolver.
+          uv export --frozen --all-extras --all-groups --no-extra native --no-emit-project --output-file "$RUNNER_TEMP/requirements.lock"
+          uv run --frozen --extra security python -m pip_audit \
+            --requirement "$RUNNER_TEMP/requirements.lock" --no-deps --disable-pip
+          uv run --frozen --extra security python -m pip_audit \
+            --requirement "$RUNNER_TEMP/requirements.lock" --no-deps --disable-pip \
+            --vulnerability-service osv
+          uv run --frozen --extra security bandit -c pyproject.toml -r src/one_link scripts --severity-level medium
+
+      - name: install pinned cargo-audit and gate both Rust lockfiles
+        run: |
+          cargo install --locked --version 0.22.2 cargo-audit
+          cargo audit --file native/Cargo.lock --deny warnings
+          cargo audit --file native/fuzz/Cargo.lock --deny warnings
+
+      - name: install checksummed Gitleaks release
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}" \
+            --output "${archive}"
+          printf '%s  %s\n' "${GITLEAKS_SHA256}" "${archive}" | sha256sum --check --strict
+          tar --extract --gzip --file "${archive}" gitleaks
+          ./gitleaks version
+
+      - name: full-history secret gate
+        run: >-
+          ./gitleaks git . --no-banner --no-color --redact=100
+          --max-decode-depth=5 --max-archive-depth=2 --timeout=300
+
+  release_quality_windows:
+    name: tagged commit quality / Windows
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: false
+
+      - name: install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup default 1.96.0
+
+      - name: verify lock and install the reviewed Windows toolchain
+        run: |
+          uv lock --check
+          uv sync --frozen --python python --extra dev --extra e2e --extra release
+
+      - name: build tagged native Python binding
+        working-directory: native
+        run: uv run --project .. --frozen --extra dev --extra release maturin develop --release --locked
+
+      - name: canonical Windows type gate
+        run: uv run --frozen --extra dev mypy src/one_link
+
+      - name: operator pre-release, native SLO, fuzz, and live-demo gates
+        run: >-
+          uv run --frozen --extra dev --extra release python
+          scripts/pre_release_audit.py --skip-cargo --skip-pytest
+
+      - name: full Python suite for tagged source
+        env:
+          ONE_LINK_RUN_LIVE_INTEGRATION: "1"
+          PYTHONUNBUFFERED: "1"
+        run: >-
+          uv run --frozen --extra dev python -m pytest tests/
+          --ignore=tests/e2e
+          --ignore=tests/test_call_reliability_soak.py
+          -q --tb=short --maxfail=20
+
+      - name: install browser and run non-skippable E2E gate
+        env:
+          ONE_LINK_RUN_BROWSER_E2E: "1"
+        run: |
+          uv run --frozen --extra e2e playwright install chromium firefox
+          uv run --frozen --extra e2e python -m pytest tests/e2e/ -v --tb=short --browser chromium
+          uv run --frozen --extra e2e python -m pytest tests/e2e/test_peer_live_transport.py::test_two_isolated_peer_pages_complete_manual_webrtc_and_exchange_probe tests/e2e/test_browser_identity_possession_live.py::test_required_mode_live_pair_owner_request_and_immediate_revoke tests/e2e/test_call_local_candidate_live.py::test_call_media_local_candidate_augmentation_uses_real_browser_ice -v --tb=short --browser firefox
+
+  # Branch checks do not automatically follow a tag. Re-run the complete,
+  # checksum-pinned TLA+ model inventory at this exact publication commit and
+  # retain the counterexample/success logs as release evidence.
+  formal_verification:
+    name: tagged commit formal verification
+    uses: ./.github/workflows/formal_verification.yml
+    permissions:
+      contents: read
+
+  release_quality_gate:
+    name: tagged release quality authority
+    needs: [release_quality_linux, release_quality_windows, formal_verification]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: require every platform quality gate
+        env:
+          LINUX_RESULT: ${{ needs.release_quality_linux.result }}
+          WINDOWS_RESULT: ${{ needs.release_quality_windows.result }}
+          FORMAL_RESULT: ${{ needs.formal_verification.result }}
+        run: |
+          set -euo pipefail
+          test "$LINUX_RESULT" = "success"
+          test "$WINDOWS_RESULT" = "success"
+          test "$FORMAL_RESULT" = "success"
+
   build:
-    name: build reproducible artifacts
-    needs: call_reliability_gate
+    name: build locked source artifacts
+    needs: [call_reliability_gate, release_quality_gate]
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
       source_date_epoch: ${{ steps.meta.outputs.source_date_epoch }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history so SOURCE_DATE_EPOCH = commit date is
           # deterministic across re-runs.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
+      - name: setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: false
+
       - name: read version + source-date-epoch
         id: meta
-        # Use the tag's commit timestamp as SOURCE_DATE_EPOCH so
-        # rebuild-from-source by anyone on any machine produces
-        # byte-identical sdist + wheel. The Python build backend
-        # (setuptools) honors SOURCE_DATE_EPOCH when zipping.
+        # Use the tag's commit timestamp as SOURCE_DATE_EPOCH to remove the
+        # runner wall clock from archive metadata. This is a deterministic
+        # build input, not a universal byte-reproducibility claim.
+        env:
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
         run: |
-          version="${GITHUB_REF#refs/tags/v}"
-          if [ "$version" = "$GITHUB_REF" ]; then
-            version=$(grep -E '^version' pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          set -euo pipefail
+          project_version="$(python - <<'PY'
+          import tomllib
+          with open("pyproject.toml", "rb") as fh:
+              print(tomllib.load(fh)["project"]["version"])
+          PY
+          )"
+          version="$project_version"
+          if [[ "$RELEASE_REF_TYPE" != "tag" ]]; then
+            echo "::error::Tagged releases must run from an existing v* tag; select the tag when dispatching manually"
+            exit 1
+          fi
+          tag_version="${RELEASE_REF_NAME#v}"
+          if [[ "$RELEASE_REF_NAME" == "$tag_version" || "$tag_version" != "$project_version" ]]; then
+            echo "::error::Release tag $RELEASE_REF_NAME does not match pyproject version $project_version"
+            exit 1
           fi
           source_date_epoch=$(git log -1 --format=%ct)
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -100,36 +374,30 @@ jobs:
           echo "Building One Link $version (SOURCE_DATE_EPOCH=$source_date_epoch)"
 
       - name: install build tooling
-        run: |
-          python -m pip install --upgrade pip
-          pip install build
+        run: uv sync --frozen --python python --only-group release-tools
 
-      - name: build sdist + wheel reproducibly
+      - name: build sdist + wheel from locked tooling
         env:
           SOURCE_DATE_EPOCH: ${{ steps.meta.outputs.source_date_epoch }}
           PYTHONHASHSEED: 0
         run: |
           # Clean any prior artifacts that would taint the hash
-          rm -rf dist/ build/ *.egg-info
-          python -m build --sdist --wheel --outdir dist/
+          rm -rf dist/ build/ *.egg-info src/*.egg-info
+          uv run --frozen --only-group release-tools python -m build --no-isolation --sdist --wheel --outdir dist/
 
-      - name: compute SHA-256 manifest
-        run: |
-          cd dist
-          # Generate a deterministic manifest of (hash, filename)
-          # pairs sorted by filename so two builds produce
-          # byte-identical SHA256SUMS files.
-          sha256sum * | sort -k 2 > SHA256SUMS
-          cat SHA256SUMS
+      - name: validate exact Python wheel and sdist contract
+        run: >-
+          uv run --frozen --only-group release-tools python
+          scripts/validate_python_distributions.py
+          --dist-dir dist --source-root .
 
       - name: upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist
           path: |
             dist/*.whl
             dist/*.tar.gz
-            dist/SHA256SUMS
 
   # Native wheels per OS — one_link_native (Rust hot-path: chunk store,
   # AEAD, WAL, QUIC, coherence-field). abi3 means one wheel per OS
@@ -144,9 +412,9 @@ jobs:
           # x86_64 — historical baseline.
           - os: ubuntu-latest
             artifact: native-wheel-linux-x86_64
-          # macos-13 (Intel Mac native wheel) dropped — see
-          # auto_build.yml comment for the runner-pool starvation
-          # rationale.
+          # Intel macOS is excluded from supported releases. The separate
+          # manual self-hosted workflow is validation-only when suitable
+          # hardware has been explicitly provisioned.
           - os: windows-latest
             artifact: native-wheel-windows-x86_64
           # arm64 — coverage parity.
@@ -158,42 +426,44 @@ jobs:
             artifact: native-wheel-windows-arm64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup default 1.96.0
 
       - name: setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
-      - name: install maturin
-        run: |
-          python -m pip install --upgrade pip
-          pip install "maturin>=1.5,<2.0"
-
-      - name: cache cargo target
-        uses: Swatinem/rust-cache@v2
+      - name: setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
-          workspaces: native
+          version: "0.11.31"
+          enable-cache: false
+
+      - name: install locked build tooling
+        run: uv sync --frozen --python python --only-group release-tools
 
       - name: build native wheel (abi3, release)
         working-directory: native
         env:
           SOURCE_DATE_EPOCH: ${{ needs.build.outputs.source_date_epoch }}
-        run: python -m maturin build --release --strip
+        run: uv run --project .. --frozen --only-group release-tools maturin build --release --strip --locked
 
       - name: upload native wheel
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact }}
           path: native/target/wheels/*.whl
 
-  # Standalone binaries per OS — what end users actually download
-  # from the website. PyInstaller bundles Python + all deps + the
-  # native wheels into a single executable. Users double-click and
-  # the daemon starts; no pip, no Python install.
+  # Standalone application bundles per OS — what end users actually download
+  # from the website. PyInstaller places Python, dependencies, and native
+  # wheels in an onedir tree; the complete tree is archived below.
   binaries:
     name: standalone binary — ${{ matrix.os }}
     needs: [build, native_wheels]
@@ -201,42 +471,60 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # x86_64 — original lineup. ``asset_name`` stays as-is for
-          # the macos / windows rows so existing bookmarks of
-          # ``one-link-macos.zip`` and ``one-link-windows.exe.zip``
-          # keep resolving; arch-suffixed names get added for the
-          # new platforms below.
+          # PyInstaller emits an onedir tree, not a self-contained launcher.
+          # Every release asset is therefore an architecture-labelled ZIP of
+          # the complete directory; publishing only the executable would drop
+          # `_internal` and produce a binary that cannot start.
           - os: ubuntu-latest
             artifact: binary-linux-x86_64
-            asset_name: one-link-linux-x86_64
+            asset_name: one-link-linux-x86_64.zip
+            bundle_path: dist/one-link
+            bundle_executable: one-link
             native_artifact: native-wheel-linux-x86_64
           - os: macos-latest
             artifact: binary-macos-arm64
-            asset_name: one-link-macos
+            asset_name: one-link-macos-arm64.zip
+            bundle_path: dist/one-link.app
+            bundle_executable: Contents/MacOS/one-link
             native_artifact: native-wheel-macos-arm64
           - os: windows-latest
             artifact: binary-windows-x86_64
-            asset_name: one-link-windows.exe
+            asset_name: one-link-windows-x86_64.zip
+            bundle_path: dist/one-link
+            bundle_executable: one-link.exe
             native_artifact: native-wheel-windows-x86_64
           # ── new architecture coverage ────────────────────────
-          # macos-13 (Intel Mac binary) dropped — see auto_build.yml
-          # comment for the runner-pool starvation rationale.
+          # Intel macOS is excluded from supported releases. The separate
+          # manual self-hosted workflow is validation-only when suitable
+          # hardware has been explicitly provisioned.
           - os: ubuntu-24.04-arm
             artifact: binary-linux-arm64
-            asset_name: one-link-linux-arm64
+            asset_name: one-link-linux-arm64.zip
+            bundle_path: dist/one-link
+            bundle_executable: one-link
             native_artifact: native-wheel-linux-arm64
           - os: windows-11-arm
             artifact: binary-windows-arm64
-            asset_name: one-link-windows-arm64.exe
+            asset_name: one-link-windows-arm64.zip
+            bundle_path: dist/one-link
+            bundle_executable: one-link.exe
             native_artifact: native-wheel-windows-arm64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+
+      - name: setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: false
 
       - name: install Rust toolchain
         # Needed BEFORE ``pip install -e .`` on win_arm64 because
@@ -245,216 +533,291 @@ jobs:
         # and is otherwise unused at the binaries-job layer (native
         # code lands as a prebuilt wheel from ``native_wheels``).
         # Mirrors auto_build.yml exactly.
-        uses: dtolnay/rust-toolchain@stable
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup default 1.96.0
 
-      - name: install OpenSSL on Windows ARM64 (cryptography build dep)
-        # See auto_build.yml for the full rationale — same setup, same
-        # cache key, so the binaries job can reuse what auto_build
-        # populated (when run on the same runner image).
+      - name: install/verify OpenSSL on Windows ARM64 (cryptography build dep)
+        # See auto_build.yml for the full rationale. Tagged releases do not
+        # restore compiled vcpkg caches: OpenSSL is rebuilt from the pinned
+        # port baseline below so release bytes cannot inherit stale objects.
         if: matrix.os == 'windows-11-arm'
         shell: pwsh
+        env:
+          VCPKG_COMMIT: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # 2026.06.24
         run: |
           $vcpkg = $env:VCPKG_INSTALLATION_ROOT
           if (-not $vcpkg) { throw "VCPKG_INSTALLATION_ROOT not set on this runner" }
-          & "$vcpkg\vcpkg.exe" install openssl:arm64-windows --recurse
-          if ($LASTEXITCODE -ne 0) { throw "vcpkg install openssl failed (exit $LASTEXITCODE)" }
-          $prefix = "$vcpkg\installed\arm64-windows"
+          & git -C $vcpkg fetch --depth 1 origin $env:VCPKG_COMMIT
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg commit fetch failed" }
+          & git -C $vcpkg checkout --detach $env:VCPKG_COMMIT
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg commit checkout failed" }
+          $resolved = (& git -C $vcpkg rev-parse HEAD).Trim()
+          if ($resolved -ne $env:VCPKG_COMMIT) { throw "vcpkg commit mismatch: $resolved" }
+          & "$vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw "pinned vcpkg bootstrap failed" }
+          & "$vcpkg\vcpkg.exe" install openssl:arm64-windows-static --recurse
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install static openssl failed (exit $LASTEXITCODE)" }
+          $prefix = "$vcpkg\installed\arm64-windows-static"
           "OPENSSL_DIR=$prefix"                 | Out-File -Append $env:GITHUB_ENV -Encoding utf8
           "OPENSSL_LIB_DIR=$prefix\lib"         | Out-File -Append $env:GITHUB_ENV -Encoding utf8
           "OPENSSL_INCLUDE_DIR=$prefix\include" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "OPENSSL_STATIC=1"                    | Out-File -Append $env:GITHUB_ENV -Encoding utf8
           "OPENSSL_NO_VENDOR=1"                 | Out-File -Append $env:GITHUB_ENV -Encoding utf8
-          "$prefix\bin"                         | Out-File -Append $env:GITHUB_PATH -Encoding utf8
-
-      - name: cache vcpkg ARM64 OpenSSL build
-        if: matrix.os == 'windows-11-arm'
-        uses: actions/cache@v4
-        with:
-          path: |
-            C:/vcpkg/installed/arm64-windows
-            C:/vcpkg/packages/openssl_arm64-windows
-          key: vcpkg-openssl-arm64-windows-v1
+          "VCPKG_DEFAULT_TRIPLET=arm64-windows-static" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
 
       - name: install build deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller
-          pip install -e .
-          # ML stack: onnxruntime (~20 MB) + numpy + scipy for the
-          # Tier ζ/η/θ semantic codecs. torch is INSTALLED here only
-          # to export the .onnx weights from the .pt checkpoints
-          # below; it is NOT bundled into the binary.
-          pip install onnxruntime onnx onnxscript torch --index-url https://download.pytorch.org/whl/cpu
+        # Stable release artifacts intentionally omit preview semantic models,
+        # ONNX Runtime, and codec-only scientific dependencies until the full
+        # browser media-wire/playout path graduates its physical gates.
+        run: uv sync --frozen --python python --extra release --extra tray
 
       # Pull the native wheel built earlier in the same workflow
-      # and install it so PyInstaller's --collect-all picks up the
+      # and install it so PyInstaller's explicit module collection picks up the
       # .pyd / .so / .dylib. This is the link between phases 1 + 4
       # in the production-install plan.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ matrix.native_artifact }}
           path: native-wheel/
       - name: install native wheel into build env
         shell: bash
         run: |
-          pip install --force-reinstall --no-deps native-wheel/*.whl
-
-      # Export .pt → .onnx so PyInstaller bundles the small ONNX
-      # checkpoints rather than the larger .pt ones. The bundled
-      # binary loads via onnxruntime; torch never ships.
-      - name: export models to ONNX
-        shell: bash
-        env:
-          PYTHONIOENCODING: utf-8
-        run: |
-          python scripts/export_ml_to_onnx.py
+          uv pip install --python .venv --reinstall --no-deps native-wheel/*.whl
 
       - name: build standalone binary
         shell: bash
         env:
           SOURCE_DATE_EPOCH: ${{ needs.build.outputs.source_date_epoch }}
-        run: python scripts/build_binary.py
+        run: uv run --no-sync python scripts/build_binary.py
 
-      # Rename the produced binary to a per-OS asset name so users
-      # downloading from the release page see `one-link-windows.exe`
-      # / `one-link-macos` / `one-link-linux-x86_64`, not three
-      # identically-named files.
-      - name: stage binary for upload (windows)
-        if: matrix.os == 'windows-latest'
+      - name: validate stable packaged-artifact contract
         shell: bash
+        env:
+          BUNDLE_PATH: ${{ matrix.bundle_path }}
+        run: |
+          uv run --no-sync python scripts/validate_packaged_artifact.py \
+            --artifact "${BUNDLE_PATH}" \
+            --spec build/one-link.spec
+
+      - name: package and verify the complete standalone onedir
+        shell: bash
+        env:
+          ASSET_NAME: ${{ matrix.asset_name }}
+          BUNDLE_PATH: ${{ matrix.bundle_path }}
+          BUNDLE_EXECUTABLE: ${{ matrix.bundle_executable }}
+          SOURCE_DATE_EPOCH: ${{ needs.build.outputs.source_date_epoch }}
         run: |
           mkdir -p staged
-          cp dist/one-link.exe staged/${{ matrix.asset_name }}
-      - name: stage binary for upload (posix)
-        if: matrix.os != 'windows-latest'
-        shell: bash
-        run: |
-          mkdir -p staged
-          cp dist/one-link staged/${{ matrix.asset_name }}
-          chmod +x staged/${{ matrix.asset_name }}
+          uv run --no-sync python scripts/package_standalone_bundle.py \
+            --bundle "${BUNDLE_PATH}" \
+            --output "staged/${ASSET_NAME}" \
+            --executable "${BUNDLE_EXECUTABLE}" \
+            --epoch "${SOURCE_DATE_EPOCH}"
+          uv run --no-sync python scripts/validate_packaged_artifact.py \
+            --artifact "${BUNDLE_PATH}" \
+            --spec build/one-link.spec \
+            --release-archive "staged/${ASSET_NAME}" \
+            --frozen-e2e
 
       - name: upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact }}
           path: staged/${{ matrix.asset_name }}
 
   sign:
     name: sigstore-attest dist
-    needs: [build, native_wheels, binaries]
+    needs: [release_quality_gate, build, native_wheels, binaries]
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: read
+      id-token: write # Required to obtain the Sigstore/GitHub OIDC identity.
+      attestations: write # Required to publish release artifact attestations.
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: dist
           path: dist/
 
-      # Merge per-OS native wheels into dist/ so they get signed and
-      # attached to the release alongside the pure-Python wheel.
-      - uses: actions/download-artifact@v4
+      # Merge every architecture-specific native wheel into dist/ so it gets
+      # signed and attached alongside the pure-Python wheel. Pattern download
+      # keeps this consumer coupled to the matrix's `native-wheel-*` contract
+      # instead of a stale hand-maintained list of three legacy artifact names.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: native-wheel-linux
+          pattern: native-wheel-*
           path: dist/
-      - uses: actions/download-artifact@v4
-        with:
-          name: native-wheel-macos
-          path: dist/
-      - uses: actions/download-artifact@v4
-        with:
-          name: native-wheel-windows
-          path: dist/
+          merge-multiple: true
 
       # Standalone binaries — what end users download from the
       # website. Sigstore signs these too so anyone can verify
       # the .exe / mac binary / linux binary was built from the
       # matching tag by GitHub Actions.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: binary-linux
+          pattern: binary-*
           path: dist/
-      - uses: actions/download-artifact@v4
-        with:
-          name: binary-macos
-          path: dist/
-      - uses: actions/download-artifact@v4
-        with:
-          name: binary-windows
-          path: dist/
-
-      # Re-compute the SHA256SUMS manifest now that native wheels +
-      # standalone binaries are included. The build job's manifest
-      # only covered the pure-Python artifacts; downloads of the
-      # native wheels or binaries would otherwise have no verifiable
-      # hash in the release.
-      - name: recompute SHA256SUMS to include native wheels + binaries
-        run: |
-          cd dist
-          # Hash every distributable file. The binaries have no
-          # extension on macOS/Linux, so we glob on `one-link*`
-          # to catch them all, then dedupe with sort -u.
-          {
-            sha256sum *.whl 2>/dev/null
-            sha256sum *.tar.gz 2>/dev/null
-            sha256sum one-link* 2>/dev/null
-          } | sort -k 2 -u > SHA256SUMS
-          cat SHA256SUMS
+          merge-multiple: true
 
       - name: setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
-      - name: install sigstore
+      - name: setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: false
+
+      - name: install locked SBOM and signing clients
         run: |
-          python -m pip install --upgrade pip
-          pip install sigstore
+          uv lock --check
+          uv sync --frozen --python python --only-group release-tools
+
+      # Generate the release SBOM only after every matrix artifact is present.
+      # Its Python graph comes from the frozen universal lock; its Rust graph
+      # comes directly from Cargo.lock/workspace manifests; and its file
+      # components hash the exact wheels and ZIPs that will be published.
+      - name: generate complete release CycloneDX SBOM
+        run: |
+          set -euo pipefail
+          uv export --frozen --all-extras --all-groups --no-extra native --no-emit-project \
+            --output-file "$RUNNER_TEMP/one-link-release-requirements.lock"
+          uv run --frozen --only-group release-tools python scripts/gen_sbom.py \
+            --from requirements \
+            --requirements "$RUNNER_TEMP/one-link-release-requirements.lock" \
+            --python-lock uv.lock \
+            --exclude-python-extra native \
+            --cargo-lock native/Cargo.lock \
+            --cargo-workspace native/Cargo.toml \
+            --artifacts-dir dist \
+            --artifact-pattern 'one_link-*.whl' \
+            --artifact-pattern 'one_link-*.tar.gz' \
+            --artifact-pattern 'one_link_native-*.whl' \
+            --artifact-pattern 'one-link-*.zip' \
+            --output dist/sbom.cdx.json
+          test -s dist/sbom.cdx.json
+
+      # The updater authority binds the exact standalone archives, SBOM,
+      # immutable tag, and triggering commit. It must be generated after the
+      # SBOM (which it hashes) and before the checksum/signature boundary.
+      - name: generate authenticated standalone update manifest
+        shell: bash
+        env:
+          UPDATE_TAG: v${{ needs.build.outputs.version }}
+          UPDATE_COMMIT_SHA: ${{ github.sha }}
+          UPDATE_SOURCE_DATE_EPOCH: ${{ needs.build.outputs.source_date_epoch }}
+        run: >-
+          uv run --frozen --only-group release-tools python
+          scripts/generate_update_manifest.py
+          --dist-dir dist
+          --tag "$UPDATE_TAG"
+          --commit-sha "$UPDATE_COMMIT_SHA"
+          --source-date-epoch "$UPDATE_SOURCE_DATE_EPOCH"
+          --minimum-source-version 0.20.0
+
+      - name: checksum the complete unsigned release payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          mapfile -d '' -t unsigned_assets < <(
+            find . -maxdepth 1 -type f \
+              ! -name 'SHA256SUMS' ! -name '*.sigstore' \
+              -printf '%f\0' | sort -z
+          )
+          if (( ${#unsigned_assets[@]} == 0 )); then
+            echo "::error::No release assets were assembled for checksumming"
+            exit 1
+          fi
+          for file in "${unsigned_assets[@]}"; do
+            sha256sum -- "$file"
+          done | sort -k 2 > SHA256SUMS
+          test "$(grep -c '  sbom.cdx.json$' SHA256SUMS)" -eq 1
+          test "$(grep -c '  UPDATE_MANIFEST.json$' SHA256SUMS)" -eq 1
+          cat SHA256SUMS
+
+      - name: verify SBOM artifact hashes against SHA256SUMS
+        run: |
+          uv run --frozen --only-group release-tools python scripts/gen_sbom.py \
+            --verify-release-sbom dist/sbom.cdx.json \
+            --artifacts-dir dist \
+            --artifact-pattern 'one_link-*.whl' \
+            --artifact-pattern 'one_link-*.tar.gz' \
+            --artifact-pattern 'one_link_native-*.whl' \
+            --artifact-pattern 'one-link-*.zip' \
+            --checksum-auxiliary UPDATE_MANIFEST.json \
+            --checksum-manifest dist/SHA256SUMS
 
       - name: sigstore-sign each artifact
         run: |
+          set -euo pipefail
           cd dist
-          # Sign every wheel, source tarball, the SHA manifest, AND
-          # the standalone binaries. The binaries are what end users
-          # actually download from the website, so they're the most
-          # important to attest.
-          for f in *.whl *.tar.gz one-link-* SHA256SUMS; do
-            [ -f "$f" ] || continue
-            python -m sigstore sign --bundle "$f.sigstore" "$f"
+          mapfile -d '' -t unsigned_assets < <(
+            find . -maxdepth 1 -type f ! -name '*.sigstore' -printf '%f\0' | sort -z
+          )
+          for f in "${unsigned_assets[@]}"; do
+            uv run --frozen --only-group release-tools python -m sigstore sign \
+              --bundle "$f.sigstore" "$f"
           done
           ls -la
 
       - name: attest the build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: |
             dist/*.whl
             dist/*.tar.gz
             dist/one-link-*
+            dist/sbom.cdx.json
+            dist/UPDATE_MANIFEST.json
             dist/SHA256SUMS
+
+      - name: seal signed release payload for the publisher
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-release-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish tagged release
+    needs: [release_quality_gate, build, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required only for `gh release` publication below.
+    steps:
+      # Keep the write-scoped job deliberately tiny: only GitHub's immutable
+      # artifact downloader runs before the audited `gh` publication shell.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-release-dist
+          path: dist/
 
       - name: create or update GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/*.whl
-            dist/*.tar.gz
-            dist/one-link-*
-            dist/*.sigstore
-            dist/SHA256SUMS
-          generate_release_notes: true
-          body: |
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: v${{ needs.build.outputs.version }}
+          RELEASE_TARGET: ${{ github.sha }}
+          RELEASE_TITLE: One Link ${{ needs.build.outputs.version }}
+          RELEASE_PREAMBLE: |
             ## One Link ${{ needs.build.outputs.version }}
 
-            Reproducible-build artifacts published with Sigstore
-            keyless attestations. Anyone can verify a download
+            Locked, quality-gated artifacts published with Sigstore keyless
+            provenance attestations. Anyone can verify a download
             with:
 
             ```bash
-            bash scripts/verify-release.sh dist/<artifact>
+            bash scripts/verify-release.sh dist/<artifact> v${{ needs.build.outputs.version }}
             ```
 
             Or with the sigstore tool directly:
@@ -468,5 +831,213 @@ jobs:
             ```
 
             **SOURCE_DATE_EPOCH:** `${{ needs.build.outputs.source_date_epoch }}`
-            (rebuild from source with that env var set to verify
-            byte-equal artifacts).
+            (the deterministic source-timestamp input used by this build).
+
+            `SHA256SUMS` verifies the exact published bytes. Separate unsigned
+            CI evidence currently proves byte-for-byte reproducibility only for
+            the explicitly compared Linux native wheel; no such claim is made
+            for the standalone cross-platform binaries.
+
+            `sbom.cdx.json` inventories the frozen Python graph, the complete
+            native Cargo.lock/workspace graph, and SHA-256 hashes of the exact
+            wheels and standalone bundles assembled by this run. The SBOM is
+            itself covered by SHA256SUMS, Sigstore, and provenance attestation.
+
+            `UPDATE_MANIFEST.json` is the signed, commit-bound authority used by
+            the standalone transactional updater. It names and hashes each
+            platform archive and is covered by SHA256SUMS, Sigstore, and
+            provenance attestation.
+        run: |
+          set -euo pipefail
+
+          # Resolve lightweight or nested annotated tags to their commit and
+          # bind publication to the exact SHA that triggered and built this
+          # workflow. A tag moved while a long release matrix is running must
+          # never receive artifacts built from its former target.
+          resolve_tag_commit() {
+            local object_type object_sha depth
+            IFS=$'\t' read -r object_type object_sha < <(
+              gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" \
+                --jq '.object | [.type, .sha] | @tsv'
+            )
+            for depth in 1 2 3 4 5; do
+              if [[ "$object_type" == "commit" ]]; then
+                printf '%s\n' "$object_sha"
+                return 0
+              fi
+              if [[ "$object_type" != "tag" ]]; then
+                echo "::error::Release ref resolves to unsupported object type: $object_type" >&2
+                return 1
+              fi
+              IFS=$'\t' read -r object_type object_sha < <(
+                gh api "repos/$GH_REPO/git/tags/$object_sha" \
+                  --jq '.object | [.type, .sha] | @tsv'
+              )
+            done
+            echo "::error::Release tag annotation chain exceeds five objects" >&2
+            return 1
+          }
+          assert_release_tag_binding() {
+            local resolved_commit
+            resolved_commit="$(resolve_tag_commit)"
+            if [[ "$resolved_commit" != "$RELEASE_TARGET" ]]; then
+              echo "::error::Release tag moved: expected $RELEASE_TARGET, found $resolved_commit" >&2
+              return 1
+            fi
+          }
+          assert_release_is_draft() {
+            local draft
+            draft="$(gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" --jq '.draft')"
+            if [[ "$draft" != "true" ]]; then
+              echo "::error::Refusing to modify an already-public release: $RELEASE_TAG" >&2
+              return 1
+            fi
+          }
+          assert_release_tag_binding
+
+          generated_notes="$RUNNER_TEMP/generated-release-notes.md"
+          release_notes="$RUNNER_TEMP/release-notes.md"
+          gh api --method POST "repos/$GH_REPO/releases/generate-notes" \
+            -f "tag_name=$RELEASE_TAG" \
+            -f "target_commitish=$RELEASE_TARGET" \
+            --jq '.body // ""' > "$generated_notes"
+          {
+            printf '%s\n\n' "$RELEASE_PREAMBLE"
+            cat "$generated_notes"
+          } > "$release_notes"
+
+          create_args=(
+            "$RELEASE_TAG"
+            --target "$RELEASE_TARGET"
+            --title "$RELEASE_TITLE"
+            --notes-file "$release_notes"
+            --verify-tag
+            --draft
+          )
+
+          # Keep both a new release and a rerun private until every asset has
+          # uploaded and its remote byte count has been verified. A failed job
+          # therefore leaves a draft for maintainers instead of exposing a
+          # partially replaced public release. The create fallback is race-safe;
+          # `--verify-tag` guarantees publication can never mint an unreviewed
+          # release tag from a manually dispatched branch.
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            if ! gh release create "${create_args[@]}"; then
+              gh release view "$RELEASE_TAG" >/dev/null
+            fi
+          fi
+          assert_release_is_draft
+          gh release edit "$RELEASE_TAG" \
+            --title "$RELEASE_TITLE" \
+            --notes-file "$release_notes" \
+            --prerelease=false
+
+          mapfile -d '' -t assets < <(
+            find dist -maxdepth 1 -type f \
+              \( -name '*.whl' \
+                 -o -name '*.tar.gz' \
+                 -o -name 'one-link-*' \
+                 -o -name 'sbom.cdx.json' \
+                 -o -name 'UPDATE_MANIFEST.json' \
+                 -o -name '*.sigstore' \
+                 -o -name 'SHA256SUMS' \) \
+              -print0 | sort -z
+          )
+          if (( ${#assets[@]} == 0 )); then
+            echo "::error::No tagged-release assets were prepared"
+            exit 1
+          fi
+
+          upload_asset() {
+            local asset="$1"
+            local asset_name local_size local_digest attempt state remote_name remote_size remote_digest
+            asset_name="$(basename "$asset")"
+            local_size="$(wc -c < "$asset" | tr -d '[:space:]')"
+            local_digest="sha256:$(sha256sum "$asset" | cut -d ' ' -f 1)"
+            for attempt in 1 2 3 4; do
+              assert_release_is_draft
+              state="missing"
+              while IFS=$'\t' read -r remote_name remote_size remote_digest; do
+                if [[ "$remote_name" == "$asset_name" ]]; then
+                  if [[ "$state" != "missing" ]]; then
+                    echo "::error file=$asset::Duplicate remote release asset name" >&2
+                    return 1
+                  fi
+                  if [[ "$remote_size" == "$local_size" && "$remote_digest" == "$local_digest" ]]; then
+                    state="exact"
+                  else
+                    state="mismatch"
+                  fi
+                fi
+              done < <(
+                gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" \
+                  --jq '.assets[] | [.name, (.size | tostring), (.digest // "MISSING")] | @tsv'
+              )
+              if [[ "$state" == "exact" ]]; then
+                return 0
+              fi
+              if [[ "$state" == "mismatch" ]]; then
+                echo "::error file=$asset::Existing draft asset differs; refusing destructive replacement" >&2
+                return 1
+              fi
+              if (( attempt == 4 )); then
+                echo "::error file=$asset::Release upload is still absent after 3 attempts" >&2
+                return 1
+              fi
+              if gh release upload "$RELEASE_TAG" "$asset"; then
+                continue
+              fi
+              if (( attempt == 3 )); then
+                echo "::error file=$asset::Release upload failed after 3 attempts"
+                return 1
+              fi
+              sleep $((attempt * 2))
+            done
+          }
+          for asset in "${assets[@]}"; do
+            upload_asset "$asset"
+          done
+
+          remote_index="$RUNNER_TEMP/tagged-release-assets.tsv"
+          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" \
+            --jq '.assets[] | [.name, (.size | tostring), (.digest // "MISSING")] | @tsv' \
+            > "$remote_index"
+          remote_count="$(wc -l < "$remote_index" | tr -d '[:space:]')"
+          if [[ "$remote_count" != "${#assets[@]}" ]]; then
+            echo "::error::Remote release contains $remote_count assets; expected exactly ${#assets[@]}"
+            exit 1
+          fi
+          for asset in "${assets[@]}"; do
+            asset_name="$(basename "$asset")"
+            local_size="$(wc -c < "$asset" | tr -d '[:space:]')"
+            local_digest="sha256:$(sha256sum "$asset" | cut -d ' ' -f 1)"
+            remote_size=""
+            remote_digest=""
+            while IFS=$'\t' read -r remote_name candidate_size candidate_digest; do
+              if [[ "$remote_name" == "$asset_name" ]]; then
+                remote_size="$candidate_size"
+                remote_digest="$candidate_digest"
+                break
+              fi
+            done < "$remote_index"
+            if [[ -z "$remote_size" || "$remote_size" != "$local_size" ]]; then
+              echo "::error file=$asset::Remote release asset is missing or truncated"
+              exit 1
+            fi
+            if [[ "$remote_digest" != "$local_digest" ]]; then
+              echo "::error file=$asset::Remote release asset digest is missing or mismatched"
+              exit 1
+            fi
+          done
+
+          # This is the sole transition from private staging to public release,
+          # and can run only after every expected asset passed remote-size
+          # verification above. Re-resolve the tag immediately before that
+          # transition to close the long-running build/sign race window.
+          assert_release_tag_binding
+          assert_release_is_draft
+          gh release edit "$RELEASE_TAG" \
+            --title "$RELEASE_TITLE" \
+            --notes-file "$release_notes" \
+            --draft=false \
+            --prerelease=false

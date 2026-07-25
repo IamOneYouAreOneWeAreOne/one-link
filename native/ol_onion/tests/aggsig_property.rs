@@ -130,7 +130,7 @@ proptest! {
         let msgs: Vec<Vec<u8>> = (0..seeds.len())
             .map(|i| {
                 let mut v = msg_seed.to_vec();
-                v.push(i as u8);
+                v.push(u8::try_from(i).unwrap());
                 v
             })
             .collect();
@@ -156,7 +156,9 @@ proptest! {
         bit in 0u32..512,
     ) {
         let n = seeds.len();
-        let msgs: Vec<Vec<u8>> = (0..n).map(|i| vec![msg_byte, i as u8]).collect();
+        let msgs: Vec<Vec<u8>> = (0..n)
+            .map(|i| vec![msg_byte, u8::try_from(i).unwrap()])
+            .collect();
         let sks: Vec<SchnorrSigningKey> = seeds.iter().map(SchnorrSigningKey::from_seed).collect();
         let mut sigs: Vec<SchnorrSignature> = sks
             .iter()
@@ -199,11 +201,10 @@ fn non_canonical_s_is_internal_error() {
     // group order for the Ristretto255 scalar field.
     sig.0[63] = 0xFF;
     match verify(&vk, b"x", &sig) {
-        Err(OnionError::Internal(_)) => {}
         // It's plausible the bit pattern is still canonical but wrong.
         // Either Internal or SignatureInvalid is acceptable here; the
         // test asserts we never silently accept.
-        Err(OnionError::SignatureInvalid) => {}
+        Err(OnionError::Internal(_) | OnionError::SignatureInvalid) => {}
         Ok(()) => panic!("malformed signature must not verify"),
         Err(e) => panic!("unexpected error variant: {e:?}"),
     }

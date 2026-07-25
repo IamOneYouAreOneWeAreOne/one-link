@@ -1,6 +1,6 @@
-//! `OnlineLearner` — Phase I weight adaptation for the UnifiedMin selector.
+//! `OnlineLearner` — Phase I weight adaptation for the `UnifiedMin` selector.
 //!
-//! Wraps [`UnifiedMin`] with an observe() method that updates the per-
+//! Wraps [`UnifiedMin`] with an `observe()` method that updates the per-
 //! term [`Weights`] from production feedback. The objective is to
 //! *reduce* the energy the selector assigns to **future** decisions
 //! whose contexts resembled high-regret past decisions, and vice versa
@@ -22,7 +22,7 @@
 //!   selector's prediction.
 //! - `∂E_total/∂w_i` is the partial derivative of the energy
 //!   objective at the chosen decision. We compute it analytically
-//!   per [Weights] field — cheap, deterministic, no finite-diff
+//!   per [`Weights`] field — cheap, deterministic, no finite-diff
 //!   noise.
 //! - `γ` (`regularization`) pulls each weight back toward its
 //!   factory default. Without it, persistent regret can drift the
@@ -31,7 +31,7 @@
 //!   defaults proportional to the average regret-times-gradient
 //!   signal.
 //!
-//! Weights are also clamped to `(0, 10× default)` after every update
+//! `Weights` are also clamped to `(0, 10× default)` after every update
 //! so a single pathological observation can't blow them up.
 //!
 //! ## Determinism
@@ -51,9 +51,16 @@
 //! any weight outside the (0, 10× default) band.
 
 use crate::decision::Decision;
-use crate::unified_min::UnifiedMin;
+use crate::unified_min::{usize_as_f32, UnifiedMin};
 use crate::weights::Weights;
 use ol_decide::Context;
+
+fn u64_as_f64(value: u64) -> f64 {
+    let bytes = value.to_be_bytes();
+    let high = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let low = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    f64::from(high) * 4_294_967_296.0 + f64::from(low)
+}
 
 /// Per-weight bookkeeping returned by [`OnlineLearner::stats`].
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -72,32 +79,32 @@ pub struct LearnerStats {
     pub clamp_events: u64,
 }
 
-/// The 11-element analytic gradient of `E_total` at (ctx, decision).
-/// One slot per Weights field, in the canonical order documented in
+/// The 11-element analytic gradient of `E_total` at (`ctx`, `decision`).
+/// One slot per `Weights` field, in the canonical order documented in
 /// [`Weights`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EnergyGradient {
-    /// ∂E / ∂alpha_coherence
+    /// ∂E / ∂`alpha_coherence`
     pub d_alpha_coherence: f32,
-    /// ∂E / ∂privacy_weight
+    /// ∂E / ∂`privacy_weight`
     pub d_privacy_weight: f32,
-    /// ∂E / ∂cover_penalty
+    /// ∂E / ∂`cover_penalty`
     pub d_cover_penalty: f32,
-    /// ∂E / ∂anchor_cost
+    /// ∂E / ∂`anchor_cost`
     pub d_anchor_cost: f32,
-    /// ∂E / ∂batch_latency_cost
+    /// ∂E / ∂`batch_latency_cost`
     pub d_batch_latency_cost: f32,
-    /// ∂E / ∂onion_hop_cost
+    /// ∂E / ∂`onion_hop_cost`
     pub d_onion_hop_cost: f32,
-    /// ∂E / ∂relay_rtt_multiplier
+    /// ∂E / ∂`relay_rtt_multiplier`
     pub d_relay_rtt_multiplier: f32,
-    /// ∂E / ∂lambda_dynamic
+    /// ∂E / ∂`lambda_dynamic`
     pub d_lambda_dynamic: f32,
-    /// ∂E / ∂dark_base
+    /// ∂E / ∂`dark_base`
     pub d_dark_base: f32,
-    /// ∂E / ∂dark_coherence
+    /// ∂E / ∂`dark_coherence`
     pub d_dark_coherence: f32,
-    /// ∂E / ∂dark_cover
+    /// ∂E / ∂`dark_cover`
     pub d_dark_cover: f32,
 }
 
@@ -202,7 +209,7 @@ impl OnlineLearner {
         let mean = if self.n_observations == 0 {
             0.0
         } else {
-            self.sum_abs_regret / (self.n_observations as f64)
+            self.sum_abs_regret / u64_as_f64(self.n_observations)
         };
         LearnerStats {
             n_observations: self.n_observations,
@@ -238,7 +245,7 @@ impl OnlineLearner {
             .saturating_add_f64(f64::from(regret.abs()));
     }
 
-    /// Analytic gradient of E_total at (ctx, decision) with the
+    /// Analytic gradient of `E_total` at (`ctx`, `decision`) with the
     /// current weights. Each partial is computed directly from the
     /// closed-form expression in `UnifiedMin::e_*` and chain-ruled
     /// through `c_dynamic`.
@@ -333,7 +340,7 @@ impl OnlineLearner {
         //   c_d = e^{-λD} · 100  →  ∂c_d/∂λ = -D · c_d
         // We need D inverted from c_d (since c_d ≠ 0) — but
         // simpler: recompute D directly.
-        let scale_size = (ctx.size as f32).max(1.0).log10();
+        let scale_size = usize_as_f32(ctx.size).max(1.0).log10();
         let sens = match ctx.user_mode {
             UserMode::Paranoid => 3.0_f32,
             UserMode::LatencyStrict => -1.0,
@@ -461,6 +468,23 @@ mod tests {
             anchor_lay: true,
             predictor_warm: false,
         }
+    }
+
+    #[test]
+    fn u64_to_f64_rounds_large_counts_like_ieee_conversion() {
+        assert_eq!(u64_as_f64(0).to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            u64_as_f64(1_u64 << 32).to_bits(),
+            4_294_967_296.0_f64.to_bits()
+        );
+        assert_eq!(
+            u64_as_f64((1_u64 << 53) + 1).to_bits(),
+            9_007_199_254_740_992.0_f64.to_bits()
+        );
+        assert_eq!(
+            u64_as_f64(u64::MAX).to_bits(),
+            18_446_744_073_709_551_616.0_f64.to_bits()
+        );
     }
 
     #[test]

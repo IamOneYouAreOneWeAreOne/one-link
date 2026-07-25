@@ -26,7 +26,7 @@
 //! ## What this crate is NOT
 //!
 //! - It does NOT decide what's urgent vs background. That's the
-//!   selector's job (ol_selector, decision point D06). The batcher
+//!   selector's job (`ol_selector`, decision point D06). The batcher
 //!   only sees entries the selector tagged as `Batch`.
 //! - It does NOT poll the OS for radio state. The daemon may set it
 //!   externally via [`Batcher::set_radio_state`] as an observability
@@ -80,6 +80,13 @@ pub const DEFAULT_DRX_WINDOW_MS: u32 = 50;
 /// [`BatcherError::QueueFull`]. Sized for a daemon broadcasting to a
 /// few thousand paired peers at most.
 pub const DEFAULT_MAX_QUEUE_SIZE: usize = 4096;
+
+/// Absolute constructor ceiling for queued entries.
+///
+/// Payload-specific integrations must additionally enforce byte budgets;
+/// this cap prevents a hostile or accidental configuration from turning a
+/// logical queue limit into an effectively unbounded allocation promise.
+pub const MAX_QUEUE_SIZE_LIMIT: usize = 65_536;
 
 /// Default maximum entry age in milliseconds.
 ///

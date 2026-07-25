@@ -19,23 +19,30 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from one_link import server as server_mod
+from one_link import app as app_mod
+from one_link.safe_http import validated_urlopen
 
 
 RESULTS_DIR = Path("benchmarks") / "results"
 
 
 def _fetch_performance(*, timeout: float = 10.0) -> dict[str, Any]:
-    port = server_mod.read_server_port()
-    token = server_mod.read_ui_token()
+    daemon = app_mod._resolve_running_daemon()
+    if daemon is None:
+        raise RuntimeError("authenticated One Link daemon/UI is not available")
+    port = daemon.server_port
+    token = daemon.token
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/api/self-mesh/performance",
         headers={"Authorization": f"Bearer {token}"},
         method="GET",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        with validated_urlopen(req, timeout=timeout, allow_loopback_http=True) as resp:
+            raw = resp.read(8 * 1024 * 1024 + 1)
+        if len(raw) > 8 * 1024 * 1024:
+            raise RuntimeError("self-mesh performance response is oversized")
+        return json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"self-mesh performance HTTP {exc.code}: {body}") from exc

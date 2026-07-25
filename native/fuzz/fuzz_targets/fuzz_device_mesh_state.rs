@@ -3,12 +3,8 @@
 //! mutations. Must never panic.
 
 use libfuzzer_sys::fuzz_target;
-use ol_device_mesh::mesh_state::{
-    AuthenticatedOp, Delta, MeshState, SubtreePolicyKind, SyncState,
-};
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, MasterIdentity,
-};
+use ol_device_mesh::mesh_state::{AuthenticatedOp, Delta, MeshState, SubtreePolicyKind, SyncState};
+use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity};
 use ol_pqsig::HybridVerifyingKey;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -16,8 +12,7 @@ use rand_chacha::ChaCha20Rng;
 fuzz_target!(|data: &[u8]| {
     let mut rng = ChaCha20Rng::from_seed([0xA3u8; 32]);
     let master = MasterIdentity::generate(&mut rng);
-    let (sk, att) =
-        mint_subkey(&master, DeviceClass::Phone, [0x55; 16], 0, 365).unwrap();
+    let (sk, att) = mint_subkey(&master, DeviceClass::Phone, [0x55; 16], 0, 365).unwrap();
     let vk = HybridVerifyingKey::from_bytes(&att.subkey_vk_bytes).unwrap();
     let mut state = MeshState::empty();
     let _ = state.ensure_subtree(b"x".to_vec(), SubtreePolicyKind::LwwRegister);
@@ -27,7 +22,10 @@ fuzz_target!(|data: &[u8]| {
     let mut op = AuthenticatedOp::sign(
         &sk,
         b"x".to_vec(),
-        Delta::LwwSet { value: b"baseline".to_vec(), ts: 1 },
+        Delta::LwwSet {
+            value: b"baseline".to_vec(),
+            ts: 1,
+        },
         1,
         1,
     )

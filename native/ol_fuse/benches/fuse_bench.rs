@@ -13,7 +13,7 @@ use ol_fuse::{FilesystemBackend, MemoryBackend};
 fn populate(fs: &MemoryBackend, n: usize) {
     let payload = vec![0xABu8; 4096];
     for i in 0..n {
-        let path = format!("dir/file_{:04}.bin", i);
+        let path = format!("dir/file_{i:04}.bin");
         fs.write(&path, 0, &payload).unwrap();
     }
 }

@@ -1,7 +1,7 @@
-//! OneField Mesh RF calibration.
+//! `OneField` Mesh RF calibration.
 //!
 //! Same algebra as One Link's network calibration, but the constants
-//! describe RF τ_c phenomena instead of network ones:
+//! describe RF `τ_c` phenomena instead of network ones:
 //!
 //! | Field-theory variable | OneField analog |
 //! |---|---|
@@ -12,7 +12,7 @@
 
 use super::{Calibration, Domain};
 
-/// Default OneField calibration for typical urban RF environments.
+/// Default `OneField` calibration for typical urban RF environments.
 #[must_use]
 pub fn one_field_calibration() -> Calibration {
     Calibration {
@@ -50,6 +50,6 @@ mod tests {
         let c = one_field_calibration();
         // ell = √(100 / 0.1) = √1000 ≈ 31.6 meters.
         let ell = c.screening_length().unwrap();
-        assert!((ell - 31.62277660168379).abs() < 1e-9, "ell = {ell}");
+        assert!((ell - 31.622_776_601_683_79).abs() < 1e-9, "ell = {ell}");
     }
 }

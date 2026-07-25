@@ -84,6 +84,8 @@ SIG_LEN = 64
 MAX_DEVICE_KIND_LEN = 64
 MAX_CHALLENGE_LEN = 256
 MAX_TRANSCRIPT_LEN = 256
+MAX_CERT_FUTURE_SKEW_MS = 60_000
+MAX_I64 = 2**63 - 1
 CERT_HEADER_FIXED_LEN = (
     len(CERT_MAGIC) + 1
     + ED_PUB_LEN + ED_PUB_LEN
@@ -118,14 +120,16 @@ def encode_device_cert(
     expires_ms: int = 0,
 ) -> bytes:
     """Mint + sign a device cert with the root's Ed25519 priv."""
-    if len(root_priv_seed) != 32:
+    if not isinstance(root_priv_seed, bytes) or len(root_priv_seed) != 32:
         raise ValueError("root_priv_seed must be 32 bytes")
-    if len(root_pub) != ED_PUB_LEN:
+    if not isinstance(root_pub, bytes) or len(root_pub) != ED_PUB_LEN:
         raise ValueError(f"root_pub must be {ED_PUB_LEN} bytes")
-    if len(device_pub) != ED_PUB_LEN:
+    if not isinstance(device_pub, bytes) or len(device_pub) != ED_PUB_LEN:
         raise ValueError(f"device_pub must be {ED_PUB_LEN} bytes")
     if root_pub == device_pub:
         raise ValueError("root_pub and device_pub must differ")
+    if not isinstance(device_kind, str):
+        raise ValueError("device_kind must be text")
     kind_bytes = device_kind.encode("utf-8")
     if len(kind_bytes) == 0:
         raise ValueError("device_kind must not be empty")
@@ -135,9 +139,13 @@ def encode_device_cert(
         )
     if added_ms is None:
         added_ms = int(time.time() * 1000)
-    if not (0 <= added_ms <= 2**63 - 1):
+    if isinstance(added_ms, bool) or not isinstance(added_ms, int):
+        raise ValueError("added_ms must be an integer")
+    if isinstance(expires_ms, bool) or not isinstance(expires_ms, int):
+        raise ValueError("expires_ms must be an integer")
+    if not (0 <= added_ms <= MAX_I64):
         raise ValueError("added_ms out of range")
-    if not (0 <= expires_ms <= 2**63 - 1):
+    if not (0 <= expires_ms <= MAX_I64):
         raise ValueError("expires_ms out of range")
     if expires_ms != 0 and expires_ms < added_ms:
         raise ValueError(
@@ -154,6 +162,8 @@ def encode_device_cert(
 
 
 def parse_device_cert(blob: bytes) -> DeviceCert:
+    if not isinstance(blob, bytes):
+        raise ValueError("cert must be bytes")
     if len(blob) < CERT_HEADER_FIXED_LEN + 2 + SIG_LEN:
         raise ValueError("cert too short")
     if blob[:6] != CERT_MAGIC:
@@ -199,20 +209,33 @@ def verify_device_cert(
         )
     except InvalidSignature:
         raise ValueError("device-cert signature invalid") from None
+    if parsed.root_pub == parsed.device_pub:
+        raise ValueError("device-cert root_pub and device_pub must differ")
+    if not parsed.device_kind:
+        raise ValueError("device-cert device_kind must not be empty")
+    if parsed.added_ms > MAX_I64 or parsed.expires_ms > MAX_I64:
+        raise ValueError("device-cert timestamp out of range")
+    if parsed.expires_ms != 0 and parsed.expires_ms < parsed.added_ms:
+        raise ValueError("device-cert expiry precedes issuance")
     if expected_root_pub is not None:
         if parsed.root_pub != expected_root_pub:
             raise ValueError(
                 f"cert root_pub doesn't match expected "
                 f"{expected_root_pub.hex()[:16]}…"
             )
-    if parsed.expires_ms != 0:
-        if now_ms is None:
-            now_ms = int(time.time() * 1000)
-        if now_ms > parsed.expires_ms:
-            raise ValueError(
-                f"device cert expired: now {now_ms} > "
-                f"expires {parsed.expires_ms}"
-            )
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    if isinstance(now_ms, bool) or not isinstance(now_ms, int):
+        raise ValueError("now_ms must be an integer")
+    if not (0 <= now_ms <= MAX_I64):
+        raise ValueError("now_ms out of range")
+    if parsed.added_ms > now_ms + MAX_CERT_FUTURE_SKEW_MS:
+        raise ValueError("device cert issuance is in the future")
+    if parsed.expires_ms != 0 and now_ms > parsed.expires_ms:
+        raise ValueError(
+            f"device cert expired: now {now_ms} > "
+            f"expires {parsed.expires_ms}"
+        )
     return parsed
 
 

@@ -165,3 +165,73 @@ def test_wire_with_witness_preserves_commitment():
     assert d["field_witness_commitment"] is not None
     cmt = base64.b64decode(d["field_witness_commitment"])  # type: ignore[arg-type]
     assert len(cmt) == 32
+
+
+def _valid_wire_dict() -> dict[str, object]:
+    master = _fresh_master()
+    challenge = fresh_challenge_for_peer()
+    doc = issue_for_challenge(
+        master,
+        challenge,
+        TEST_SDP_PUBKEY,
+        now_unix=1_000,
+    )
+    return AttestationWire.from_doc(doc).to_wire_dict()
+
+
+@pytest.mark.parametrize(
+    ("field", "mutate"),
+    [
+        ("peer_nonce", lambda value: str(value) + "\n"),
+        ("peer_nonce", lambda value: str(value).rstrip("=")),
+        ("peer_nonce", lambda value: "!" + str(value)[1:]),
+        ("issuer_sdp_pubkey", lambda _value: base64.b64encode(b"x" * 31).decode()),
+        ("master_vk", lambda _value: base64.b64encode(b"x" * 1983).decode()),
+        ("master_sig", lambda _value: base64.b64encode(b"x" * 3372).decode()),
+        ("platform_quote", lambda _value: base64.b64encode(b"x" * 65_537).decode()),
+    ],
+)
+def test_wire_rejects_noncanonical_or_wrong_sized_binary_fields(field, mutate):
+    wire = _valid_wire_dict()
+    wire[field] = mutate(wire[field])
+    with pytest.raises(ValueError):
+        AttestationWire.from_wire_dict(wire)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("provider_tag", True),
+        ("provider_tag", "1"),
+        ("provider_tag", 0),
+        ("provider_tag", 8),
+        ("issued_unix", True),
+        ("issued_unix", "1000"),
+        ("issued_unix", -1),
+        ("deadline_unix", 2**63),
+    ],
+)
+def test_wire_rejects_coerced_or_out_of_range_integer_fields(field, value):
+    wire = _valid_wire_dict()
+    wire[field] = value
+    with pytest.raises(ValueError):
+        AttestationWire.from_wire_dict(wire)
+
+
+def test_wire_rejects_reversed_or_oversized_freshness_window():
+    reversed_window = _valid_wire_dict()
+    reversed_window["deadline_unix"] = 999
+    with pytest.raises(ValueError):
+        AttestationWire.from_wire_dict(reversed_window)
+
+    oversized_window = _valid_wire_dict()
+    oversized_window["deadline_unix"] = 1_031
+    with pytest.raises(ValueError):
+        AttestationWire.from_wire_dict(oversized_window)
+
+
+def test_wire_rejects_unknown_keys_before_native_verification():
+    wire = _valid_wire_dict()
+    wire["unsigned_hint"] = "attacker-controlled"
+    with pytest.raises(ValueError):
+        AttestationWire.from_wire_dict(wire)

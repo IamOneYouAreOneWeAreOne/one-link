@@ -31,6 +31,8 @@ import traceback
 from collections import deque
 from typing import Any, Iterable, Optional
 
+from one_link.fault_observability import report_best_effort_failure
+
 log = logging.getLogger(__name__)
 
 # Capacity of the ring buffer. 500 entries × ~1KB each = ~500 KB
@@ -99,8 +101,13 @@ class DebugLog:
         if self._broadcast is not None:
             try:
                 self._broadcast(entry)
-            except Exception:
-                pass
+            except Exception as exc:
+                report_best_effort_failure(
+                    log,
+                    "debug_log_live_broadcast",
+                    exc,
+                    level=logging.DEBUG,
+                )
         return entry
 
     def record_exception(

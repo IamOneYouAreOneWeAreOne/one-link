@@ -5,7 +5,7 @@
 //!
 //! - I/O-bound operations (write + fsync + replay) release the GIL.
 //! - Errors map to `one_link_native.OlWalError`.
-//! - Higher-level chunk_store + manifest_log layers (Phase A1 next)
+//! - Higher-level `chunk_store` + `manifest_log` layers (Phase A1 next)
 //!   consume this surface.
 
 use std::path::PathBuf;
@@ -37,7 +37,12 @@ fn kind_to_str(k: LogKind) -> &'static str {
 }
 
 /// Python-visible WAL record. Wraps `(kind, flags, payload)`.
-#[pyclass(name = "WalRecord", module = "one_link_native.wal", frozen)]
+#[pyclass(
+    from_py_object,
+    name = "WalRecord",
+    module = "one_link_native.wal",
+    frozen
+)]
 #[derive(Debug, Clone)]
 pub struct PyWalRecord {
     /// Per-log-kind record kind byte.
@@ -53,18 +58,25 @@ pub struct PyWalRecord {
 impl PyWalRecord {
     #[new]
     #[pyo3(signature = (kind, flags, payload))]
-    fn new(kind: u8, flags: u8, payload: &[u8]) -> Self {
-        Self {
+    fn new(kind: u8, flags: u8, payload: &[u8]) -> PyResult<Self> {
+        if payload.len() > ol_wal::MAX_PAYLOAD_LEN {
+            return Err(PyValueError::new_err(format!(
+                "payload too large: {} > {}",
+                payload.len(),
+                ol_wal::MAX_PAYLOAD_LEN
+            )));
+        }
+        Ok(Self {
             kind,
             flags,
             payload: payload.to_vec(),
-        }
+        })
     }
 
     /// Payload bytes.
     #[getter]
     fn payload<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.payload)
+        PyBytes::new(py, &self.payload)
     }
 
     /// Payload length.
@@ -97,8 +109,8 @@ impl From<&PyWalRecord> for RustRecord {
 ///
 /// Construct via :func:`create` or :func:`open`. Append records via
 /// :meth:`append`, batch them, and call :meth:`flush` to make them durable.
-/// Call :meth:`rotate` to advance to a new file when the active one
-/// nears the rotation cap.
+/// Rotation is automatic when an append reaches the active-file cap;
+/// :meth:`rotate` remains available for an explicit early seal.
 #[pyclass(name = "Wal", module = "one_link_native.wal", unsendable)]
 pub struct PyWal {
     inner: Option<RustWal>,
@@ -110,7 +122,7 @@ impl PyWal {
     fn active_file_id(&self) -> PyResult<u64> {
         self.inner
             .as_ref()
-            .map(|w| w.active_file_id())
+            .map(ol_wal::Wal::active_file_id)
             .ok_or_else(|| PyValueError::new_err("WAL is closed"))
     }
 
@@ -119,7 +131,7 @@ impl PyWal {
     fn active_file_size(&self) -> PyResult<u64> {
         self.inner
             .as_ref()
-            .map(|w| w.active_file_size())
+            .map(ol_wal::Wal::active_file_size)
             .ok_or_else(|| PyValueError::new_err("WAL is closed"))
     }
 
@@ -130,7 +142,7 @@ impl PyWal {
             .as_mut()
             .ok_or_else(|| PyValueError::new_err("WAL is closed"))?;
         let r = RustRecord::from(record);
-        inner.append(&r).map_err(wal_error_to_pyerr)
+        inner.append(&r).map(|_| ()).map_err(wal_error_to_pyerr)
     }
 
     /// Flush pending records to durable storage in a single barrier.
@@ -139,8 +151,7 @@ impl PyWal {
             .inner
             .as_mut()
             .ok_or_else(|| PyValueError::new_err("WAL is closed"))?;
-        py.allow_threads(|| inner.flush())
-            .map_err(wal_error_to_pyerr)
+        py.detach(|| inner.flush()).map_err(wal_error_to_pyerr)
     }
 
     /// Rotate to the next file id (flushes pending first, then allocates
@@ -150,15 +161,13 @@ impl PyWal {
             .inner
             .as_mut()
             .ok_or_else(|| PyValueError::new_err("WAL is closed"))?;
-        py.allow_threads(|| inner.rotate())
-            .map_err(wal_error_to_pyerr)
+        py.detach(|| inner.rotate()).map_err(wal_error_to_pyerr)
     }
 
     /// Close the WAL writer, flushing pending records.
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         if let Some(mut inner) = self.inner.take() {
-            py.allow_threads(|| inner.flush())
-                .map_err(wal_error_to_pyerr)?;
+            py.detach(|| inner.flush()).map_err(wal_error_to_pyerr)?;
         }
         Ok(())
     }
@@ -172,7 +181,7 @@ fn create(py: Python<'_>, dir: &str, kind: &str) -> PyResult<PyWal> {
     let kind = parse_kind(kind)?;
     let path = PathBuf::from(dir);
     let inner = py
-        .allow_threads(|| RustWal::create(&path, kind))
+        .detach(|| RustWal::create(&path, kind))
         .map_err(wal_error_to_pyerr)?;
     Ok(PyWal { inner: Some(inner) })
 }
@@ -187,7 +196,7 @@ fn open(py: Python<'_>, dir: &str, kind: &str) -> PyResult<PyWal> {
     let kind = parse_kind(kind)?;
     let path = PathBuf::from(dir);
     let inner = py
-        .allow_threads(|| RustWal::open(&path, kind))
+        .detach(|| RustWal::open(&path, kind))
         .map_err(wal_error_to_pyerr)?;
     Ok(PyWal { inner: Some(inner) })
 }
@@ -201,7 +210,7 @@ fn replay_log_dir(py: Python<'_>, dir: &str, kind: &str) -> PyResult<Vec<PyWalRe
     let kind = parse_kind(kind)?;
     let path = PathBuf::from(dir);
     let outcome = py
-        .allow_threads(|| rust_replay_log_dir(&path, kind))
+        .detach(|| rust_replay_log_dir(&path, kind))
         .map_err(wal_error_to_pyerr)?;
     Ok(outcome
         .records
@@ -218,7 +227,7 @@ fn replay_log_dir(py: Python<'_>, dir: &str, kind: &str) -> PyResult<Vec<PyWalRe
 #[pyfunction]
 fn log_kind_magic<'py>(py: Python<'py>, kind: &str) -> PyResult<Bound<'py, PyBytes>> {
     let kind = parse_kind(kind)?;
-    Ok(PyBytes::new_bound(py, &kind.magic()))
+    Ok(PyBytes::new(py, &kind.magic()))
 }
 
 /// Register the wal submodule.

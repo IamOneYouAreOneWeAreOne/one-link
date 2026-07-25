@@ -1,3 +1,4 @@
+import json
 import socket
 
 import pytest
@@ -13,6 +14,7 @@ from one_link.route_bootstrap import (
     make_route_bootstrap,
     verify_bootstrap,
 )
+from one_link import route_bootstrap as rb
 
 
 def _identity() -> Identity:
@@ -228,6 +230,127 @@ def test_route_bootstrap_control_paths_cannot_smuggle_tcp_ports():
                     port=17117,
                     route="ble_control",
                     transport="tcp",
+                )
+            ],
+        )
+
+
+def _sample_payload():
+    return make_route_bootstrap(
+        identity=_identity(),
+        endpoints=[RouteEndpointHint(kind="lan", address="10.0.0.4", port=17117)],
+        capabilities=["chat", "files"],
+        now_ms=1_000_000,
+        nonce_hex="01" * 16,
+    )
+
+
+def test_route_bootstrap_rejects_unknown_outer_body_and_endpoint_fields():
+    payload = _sample_payload()
+    outer = payload.to_dict()
+    outer["ignored"] = "parser-confusion"
+    raw = rb._canonical_bytes(outer)
+    with pytest.raises(ValueError, match="fields invalid"):
+        decode_bootstrap("OLRB1." + rb._b64u(raw), now_ms=1_001_000)
+
+    body = json.loads(json.dumps(payload.body))
+    body["ignored"] = "parser-confusion"
+    with pytest.raises(ValueError, match="fields invalid"):
+        verify_bootstrap(
+            type(payload)(body=body, signature_hex=payload.signature_hex),
+            now_ms=1_001_000,
+        )
+
+    body = json.loads(json.dumps(payload.body))
+    body["endpoints"][0]["ignored"] = True
+    with pytest.raises(ValueError, match="fields invalid"):
+        verify_bootstrap(
+            type(payload)(body=body, signature_hex=payload.signature_hex),
+            now_ms=1_001_000,
+        )
+
+
+def test_route_bootstrap_rejects_coercive_scalars_and_malformed_capabilities():
+    payload = _sample_payload()
+    for field, value in (
+        ("version", True),
+        ("issued_ms", "1000000"),
+        ("expires_ms", False),
+    ):
+        body = json.loads(json.dumps(payload.body))
+        body[field] = value
+        with pytest.raises(ValueError, match=field if field != "version" else "version"):
+            verify_bootstrap(
+                type(payload)(body=body, signature_hex=payload.signature_hex),
+                now_ms=1_001_000,
+            )
+
+    body = json.loads(json.dumps(payload.body))
+    body["endpoints"][0]["port"] = True
+    with pytest.raises(ValueError, match="port"):
+        verify_bootstrap(
+            type(payload)(body=body, signature_hex=payload.signature_hex),
+            now_ms=1_001_000,
+        )
+
+    for capabilities in (["bad token"], ["chat", "chat"], [7]):
+        body = json.loads(json.dumps(payload.body))
+        body["capabilities"] = capabilities
+        with pytest.raises(ValueError, match="capability"):
+            verify_bootstrap(
+                type(payload)(body=body, signature_hex=payload.signature_hex),
+                now_ms=1_001_000,
+            )
+
+
+def test_route_bootstrap_rejects_noncanonical_json_base64_and_duplicate_fields():
+    payload = _sample_payload()
+    noncanonical = json.dumps(payload.to_dict()).encode("utf-8")
+    with pytest.raises(ValueError, match="canonical encoding"):
+        decode_bootstrap("OLRB1." + rb._b64u(noncanonical), now_ms=1_001_000)
+
+    with pytest.raises(ValueError, match="base64url"):
+        decode_bootstrap(encode_bootstrap(payload) + "=", now_ms=1_001_000)
+
+    duplicate = b'{"body":{},"body":{},"signature":""}'
+    with pytest.raises(ValueError, match="invalid bootstrap JSON"):
+        decode_bootstrap("OLRB1." + rb._b64u(duplicate), now_ms=1_001_000)
+
+
+def test_route_bootstrap_rejects_truncated_or_trailed_compressed_streams():
+    payload = _sample_payload()
+    compact = encode_bootstrap_compact(payload)
+    assert compact.startswith("OLRZ1.")
+    compressed = rb._b64u_decode(compact.split(".", 1)[1])
+
+    with pytest.raises(ValueError, match="compressed"):
+        decode_bootstrap(
+            "OLRZ1." + rb._b64u(compressed[:-1]),
+            now_ms=1_001_000,
+        )
+    with pytest.raises(ValueError, match="compressed"):
+        decode_bootstrap(
+            "OLRZ1." + rb._b64u(compressed + b"trailing"),
+            now_ms=1_001_000,
+        )
+
+
+def test_route_bootstrap_rejects_noncanonical_hex_and_nonfinite_metadata():
+    payload = _sample_payload()
+    with pytest.raises(ValueError, match="lowercase hex"):
+        verify_bootstrap(
+            type(payload)(body=payload.body, signature_hex=payload.signature_hex.upper()),
+            now_ms=1_001_000,
+        )
+    with pytest.raises(ValueError, match="finite"):
+        make_route_bootstrap(
+            identity=_identity(),
+            endpoints=[
+                RouteEndpointHint(
+                    kind="lan",
+                    address="10.0.0.4",
+                    port=17117,
+                    metadata={"metric": float("nan")},
                 )
             ],
         )

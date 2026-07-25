@@ -1,13 +1,13 @@
 //! `one_link_native.coherence_field` — pyo3 binding for
 //! `ol_coherence_field` (Phase E of `FILE_ENGINE_V2_PLAN.md`).
 //!
-//! Surfaces the S_One canonical theorem stack to the daemon:
+//! Surfaces the `S_One` canonical theorem stack to the daemon:
 //!
 //! 1. Helmholtz solve `(Γ·I + D·L)·δτ_c = S` on a graph Laplacian.
 //! 2. BE-RAR interpolation `nu(y) = 1/(1 − exp(−√y))`.
 //! 3. Screening length + apparent-horizon anchor calibration.
 //! 4. Identity-sector dual source `S = α·ρ + β·|J|`.
-//! 5. Cross-domain calibrations (One Link / OneField / BioMesh).
+//! 5. Cross-domain calibrations (One Link / `OneField` / `BioMesh`).
 //! 6. Couplings: homology → field, field → prefetch, field → ratchet.
 
 use ol_coherence_field::{
@@ -29,26 +29,54 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+/// FFI resource envelopes. Native callers can build larger research
+/// graphs directly; Python orchestration is bounded so a malformed API
+/// integer cannot trigger an unbounded adjacency/workspace allocation
+/// or solver loop.
+const MAX_FIELD_NODES: usize = 100_000;
+const MAX_FIELD_EDGES: usize = 1_000_000;
+const MAX_SOLVER_ITERS: usize = 100_000;
+
 /// pyo3 wrapper around `GraphLaplacian`.
-#[pyclass(name = "GraphLaplacian", module = "one_link_native.coherence_field")]
+#[pyclass(
+    skip_from_py_object,
+    name = "GraphLaplacian",
+    module = "one_link_native.coherence_field"
+)]
 #[derive(Clone)]
 pub struct PyGraphLaplacian {
     inner: RustGraphLaplacian,
+    edge_count: usize,
 }
 
 #[pymethods]
 impl PyGraphLaplacian {
     #[new]
-    fn new(n: usize) -> Self {
-        Self {
-            inner: RustGraphLaplacian::new(n),
+    fn new(n: usize) -> PyResult<Self> {
+        if n > MAX_FIELD_NODES {
+            return Err(PyValueError::new_err(format!(
+                "node count {n} exceeds {MAX_FIELD_NODES} node cap"
+            )));
         }
+        Ok(Self {
+            inner: RustGraphLaplacian::new(n),
+            edge_count: 0,
+        })
     }
 
     fn add_edge(&mut self, i: usize, j: usize, weight: f64) -> PyResult<()> {
+        if i != j && self.edge_count >= MAX_FIELD_EDGES {
+            return Err(PyValueError::new_err(format!(
+                "edge count exceeds {MAX_FIELD_EDGES} edge cap"
+            )));
+        }
         self.inner
             .add_edge(i, j, weight)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if i != j {
+            self.edge_count += 1;
+        }
+        Ok(())
     }
 
     fn node_count(&self) -> usize {
@@ -86,13 +114,19 @@ fn py_solve_helmholtz<'py>(
     max_iters: usize,
     tolerance: f64,
 ) -> PyResult<Bound<'py, PyDict>> {
+    if max_iters > MAX_SOLVER_ITERS {
+        return Err(PyValueError::new_err(format!(
+            "max_iters {max_iters} exceeds {MAX_SOLVER_ITERS} iteration cap"
+        )));
+    }
     let cfg = CgConfig {
         max_iter: max_iters,
         tolerance,
     };
+    let source = source.into_boxed_slice();
     let result = solve_helmholtz(&graph.inner, d, gamma, &source, cfg)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let out = PyDict::new_bound(py);
+    let out = PyDict::new(py);
     out.set_item("field", result.field)?;
     out.set_item("residual", result.residual)?;
     out.set_item("iterations", result.iterations)?;
@@ -114,10 +148,21 @@ fn py_green_function(
     max_iters: usize,
     tolerance: f64,
 ) -> PyResult<Vec<f64>> {
+    if max_iters > MAX_SOLVER_ITERS {
+        return Err(PyValueError::new_err(format!(
+            "max_iters {max_iters} exceeds {MAX_SOLVER_ITERS} iteration cap"
+        )));
+    }
+    if sources.len() > graph.inner.n() {
+        return Err(PyValueError::new_err(
+            "source list cannot exceed graph node count",
+        ));
+    }
     let cfg = CgConfig {
         max_iter: max_iters,
         tolerance,
     };
+    let sources = sources.into_boxed_slice();
     green_function(&graph.inner, d, gamma, destination, &sources, cfg)
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
@@ -143,6 +188,7 @@ fn py_apparent_horizon_anchor(c_wire: f64, h_swarm: f64) -> Option<f64> {
 #[pyfunction]
 #[pyo3(name = "linear_source")]
 fn py_linear_source(density: Vec<f64>, weight: f64) -> PyResult<Vec<f64>> {
+    let density = density.into_boxed_slice();
     linear_source(&density, weight).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
@@ -154,6 +200,8 @@ fn py_identity_dual_source(
     alpha: f64,
     beta: f64,
 ) -> PyResult<Vec<f64>> {
+    let density = density.into_boxed_slice();
+    let flux = flux.into_boxed_slice();
     identity_dual_source(&density, &flux, alpha, beta)
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
@@ -170,6 +218,9 @@ fn py_identity_dual_source_with_phase(
     c0: f64,
     w_phase: f64,
 ) -> PyResult<Vec<f64>> {
+    let density = density.into_boxed_slice();
+    let flux = flux.into_boxed_slice();
+    let c_support = c_support.into_boxed_slice();
     identity_dual_source_with_phase(
         &density,
         &flux,
@@ -185,6 +236,7 @@ fn py_identity_dual_source_with_phase(
 #[pyo3(name = "support_phase_kernel")]
 #[pyo3(signature = (c_support, c0=0.80, w_phase=0.12))]
 fn py_support_phase_kernel(c_support: Vec<f64>, c0: f64, w_phase: f64) -> Vec<f64> {
+    let c_support = c_support.into_boxed_slice();
     support_phase_kernel(&c_support, SupportPhaseConfig { c0, w_phase })
 }
 
@@ -214,6 +266,8 @@ fn py_prefetch_priorities(
     holders: Vec<usize>,
     route_weight: f64,
 ) -> Vec<(usize, f64, f64)> {
+    let field = field.into_boxed_slice();
+    let holders = holders.into_boxed_slice();
     let result: Vec<PrefetchPriority> =
         prefetch_priorities(&field, requester, &holders, route_weight);
     result
@@ -230,6 +284,7 @@ fn py_rotation_cadence_multiplier(
     mu_max: f64,
     power: f64,
 ) -> Vec<(usize, f64, u64)> {
+    let field = field.into_boxed_slice();
     let result: Vec<RotationCadence> =
         rotation_cadence_multiplier(&field, baseline_bytes, mu_max, power);
     result
@@ -247,7 +302,7 @@ fn domain_to_str(domain: Domain) -> &'static str {
 }
 
 fn calibration_to_dict<'py>(py: Python<'py>, cal: &Calibration) -> PyResult<Bound<'py, PyDict>> {
-    let out = PyDict::new_bound(py);
+    let out = PyDict::new(py);
     out.set_item("domain", domain_to_str(cal.domain))?;
     out.set_item("d", cal.d)?;
     out.set_item("gamma", cal.gamma)?;
@@ -282,7 +337,7 @@ fn py_bio_mesh_calibration(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
 
 /// pyo3 wrapper around `FieldObservations` (D23 / D24).
 ///
-/// Per-peer τ_c observation buffer with trust-weighted EWMA updates
+/// Per-peer `τ_c` observation buffer with trust-weighted EWMA updates
 /// (Gap 4 defense against field poisoning) + coherence-gradient
 /// computation (Gap 25 — currently RESEARCH-GRADE, surface as soft
 /// signal).
@@ -300,31 +355,31 @@ impl PyFieldObservations {
     #[new]
     #[pyo3(signature = (alpha = 0.05, initial_value = 0.5))]
     fn new(alpha: f32, initial_value: f32) -> PyResult<Self> {
-        let inner =
-            FieldObservations::with_initial(alpha, initial_value).map_err(observation_err_to_py)?;
+        let inner = FieldObservations::with_initial(alpha, initial_value)
+            .map_err(|err| observation_err_to_py(&err))?;
         Ok(Self { inner })
     }
 
     /// Trust-weighted EWMA update for a peer.
     ///
     /// `trust_weight` in [0, 1]; 1.0 is the standard EWMA. The daemon
-    /// computes this from align_native.trust_for(...) before calling
+    /// computes this from `align_native.trust_for`(...) before calling
     /// this method.
     #[pyo3(signature = (peer_id, observed_tau, trust_weight = 1.0))]
     fn update(&mut self, peer_id: &str, observed_tau: f32, trust_weight: f32) -> PyResult<()> {
         self.inner
             .update(peer_id, observed_tau, trust_weight)
-            .map_err(observation_err_to_py)
+            .map_err(|err| observation_err_to_py(&err))
     }
 
-    /// Current EWMA τ_c value for a peer, or None if never observed.
+    /// Current EWMA `τ_c` value for a peer, or None if never observed.
     fn tau_at(&self, peer_id: &str) -> Option<f32> {
         self.inner.tau_at(peer_id)
     }
 
     /// Replace the neighbor list used by gradient computation.
     ///
-    /// Empty list disables gradient_at for that peer.
+    /// Empty list disables `gradient_at` for that peer.
     fn set_neighbors(&mut self, peer_id: &str, neighbors: Vec<String>) {
         self.inner.set_neighbors(peer_id, neighbors);
     }
@@ -365,11 +420,11 @@ impl PyFieldObservations {
     }
 }
 
-fn observation_err_to_py(err: ObservationError) -> PyErr {
+fn observation_err_to_py(err: &ObservationError) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
-fn wave_err_to_py(err: WaveError) -> PyErr {
+fn wave_err_to_py(err: &WaveError) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
@@ -393,14 +448,18 @@ impl PyWaveStepper {
         // Re-create with new parameter; with_wave_speed consumes self,
         // so swap inner via mem::take to honor the builder pattern.
         let current = std::mem::take(&mut self.inner);
-        self.inner = current.with_wave_speed(c).map_err(wave_err_to_py)?;
+        self.inner = current
+            .with_wave_speed(c)
+            .map_err(|err| wave_err_to_py(&err))?;
         Ok(())
     }
 
     /// Override the damping coefficient.
     fn set_damping(&mut self, gamma: f32) -> PyResult<()> {
         let current = std::mem::take(&mut self.inner);
-        self.inner = current.with_damping(gamma).map_err(wave_err_to_py)?;
+        self.inner = current
+            .with_damping(gamma)
+            .map_err(|err| wave_err_to_py(&err))?;
         Ok(())
     }
 
@@ -411,7 +470,7 @@ impl PyWaveStepper {
     }
 
     /// Configure a value clamp range [min, max]. Pass (min, max) to
-    /// enable, or omit to disable. step() will return an error when
+    /// enable, or omit to disable. `step()` will return an error when
     /// any field value drifts outside the range.
     #[pyo3(signature = (min=None, max=None))]
     fn set_clamp_range(&mut self, min: Option<f32>, max: Option<f32>) {
@@ -430,12 +489,13 @@ impl PyWaveStepper {
         self.inner = current.with_cfl_enforce(enforce);
     }
 
-    /// Seed the current snapshot from a {node_id: tau} dict.
+    /// Seed the current snapshot from a {`node_id`: tau} dict.
     fn seed(&mut self, values: std::collections::HashMap<String, f32>) {
-        self.inner.seed(&values);
+        let values = Box::new(values);
+        self.inner.seed(values.as_ref());
     }
 
-    /// Advance one time step. ``neighbors`` is a {node: [neighbor_ids]}
+    /// Advance one time step. ``neighbors`` is a {node: [`neighbor_ids`]}
     /// mapping. Returns the number of nodes whose disturbance crossed
     /// the threshold during this step.
     fn step(
@@ -443,7 +503,10 @@ impl PyWaveStepper {
         dt: f32,
         neighbors: std::collections::HashMap<String, Vec<String>>,
     ) -> PyResult<u32> {
-        self.inner.step(dt, &neighbors).map_err(wave_err_to_py)
+        let neighbors = Box::new(neighbors);
+        self.inner
+            .step(dt, neighbors.as_ref())
+            .map_err(|err| wave_err_to_py(&err))
     }
 
     /// Current field value at `node`. None if untracked.
@@ -479,7 +542,7 @@ impl PyWaveStepper {
         self.inner.reset_warnings();
     }
 
-    /// Number of successful step() calls since construction/seed.
+    /// Number of successful `step()` calls since construction/seed.
     #[getter]
     fn step_count(&self) -> u64 {
         self.inner.step_count()
@@ -492,7 +555,7 @@ impl PyWaveStepper {
     }
 
     /// Maximum stable dt for this stepper's wave speed. Returns
-    /// +inf when wave_speed is 0.
+    /// +inf when `wave_speed` is 0.
     fn max_stable_dt(&self) -> f32 {
         self.inner.max_stable_dt()
     }
@@ -505,7 +568,8 @@ impl PyWaveStepper {
         dt: f32,
         neighbors: std::collections::HashMap<String, Vec<String>>,
     ) -> f32 {
-        self.inner.total_energy(dt, &neighbors)
+        let neighbors = Box::new(neighbors);
+        self.inner.total_energy(dt, neighbors.as_ref())
     }
 
     /// Snapshot of all (node, ψ) pairs as a dict.
@@ -518,6 +582,9 @@ impl PyWaveStepper {
 pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", ol_coherence_field::VERSION)?;
     m.add("G_A_GALAXY_PLANCK", G_A_GALAXY_PLANCK)?;
+    m.add("MAX_FIELD_NODES", MAX_FIELD_NODES)?;
+    m.add("MAX_FIELD_EDGES", MAX_FIELD_EDGES)?;
+    m.add("MAX_SOLVER_ITERS", MAX_SOLVER_ITERS)?;
     m.add_class::<PyGraphLaplacian>()?;
     m.add_class::<PyFieldObservations>()?;
     m.add_class::<PyWaveStepper>()?;

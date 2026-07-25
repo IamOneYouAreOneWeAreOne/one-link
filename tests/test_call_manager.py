@@ -10,13 +10,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import blake3
 
-from one_link.async_capsule import CapsuleKind
 from one_link.call_manager import (
+    CallCapacityError,
+    CallIdentityMismatchError,
     CallManager,
     CallManagerRegistry,
+    InvalidCallIdError,
     ManagerEvent,
     ManagerEventKind,
-    ManagerOutput,
     TailEventKind,
 )
 from one_link.call_session import EndReason, Intensity
@@ -25,7 +26,6 @@ from one_link.call_signaling import (
     CALL_END,
     CALL_INVITE,
     CallPhase,
-    EndCause,
     LocalAction,
     RESUME_OFFER,
 )
@@ -38,9 +38,7 @@ from one_link.frame_provenance import (
 )
 from one_link.identity import Identity
 from one_link.recording_consent import (
-    RECORDING_GRANT,
     RECORDING_REQUEST,
-    RECORDING_STOP,
     ConsentPhase,
 )
 
@@ -274,6 +272,7 @@ def test_immune_convert_opens_capsule_builder(
     assert m.phase == CallPhase.ASYNC_CAPTURE
     assert m.state.capsule_builder is not None
     assert m.state.capsule_builder.is_empty()
+    assert m.state.capsule_builder.started_at_ms == 5_000
 
 
 def test_audio_segments_flow_into_capsule(
@@ -315,6 +314,8 @@ def test_capsule_finalize_transitions_to_resumable(
     ))
     assert m.phase == CallPhase.RESUMABLE
     assert out.finalized_capsule is not None
+    assert out.finalized_capsule.started_at_ms == 5_000
+    assert out.finalized_capsule.duration_ms == 300
     assert out.finalized_capsule.all_frames_verified_by(alice.public_bytes)
     # Tail event: CAPSULE_CAPTURED + RESUME_OFFER_AVAILABLE
     captured = [e for e in out.tail_events if e.kind == TailEventKind.CAPSULE_CAPTURED]
@@ -337,6 +338,72 @@ def test_capsule_finalize_with_empty_builder_is_noop(
     ))
     assert m.phase == CallPhase.ASYNC_CAPTURE     # unchanged
     assert out.finalized_capsule is None
+
+
+def test_capsule_finalize_retry_is_exact_and_late_audio_is_ignored(
+    alice: Identity, mom: Identity,
+) -> None:
+    m = _new_originator(alice, mom)
+    m.handle(ManagerEvent(ManagerEventKind.USER_INITIATE_CALL, 1_000))
+    m.handle(ManagerEvent(ManagerEventKind.WIRE_CALL_ACCEPT, 2_000))
+    m.handle(ManagerEvent(ManagerEventKind.IMMUNE_CONVERT_TO_ASYNC, 5_000))
+    chunk = b"first-opus-frame"
+    m.handle(ManagerEvent(
+        kind=ManagerEventKind.CAPTURE_AUDIO_SEGMENT,
+        occurred_at_ms=5_100,
+        data={"chunk": chunk, "provenance": _signed(alice, chunk)},
+    ))
+    first = m.handle(ManagerEvent(
+        kind=ManagerEventKind.CAPSULE_FINALIZED,
+        occurred_at_ms=6_000,
+    ))
+    assert first.finalized_capsule is not None
+
+    late = b"late-frame-after-commit"
+    m.handle(ManagerEvent(
+        kind=ManagerEventKind.CAPTURE_AUDIO_SEGMENT,
+        occurred_at_ms=6_100,
+        data={"chunk": late, "provenance": _signed(alice, late)},
+    ))
+    retried = m.handle(ManagerEvent(
+        kind=ManagerEventKind.CAPSULE_FINALIZED,
+        occurred_at_ms=7_000,
+    ))
+    assert retried.finalized_capsule == first.finalized_capsule
+    assert retried.finalized_capsule.audio_payload == chunk
+    assert retried.tail_events == ()
+
+
+def test_max_length_call_id_maps_to_bounded_wire_safe_capsule_id(
+    alice: Identity,
+    mom: Identity,
+) -> None:
+    call_id = "a:" + "b" * 126
+    manager = CallManager(
+        call_id=call_id,
+        peer_master_vk_hex=mom.fingerprint,
+        local_role="originator",
+        local_master_vk_hex=alice.fingerprint,
+        started_at_ms=1_000,
+    )
+    manager.handle(ManagerEvent(ManagerEventKind.USER_INITIATE_CALL, 1_000))
+    manager.handle(ManagerEvent(ManagerEventKind.WIRE_CALL_ACCEPT, 2_000))
+    manager.handle(ManagerEvent(ManagerEventKind.IMMUNE_CONVERT_TO_ASYNC, 3_000))
+    chunk = b"bounded-id-opus"
+    manager.handle(ManagerEvent(
+        kind=ManagerEventKind.CAPTURE_AUDIO_SEGMENT,
+        occurred_at_ms=3_100,
+        data={"chunk": chunk, "provenance": _signed(alice, chunk)},
+    ))
+    output = manager.handle(ManagerEvent(
+        ManagerEventKind.CAPSULE_FINALIZED,
+        3_200,
+    ))
+    assert output.finalized_capsule is not None
+    capsule_id = output.finalized_capsule.capsule_id
+    assert capsule_id.startswith("capsule-")
+    assert len(capsule_id) <= 128
+    assert all(ch.isalnum() or ch in "-_." for ch in capsule_id)
 
 
 # ---------------------------------------------------------------------------
@@ -482,3 +549,119 @@ def test_registry_reaps_completed_calls(alice: Identity, mom: Identity) -> None:
     assert len(reg) == 1
     assert reg.get("c-done") is None
     assert reg.get("c-active") is m2
+
+
+def test_registry_rejects_cross_peer_call_id_collision(
+    alice: Identity, mom: Identity,
+) -> None:
+    other = _identity("registry-collision-peer")
+    reg = CallManagerRegistry()
+    original = reg.open(
+        call_id="collision-1",
+        peer_master_vk_hex=mom.fingerprint,
+        local_role="originator",
+        local_master_vk_hex=alice.fingerprint,
+        started_at_ms=1_000,
+    )
+
+    with pytest.raises(CallIdentityMismatchError):
+        reg.open(
+            call_id="collision-1",
+            peer_master_vk_hex=other.fingerprint,
+            local_role="originator",
+            local_master_vk_hex=alice.fingerprint,
+            started_at_ms=2_000,
+        )
+    with pytest.raises(CallIdentityMismatchError):
+        reg.get_for_peer("collision-1", other.fingerprint)
+    assert reg.get_for_peer("collision-1", mom.fingerprint) is original
+
+
+@pytest.mark.parametrize(
+    "call_id",
+    ["", " has-space", "has/slash", "line\nbreak", "x" * 129],
+)
+def test_registry_rejects_malformed_or_oversized_call_ids(
+    call_id: str, alice: Identity, mom: Identity,
+) -> None:
+    reg = CallManagerRegistry()
+    with pytest.raises(InvalidCallIdError):
+        reg.open(
+            call_id=call_id,
+            peer_master_vk_hex=mom.fingerprint,
+            local_role="originator",
+            local_master_vk_hex=alice.fingerprint,
+            started_at_ms=1_000,
+        )
+    assert len(reg) == 0
+
+
+def test_registry_enforces_global_and_per_peer_capacity_before_allocation(
+    alice: Identity, mom: Identity,
+) -> None:
+    other = _identity("registry-capacity-peer")
+    reg = CallManagerRegistry(max_calls=2, max_calls_per_peer=1)
+    reg.open(
+        call_id="capacity-1",
+        peer_master_vk_hex=mom.fingerprint,
+        local_role="originator",
+        local_master_vk_hex=alice.fingerprint,
+        started_at_ms=1_000,
+    )
+    with pytest.raises(CallCapacityError):
+        reg.open(
+            call_id="capacity-same-peer",
+            peer_master_vk_hex=mom.fingerprint,
+            local_role="originator",
+            local_master_vk_hex=alice.fingerprint,
+            started_at_ms=1_001,
+        )
+    reg.open(
+        call_id="capacity-2",
+        peer_master_vk_hex=other.fingerprint,
+        local_role="originator",
+        local_master_vk_hex=alice.fingerprint,
+        started_at_ms=1_002,
+    )
+    with pytest.raises(CallCapacityError):
+        reg.open(
+            call_id="capacity-global",
+            peer_master_vk_hex=_identity("third-capacity-peer").fingerprint,
+            local_role="originator",
+            local_master_vk_hex=alice.fingerprint,
+            started_at_ms=1_003,
+        )
+    assert set(reg.active_call_ids()) == {"capacity-1", "capacity-2"}
+
+
+def test_registry_expires_only_pending_calls_with_monotonic_time(
+    alice: Identity, mom: Identity,
+) -> None:
+    now = [100.0]
+    reg = CallManagerRegistry(
+        pending_ttl_s=30.0,
+        clock=lambda: now[0],
+    )
+    pending = reg.open(
+        call_id="pending-expiry",
+        peer_master_vk_hex=mom.fingerprint,
+        local_role="originator",
+        local_master_vk_hex=alice.fingerprint,
+        started_at_ms=1_000,
+    )
+    active = reg.open(
+        call_id="active-survives",
+        peer_master_vk_hex=_identity("active-expiry-peer").fingerprint,
+        local_role="originator",
+        local_master_vk_hex=alice.fingerprint,
+        started_at_ms=1_000,
+    )
+    active.handle(ManagerEvent(ManagerEventKind.USER_INITIATE_CALL, 1_000))
+    active.handle(ManagerEvent(ManagerEventKind.WIRE_CALL_ACCEPT, 2_000))
+    assert pending.phase == CallPhase.INVITING
+    assert active.phase == CallPhase.ACTIVE
+
+    now[0] = 131.0
+    assert reg.reap_stale_pending() == ("pending-expiry",)
+    assert reg.get("pending-expiry") is None
+    assert reg.get("active-survives") is active

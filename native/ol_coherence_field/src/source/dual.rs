@@ -2,7 +2,7 @@
 //!
 //! ## Why dual sourcing
 //!
-//! The S_One linear-source no-go theorem says a pure density-linear
+//! The `S_One` linear-source no-go theorem says a pure density-linear
 //! `S = α · ρ` collapses the coherence flux to `g_coh ∝ g_bar`.
 //! Escape requires the source to be nonlinear in observables OR to
 //! carry an additional structural channel beyond density.

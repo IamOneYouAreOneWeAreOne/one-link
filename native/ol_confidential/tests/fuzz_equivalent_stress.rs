@@ -5,12 +5,13 @@
 use proptest::prelude::*;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use std::sync::OnceLock;
 
 use ol_confidential::{
     sign_attestation, verify_attestation, AttestationDoc, ConfidentialProvider, ConfidentialTier,
     ProviderTag, SoftwareProvider, ATTESTATION_NONCE_LEN, ISSUER_SDP_PUBKEY_LEN,
 };
-use ol_pqsig::HybridSigningKey;
+use ol_pqsig::{HybridSigningKey, HybridVerifyingKey};
 
 fn cases() -> u32 {
     if std::env::var("ONE_LINK_F1_GATE").as_deref() == Ok("1") {
@@ -22,9 +23,33 @@ fn cases() -> u32 {
 
 const TEST_SDP_PUBKEY: [u8; ISSUER_SDP_PUBKEY_LEN] = [0xE5; ISSUER_SDP_PUBKEY_LEN];
 
+struct DeterministicFixtures {
+    provider: SoftwareProvider,
+    signing_key: HybridSigningKey,
+    bogus_verifying_key: HybridVerifyingKey,
+}
+
+/// None of the fuzz input reaches fixture construction. Rebuilding these same
+/// deterministic ML-DSA keys for every case only repeats identical key
+/// expansion; retain the exact RNG sequence while constructing them once.
+fn deterministic_fixtures() -> &'static DeterministicFixtures {
+    static FIXTURES: OnceLock<DeterministicFixtures> = OnceLock::new();
+    FIXTURES.get_or_init(|| {
+        let mut rng = ChaCha20Rng::from_seed([0xC0; 32]);
+        let provider = SoftwareProvider::generate(&mut rng);
+        let (signing_key, _verifying_key) = HybridSigningKey::generate(&mut rng);
+        let bogus_verifying_key = HybridSigningKey::generate(&mut rng).1;
+        DeterministicFixtures {
+            provider,
+            signing_key,
+            bogus_verifying_key,
+        }
+    })
+}
+
 fn fuzz_body(data: &[u8]) {
-    let mut rng = ChaCha20Rng::from_seed([0xC0; 32]);
-    let provider = SoftwareProvider::generate(&mut rng);
+    let fixtures = deterministic_fixtures();
+    let provider = &fixtures.provider;
 
     let mut seed = [0u8; 32];
     for (i, b) in data.iter().take(32).enumerate() {
@@ -43,7 +68,6 @@ fn fuzz_body(data: &[u8]) {
     }
     let _ = provider.sealed_sign(&tampered, b"probe");
 
-    let (sk, _vk) = HybridSigningKey::generate(&mut rng);
     let mut nonce = [0u8; ATTESTATION_NONCE_LEN];
     for (i, b) in data.iter().take(ATTESTATION_NONCE_LEN).enumerate() {
         nonce[i] = *b;
@@ -61,7 +85,7 @@ fn fuzz_body(data: &[u8]) {
     let deadline = issued.saturating_add(offset);
     let quote: Vec<u8> = data.iter().skip(3).take(64).copied().collect();
     if let Ok(doc) = sign_attestation(
-        &sk,
+        &fixtures.signing_key,
         provider_tag,
         nonce,
         issued,
@@ -83,7 +107,7 @@ fn fuzz_body(data: &[u8]) {
 
     let bogus = AttestationDoc {
         provider_tag,
-        master_vk: HybridSigningKey::generate(&mut rng).1,
+        master_vk: fixtures.bogus_verifying_key.clone(),
         peer_nonce: nonce,
         issued_unix: issued,
         deadline_unix: deadline,

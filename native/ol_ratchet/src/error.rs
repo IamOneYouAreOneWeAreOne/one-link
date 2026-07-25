@@ -33,7 +33,7 @@ pub enum RatchetError {
 
     /// Fast-forward / peek requested a step too far ahead of the
     /// current chain position. Closes the audit L11 (May 2026)
-    /// DoS where a malicious peer could ship `seq = u64::MAX` and
+    /// `DoS` where a malicious peer could ship `seq = u64::MAX` and
     /// force the receiver into an indefinite BLAKE3 derive loop.
     #[error("skip too large: from step {from} requested {target} (delta {delta}, max {max})")]
     SkipTooLarge {

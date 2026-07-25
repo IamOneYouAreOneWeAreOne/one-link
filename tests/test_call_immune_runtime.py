@@ -8,11 +8,8 @@ Covers:
 
 from __future__ import annotations
 
-import json
-from dataclasses import replace
 from pathlib import Path
 
-import pytest
 
 from one_link.call_immune import (
     GraduationMode,

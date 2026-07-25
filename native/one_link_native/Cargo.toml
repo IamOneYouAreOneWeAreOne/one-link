@@ -46,6 +46,7 @@ ol_decide         = { path = "../ol_decide" }
 ol_selector       = { path = "../ol_selector" }
 ol_radio_batcher  = { path = "../ol_radio_batcher" }
 ol_compress       = { path = "../ol_compress" }
+ol_fuse           = { path = "../ol_fuse" }
 curve25519-dalek  = { version = "4", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }
 ml-kem            = "0.2"
 hybrid-array      = "0.2"
@@ -77,6 +78,11 @@ unstable-deterministic-provider = [
 # `platform_quote`. Build with `maturin develop --release --features
 # windows-tpm` on a Windows host with a functional TPM 2.0.
 windows-tpm = ["ol_confidential/windows-tpm"]
+# Production Linux wheels forward this feature to the real `fuser`
+# adapter.  `ol_fuse` keeps its fuser/libc dependencies in a Linux-only
+# target block, so enabling the feature for the cross-platform maturin
+# matrix preserves explicit unsupported behavior on Windows and macOS.
+linux-mount = ["ol_fuse/linux-mount"]
 
 [lints]
 workspace = true

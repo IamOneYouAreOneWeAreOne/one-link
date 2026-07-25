@@ -4,6 +4,11 @@
 **Phase:** A1 (item #6: AEAD frame size decision; item #7: per-chunk AEAD)
 **Depends on:** ADR-0001 (CDC chunk size distribution)
 
+**Truth amendment (2026-07-24):** the 64-bit chunk prefix is not globally
+unique. Nonce safety is conditional on deriving an independent AEAD key from the
+full 256-bit chunk ID or enforcing a same-key prefix registry. `ol_aead` does not
+own that registry, so this ADR must not describe reuse as impossible.
+
 ---
 
 ## Context
@@ -32,7 +37,7 @@ Parameters:
 | Primary cipher | **AES-256-GCM** | AES-NI / VAES = ~5 GiB/s/core x86; HW-accelerated constant-time; PQ-relevant key length (256 bit ≈ 128-bit PQ security per Grover halving). |
 | Fallback cipher | **ChaCha20-Poly1305** | ARM64 NEON path; ~3 GiB/s/core; constant-time by construction. |
 | AEAD frame size | **16 KiB plaintext payload** | At a 64 KiB chunk-size mean, a chunk holds 4 frames. FUSE 64-KiB random read decrypts 1 frame (16 KiB), worst-case 2 frames if cross-frame. 4× amplification reduction vs whole-chunk-frames. |
-| Nonce structure | **96-bit: chunk_id_lo64 \|\| frame_index_u32** | chunk_id_lo64 = lower 64 bits of BLAKE3(chunk_plaintext); guaranteed unique per chunk under content-addressing. frame_index distinguishes frames within a chunk. Reuse-impossible by construction. |
+| Nonce structure | **96-bit: chunk_id_lo64 \|\| frame_index_u32** | `chunk_id_lo64` is only a 64-bit prefix and can collide. `frame_index` distinguishes accepted frames within one chunk. Safety across chunks requires a full-ID-derived independent key or a same-key collision registry outside `ol_aead`. |
 | AAD | **chunk_id_full256 (32 bytes BLAKE3)** | Binds frame-level encryption to the chunk identity; tamper of chunk_id invalidates auth tag. |
 | Tag size | **128 bit (full GCM tag, 16 bytes Poly1305)** | Truncation savings (~3% per 16 KiB frame) not worth the security loss. |
 | Per-chunk overhead | **frames × 16 bytes (auth tags)** | A 64 KiB chunk → 4 frames × 16 = 64 bytes overhead = 0.097%. Negligible. |
@@ -43,7 +48,10 @@ Parameters:
 - **Whole-chunk-as-one-frame (no internal frames)**: simpler, but FUSE read amplification is unbounded. Reject.
 - **AES-128-GCM**: 128-bit security ≈ 64-bit PQ. Reject for PQ-conservative posture.
 - **AES-256-OCB**: better software perf than GCM, but AES-NI gives GCM hardware advantage that OCB can't match. Reject.
-- **AES-256-GCM-SIV**: nonce-misuse-resistant, but our nonce structure is reuse-impossible by construction (content-addressed chunk_id). The SIV cost (extra cipher pass for synthetic IV) buys us nothing. Reject.
+- **AES-256-GCM-SIV**: nonce-misuse resistance would add defense in depth
+  against a caller violating the independent-key/registry contract, at the cost
+  of another pass and a different primitive. The original decision rejected
+  that cost; the 64-bit prefix alone is not a justification for rejection.
 - **XChaCha20-Poly1305**: 192-bit nonce. Buys nothing beyond ChaCha20-Poly1305 here because our nonce structure is constructed, not random. Reject.
 
 ## Consequences
@@ -52,7 +60,10 @@ Parameters:
 - FUSE read amplification capped at 16 KiB per random read (worst case 32 KiB if cross-frame). Bounded.
 - AES-NI throughput far exceeds the 1 GiB/s engine gate. Headroom for parallelism.
 - Per-chunk forward-secret ratchet (Phase C) integrates cleanly: ratchet step happens at chunk boundary, frame keys derived from per-chunk key. Fits Signal-class double-ratchet without overhead per frame.
-- Nonce reuse impossible. 64-bit chunk_id collision probability < 2^-64; in practice the BLAKE3 256-bit address is the canonical identifier and 64-bit prefix collision is birthday-bound to ~2^32 chunks (4 billion); engine will refuse to write a chunk whose 64-bit prefix collides with an existing one.
+- Within one accepted chunk, distinct in-range frame indexes produce distinct
+  nonce bytes. Across chunks, prefix collisions are birthday-bound near
+  2^32 samples; confidentiality/integrity therefore depends on the full-ID key
+  derivation or a caller-owned same-key collision registry.
 
 **Negative:**
 - 16 KiB frame size is below typical CPU L1 working sets but above L1 line size. Two-pass: encrypt then auth, or interleaved; with AES-NI VAES, single pass dominates either way.
@@ -63,7 +74,9 @@ Parameters:
 1. **Throughput gate (A1, software AES)**: encrypt + auth 256 KiB chunks, single core: ≥ 2 GiB/s sustained for both AES-GCM (software) and ChaCha20-Poly1305. This is the honest baseline measured with the RustCrypto crates' default backend.
 1a. **Throughput gate (Phase B optimization, AES-NI)**: target ≥ 4 GiB/s/core for AES-256-GCM via AES-NI hardware acceleration. Attempted in A1 via `RUSTFLAGS="-C target-feature=+aes,+pclmulqdq"` but blocked on this dev box by Windows Smart App Control / WDAC; production wheels will enable AES-NI at the build matrix level (cibuildwheel + per-platform target-feature) and the 4 GiB/s gate becomes load-bearing then. Tracked as a Phase B deliverable, not a Phase A1 release blocker.
 2. **FUSE read amplification gate**: random 64 KiB read on a 100 GiB virtual file induces ≤32 KiB AEAD work. Measured via instrumented decrypt counter.
-3. **Nonce reuse impossible-test**: write 100M chunks; assert no 64-bit chunk_id collision; if collision detected, engine MUST refuse the write.
+3. **Nonce contract gate**: prove that the product caller derives independent
+   AEAD keys from the full chunk ID or detects/rejects a repeated 64-bit prefix
+   under the same key. Randomly seeing no collision is not proof of uniqueness.
 4. **Per-chunk-key independence**: revealing one chunk's key reveals nothing about adjacent chunks (property test against derivation function).
 
 ## References

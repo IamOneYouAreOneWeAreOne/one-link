@@ -3,6 +3,14 @@
 use crate::context::Context;
 use crate::error::CapError;
 
+/// Maximum number of operation names accepted in one `OperationIn` caveat.
+///
+/// A capability's entire wire representation is already capped at 8 KiB, but
+/// the nested count is attacker controlled.  Keeping an explicit semantic
+/// bound prevents a compact payload containing empty operation names from
+/// amplifying into thousands of heap allocations during decode.
+pub const MAX_OPERATION_NAMES: usize = 256;
+
 /// Tag bytes for the wire encoding of each caveat kind. Stable; new
 /// kinds get new tags (don't reuse).
 mod tag {
@@ -31,6 +39,71 @@ pub enum Caveat {
 }
 
 impl Caveat {
+    /// Validate locally constructed caveat data before it can influence an
+    /// allocation or enter a capability signature chain.
+    pub(crate) fn validate_for_wire(&self) -> Result<(), CapError> {
+        let body_len = match self {
+            Self::ExpiresAt(_) => 8,
+            Self::PeerFingerprint(_) => 32,
+            Self::PathPrefix(prefix) => {
+                if prefix.is_empty() {
+                    return Err(CapError::ResourceLimit {
+                        reason: "PathPrefix must not be empty",
+                    });
+                }
+                prefix.len()
+            }
+            Self::OperationIn(ops) => {
+                if ops.len() > MAX_OPERATION_NAMES {
+                    return Err(CapError::ResourceLimit {
+                        reason: "OperationIn count exceeds MAX_OPERATION_NAMES",
+                    });
+                }
+                let mut len = 4usize;
+                for op in ops {
+                    if op.is_empty() {
+                        return Err(CapError::ResourceLimit {
+                            reason: "OperationIn names must not be empty",
+                        });
+                    }
+                    len = len
+                        .checked_add(4)
+                        .and_then(|n| n.checked_add(op.len()))
+                        .ok_or(CapError::ResourceLimit {
+                            reason: "OperationIn encoded length overflow",
+                        })?;
+                }
+                len
+            }
+            Self::AuditTag(tag) => tag.len(),
+        };
+        if u32::try_from(body_len).is_err() {
+            return Err(CapError::ResourceLimit {
+                reason: "caveat body exceeds u32 wire length",
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn encoded_len(&self) -> Result<usize, CapError> {
+        self.validate_for_wire()?;
+        let body_len = match self {
+            Self::ExpiresAt(_) => 8,
+            Self::PeerFingerprint(_) => 32,
+            Self::PathPrefix(prefix) | Self::AuditTag(prefix) => prefix.len(),
+            Self::OperationIn(ops) => ops.iter().try_fold(4usize, |len, op| {
+                len.checked_add(4)
+                    .and_then(|n| n.checked_add(op.len()))
+                    .ok_or(CapError::ResourceLimit {
+                        reason: "OperationIn encoded length overflow",
+                    })
+            })?,
+        };
+        5usize.checked_add(body_len).ok_or(CapError::ResourceLimit {
+            reason: "caveat encoded length overflow",
+        })
+    }
+
     /// Wire encoding: `[tag: u8][len: u32 LE][bytes]`.
     pub(crate) fn encode(&self) -> Vec<u8> {
         match self {
@@ -52,22 +125,24 @@ impl Caveat {
                 let b = p.as_bytes();
                 let mut out = Vec::with_capacity(1 + 4 + b.len());
                 out.push(tag::PATH_PREFIX);
-                out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(u32::MAX).to_le_bytes());
                 out.extend_from_slice(b);
                 out
             }
             Self::OperationIn(ops) => {
                 // Encoded as: count u32 LE, then each op as len u32 + bytes.
                 let mut body = Vec::new();
-                body.extend_from_slice(&(ops.len() as u32).to_le_bytes());
+                body.extend_from_slice(&u32::try_from(ops.len()).unwrap_or(u32::MAX).to_le_bytes());
                 for op in ops {
                     let b = op.as_bytes();
-                    body.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                    body.extend_from_slice(
+                        &u32::try_from(b.len()).unwrap_or(u32::MAX).to_le_bytes(),
+                    );
                     body.extend_from_slice(b);
                 }
                 let mut out = Vec::with_capacity(1 + 4 + body.len());
                 out.push(tag::OPERATION_IN);
-                out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+                out.extend_from_slice(&u32::try_from(body.len()).unwrap_or(u32::MAX).to_le_bytes());
                 out.extend_from_slice(&body);
                 out
             }
@@ -75,7 +150,7 @@ impl Caveat {
                 let b = t.as_bytes();
                 let mut out = Vec::with_capacity(1 + 4 + b.len());
                 out.push(tag::AUDIT_TAG);
-                out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(u32::MAX).to_le_bytes());
                 out.extend_from_slice(b);
                 out
             }
@@ -84,6 +159,7 @@ impl Caveat {
 
     /// Decode a single caveat from `buf`. Returns the caveat + the
     /// number of bytes consumed.
+    #[allow(clippy::too_many_lines)] // One bounded, linear parser keeps cursor invariants local.
     pub(crate) fn decode(buf: &[u8]) -> Result<(Self, usize), CapError> {
         if buf.len() < 5 {
             return Err(CapError::Malformed {
@@ -101,12 +177,15 @@ impl Caveat {
             reason: "caveat length field not 4 bytes",
         })?;
         let len = u32::from_le_bytes(len_bytes) as usize;
-        if buf.len() < 5 + len {
+        let body_end = 5usize.checked_add(len).ok_or(CapError::Malformed {
+            reason: "caveat length overflows address space",
+        })?;
+        if buf.len() < body_end {
             return Err(CapError::Malformed {
                 reason: "caveat truncated",
             });
         }
-        let body = &buf[5..5 + len];
+        let body = &buf[5..body_end];
         let caveat = match tag_byte {
             tag::EXPIRES_AT => {
                 if body.len() != 8 {
@@ -146,34 +225,61 @@ impl Caveat {
                         reason: "OperationIn count field not 4 bytes",
                     })?;
                 let count = u32::from_le_bytes(count_bytes) as usize;
+                // Every encoded entry needs at least its four-byte length
+                // field.  Prove the declared count can fit in this body
+                // *before* using it as a Vec capacity.  This ordering is a
+                // security invariant: a 137-byte fuzz input previously made
+                // Vec::with_capacity attempt an allocation of about 100 GiB.
+                let structurally_possible = (body.len() - 4) / 4;
+                if count > structurally_possible {
+                    return Err(CapError::Malformed {
+                        reason: "OperationIn count exceeds encoded body",
+                    });
+                }
+                if count > MAX_OPERATION_NAMES {
+                    return Err(CapError::Malformed {
+                        reason: "OperationIn count exceeds MAX_OPERATION_NAMES",
+                    });
+                }
                 let mut ops = Vec::with_capacity(count);
                 let mut cursor = 4usize;
                 for _ in 0..count {
-                    if body.len() < cursor + 4 {
+                    let length_end = cursor.checked_add(4).ok_or(CapError::Malformed {
+                        reason: "OperationIn entry length overflows address space",
+                    })?;
+                    if body.len() < length_end {
                         return Err(CapError::Malformed {
                             reason: "OperationIn entry truncated",
                         });
                     }
                     let entry_len_bytes: [u8; 4] =
-                        body[cursor..cursor + 4]
+                        body[cursor..length_end]
                             .try_into()
                             .map_err(|_| CapError::Malformed {
                                 reason: "OperationIn entry length not 4 bytes",
                             })?;
                     let l = u32::from_le_bytes(entry_len_bytes) as usize;
-                    cursor += 4;
-                    if body.len() < cursor + l {
+                    cursor = length_end;
+                    let entry_end = cursor.checked_add(l).ok_or(CapError::Malformed {
+                        reason: "OperationIn entry body length overflows address space",
+                    })?;
+                    if body.len() < entry_end {
                         return Err(CapError::Malformed {
                             reason: "OperationIn entry body truncated",
                         });
                     }
-                    let s = std::str::from_utf8(&body[cursor..cursor + l]).map_err(|_| {
+                    let s = std::str::from_utf8(&body[cursor..entry_end]).map_err(|_| {
                         CapError::Malformed {
                             reason: "OperationIn entry not UTF-8",
                         }
                     })?;
                     ops.push(s.to_string());
-                    cursor += l;
+                    cursor = entry_end;
+                }
+                if cursor != body.len() {
+                    return Err(CapError::Malformed {
+                        reason: "OperationIn body has trailing bytes",
+                    });
                 }
                 Self::OperationIn(ops)
             }
@@ -185,7 +291,7 @@ impl Caveat {
             }
             other => return Err(CapError::UnknownCaveat { tag: other }),
         };
-        Ok((caveat, 5 + len))
+        Ok((caveat, body_end))
     }
 
     /// Evaluate this caveat against `ctx`. Returns `Ok(())` if the
@@ -219,7 +325,7 @@ impl Caveat {
             }
             Self::PathPrefix(p) => {
                 if let Some(path) = ctx.path {
-                    if !path.starts_with(p.as_str()) {
+                    if !path_is_within_prefix(path, p) {
                         return Err("PathPrefix: path not under prefix");
                     }
                 } else {
@@ -240,5 +346,102 @@ impl Caveat {
             }
         }
         Ok(())
+    }
+}
+
+/// Segment-aware lexical prefix check.  Callers should still provide
+/// canonical resource paths, but this layer fails closed on dot-segments and
+/// prevents `/safe` from authorizing `/safety` or `/safe/../escape`.
+fn path_is_within_prefix(path: &str, prefix: &str) -> bool {
+    if prefix.is_empty()
+        || path
+            .split(['/', '\\'])
+            .any(|segment| matches!(segment, "." | ".."))
+        || prefix
+            .split(['/', '\\'])
+            .any(|segment| matches!(segment, "." | ".."))
+    {
+        return false;
+    }
+    if path == prefix {
+        return true;
+    }
+    let Some(rest) = path.strip_prefix(prefix) else {
+        return false;
+    };
+    prefix.ends_with(['/', '\\']) || rest.starts_with(['/', '\\'])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn operation_in_body(body: &[u8]) -> Vec<u8> {
+        let mut encoded = Vec::with_capacity(5 + body.len());
+        encoded.push(tag::OPERATION_IN);
+        encoded.extend_from_slice(&u32::try_from(body.len()).unwrap_or(u32::MAX).to_le_bytes());
+        encoded.extend_from_slice(body);
+        encoded
+    }
+
+    #[test]
+    fn operation_count_must_fit_before_allocation() {
+        // Regression for nightly fuzz crash 2d52b3564a26e2971f552534b63e5b130d048643:
+        // an attacker-controlled count used to flow directly into
+        // Vec::with_capacity and request an allocation of roughly 100 GiB.
+        let encoded = operation_in_body(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            Caveat::decode(&encoded),
+            Err(CapError::Malformed {
+                reason: "OperationIn count exceeds encoded body"
+            })
+        ));
+    }
+
+    #[test]
+    fn operation_count_has_a_semantic_resource_bound() {
+        let count = MAX_OPERATION_NAMES + 1;
+        let mut body = Vec::with_capacity(4 + count * 4);
+        body.extend_from_slice(&u32::try_from(count).unwrap_or(u32::MAX).to_le_bytes());
+        for _ in 0..count {
+            body.extend_from_slice(&0u32.to_le_bytes());
+        }
+        let encoded = operation_in_body(&body);
+        assert!(matches!(
+            Caveat::decode(&encoded),
+            Err(CapError::Malformed {
+                reason: "OperationIn count exceeds MAX_OPERATION_NAMES"
+            })
+        ));
+    }
+
+    #[test]
+    fn operation_body_must_be_canonical() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u32.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.push(0xAA);
+        let encoded = operation_in_body(&body);
+        assert!(matches!(
+            Caveat::decode(&encoded),
+            Err(CapError::Malformed {
+                reason: "OperationIn body has trailing bytes"
+            })
+        ));
+    }
+
+    #[test]
+    fn path_prefix_is_segment_aware_and_traversal_safe() {
+        let caveat = Caveat::PathPrefix("/safe".to_string());
+        assert!(caveat
+            .check(&Context::new().with_path("/safe/file"))
+            .is_ok());
+        assert!(caveat.check(&Context::new().with_path("/safe")).is_ok());
+        assert!(caveat
+            .check(&Context::new().with_path("/safety/file"))
+            .is_err());
+        assert!(caveat
+            .check(&Context::new().with_path("/safe/../escape"))
+            .is_err());
     }
 }

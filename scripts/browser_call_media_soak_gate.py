@@ -17,7 +17,9 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -38,6 +40,46 @@ RESULTS_DIR = Path("benchmarks") / "results"
 class BrowserCandidate:
     name: str
     path: str
+
+
+class BrowserStartupError(RuntimeError):
+    """A browser failed before its loopback DevTools endpoint became ready."""
+
+
+def _browser_temp_directory() -> tempfile.TemporaryDirectory[str]:
+    """Create an isolated profile whose late cache unlock cannot erase a pass.
+
+    Chromium-family browsers can keep cache-journal handles alive for a short
+    period after their controlling process exits, especially on Windows.  The
+    profile is disposable test state; a transient cleanup ``PermissionError``
+    must not replace a completed media report with a fabricated gate failure.
+    ``TemporaryDirectory`` still removes every entry it can and retries its
+    normal permission recovery, while ``ignore_cleanup_errors`` makes any
+    remaining locked cache file advisory rather than test-semantic.
+    """
+
+    return tempfile.TemporaryDirectory(
+        prefix="ol_browser_soak_",
+        ignore_cleanup_errors=True,
+    )
+
+
+@dataclass
+class BrowserProcess:
+    """A started browser and the resources that must live with it."""
+
+    proc: subprocess.Popen
+    port: int
+    profile: Path
+    stderr_path: Path
+    stderr_fh: Any
+
+    def close(self) -> None:
+        _terminate_process_tree(self.proc)
+        try:
+            self.stderr_fh.close()
+        except OSError:
+            pass
 
 
 def browser_candidates() -> list[BrowserCandidate]:
@@ -76,6 +118,232 @@ def browser_candidates() -> list[BrowserCandidate]:
 def find_browser() -> BrowserCandidate | None:
     candidates = browser_candidates()
     return candidates[0] if candidates else None
+
+
+def _free_loopback_port() -> int:
+    """Return a currently free IPv4 loopback port.
+
+    There is necessarily a small bind-after-close race on platforms where a
+    listening socket cannot be handed to Chromium. Browser startup retries use
+    a new port and a new profile, so a collision cannot poison later attempts.
+    """
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _diagnostic_tail(path: Path, *, max_bytes: int = 8192) -> str:
+    """Read at most ``max_bytes`` from the end of a browser diagnostic file."""
+
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - max_bytes), os.SEEK_SET)
+            return fh.read(max_bytes).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _sanitize_browser_diagnostics(
+    raw: str,
+    *,
+    redactions: tuple[str, ...] = (),
+    max_chars: int = 2048,
+) -> str:
+    """Return a bounded diagnostic that cannot disclose local paths/endpoints."""
+
+    text = str(raw or "")
+    sensitive_paths = (*redactions, str(Path.home()), tempfile.gettempdir())
+    spellings: set[str] = set()
+    for value in sensitive_paths:
+        if not value:
+            continue
+        spellings.update({value, value.replace("\\", "/"), value.replace("/", "\\")})
+    for spelling in sorted(spellings, key=len, reverse=True):
+        text = text.replace(spelling, "<redacted-path>")
+    text = re.sub(r"https?://[^\s\]\[(){}<>\"']+", "<redacted-url>", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?![\w.])", "<redacted-endpoint>", text)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "?", text)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    bounded = " | ".join(lines[-20:])
+    if len(bounded) > max_chars:
+        bounded = "..." + bounded[-(max_chars - 3):]
+    return bounded or "<no browser diagnostics>"
+
+
+def _safe_exception(exc: BaseException, *, redactions: tuple[str, ...] = ()) -> str:
+    return _sanitize_browser_diagnostics(
+        f"{type(exc).__name__}: {exc}",
+        redactions=redactions,
+        max_chars=1024,
+    )
+
+
+def _signal_process_group(proc: subprocess.Popen, sig: int) -> bool:
+    """Signal a POSIX process group without assuming POSIX APIs exist."""
+
+    getpgid = getattr(os, "getpgid", None)
+    killpg = getattr(os, "killpg", None)
+    if not callable(getpgid) or not callable(killpg):
+        return False
+    try:
+        killpg(getpgid(proc.pid), sig)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _terminate_process_tree(proc: subprocess.Popen, *, timeout_s: float = 5.0) -> None:
+    """Best-effort cleanup for Chromium's multi-process tree."""
+
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout_s,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+    else:
+        if not _signal_process_group(proc, signal.SIGTERM):
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+    try:
+        proc.wait(timeout=timeout_s)
+        return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if os.name != "nt":
+        sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
+        _signal_process_group(proc, sigkill)
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=timeout_s)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+async def _wait_for_browser_ready(
+    proc: subprocess.Popen,
+    port: int,
+    *,
+    timeout_s: float,
+) -> None:
+    """Poll the explicit loopback CDP endpoint and fail early if Chromium exits."""
+
+    deadline = time.monotonic() + timeout_s
+    last_status: int | None = None
+    timeout = aiohttp.ClientTimeout(total=0.75, connect=0.25)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        while time.monotonic() < deadline:
+            return_code = proc.poll()
+            if return_code is not None:
+                raise BrowserStartupError(
+                    f"browser exited before DevTools readiness (exit code {return_code})"
+                )
+            try:
+                async with session.get(f"http://127.0.0.1:{port}/json/version") as response:
+                    last_status = response.status
+                    if response.status == 200:
+                        payload = await response.json(content_type=None)
+                        if isinstance(payload, dict) and payload.get("webSocketDebuggerUrl"):
+                            return
+            except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError):
+                pass
+            await asyncio.sleep(0.05)
+    suffix = f" (last HTTP status {last_status})" if last_status is not None else ""
+    raise BrowserStartupError(f"browser DevTools endpoint was not ready within {timeout_s:g}s{suffix}")
+
+
+async def _launch_browser_process(
+    browser: BrowserCandidate,
+    root: Path,
+    *,
+    browser_args: list[str],
+    startup_timeout_s: float = 15.0,
+    startup_attempts: int = 3,
+) -> BrowserProcess:
+    """Start Chromium with bounded startup-only retries and fresh state."""
+
+    if startup_attempts <= 0:
+        raise ValueError("startup_attempts must be positive")
+    last_failure = "browser startup did not run"
+    for attempt in range(1, startup_attempts + 1):
+        port = _free_loopback_port()
+        profile = root / f"browser-profile-{attempt}-{port}"
+        profile.mkdir(parents=True, exist_ok=False)
+        stderr_path = root / f"browser-stderr-{attempt}.log"
+        stderr_fh = stderr_path.open("wb")
+        args = [
+            browser.path,
+            "--headless=new",
+            "--remote-debugging-address=127.0.0.1",
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={profile}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            *browser_args,
+            "about:blank",
+        ]
+        if os.name == "nt" and Path(browser.path).name.lower() in {"msedge.exe", "msedge"}:
+            # Edge otherwise performs a compatibility-layer relaunch. The
+            # launcher exits with code 0 while the unowned browser tree keeps
+            # the profile locked and obscures genuine startup failures.
+            args.insert(1, "--edge-skip-compat-layer-relaunch")
+        if os.name != "nt":
+            args.insert(1, "--no-sandbox")
+        popen_kwargs: dict[str, Any] = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": stderr_fh,
+            "stdin": subprocess.DEVNULL,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        else:
+            popen_kwargs["start_new_session"] = True
+        try:
+            proc = subprocess.Popen(args, **popen_kwargs)
+        except OSError as exc:
+            stderr_fh.close()
+            raise BrowserStartupError(
+                _safe_exception(exc, redactions=(str(root), str(profile), browser.path))
+            ) from exc
+        try:
+            await _wait_for_browser_ready(proc, port, timeout_s=startup_timeout_s)
+        except BrowserStartupError as exc:
+            _terminate_process_tree(proc)
+            stderr_fh.close()
+            diagnostic = _sanitize_browser_diagnostics(
+                _diagnostic_tail(stderr_path),
+                redactions=(str(root), str(profile), browser.path),
+            )
+            last_failure = f"{exc}; stderr: {diagnostic}"
+            continue
+        return BrowserProcess(
+            proc=proc,
+            port=port,
+            profile=profile,
+            stderr_path=stderr_path,
+            stderr_fh=stderr_fh,
+        )
+    raise BrowserStartupError(
+        f"browser startup failed after {startup_attempts} attempts: {last_failure}"
+    )
 
 
 def build_harness_html() -> str:
@@ -415,6 +683,16 @@ def evaluate_report(report: dict[str, Any]) -> list[str]:
     thresholds = report.get("thresholds") or {}
     if not report.get("ok"):
         failures.append("browser media soak reported not ok")
+    phase = str(report.get("phase") or "")
+    has_media_report = bool(final or remote or thresholds or "events" in report)
+    if phase and phase != "complete" and not report.get("ok"):
+        failures.append(f"browser media soak stopped during {phase}")
+    if phase and phase != "complete" and not has_media_report:
+        privacy = report.get("privacy") or {}
+        for key in ("containsMedia", "containsSdp", "containsIceCandidates", "containsIpAddresses", "containsDeviceNames", "containsUserContent"):
+            if privacy.get(key):
+                failures.append(f"privacy flag failed: {key}")
+        return _dedupe(failures)
     if int(report.get("setupMs") or 0) > int(thresholds.get("maxSetupMs") or 5000):
         failures.append("first media setup exceeded budget")
     if int(final.get("framesDecoded") or 0) < int(thresholds.get("minVideoFrames") or 0):
@@ -435,20 +713,6 @@ def evaluate_report(report: dict[str, Any]) -> list[str]:
         if privacy.get(key):
             failures.append(f"privacy flag failed: {key}")
     return _dedupe(failures)
-
-
-async def _wait_for_devtools_port(profile: Path, timeout_s: float) -> tuple[int, str]:
-    marker = profile / "DevToolsActivePort"
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        try:
-            lines = marker.read_text(encoding="utf-8").splitlines()
-            if len(lines) >= 2:
-                return int(lines[0]), lines[1]
-        except OSError:
-            pass
-        await asyncio.sleep(0.05)
-    raise RuntimeError("browser did not expose DevToolsActivePort")
 
 
 async def _new_page_ws(port: int, url: str) -> str:
@@ -497,35 +761,29 @@ async def run_browser_soak(
     min_video_frames: int,
     min_audio_packets: int,
 ) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="ol_browser_soak_") as td:
+    with _browser_temp_directory() as td:
         root = Path(td)
-        profile = root / "profile"
-        profile.mkdir()
         harness = root / "browser_media_soak.html"
         harness.write_text(build_harness_html(), encoding="utf-8")
-        args = [
-            browser.path,
-            "--headless=new",
-            "--remote-debugging-port=0",
-            f"--user-data-dir={profile}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--autoplay-policy=no-user-gesture-required",
-            "--use-fake-device-for-media-stream",
-            "--use-fake-ui-for-media-stream",
-            "--allow-file-access-from-files",
-            "--disable-background-timer-throttling",
-            "--disable-renderer-backgrounding",
-            "about:blank",
-        ]
-        if os.name != "nt":
-            args.insert(1, "--no-sandbox")
-        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = await _launch_browser_process(
+            browser,
+            root,
+            browser_args=[
+                "--autoplay-policy=no-user-gesture-required",
+                "--use-fake-device-for-media-stream",
+                "--use-fake-ui-for-media-stream",
+                "--allow-file-access-from-files",
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+            ],
+        )
         try:
-            port, _ = await _wait_for_devtools_port(profile, 15)
-            page_ws = await _new_page_ws(port, harness.as_uri())
+            page_ws = await _new_page_ws(process.port, harness.as_uri())
             async with aiohttp.ClientSession() as session:
-                async with session.ws_connect(page_ws, timeout=30) as ws:
+                async with session.ws_connect(
+                    page_ws,
+                    timeout=aiohttp.ClientWSTimeout(ws_close=10.0),
+                ) as ws:
                     counter = [0]
                     await _cdp_send(ws, counter, "Runtime.enable")
                     await _cdp_send(ws, counter, "Page.enable")
@@ -566,14 +824,11 @@ async def run_browser_soak(
                     if "value" not in remote:
                         raise RuntimeError(f"browser did not return soak report: {remote}")
                     report = dict(remote["value"])
+                    report["phase"] = "complete"
                     report["browser"] = {"name": browser.name, "path": Path(browser.path).name}
                     return report
         finally:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            process.close()
 
 
 def _dedupe(values: list[str]) -> list[str]:
@@ -633,7 +888,8 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         report = {
             "ok": False,
-            "error": repr(exc),
+            "phase": "browser_startup" if isinstance(exc, BrowserStartupError) else "browser_execution",
+            "error": _safe_exception(exc),
             "browser": {"name": browser.name, "path": Path(browser.path).name},
             "privacy": {
                 "containsMedia": False,

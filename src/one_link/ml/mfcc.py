@@ -10,8 +10,8 @@ Real pipeline, no shortcuts:
   7. optional delta + delta-delta (first + second time derivatives)
 
 Implementation is scipy + numpy only (no torchaudio dependency).
-Uses np.float32 end-to-end for numerical parity with a future CUDA
-port (see tools/ml/mfcc_cuda.py -- TODO).
+Uses np.float32 end-to-end so a future accelerated implementation can retain
+numerical parity with this reference pipeline.
 
 Public API:
     compute_mfcc(signal, sr, n_mfcc=20, n_fft=512, hop=160,

@@ -1,7 +1,7 @@
 //! Property tests for Row 8 Layer 2 (quorum).
 //!
 //! Two tiers:
-//!   - pure-derivation paths (proposal_id / policy handle): 1M iters
+//!   - pure-derivation paths (`proposal_id` / policy handle): 1M iters
 //!   - keygen-bound paths (mint subkey + propose + approve + verify):
 //!     1k iters because each iteration mints multiple PQ-hybrid keys.
 

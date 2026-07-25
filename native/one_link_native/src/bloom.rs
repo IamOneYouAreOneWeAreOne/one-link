@@ -2,7 +2,7 @@
 //!
 //! Surfaces the content-addressed Bloom filter used by ADR-0011's
 //! transfer-init handshake. Python callers build a filter, insert
-//! chunk_ids (32-byte BLAKE3 addresses), and encode/decode the wire
+//! `chunk_ids` (32-byte BLAKE3 addresses), and encode/decode the wire
 //! format.
 
 use ol_bloom::{Bloom, MAX_FILTER_BYTES};
@@ -22,7 +22,7 @@ pub struct PyBloom {
 
 #[pymethods]
 impl PyBloom {
-    /// Build an empty Bloom filter sized for `n` chunk_ids at 1% FP rate.
+    /// Build an empty Bloom filter sized for `n` `chunk_ids` at 1% FP rate.
     #[new]
     #[pyo3(signature = (n, target_fp = None))]
     fn new(n: usize, target_fp: Option<f64>) -> Self {
@@ -33,14 +33,14 @@ impl PyBloom {
         Self { inner }
     }
 
-    /// Insert a 32-byte chunk_id.
+    /// Insert a 32-byte `chunk_id`.
     fn insert(&mut self, py: Python<'_>, chunk_id: &Bound<'_, PyAny>) -> PyResult<()> {
         let id = chunk_id_from_buffer(py, chunk_id)?;
         self.inner.insert(&id);
         Ok(())
     }
 
-    /// Test whether a 32-byte chunk_id is (probably) present.
+    /// Test whether a 32-byte `chunk_id` is (probably) present.
     fn contains(&self, py: Python<'_>, chunk_id: &Bound<'_, PyAny>) -> PyResult<bool> {
         let id = chunk_id_from_buffer(py, chunk_id)?;
         Ok(self.inner.contains(&id))
@@ -71,23 +71,25 @@ impl PyBloom {
     /// Encode to wire bytes per ADR-0011.
     fn encode<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let bytes = self.inner.encode().map_err(bloom_error_to_pyerr)?;
-        Ok(PyBytes::new_bound(py, &bytes))
+        Ok(PyBytes::new(py, &bytes))
     }
 
     /// Decode from wire bytes per ADR-0011.
     #[staticmethod]
     fn decode(py: Python<'_>, encoded: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let buf = PyBuffer::<u8>::get_bound(encoded)?;
+        let buf = PyBuffer::<u8>::get(encoded)?;
         if buf.len_bytes() > MAX_FILTER_BYTES {
             return Err(PyValueError::new_err(format!(
-                "encoded bloom exceeds {} byte cap",
-                MAX_FILTER_BYTES
+                "encoded bloom exceeds {MAX_FILTER_BYTES} byte cap"
             )));
         }
-        let slice =
-            unsafe { std::slice::from_raw_parts(buf.buf_ptr() as *const u8, buf.len_bytes()) };
+        // `PyBuffer::to_vec` honors arbitrary strides and avoids
+        // constructing a raw Rust slice over a non-contiguous Python
+        // view. Decode already owns its bit array, so a raw zero-copy
+        // borrow would not save an allocation here.
+        let encoded = buf.to_vec(py)?;
         let inner = py
-            .allow_threads(|| Bloom::decode(slice))
+            .detach(|| Bloom::decode(&encoded))
             .map_err(bloom_error_to_pyerr)?;
         Ok(Self { inner })
     }
@@ -103,7 +105,7 @@ impl PyBloom {
 }
 
 fn chunk_id_from_buffer(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<[u8; 32]> {
-    let buf = PyBuffer::<u8>::get_bound(obj)?;
+    let buf = PyBuffer::<u8>::get(obj)?;
     if buf.len_bytes() != 32 {
         return Err(PyValueError::new_err(format!(
             "chunk_id must be exactly 32 bytes, got {}",
@@ -111,9 +113,7 @@ fn chunk_id_from_buffer(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<[u8;
         )));
     }
     let mut out = [0u8; 32];
-    let _ = py; // GIL token not needed for this short copy
-    let slice = unsafe { std::slice::from_raw_parts(buf.buf_ptr() as *const u8, 32) };
-    out.copy_from_slice(slice);
+    buf.copy_to_slice(py, &mut out)?;
     Ok(out)
 }
 
@@ -141,6 +141,7 @@ pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()>
     m.add("__version__", ol_bloom::VERSION)?;
     m.add("BLOOM_HEADER_LEN", ol_bloom::BLOOM_HEADER_LEN)?;
     m.add("MAX_FILTER_BYTES", ol_bloom::MAX_FILTER_BYTES)?;
+    m.add("MAX_FILTER_BITS", ol_bloom::MAX_FILTER_BITS)?;
     m.add_class::<PyBloom>()?;
     m.add_function(wrap_pyfunction!(optimal_m_bits, m)?)?;
     m.add_function(wrap_pyfunction!(optimal_k, m)?)?;

@@ -820,7 +820,10 @@ async def test_inbound_file_offer_pulls_available_chunk_from_swarm_before_wants(
     )
 
     reply = sender_chan.sent[-1]
-    row = state.get_transfer(f"in:{blob}")
+    incoming = daemon._incoming_files[blob]
+    assert incoming.transfer_id is not None
+    row = state.get_transfer(incoming.transfer_id)
+    assert row is not None
     assert reply["t"] == "FILE_WANTS"
     assert reply["wants"] == [1]
     assert daemon._read_chunk_cache(hashes[0]) == pieces[0]

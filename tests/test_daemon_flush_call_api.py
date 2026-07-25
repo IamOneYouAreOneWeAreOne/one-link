@@ -29,7 +29,7 @@ from one_link.call_api import (
     CallAPI,
 )
 from one_link.call_signaling import CallPhase
-from one_link.call_manager import CallManagerRegistry, TailEvent, TailEventKind
+from one_link.call_manager import TailEvent, TailEventKind
 from one_link.daemon import Daemon, OutboundSession
 from one_link.identity import Identity
 from one_link.wire import decode_msg, encode_msg, make_msg

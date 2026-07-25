@@ -13,6 +13,15 @@ pub enum ErasureError {
     #[error("empty plaintext cannot be striped")]
     EmptyPlaintext,
 
+    /// Plaintext exceeds the bounded whole-chunk resource envelope.
+    #[error("plaintext too large for one stripe: {got} > max {max}")]
+    PlaintextTooLarge {
+        /// Bytes supplied.
+        got: usize,
+        /// Maximum accepted bytes.
+        max: usize,
+    },
+
     /// `decode_stripe` was given a `present` vector with the wrong
     /// shape (must be exactly `k + m` slots).
     #[error("expected {expected} shard slots, got {got}")]
@@ -39,4 +48,26 @@ pub enum ErasureError {
         /// Expected index.
         expected_index: u8,
     },
+
+    /// Present shards disagree on immutable stripe metadata.
+    #[error("shard at position {pos} has inconsistent {field}")]
+    ShardMetadataMismatch {
+        /// Canonical slot containing the conflicting shard.
+        pos: usize,
+        /// Metadata field that disagreed.
+        field: &'static str,
+    },
+
+    /// Declared plaintext length cannot fit in the decoded data shards.
+    #[error("invalid declared plaintext length: {got} > decoded capacity {max}")]
+    InvalidPlaintextLength {
+        /// Declared plaintext bytes.
+        got: u64,
+        /// Maximum bytes represented by the data shards.
+        max: usize,
+    },
+
+    /// Reconstructed plaintext does not match the authenticated stripe id.
+    #[error("reconstructed plaintext does not match stripe_id")]
+    StripeIdMismatch,
 }

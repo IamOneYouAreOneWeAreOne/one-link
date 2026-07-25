@@ -1,26 +1,28 @@
 //! Runtime confidential-compute tier and platform detection.
 
-/// What hardness tier the daemon is running at right now.
+/// Claimed provider hardness tier.
 ///
-/// Ordered: `Software < HardwareBound < HardwareAttested`. Peers can
-/// downgrade their threat model when the local tier is lower than
-/// expected (e.g., refuse to exchange long-term secrets if not at
-/// least `HardwareBound`).
+/// Ordered: `Software < HardwareBound < HardwareAttested`. This enum is
+/// policy metadata, not evidence: peers must verify the provider-specific
+/// quote, trust root, measurements, and key-operation boundary before relying
+/// on a hardware tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ConfidentialTier {
     /// Software-only baseline. Master key sealed under a per-process
-    /// ephemeral ChaCha20-Poly1305 key; `Zeroize` on drop; mlock
-    /// where the OS allows. Defeats user-mode malware; does NOT
-    /// defeat root malware or `/proc/mem` capture.
+    /// ephemeral ChaCha20-Poly1305 key in the same process; best-effort
+    /// cleanup on drop. Does not defeat malware able to inspect/inject into
+    /// that process, root malware, or `/proc/mem` capture.
     Software,
-    /// Key is held inside a hardware secure element (Apple Secure
+    /// Local provider contract claims a key is held inside a hardware secure
+    /// element (Apple Secure
     /// Enclave / Android `StrongBox` / Windows TPM / Intel SGX /
     /// AMD SEV-SNP). No vendor attestation chain. Cipher operations
-    /// stay inside the element; the daemon only sees public outputs.
+    /// are intended to stay inside the element. A wire tag alone does not
+    /// prove this to a peer; provider-specific verification is required.
     HardwareBound,
-    /// Hardware-bound AND the peer chose to verify a vendor-issued
+    /// Hardware-bound AND the peer verified a vendor-issued
     /// attestation chain (Apple App Attest / Android Play Integrity /
-    /// Windows TPM EK / Intel quote service). Strongest tier.
+    /// Windows TPM EK / Intel quote service) and required measurements.
     HardwareAttested,
 }
 
@@ -33,8 +35,9 @@ impl ConfidentialTier {
 
     /// Map a [`crate::provider::ProviderTag`] (the byte that flows over
     /// the wire in [`crate::attestation::AttestationDoc`]) onto its
-    /// best-effort tier. Used by `verify_attestation` to enforce the
-    /// `min_tier` floor without callers having to bridge the two enums.
+    /// claimed local tier. Used by `verify_attestation` to enforce the
+    /// `min_tier` floor; callers must still run provider-specific quote/root
+    /// verification before treating a tag as hardware evidence.
     #[must_use]
     pub const fn from_provider_tag(tag: crate::provider::ProviderTag) -> Self {
         use crate::provider::ProviderTag;

@@ -8,19 +8,15 @@ CallManager.
 
 from __future__ import annotations
 
-from dataclasses import replace
 
-import pytest
 
 from one_link.call_immune import (
     GraduationMode,
     ImmuneAction,
     ImmuneDecision,
     ImmuneSystem,
-    Thresholds,
 )
 from one_link.call_immune_actions import (
-    ActionPlan,
     BrowserAction,
     execute_plan,
     plan_for_decision,

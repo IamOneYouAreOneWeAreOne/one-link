@@ -12,14 +12,22 @@
 //! concentrates on the best arm within `O(K log T)` rounds where K is
 //! the number of arms and T is the horizon.
 //!
-//! Phase C acceptance gate (per `FILE_ENGINE_V2_PLAN.md` line 288):
+//! Phase C primitive acceptance gate (per `FILE_ENGINE_V2_PLAN.md`):
 //!
-//!   > Bandit converges on known-optimum peer-pair within ≤200
+//!   > Bandit converges on a known-optimum synthetic arm within ≤200
 //!   > interactions in simulation.
 //!
-//! Verified in `tests/acceptance.rs`.
+//! Verified in `tests/acceptance.rs`. This establishes convergence of
+//! the generic sampler; it does not imply that every proposed transfer
+//! knob has a production control loop.
 
 use crate::error::BanditError;
+
+/// Upper bound for a single adaptive decision model. Production route
+/// selectors use fewer than 16 arms; 1024 preserves generous research
+/// headroom while preventing an FFI integer from causing an unbounded
+/// allocation and O(K) selection loop.
+pub const MAX_ARMS: usize = 1024;
 
 /// One arm of the bandit: a Beta(α, β) posterior over its expected
 /// reward in `[0, 1]`.
@@ -85,13 +93,18 @@ impl BanditSeed {
 impl BanditRng for BanditSeed {
     #[inline]
     fn next_f64(&mut self) -> f64 {
+        const TWO_POW_32: f64 = 4_294_967_296.0;
+        const TWO_POW_53: f64 = 9_007_199_254_740_992.0;
+
         // SplitMix64 — produces a fresh u64 each call.
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.state;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         let bits = (z ^ (z >> 31)) >> 11; // 53-bit mantissa
-        (bits as f64) * (1.0 / ((1u64 << 53) as f64))
+        let high = u32::try_from(bits >> 32).expect("53-bit value has a 21-bit high word");
+        let low = u32::try_from(bits & u64::from(u32::MAX)).expect("masked low word fits in u32");
+        (f64::from(high) * TWO_POW_32 + f64::from(low)) / TWO_POW_53
     }
 }
 
@@ -110,6 +123,12 @@ impl Bandit {
     pub fn new(n_arms: usize) -> Result<Self, BanditError> {
         if n_arms == 0 {
             return Err(BanditError::NoArms);
+        }
+        if n_arms > MAX_ARMS {
+            return Err(BanditError::TooManyArms {
+                got: n_arms,
+                max: MAX_ARMS,
+            });
         }
         Ok(Self {
             arms: vec![Arm::default(); n_arms],
@@ -132,7 +151,7 @@ impl Bandit {
 
     /// Select the next arm to play via Thompson sampling.
     ///
-    /// Draws θ_i ~ Beta(α_i, β_i) for each arm; returns the index of
+    /// Draws `θ_i` ~ `Beta(α_i`, `β_i`) for each arm; returns the index of
     /// the maximum.
     pub fn select<R: BanditRng>(&self, rng: &mut R) -> usize {
         let mut best_idx = 0usize;
@@ -192,7 +211,7 @@ impl Bandit {
 /// `X = G(α) / (G(α) + G(β))`, where `G(k)` is a Gamma(k, 1) sample.
 ///
 /// For α + β small (≤ 1) we'd want a specialized sampler; in practice
-/// the bandit's arms always have α ≥ 1 + observed_successes ≥ 1, so
+/// the bandit's arms always have α ≥ 1 + `observed_successes` ≥ 1, so
 /// the Marsaglia-Tsang Gamma sampler is appropriate.
 fn sample_beta<R: BanditRng>(alpha: f64, beta: f64, rng: &mut R) -> f64 {
     let g_a = sample_gamma(alpha, rng);
@@ -205,28 +224,31 @@ fn sample_gamma<R: BanditRng>(shape: f64, rng: &mut R) -> f64 {
     debug_assert!(shape > 0.0, "Gamma shape must be > 0; got {shape}");
     if shape < 1.0 {
         // Johnk's algorithm + boost: G(k) ~ G(k+1) * U^(1/k).
-        let g = sample_gamma(shape + 1.0, rng);
-        let u: f64 = rng.next_f64();
-        return g * u.powf(1.0 / shape);
+        let gamma_sample = sample_gamma(shape + 1.0, rng);
+        let uniform_sample = rng.next_f64();
+        return gamma_sample * uniform_sample.powf(1.0 / shape);
     }
-    let d = shape - 1.0 / 3.0;
-    let c = 1.0 / (9.0 * d).sqrt();
+    let shape_offset = shape - 1.0 / 3.0;
+    let scale = 1.0 / (9.0 * shape_offset).sqrt();
     loop {
         // Standard normal via Box-Muller.
         let u1 = rng.next_f64().max(1e-300);
         let u2 = rng.next_f64();
-        let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-        let v_cube = 1.0 + c * z;
-        if v_cube <= 0.0 {
+        let normal_sample = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        let candidate_base = 1.0 + scale * normal_sample;
+        if candidate_base <= 0.0 {
             continue;
         }
-        let v = v_cube * v_cube * v_cube;
-        let u = rng.next_f64();
-        if u < 1.0 - 0.0331 * z.powi(4) {
-            return d * v;
+        let candidate = candidate_base * candidate_base * candidate_base;
+        let acceptance_sample = rng.next_f64();
+        if acceptance_sample < 1.0 - 0.0331 * normal_sample.powi(4) {
+            return shape_offset * candidate;
         }
-        if u.ln() < 0.5 * z * z + d * (1.0 - v + v.ln()) {
-            return d * v;
+        if acceptance_sample.ln()
+            < 0.5 * normal_sample * normal_sample
+                + shape_offset * (1.0 - candidate + candidate.ln())
+        {
+            return shape_offset * candidate;
         }
     }
 }
@@ -241,12 +263,20 @@ mod tests {
     }
 
     #[test]
+    fn excessive_arms_rejected_before_allocation() {
+        assert!(matches!(
+            Bandit::new(usize::MAX),
+            Err(BanditError::TooManyArms { .. })
+        ));
+    }
+
+    #[test]
     fn fresh_bandit_uniform_arms() {
         let b = Bandit::new(3).unwrap();
         for arm in b.arms() {
-            assert_eq!(arm.alpha, 1.0);
-            assert_eq!(arm.beta, 1.0);
-            assert_eq!(arm.mean(), 0.5);
+            assert!((arm.alpha - 1.0).abs() < f64::EPSILON);
+            assert!((arm.beta - 1.0).abs() < f64::EPSILON);
+            assert!((arm.mean() - 0.5).abs() < f64::EPSILON);
         }
     }
 
@@ -254,11 +284,11 @@ mod tests {
     fn update_records_reward() {
         let mut b = Bandit::new(3).unwrap();
         b.update(1, 1.0).unwrap();
-        assert_eq!(b.arms()[1].alpha, 2.0);
-        assert_eq!(b.arms()[1].beta, 1.0);
+        assert!((b.arms()[1].alpha - 2.0).abs() < f64::EPSILON);
+        assert!((b.arms()[1].beta - 1.0).abs() < f64::EPSILON);
         b.update(1, 0.0).unwrap();
-        assert_eq!(b.arms()[1].alpha, 2.0);
-        assert_eq!(b.arms()[1].beta, 2.0);
+        assert!((b.arms()[1].alpha - 2.0).abs() < f64::EPSILON);
+        assert!((b.arms()[1].beta - 2.0).abs() < f64::EPSILON);
     }
 
     #[test]

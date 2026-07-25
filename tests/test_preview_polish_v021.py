@@ -48,28 +48,19 @@ def server_src() -> str:
 # ── Bug 1: PDF iframe blocked by X-Frame-Options ──────────────────
 
 
-def test_api_file_download_overrides_x_frame_options_for_inline_preview(server_src):
-    """The global security middleware sets X-Frame-Options: DENY on
-    every response (server.py:1150). /api/files/{name} is the src
-    target of the inline PDF/video/audio preview iframe, so it MUST
-    override DENY with SAMEORIGIN (or the modern CSP equivalent)
-    or the iframe stays blank.
-
-    Pin the override so a future security pass that removes it
-    breaks the preview UX in CI rather than in the user's browser."""
+def test_api_file_download_uses_risk_aware_inline_headers(server_src):
+    """Safe media remains same-origin previewable, while active content
+    takes the attachment/CSP-sandbox path in the shared header builder."""
     idx = server_src.find("async def api_file_download(")
     assert idx > 0, "api_file_download handler not found"
     end = server_src.find("\n    async def ", idx + 10)
     body = server_src[idx:end if end > 0 else idx + 2000]
-    assert '"X-Frame-Options": "SAMEORIGIN"' in body, (
-        "/api/files/{name} response must override the global "
-        "X-Frame-Options: DENY with SAMEORIGIN so the inline "
-        "preview iframe can render"
-    )
-    assert 'frame-ancestors' in body, (
-        "Modern browsers honor CSP frame-ancestors over the legacy "
-        "X-Frame-Options header; both must be set"
-    )
+    assert "_untrusted_file_headers(" in body
+    helper_idx = server_src.find("def _untrusted_file_headers(")
+    helper = server_src[helper_idx:helper_idx + 3500]
+    assert '"X-Frame-Options": "SAMEORIGIN"' in helper
+    assert '"X-Frame-Options": "DENY"' in helper
+    assert "sandbox; default-src 'none'" in helper
 
 
 # ── Bug 2: Details click bubbles to bubble-open handler ────────────
@@ -141,11 +132,11 @@ def test_conversation_search_icon_trigger_does_not_collide_with_placeholder(inde
     ("aac", "audio"),
     ("flac", "audio"),
     ("opus", "audio"),
-    # SVG -> image kind (renders via <img>)
-    ("svg", "image"),
-    # HTML -> sandboxed iframe (no credentials)
-    ("html", "html-sandboxed"),
-    ("htm", "html-sandboxed"),
+    # Active web documents -> inert source text in JSON. Serving them
+    # as same-origin <img>/<iframe> resources would be stored XSS.
+    ("svg", "code"),
+    ("html", "code"),
+    ("htm", "code"),
 ])
 def test_server_preview_kinds_cover_modern_formats(ext, expected_kind):
     """Every common video/audio/svg/html extension a normal user
@@ -166,7 +157,7 @@ def test_stream_kinds_return_stream_url_metadata_not_bytes(tmp_path, monkeypatch
     video would OOM the daemon). Pin by inspecting the preview
     handler's source."""
     src = _SERVER_PY_PATH.read_text(encoding="utf-8")
-    idx = src.find('if kind in ("pdf", "video", "audio", "image", "html-sandboxed"):')
+    idx = src.find('if kind in ("pdf", "video", "audio", "image"):')
     assert idx > 0, (
         "preview handler must early-return for stream-able kinds "
         "before reading any bytes"

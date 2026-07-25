@@ -1,4 +1,4 @@
-//! Adversarial test vectors for the Row 7 transport_obfs layer.
+//! Adversarial test vectors for the Row 7 `transport_obfs` layer.
 //!
 //! Each test exercises a known attack pattern against bridge-style
 //! obfuscated transports and confirms the layer rejects / no-ops as

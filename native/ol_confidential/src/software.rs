@@ -2,13 +2,16 @@
 //!
 //! ## Threat model
 //!
-//! - **Defeats**: user-mode malware reading the master key from process
-//!   memory. The master never appears in plaintext at rest; sealing
-//!   uses a per-process ephemeral key that itself only lives in
-//!   `Zeroize`-protected memory and is dropped when the provider is.
+//! - **Provides**: an AEAD-sealed blob outside the provider and bounded
+//!   plaintext/key lifetimes inside ordinary process memory. This can reduce
+//!   accidental at-rest exposure when callers erase inputs correctly.
+//! - **Does not defeat same-user malware** that can read or inject into the
+//!   daemon process: the software sealing key and transient unsealed master
+//!   necessarily exist in that process. `Zeroize` is best-effort cleanup,
+//!   not proof that compiler/runtime/OS copies never remain.
 //! - **Does NOT defeat**: root malware / kernel debugger / cold-boot
 //!   / `/proc/mem` capture. Those need a hardware enclave, which
-//!   ships in Phase 2 backends.
+//!   require a correctly integrated hardware boundary and attestation path.
 //!
 //! ## Sealing primitive
 //!

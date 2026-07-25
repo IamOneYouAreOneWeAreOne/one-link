@@ -1,20 +1,16 @@
 """Cross-version wire-compatibility CONTRACT.
 
-2026-06-04. One Link installs update independently — two paired
-devices are routinely on different builds (one took the update, one
-didn't). The product promise is "different versions always work with
-each other." That promise rests on a handful of invariants in the
-wire protocol. This file pins them so a future refactor CANNOT
-silently break interop; if one of these tests fails, read
-docs/WIRE_COMPATIBILITY.md before "fixing" the test.
+2026-06-04. One Link devices update independently, so paired devices can be on
+different builds. These tests pin bounded compatibility invariants; they do not
+prove arbitrary historical/future builds interoperate. If one fails, read
+docs/WIRE_COMPATIBILITY.md before changing the contract.
 
 The invariants:
 
-  1. Baseline capabilities (chat + files) are ALWAYS advertised, so
-     any two builds share a common floor and can always at least chat
-     + send a file.
-  2. Capability negotiation NEVER hard-refuses on a version number
-     alone — a version difference can only downgrade the mode.
+  1. Current tested builds advertise baseline capabilities (chat + files).
+     Shared names permit a baseline attempt but are not wire-equivalence proof.
+  2. Capability negotiation does not hard-refuse on a version number alone;
+     required capabilities and later protocol validation can still reject.
   3. The Double-Ratchet wire header is frozen at v1; a bump is a
      breaking wire change that MUST be gated behind a negotiated
      capability (see the doc), never shipped unilaterally.
@@ -26,7 +22,7 @@ from __future__ import annotations
 import pytest
 
 from one_link import capabilities as caps
-from one_link.protocol_compat import Version, fallback_order, negotiate
+from one_link.protocol_compat import Version, negotiate
 
 
 # ── 1. Baseline floor is always advertised ────────────────────────
@@ -61,6 +57,22 @@ def test_advertised_caps_include_core_features():
         "Removing/renaming a core cap breaks interop with builds that "
         "still expect it. See docs/WIRE_COMPATIBILITY.md."
     )
+
+
+def test_preview_substrates_are_never_advertised_as_wire_capabilities():
+    """A module or benchmark is not proof of an end-to-end media feature.
+
+    Preview capabilities stay recognizable for forward compatibility, but a
+    stable daemon must not promise them until the capture/wire/playout release
+    gate is real.
+    """
+    from one_link.daemon import CAPS_FEATURES
+
+    previews = set(caps.PREVIEW_CAPABILITIES)
+    assert previews
+    assert previews.isdisjoint(caps.LOCAL_CAPABILITIES)
+    assert previews.isdisjoint(CAPS_FEATURES)
+    assert previews.isdisjoint(caps.PROMPT_REQUIRED)
 
 
 # ── 2. Version difference never hard-refuses ───────────────────────

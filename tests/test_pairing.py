@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import os
+import re
+from pathlib import Path
 
 import pytest
 
 from one_link.pairing import (
+    PAIR_SAS_BITS,
+    PAIR_SAS_WORD_COUNT,
+    PAIR_SAS_WORDS,
     PairState,
     PairingTracker,
     compute_sas,
+    compute_sas_words,
+    compute_setup_sas_words,
     format_sas,
+    format_sas_words,
 )
 
 
@@ -53,6 +61,94 @@ def test_format_sas_zero_pads():
     assert format_sas("42") == "000 042"
 
 
+def test_word_sas_known_answer_vector():
+    words = compute_sas_words(
+        bytes(range(32)),
+        bytes(range(32, 64)),
+        transcript_hash=bytes(range(64, 96)),
+    )
+    assert words == ("saber", "olive", "wagon", "igloo", "zinc")
+    assert format_sas_words(words) == "saber olive wagon igloo zinc"
+
+
+def test_setup_word_sas_known_answer_and_role_symmetry():
+    owner = bytes(range(32))
+    device = bytes(range(32, 64))
+    invite = bytes(range(64, 96))
+    words = compute_setup_sas_words(
+        owner, device, invite_secret=invite,
+    )
+    assert words == ("frost", "nudge", "panda", "decoy", "sleek")
+    assert words == compute_setup_sas_words(
+        device, owner, invite_secret=invite,
+    )
+    assert words != compute_setup_sas_words(
+        owner, device, invite_secret=bytes([invite[0] ^ 1]) + invite[1:],
+    )
+
+
+def test_setup_word_sas_rejects_malformed_inputs():
+    owner, device = os.urandom(32), os.urandom(32)
+    with pytest.raises(ValueError):
+        compute_setup_sas_words(owner, device, invite_secret=os.urandom(31))
+    with pytest.raises(ValueError):
+        compute_setup_sas_words(owner[:-1], device, invite_secret=os.urandom(32))
+
+
+def test_word_sas_is_symmetric_and_transcript_bound():
+    a, b = os.urandom(32), os.urandom(32)
+    transcript = os.urandom(32)
+    expected = compute_sas_words(a, b, transcript_hash=transcript)
+    assert expected == compute_sas_words(b, a, transcript_hash=transcript)
+    assert len(expected) == PAIR_SAS_WORD_COUNT
+    assert all(word in PAIR_SAS_WORDS for word in expected)
+    assert expected != compute_sas_words(
+        a, b, transcript_hash=bytes([transcript[0] ^ 1]) + transcript[1:],
+    )
+
+
+def test_word_sas_rejects_static_or_malformed_transcripts():
+    a, b = os.urandom(32), os.urandom(32)
+    with pytest.raises(TypeError):
+        compute_sas_words(a, b, transcript_hash=None)  # type: ignore[arg-type]
+    for invalid in (b"", b"short", os.urandom(31), os.urandom(33)):
+        with pytest.raises(ValueError):
+            compute_sas_words(a, b, transcript_hash=invalid)
+
+
+def test_word_sas_has_exactly_30_protocol_bits():
+    assert PAIR_SAS_BITS == 30
+    assert len(PAIR_SAS_WORDS) == 64
+    assert len(set(PAIR_SAS_WORDS)) == 64
+
+
+def test_word_sas_formatter_fails_closed():
+    with pytest.raises(ValueError):
+        format_sas_words(("agile",) * 4)
+    with pytest.raises(ValueError):
+        format_sas_words(("agile", "amuse", "apple", "basil", "outside"))
+
+
+def test_word_dictionary_is_identical_across_python_rust_and_browsers():
+    rust = Path("native/ol_pair_qr/src/sas_words.rs").read_text(encoding="utf-8")
+    rust_block = rust.split("pub const SAS_WORDS", 1)[1].split("];", 1)[0]
+    rust_words = tuple(re.findall(r'"([a-z]+)"', rust_block))
+
+    desktop = Path("src/one_link/web/index.html").read_text(encoding="utf-8")
+    desktop_block = desktop.split("const PAIR_SAS_WORDS = new Set([", 1)[1].split("]);", 1)[0]
+    desktop_words = tuple(re.findall(r'"([a-z]+)"', desktop_block))
+
+    browser = Path("src/one_link/web/peer.html").read_text(encoding="utf-8")
+    browser_block = browser.split(
+        "const PAIR_SAS_WORDS = Object.freeze([", 1,
+    )[1].split("]);", 1)[0]
+    browser_words = tuple(re.findall(r'"([a-z]+)"', browser_block))
+
+    assert rust_words == PAIR_SAS_WORDS
+    assert desktop_words == PAIR_SAS_WORDS
+    assert browser_words == PAIR_SAS_WORDS
+
+
 # ───────── PairingTracker ──────────────────────────────────────────────
 
 def test_tracker_lifecycle_outgoing():
@@ -71,6 +167,25 @@ def test_tracker_lifecycle_outgoing():
     # They say match
     t.they_confirm("aa" * 32)
     assert t.get("aa" * 32).state == PairState.PAIRED
+
+
+def test_tracker_preserves_validated_word_sas():
+    tracker = PairingTracker()
+    words = ("agile", "amuse", "apple", "basil", "blaze")
+    ctx = tracker.begin(
+        peer_fp="aa" * 32,
+        sas="12345678",
+        sas_words=words,
+        incoming=False,
+    )
+    assert ctx.sas_words == words
+    with pytest.raises(ValueError):
+        tracker.begin(
+            peer_fp="bb" * 32,
+            sas="87654321",
+            sas_words=("agile", "amuse", "apple", "basil", "invalid"),
+            incoming=False,
+        )
 
 
 def test_tracker_lifecycle_incoming():
@@ -189,6 +304,10 @@ async def test_pairing_round_trip_pins_both_sides():
                 init = await r.json()
             assert init["ok"]
             assert isinstance(init["sas"], str) and init["sas"].isdigit()
+            assert init["sas_version"] == "words-v3"
+            assert init["sas_scope"] == "live_encrypted_channel_transcript"
+            assert len(init["sas_words"]) == PAIR_SAS_WORD_COUNT
+            assert init["sas_phrase"] == " ".join(init["sas_words"])
 
             # Give the PAIR_REQUEST a moment to land at B
             await asyncio.sleep(0.5)

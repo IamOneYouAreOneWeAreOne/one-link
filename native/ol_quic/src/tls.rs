@@ -29,7 +29,7 @@ use rustls::{DigitallySignedStruct, DistinguishedName, Error as RustlsError, Sig
 use crate::identity::{PeerFingerprint, FINGERPRINT_LEN};
 
 /// ALPN protocol identifier for the One Link daemon-to-daemon QUIC
-/// transport. Sent in the TLS ClientHello / ServerHello so connections
+/// transport. Sent in the TLS `ClientHello` / `ServerHello` so connections
 /// from non-One-Link clients (or wrong-version clients) fail at the TLS
 /// layer rather than after a partial handshake.
 pub const ALPN: &[u8] = b"ol/1";

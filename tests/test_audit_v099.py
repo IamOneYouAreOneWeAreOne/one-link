@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -48,7 +49,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.daemon import Daemon
 from one_link.identity import Identity, fingerprint_of
-from one_link.server import MAX_FAILED_AUTH_ATTEMPTS, MAX_JSON_REQUEST_BYTES, UIServer
+from one_link.server import (
+    CourierLedgerUnavailable,
+    MAX_FAILED_AUTH_ATTEMPTS,
+    MAX_JSON_REQUEST_BYTES,
+    UIServer,
+)
 from one_link.state import State
 
 # 2026-06-04: native Wi-Fi path creation (private_hotspot / wifi_direct)
@@ -74,8 +80,12 @@ def _identity() -> Identity:
     pub_bytes = pub_obj.public_bytes_raw()
     fp = fingerprint_of(pub_bytes)
     return Identity(
-        private=sk, public=pub_obj, public_bytes=pub_bytes,
-        fingerprint=fp, short_id=fp[:8], hostname="audit-host",
+        private=sk,
+        public=pub_obj,
+        public_bytes=pub_bytes,
+        fingerprint=fp,
+        short_id=fp[:8],
+        hostname="audit-host",
     )
 
 
@@ -91,14 +101,20 @@ async def ctx(tmp_path: Path, monkeypatch):
     # have data to return.
     peer_fp = "aa" * 32
     state.upsert_peer(
-        fingerprint=peer_fp, short_id=peer_fp[:8],
-        pubkey=b"\x01" * 32, hostname="audit-peer",
+        fingerprint=peer_fp,
+        short_id=peer_fp[:8],
+        pubkey=b"\x01" * 32,
+        hostname="audit-peer",
     )
     state.set_peer_trust(peer_fp, "pinned")
     state.set_peer_verified(peer_fp, method="sas-digits", note="audit fixture")
     state.record_message(
-        id="m1", ts_ms=1_000_000, direction="in", peer_fp=peer_fp,
-        msg_type="TEXT", body="hello there general kenobi",
+        id="m1",
+        ts_ms=1_000_000,
+        direction="in",
+        peer_fp=peer_fp,
+        msg_type="TEXT",
+        body="hello there general kenobi",
     )
 
     daemon = Daemon(me)
@@ -179,6 +195,7 @@ async def test_unauthenticated_access_is_blocked(ctx):
 
 
 # ───────── /api/me ────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_api_me_happy(ctx):
@@ -377,10 +394,10 @@ async def test_api_fabric_no_router_reports_pending_route_probe(ctx):
     assert j["pending_local_paths"] == 1
     assert next(s for s in j["steps"] if s["id"] == "verify_local_endpoint")["status"] == "current"
     assert j["path_options"][0]["id"] == "route_token_exchange"
-    assert next(
-        s for s in j["operator_guide"]["send"]
-        if s["id"] == "verify_local_endpoint"
-    )["status"] == "current"
+    assert (
+        next(s for s in j["operator_guide"]["send"] if s["id"] == "verify_local_endpoint")["status"]
+        == "current"
+    )
 
 
 @pytest.mark.asyncio
@@ -418,10 +435,10 @@ async def test_api_fabric_no_router_reports_failed_route_probe(ctx):
     assert j["state"] == "route_check_failed"
     assert j["failed_local_paths"] == 1
     assert next(s for s in j["steps"] if s["id"] == "verify_local_endpoint")["status"] == "blocked"
-    assert next(
-        p for p in j["path_options"]
-        if p["id"] == "trusted_verified_path"
-    )["status"] == "blocked"
+    assert (
+        next(p for p in j["path_options"] if p["id"] == "trusted_verified_path")["status"]
+        == "blocked"
+    )
 
 
 @pytest.mark.asyncio
@@ -445,10 +462,10 @@ async def test_api_fabric_no_router_without_listener_is_honest(ctx):
     assert j["token_ready"] is False
     assert j["route_token_url"] is None
     assert j["steps"][0]["status"] == "pending"
-    assert next(
-        p for p in j["path_options"]
-        if p["id"] == "route_token_exchange"
-    )["status"] == "blocked"
+    assert (
+        next(p for p in j["path_options"] if p["id"] == "route_token_exchange")["status"]
+        == "blocked"
+    )
 
 
 @pytest.mark.asyncio
@@ -482,10 +499,7 @@ async def test_api_fabric_no_router_reports_hotspot_operator_option(ctx):
     assert hotspot["status"] in {"ready", "current"}
     assert hotspot["requires_user_action"] is True
     assert hotspot["next_step"] == "open_os_hotspot_then_exchange_token"
-    creation_hotspot = next(
-        p for p in j["creation"]["plans"]
-        if p["path_id"] == "private_hotspot"
-    )
+    creation_hotspot = next(p for p in j["creation"]["plans"] if p["path_id"] == "private_hotspot")
     assert creation_hotspot["state"] == "needs_user"
     assert creation_hotspot["automatic"] is False
     assert j["operator_guide"]["send"][0]["id"] == "connect_cable_or_same_network"
@@ -714,13 +728,15 @@ async def test_api_fabric_path_create_native_uses_registered_helper_dry_run(ctx,
     client, daemon, _, token, _ = ctx
     monkeypatch.setenv(
         "ONE_LINK_NATIVE_PATH_HELPERS",
-        json.dumps([
-            {
-                "path_id": "wifi_direct",
-                "command": ["C:/OneLink/ol-wifi-direct-helper.exe"],
-                "supported_systems": ["windows"],
-            }
-        ]),
+        json.dumps(
+            [
+                {
+                    "path_id": "wifi_direct",
+                    "command": ["C:/OneLink/ol-wifi-direct-helper.exe"],
+                    "supported_systems": ["windows"],
+                }
+            ]
+        ),
     )
     daemon._fabric_snapshot = lambda: {  # type: ignore[method-assign]
         "ok": True,
@@ -902,12 +918,25 @@ async def test_api_self_mesh_enrollment_mint_revoke_and_remote_instruct(ctx):
 async def test_api_self_mesh_guardian_freeze_recover_and_revoke_proof(ctx):
     client, daemon, state, token, peer_fp = ctx
 
+    # Regression: LockBox's legacy wire marker is one byte (0x01).  Random
+    # cleartext root seeds begin with it about once per 256 roots, so this
+    # deterministic seed proves the state layer does not mistake a valid
+    # 32-byte seed for wrapped ciphertext.
+    marker_collision_seed = b"\x01" + bytes(range(1, 32))
+    marker_collision_seed_b64 = (
+        base64.urlsafe_b64encode(marker_collision_seed).rstrip(b"=").decode("ascii")
+    )
     create = await client.post(
         "/api/self-mesh/root",
         headers=_h(token),
-        json={"label": "My devices", "device_label": "Guardian laptop"},
+        json={
+            "label": "My devices",
+            "device_label": "Guardian laptop",
+            "root_seed_b64": marker_collision_seed_b64,
+        },
     )
     created = await create.json()
+    assert create.status == 200, created
     remote = Ed25519PrivateKey.generate().public_key().public_bytes_raw()
     remote_b64 = base64.urlsafe_b64encode(remote).rstrip(b"=").decode("ascii")
     mint = await client.post(
@@ -920,7 +949,8 @@ async def test_api_self_mesh_guardian_freeze_recover_and_revoke_proof(ctx):
             "label": "Phone",
         },
     )
-    assert mint.status == 200
+    mint_body = await mint.json()
+    assert mint.status == 200, mint_body
 
     denied = await client.post(
         "/api/self-mesh/devices/safety",
@@ -1061,10 +1091,7 @@ async def test_api_self_mesh_invite_qr_and_performance(ctx):
     assert body["performance"]["route_probe_avg_ms"] >= 0
     assert "history" in body
     assert body["budgets"]["status"] == "pass"
-    assert any(
-        item["metric"] == "route_probe_avg_ms"
-        for item in body["budgets"]["items"]
-    )
+    assert any(item["metric"] == "route_probe_avg_ms" for item in body["budgets"]["items"])
 
     mesh = await client.get("/api/self-mesh", headers=_h(token))
     assert mesh.status == 200
@@ -1142,7 +1169,10 @@ async def test_api_courier_export_import_stores_verified_chunks(ctx):
     assert export_resp.status == 200
     exported = await export_resp.json()
     assert exported["ok"] is True
-    assert exported["manifest"]["chunks"] == [{"index": 0, "hash": chunk_hash, "size": len(payload)}]
+    assert exported["manifest"]["sender_authenticated"] is True
+    assert exported["manifest"]["chunks"] == [
+        {"index": 0, "hash": chunk_hash, "size": len(payload)}
+    ]
     assert "courier api chunk" not in exported["bundle_b64"]
 
     cache_path = daemon._chunk_cache_path(chunk_hash)
@@ -1160,6 +1190,7 @@ async def test_api_courier_export_import_stores_verified_chunks(ctx):
     assert import_resp.status == 200
     imported = await import_resp.json()
     assert imported["ok"] is True
+    assert imported["manifest"]["sender_authenticated"] is True
     assert imported["stored_chunks"] == 1
     assert daemon._read_chunk_cache(chunk_hash) == payload
     restarted = UIServer(daemon)
@@ -1295,7 +1326,9 @@ async def test_api_courier_drop_folder_lists_and_imports_by_file_id(ctx):
         json={"chunks": [chunk_hash], "recipient_fp": daemon.me.fingerprint, "name": "drop.bin"},
     )
     exported = await export_resp.json()
-    drop_dir = Path((await (await client.get("/api/courier/files", headers=_h(token))).json())["drop_dir"])
+    drop_dir = Path(
+        (await (await client.get("/api/courier/files", headers=_h(token))).json())["drop_dir"]
+    )
     drop_file = drop_dir / "bundle.olcb.json"
     drop_file.write_text(
         json.dumps({"bundle_b64": exported["bundle_b64"]}),
@@ -1365,7 +1398,11 @@ async def test_api_courier_export_file_stages_outbox_bundle(ctx):
     resp = await client.post(
         "/api/courier/export-file",
         headers=_h(token),
-        json={"chunks": [chunk_hash], "recipient_fp": daemon.me.fingerprint, "name": "../unsafe.bin"},
+        json={
+            "chunks": [chunk_hash],
+            "recipient_fp": daemon.me.fingerprint,
+            "name": "../unsafe.bin",
+        },
     )
 
     assert resp.status == 200
@@ -1389,8 +1426,12 @@ async def test_api_courier_export_file_collision_gets_unique_name(ctx):
     daemon._store_chunk_cache(chunk_hash, payload)
     body = {"chunks": [chunk_hash], "recipient_fp": daemon.me.fingerprint, "name": "same.bin"}
 
-    first = await (await client.post("/api/courier/export-file", headers=_h(token), json=body)).json()
-    second = await (await client.post("/api/courier/export-file", headers=_h(token), json=body)).json()
+    first = await (
+        await client.post("/api/courier/export-file", headers=_h(token), json=body)
+    ).json()
+    second = await (
+        await client.post("/api/courier/export-file", headers=_h(token), json=body)
+    ).json()
 
     assert first["name"] != second["name"]
     assert Path(first["path"]).is_file()
@@ -1430,7 +1471,9 @@ async def test_api_courier_copy_to_env_removable_target(ctx, tmp_path, monkeypat
     copied_path = Path(copied["path"])
     assert copied_path.is_file()
     assert copied_path.parent == usb / "One Link Courier"
-    assert copied_path.read_text(encoding="utf-8") == Path(staged["path"]).read_text(encoding="utf-8")
+    assert copied_path.read_text(encoding="utf-8") == Path(staged["path"]).read_text(
+        encoding="utf-8"
+    )
 
     removable_files = await (
         await client.get(
@@ -1438,7 +1481,9 @@ async def test_api_courier_copy_to_env_removable_target(ctx, tmp_path, monkeypat
             headers=_h(token),
         )
     ).json()
-    removable_file_id = next(f["id"] for f in removable_files["files"] if f["name"] == copied["name"])
+    removable_file_id = next(
+        f["id"] for f in removable_files["files"] if f["name"] == copied["name"]
+    )
     copied_path.unlink()
     assert not copied_path.exists()
     pull_resp = await client.post(
@@ -1489,11 +1534,15 @@ async def test_api_courier_copy_from_env_removable_target(ctx, tmp_path, monkeyp
     pulled = await pull_resp.json()
     assert Path(pulled["path"]).is_file()
     assert Path(pulled["path"]).parent == daemon._chunk_cache_dir().parents[0] / "courier" / "drop"
-    assert Path(pulled["path"]).read_text(encoding="utf-8") == source_on_usb.read_text(encoding="utf-8")
+    assert Path(pulled["path"]).read_text(encoding="utf-8") == source_on_usb.read_text(
+        encoding="utf-8"
+    )
 
 
 @pytest.mark.asyncio
-async def test_api_courier_removable_files_ignores_symlinks_when_supported(ctx, tmp_path, monkeypatch):
+async def test_api_courier_removable_files_ignores_symlinks_when_supported(
+    ctx, tmp_path, monkeypatch
+):
     client, _, _, token, _ = ctx
     media_root = tmp_path / "media"
     usb = media_root / "USB"
@@ -1567,12 +1616,18 @@ async def test_courier_removable_monitor_detects_attach_remove(ctx, tmp_path, mo
     usb.mkdir()
     attached = monitor._removable_monitor_tick(broadcast=False)
     assert attached["changed"] is True
-    assert any(event["kind"] == "attached" and event["target"]["label"] == "USB" for event in attached["events"])
+    assert any(
+        event["kind"] == "attached" and event["target"]["label"] == "USB"
+        for event in attached["events"]
+    )
 
     usb.rmdir()
     removed = monitor._removable_monitor_tick(broadcast=False)
     assert removed["changed"] is True
-    assert any(event["kind"] == "removed" and event["target"]["label"] == "USB" for event in removed["events"])
+    assert any(
+        event["kind"] == "removed" and event["target"]["label"] == "USB"
+        for event in removed["events"]
+    )
 
     removable = await (await client.get("/api/courier/removable", headers=_h(token))).json()
     assert removable["event_source"]["mode"] == "native_compatible_inventory_events"
@@ -1580,15 +1635,53 @@ async def test_courier_removable_monitor_detects_attach_remove(ctx, tmp_path, mo
 
 
 @pytest.mark.asyncio
-async def test_courier_ledger_tolerates_malformed_disk_state(ctx, tmp_path):
+async def test_courier_ledger_corruption_blocks_replay_sensitive_import(ctx, tmp_path):
     _, daemon, _, _, _ = ctx
     ledger = tmp_path / "data" / "courier_ledger.json"
-    ledger.write_text("{broken", encoding="utf-8")
+    original = b"{broken"
+    ledger.write_bytes(original)
 
     restarted = UIServer(daemon)
 
     assert restarted._courier_seen_bundle_ids == set()
     assert restarted._courier_events == []
+    assert restarted._courier_ledger_error == "invalid_or_unreadable"
+    response = restarted._import_courier_payload(
+        {"bundle_b64": "AA==", "key_token": "OLC1.invalid"}
+    )
+    assert response.status == 503
+    assert json.loads(response.body)["error"] == "courier_replay_ledger_unavailable"
+    with pytest.raises(CourierLedgerUnavailable):
+        restarted._save_courier_ledger()
+    assert ledger.read_bytes() == original
+
+
+@pytest.mark.asyncio
+async def test_courier_ledger_fsync_failure_preserves_prior_authority(
+    ctx,
+    tmp_path,
+    monkeypatch,
+):
+    _, daemon, _, _, _ = ctx
+    server = UIServer(daemon)
+    first_id = "11" * 16
+    second_id = "22" * 16
+    server._courier_seen_bundle_ids.add(first_id)
+    server._save_courier_ledger()
+    ledger = tmp_path / "data" / "courier_ledger.json"
+    before = ledger.read_bytes()
+
+    server._courier_seen_bundle_ids.add(second_id)
+
+    def fail_fsync(_descriptor):
+        raise OSError("injected ledger fsync failure")
+
+    monkeypatch.setattr(os, "fsync", fail_fsync)
+    with pytest.raises(OSError, match="injected ledger fsync failure"):
+        server._save_courier_ledger()
+
+    assert ledger.read_bytes() == before
+    assert not list(ledger.parent.glob(f".{ledger.name}.*.tmp"))
 
 
 @pytest.mark.asyncio
@@ -1876,6 +1969,7 @@ async def test_api_route_bootstrap_import_rejects_replay(ctx, monkeypatch):
 
 # ───────── /api/peers ─────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_api_peers_returns_paired(ctx):
     client, _, _, token, peer_fp = ctx
@@ -1892,6 +1986,7 @@ async def test_api_peers_returns_paired(ctx):
 
 
 # ───────── /api/palette ───────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_palette_finds_message(ctx):
@@ -1920,7 +2015,8 @@ async def test_palette_fts_special_chars_safe(ctx):
     state.global_search must keep it safe — endpoint must not 500."""
     client, _, _, token, _ = ctx
     resp = await client.get(
-        "/api/palette?q=auth%3A%20user", headers=_h(token),
+        "/api/palette?q=auth%3A%20user",
+        headers=_h(token),
     )
     assert resp.status == 200
 
@@ -1931,12 +2027,14 @@ async def test_palette_caps_limit(ctx):
     the documented hard max."""
     client, _, _, token, _ = ctx
     resp = await client.get(
-        "/api/palette?q=a&limit=999999", headers=_h(token),
+        "/api/palette?q=a&limit=999999",
+        headers=_h(token),
     )
     assert resp.status == 200
 
 
 # ───────── /api/activity ──────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_activity_feed_includes_seeded_events(ctx):
@@ -1946,14 +2044,15 @@ async def test_activity_feed_includes_seeded_events(ctx):
     j = await resp.json()
     kinds = {e["kind"] for e in j["events"]}
     assert "trust" in kinds  # set_peer_verified above
-    assert "peer" in kinds   # first_seen synthetic event
+    assert "peer" in kinds  # first_seen synthetic event
 
 
 @pytest.mark.asyncio
 async def test_activity_kinds_filter(ctx):
     client, _, _, token, _ = ctx
     resp = await client.get(
-        "/api/activity?kinds=trust&limit=20", headers=_h(token),
+        "/api/activity?kinds=trust&limit=20",
+        headers=_h(token),
     )
     assert resp.status == 200
     j = await resp.json()
@@ -1962,11 +2061,13 @@ async def test_activity_kinds_filter(ctx):
 
 # ───────── /api/folder-conflicts ──────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_folder_conflicts_empty(ctx):
     client, _, _, token, _ = ctx
     resp = await client.get(
-        "/api/folder-conflicts", headers=_h(token),
+        "/api/folder-conflicts",
+        headers=_h(token),
     )
     assert resp.status == 200
     j = await resp.json()
@@ -1981,7 +2082,8 @@ async def test_resolve_unknown_conflict_400(ctx):
     client, _, _, token, _ = ctx
     resp = await client.post(
         "/api/folder-conflicts/99999/resolve",
-        headers=_h(token), json={"choice": "mine"},
+        headers=_h(token),
+        json={"choice": "mine"},
     )
     # 503 is acceptable when folder_engine is None (test harness sets
     # it None to avoid spinning up the FolderEngine).
@@ -1993,25 +2095,29 @@ async def test_resolve_bad_choice_rejected(ctx):
     client, _, _, token, _ = ctx
     resp = await client.post(
         "/api/folder-conflicts/1/resolve",
-        headers=_h(token), json={"choice": "yolo"},
+        headers=_h(token),
+        json={"choice": "yolo"},
     )
     assert resp.status in (400, 503)
 
 
 # ───────── /api/files/{name}/preview ──────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_preview_markdown(ctx, tmp_path: Path):
     client, _, _, token, _ = ctx
     # Use the daemon's actual inbox_dir
     from one_link.paths import inbox_dir
+
     inbox = inbox_dir()
     inbox.mkdir(parents=True, exist_ok=True)
     md = inbox / "audit_test.md"
     md.write_text("# Hi\n\n**bold**", encoding="utf-8")
     try:
         resp = await client.get(
-            "/api/files/audit_test.md/preview", headers=_h(token),
+            "/api/files/audit_test.md/preview",
+            headers=_h(token),
         )
         assert resp.status == 200
         j = await resp.json()
@@ -2026,7 +2132,8 @@ async def test_preview_traversal_blocked(ctx):
     client, _, _, token, _ = ctx
     # `..` in path component must be rejected.
     resp = await client.get(
-        "/api/files/..%2F..%2Fetc%2Fpasswd/preview", headers=_h(token),
+        "/api/files/..%2F..%2Fetc%2Fpasswd/preview",
+        headers=_h(token),
     )
     assert resp.status in (400, 404)
 
@@ -2035,13 +2142,15 @@ async def test_preview_traversal_blocked(ctx):
 async def test_preview_unknown_extension_415(ctx):
     client, _, _, token, _ = ctx
     from one_link.paths import inbox_dir
+
     inbox = inbox_dir()
     inbox.mkdir(parents=True, exist_ok=True)
     f = inbox / "audit_test.xyz"
     f.write_text("opaque", encoding="utf-8")
     try:
         resp = await client.get(
-            "/api/files/audit_test.xyz/preview", headers=_h(token),
+            "/api/files/audit_test.xyz/preview",
+            headers=_h(token),
         )
         assert resp.status == 415
     finally:
@@ -2054,13 +2163,15 @@ async def test_preview_pdf_returns_metadata_only(ctx):
     fix). Server returns stream_url + size, no 'content' field."""
     client, _, _, token, _ = ctx
     from one_link.paths import inbox_dir
+
     inbox = inbox_dir()
     inbox.mkdir(parents=True, exist_ok=True)
     f = inbox / "audit_test.pdf"
     f.write_bytes(b"%PDF-1.4\n" + b"\x00" * 4096)
     try:
         resp = await client.get(
-            "/api/files/audit_test.pdf/preview", headers=_h(token),
+            "/api/files/audit_test.pdf/preview",
+            headers=_h(token),
         )
         assert resp.status == 200
         j = await resp.json()
@@ -2079,13 +2190,15 @@ async def test_preview_lossy_decode_for_binary_text(ctx):
     handler falls back to errors='replace'."""
     client, _, _, token, _ = ctx
     from one_link.paths import inbox_dir
+
     inbox = inbox_dir()
     inbox.mkdir(parents=True, exist_ok=True)
     f = inbox / "audit_binary.txt"
     f.write_bytes(bytes(range(256)))
     try:
         resp = await client.get(
-            "/api/files/audit_binary.txt/preview", headers=_h(token),
+            "/api/files/audit_binary.txt/preview",
+            headers=_h(token),
         )
         assert resp.status == 200
         j = await resp.json()
@@ -2096,11 +2209,13 @@ async def test_preview_lossy_decode_for_binary_text(ctx):
 
 # ───────── /api/peers/{fp}/trust-history ──────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_trust_history_returns_events(ctx):
     client, _, _, token, peer_fp = ctx
     resp = await client.get(
-        f"/api/peers/{peer_fp}/trust-history", headers=_h(token),
+        f"/api/peers/{peer_fp}/trust-history",
+        headers=_h(token),
     )
     assert resp.status == 200
     j = await resp.json()
@@ -2111,18 +2226,21 @@ async def test_trust_history_returns_events(ctx):
 async def test_trust_history_unknown_peer_404(ctx):
     client, _, _, token, _ = ctx
     resp = await client.get(
-        "/api/peers/" + "ff" * 32 + "/trust-history", headers=_h(token),
+        "/api/peers/" + "ff" * 32 + "/trust-history",
+        headers=_h(token),
     )
     assert resp.status == 404
 
 
 # ───────── /api/peers/{fp}/key-history ────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_key_history_includes_seeded(ctx):
     client, _, _, token, peer_fp = ctx
     resp = await client.get(
-        f"/api/peers/{peer_fp}/key-history", headers=_h(token),
+        f"/api/peers/{peer_fp}/key-history",
+        headers=_h(token),
     )
     assert resp.status == 200
     j = await resp.json()
@@ -2132,12 +2250,14 @@ async def test_key_history_includes_seeded(ctx):
 
 # ───────── /api/peers/{fp}/verify ─────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_verify_set_then_clear(ctx):
     client, _, state, token, peer_fp = ctx
     # Already verified via fixture. Clear, then re-set.
     resp = await client.delete(
-        f"/api/peers/{peer_fp}/verify", headers=_h(token),
+        f"/api/peers/{peer_fp}/verify",
+        headers=_h(token),
     )
     assert resp.status == 200
     rec = state.get_peer(peer_fp)
@@ -2145,7 +2265,8 @@ async def test_verify_set_then_clear(ctx):
 
     resp = await client.post(
         f"/api/peers/{peer_fp}/verify",
-        headers=_h(token), json={"method": "sas-qr", "note": "audit"},
+        headers=_h(token),
+        json={"method": "sas-qr", "note": "audit"},
     )
     assert resp.status == 200
     rec = state.get_peer(peer_fp)
@@ -2158,7 +2279,8 @@ async def test_verify_unknown_method_400(ctx):
     client, _, _, token, peer_fp = ctx
     resp = await client.post(
         f"/api/peers/{peer_fp}/verify",
-        headers=_h(token), json={"method": "vibes-only"},
+        headers=_h(token),
+        json={"method": "vibes-only"},
     )
     assert resp.status == 400
 
@@ -2168,7 +2290,8 @@ async def test_verify_missing_method_400(ctx):
     client, _, _, token, peer_fp = ctx
     resp = await client.post(
         f"/api/peers/{peer_fp}/verify",
-        headers=_h(token), json={"note": "no method"},
+        headers=_h(token),
+        json={"note": "no method"},
     )
     assert resp.status == 400
 
@@ -2178,12 +2301,14 @@ async def test_verify_unknown_peer_404(ctx):
     client, _, _, token, _ = ctx
     resp = await client.post(
         "/api/peers/" + "ff" * 32 + "/verify",
-        headers=_h(token), json={"method": "manual"},
+        headers=_h(token),
+        json={"method": "manual"},
     )
     assert resp.status == 404
 
 
 # ───────── /api/key-change-events + ack ───────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_key_change_ack_unknown_id(ctx):
@@ -2191,7 +2316,8 @@ async def test_key_change_ack_unknown_id(ctx):
     # No events seeded; ack of nonexistent id must succeed gracefully
     # (newly_acked=False) rather than 500.
     resp = await client.post(
-        "/api/key-change-events/99999/ack", headers=_h(token),
+        "/api/key-change-events/99999/ack",
+        headers=_h(token),
     )
     assert resp.status == 200
     j = await resp.json()
@@ -2202,12 +2328,14 @@ async def test_key_change_ack_unknown_id(ctx):
 async def test_key_change_ack_invalid_id(ctx):
     client, _, _, token, _ = ctx
     resp = await client.post(
-        "/api/key-change-events/abc/ack", headers=_h(token),
+        "/api/key-change-events/abc/ack",
+        headers=_h(token),
     )
     assert resp.status == 400
 
 
 # ───────── /api/inbox/reveal & /api/files/{name}/reveal ───────────────
+
 
 @pytest.mark.asyncio
 async def test_inbox_reveal_returns_disabled_in_test_env(ctx):
@@ -2224,7 +2352,8 @@ async def test_inbox_reveal_returns_disabled_in_test_env(ctx):
 async def test_file_reveal_traversal_blocked(ctx):
     client, _, _, token, _ = ctx
     resp = await client.post(
-        "/api/files/..%2F..%2Fetc%2Fpasswd/reveal", headers=_h(token),
+        "/api/files/..%2F..%2Fetc%2Fpasswd/reveal",
+        headers=_h(token),
     )
     assert resp.status in (400, 404)
 
@@ -2235,13 +2364,15 @@ async def test_file_reveal_disabled_in_test_env(ctx):
     pop a real Explorer window during CI."""
     client, _, _, token, _ = ctx
     from one_link.paths import inbox_dir
+
     inbox = inbox_dir()
     inbox.mkdir(parents=True, exist_ok=True)
     f = inbox / "audit_reveal.txt"
     f.write_text("x", encoding="utf-8")
     try:
         resp = await client.post(
-            "/api/files/audit_reveal.txt/reveal", headers=_h(token),
+            "/api/files/audit_reveal.txt/reveal",
+            headers=_h(token),
         )
         assert resp.status == 200
         j = await resp.json()
@@ -2252,23 +2383,21 @@ async def test_file_reveal_disabled_in_test_env(ctx):
 
 # ───────── auth header forms ──────────────────────────────────────────
 
+
 @pytest.mark.asyncio
-async def test_cookie_auth_works(ctx):
-    """The cookie path is what the BROWSER uses; the test client uses
-    Bearer for clarity. Pin both forms work so a future refactor of
-    _check_token doesn't silently break browser sessions."""
+async def test_plaintext_loopback_cookie_auth_is_rejected(ctx):
+    """Host-wide cookies are not authority on a port-scoped HTTP origin."""
     client, _, _, token, _ = ctx
     from one_link.server import COOKIE_NAME
+
     resp = await client.get("/api/me", cookies={COOKIE_NAME: token})
-    assert resp.status == 200
+    assert resp.status == 401
 
 
 @pytest.mark.asyncio
 async def test_wrong_token_blocked(ctx):
     client, _, _, _, _ = ctx
-    resp = await client.get(
-        "/api/me", headers={"Authorization": "Bearer wrongtoken"}
-    )
+    resp = await client.get("/api/me", headers={"Authorization": "Bearer wrongtoken"})
     assert resp.status == 401
 
 

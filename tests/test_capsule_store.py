@@ -9,8 +9,8 @@ Properties:
 
 from __future__ import annotations
 
-import hashlib
 import secrets
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -26,7 +26,6 @@ from one_link.capsule_store import (
 )
 from one_link.frame_provenance import (
     FrameKind,
-    FrameProvenance,
     PathClass,
     RecordingState,
     make_segment_hash,
@@ -40,7 +39,7 @@ from one_link.frame_provenance import (
 
 def _make_capsule(n_segments: int = 3) -> AsyncCapsule:
     sk = Ed25519PrivateKey.generate()
-    device_id = "deadbeef"
+    device_id = "a" * 8
     prov_chain = []
     audio_chunks = []
     for i in range(n_segments):
@@ -70,9 +69,10 @@ def _make_capsule(n_segments: int = 3) -> AsyncCapsule:
         audio_codec="opus",
         sample_rate_hz=48_000,
         provenance_chain=tuple(prov_chain),
+        provenance_segment_sizes=tuple(len(chunk) for chunk in audio_chunks),
         recording_state_at_conversion=RecordingState.NOT_RECORDING,
         resumable_until_ms=1_000_000,
-        payload_hash=hashlib.sha256(audio).hexdigest(),
+        payload_hash=make_segment_hash(audio).hex(),
     )
 
 
@@ -93,12 +93,16 @@ def test_serialize_deserialize_round_trip_3_segments() -> None:
         assert orig.segment_hash == back.segment_hash
 
 
-def test_serialize_deserialize_round_trip_empty_provenance() -> None:
-    cap = _make_capsule(n_segments=0)
-    cap_zero = AsyncCapsule(**{**cap.__dict__, "provenance_chain": ()})
-    blob = serialize_capsule(cap_zero)
-    out = deserialize_capsule(blob)
-    assert out.provenance_chain == ()
+def test_capsule_without_audio_or_provenance_is_rejected() -> None:
+    cap = _make_capsule(n_segments=1)
+    with pytest.raises(ValueError, match="non-empty"):
+        replace(
+            cap,
+            audio_payload=b"",
+            provenance_chain=(),
+            provenance_segment_sizes=(),
+            payload_hash=make_segment_hash(b"").hex(),
+        )
 
 
 def test_deserialize_rejects_truncated_blob() -> None:

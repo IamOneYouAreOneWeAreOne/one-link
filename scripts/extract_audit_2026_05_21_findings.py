@@ -20,8 +20,9 @@ import re
 import sys
 from pathlib import Path
 
-if sys.stdout.encoding != "utf-8":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+stdout_reconfigure = getattr(sys.stdout, "reconfigure", None)
+if sys.stdout.encoding != "utf-8" and callable(stdout_reconfigure):
+    stdout_reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = Path(__file__).resolve().parent.parent
 EXTRACT_DIR = ROOT / "audit_extracts_may21"

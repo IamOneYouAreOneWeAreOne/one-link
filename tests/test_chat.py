@@ -12,7 +12,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
@@ -141,6 +140,38 @@ def test_chat_command_runs_and_exits_cleanly():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_spawned_daemon_shutdown_prefers_authenticated_control(monkeypatch):
+    from one_link import chat
+
+    events: list[object] = []
+
+    class _Proc:
+        def poll(self):
+            return None
+
+        def wait(self, timeout):
+            events.append(("wait", timeout))
+            return 0
+
+        def terminate(self):
+            events.append("terminate")
+
+        def kill(self):
+            events.append("kill")
+
+    def _request(port, *, timeout, **payload):
+        events.append(("request", port, timeout, payload))
+        return {"ok": True, "stopping": True}
+
+    monkeypatch.setattr(chat, "_request", _request)
+    chat._stop_spawned_daemon(_Proc(), 43210)
+
+    assert events == [
+        ("request", 43210, 3.0, {"cmd": "shutdown"}),
+        ("wait", 8.0),
+    ]
+
+
 def test_chat_command_errors_cleanly_when_daemon_cant_start(tmp_path: Path, monkeypatch):
     """If something prevents daemon spawn, chat must error with a friendly
     message rather than crashing. We force the failure by setting
@@ -149,7 +180,7 @@ def test_chat_command_errors_cleanly_when_daemon_cant_start(tmp_path: Path, monk
     Cross-platform reliable forcing of this is hard — instead, we just
     verify the command surface itself doesn't raise on import.
     """
-    from one_link.chat import _format_event, run_chat
+    from one_link.chat import _format_event
     # Smoke: importing the module and running _format_event with empty events
     # never raises.
     assert _format_event({}) is None

@@ -7,7 +7,6 @@ import pytest
 from one_link.identity_sas import (
     SAS_VOCAB,
     SAS_WORDS,
-    RotationDecision,
     SASChallenge,
     TrustRecord,
     VerificationState,

@@ -34,6 +34,7 @@ def test_build_mobileconfig_returns_xml_plist(tmp_path: Path):
     back. iOS rejects malformed profiles silently — no install
     prompt — so a parse-back round-trip is the right gate."""
     from one_link.peer_https import build_mobileconfig
+
     payload = build_mobileconfig(tmp_path)
     assert isinstance(payload, bytes)
     assert payload.lstrip().startswith(b"<?xml")
@@ -45,6 +46,7 @@ def test_mobileconfig_outer_payload_is_configuration(tmp_path: Path):
     """The outer payload's PayloadType MUST be 'Configuration' —
     that's the wrapper iOS recognises as a profile."""
     from one_link.peer_https import build_mobileconfig
+
     parsed = plistlib.loads(build_mobileconfig(tmp_path))
     assert parsed["PayloadType"] == "Configuration"
     assert parsed["PayloadVersion"] == 1
@@ -70,6 +72,7 @@ def test_mobileconfig_inner_payload_is_root_cert(tmp_path: Path):
     """
     from one_link.peer_https import build_mobileconfig
     from cryptography import x509
+
     parsed = plistlib.loads(build_mobileconfig(tmp_path))
     inner = parsed["PayloadContent"]
     assert isinstance(inner, list)
@@ -99,6 +102,7 @@ def test_mobileconfig_user_facing_strings_present(tmp_path: Path):
     → VPN & Device Management. A blank or junk value here makes
     the user think they're installing malware."""
     from one_link.peer_https import build_mobileconfig
+
     parsed = plistlib.loads(build_mobileconfig(tmp_path))
     name = parsed.get("PayloadDisplayName", "")
     assert "One Link" in name
@@ -108,11 +112,27 @@ def test_mobileconfig_user_facing_strings_present(tmp_path: Path):
     assert "One Link" in inner.get("PayloadDisplayName", "")
 
 
+def test_mobileconfig_truthfully_discloses_constrained_trust_scope(tmp_path: Path):
+    from one_link.peer_https import build_mobileconfig
+
+    parsed = plistlib.loads(build_mobileconfig(tmp_path))
+    descriptions = [
+        str(parsed.get("PayloadDescription", "")),
+        str(parsed["PayloadContent"][0].get("PayloadDescription", "")),
+    ]
+    copy = " ".join(descriptions).lower()
+    assert "constrained" in copy
+    assert "cannot authenticate arbitrary public websites" in copy
+    assert "any one link daemon" not in copy
+    assert "remove" in copy
+
+
 def test_mobileconfig_removable_by_user(tmp_path: Path):
     """PayloadRemovalDisallowed MUST be False (or absent) so the
     user can delete the profile any time without admin privileges.
     A locked-down profile would be a sovereignty violation."""
     from one_link.peer_https import build_mobileconfig
+
     parsed = plistlib.loads(build_mobileconfig(tmp_path))
     rd = parsed.get("PayloadRemovalDisallowed", False)
     assert rd is False
@@ -123,6 +143,7 @@ def test_mobileconfig_mints_cert_on_demand(tmp_path: Path):
     rather than crash. First-run: user clicks Generate pair QR
     before any HTTPS request has triggered ensure_cert."""
     from one_link.peer_https import build_mobileconfig, cert_path
+
     assert not cert_path(tmp_path).exists()
     payload = build_mobileconfig(tmp_path)
     assert payload  # didn't crash
@@ -142,17 +163,17 @@ def test_mobileconfig_carries_root_ca_not_leaf(tmp_path: Path):
     dual-purpose self-signed certs.
     """
     from one_link.peer_https import (
-        build_mobileconfig, cert_path, ensure_cert, root_ca_path,
+        build_mobileconfig,
+        cert_path,
+        ensure_cert,
+        root_ca_path,
     )
     from cryptography import x509
     from cryptography.hazmat.primitives import serialization
+
     ensure_cert(tmp_path)
-    on_disk_root = x509.load_pem_x509_certificate(
-        root_ca_path(tmp_path).read_bytes()
-    )
-    on_disk_leaf = x509.load_pem_x509_certificate(
-        cert_path(tmp_path).read_bytes()
-    )
+    on_disk_root = x509.load_pem_x509_certificate(root_ca_path(tmp_path).read_bytes())
+    on_disk_leaf = x509.load_pem_x509_certificate(cert_path(tmp_path).read_bytes())
     parsed = plistlib.loads(build_mobileconfig(tmp_path))
     embedded_der = parsed["PayloadContent"][0]["PayloadContent"]
     embedded = x509.load_der_x509_certificate(embedded_der)
@@ -189,8 +210,8 @@ def test_server_registers_profile_endpoint():
     so iOS Safari can fetch it. Auth-free — the cert isn't
     sensitive (it's the public half of a self-signed pair)."""
     src = Path("src/one_link/server.py").read_text(encoding="utf-8")
-    assert '/api/v1/peer-rtc/profile.mobileconfig' in src
-    assert 'self._pair_profile' in src
+    assert "/api/v1/peer-rtc/profile.mobileconfig" in src
+    assert "self._pair_profile" in src
 
 
 def test_pair_profile_handler_uses_apple_mime():
@@ -201,12 +222,12 @@ def test_pair_profile_handler_uses_apple_mime():
     src = Path("src/one_link/server.py").read_text(encoding="utf-8")
     idx = src.find("async def _pair_profile")
     assert idx > 0
-    snippet = src[idx:idx + 2400]
-    assert 'application/x-apple-aspen-config' in snippet
+    snippet = src[idx : idx + 2400]
+    assert "application/x-apple-aspen-config" in snippet
     # Suggested filename when downloaded outside Safari.
-    assert 'one-link-trust.mobileconfig' in snippet
+    assert "one-link-trust.mobileconfig" in snippet
     # No-store: each install should fetch the current cert.
-    assert 'no-store' in snippet
+    assert "no-store" in snippet
 
 
 def test_pair_profile_handler_calls_builder():
@@ -214,7 +235,7 @@ def test_pair_profile_handler_calls_builder():
     data_dir — not bake any cert into the source."""
     src = Path("src/one_link/server.py").read_text(encoding="utf-8")
     idx = src.find("async def _pair_profile")
-    snippet = src[idx:idx + 2400]
+    snippet = src[idx : idx + 2400]
     assert "build_mobileconfig" in snippet
     assert "data_dir()" in snippet
 
@@ -226,7 +247,8 @@ def test_mint_pairing_response_includes_profile_url():
     correct URL (host detection lives on the server)."""
     src = Path("src/one_link/server.py").read_text(encoding="utf-8")
     idx = src.find("async def api_mint_pairing")
-    snippet = src[idx:idx + 4500]
+    end = src.find("\n    async def ", idx + 1)
+    snippet = src[idx : end if end > idx else None]
     assert '"ios_profile_url"' in snippet
     # Profile URL MUST be HTTP, not HTTPS — the cert isn't trusted
     # yet at the time the user fetches the profile.
@@ -276,6 +298,32 @@ def test_ios_trust_details_includes_step_instructions(index_html: str):
     assert "Scan the pair QR" in index_html or "pair QR" in index_html
 
 
+def test_ios_trust_copy_matches_constrained_rotatable_authority(index_html: str):
+    section_start = index_html.find('id="ios-trust-details"')
+    assert section_start >= 0
+    section = " ".join(
+        index_html[section_start : section_start + 2600].lower().split()
+    )
+    assert "constrained" in section
+    assert "current local" in section
+    assert "cannot authenticate arbitrary public websites" in section
+    assert "address changes" in section
+    assert "removable" in section
+    assert "no warnings ever again" not in section
+
+
+def test_ios_connect_landing_discloses_system_trust_scope_and_rotation():
+    from one_link.server import _CONNECT_LANDING_HTML_IOS
+
+    copy = " ".join(_CONNECT_LANDING_HTML_IOS.lower().split())
+    assert "endpoint-constrained certificate authority" in copy
+    assert "cannot authenticate arbitrary public websites" in copy
+    assert "network address changes" in copy
+    assert "new constrained profile" in copy
+    assert "nothing else changes on your phone" not in copy
+    assert "one-time switch per computer" not in copy
+
+
 def test_ios_trust_qr_wrap_present(index_html: str):
     """A placeholder div MUST exist for the JS to populate with the
     profile-install QR. The JS only fires when the user clicks
@@ -290,13 +338,13 @@ def test_mint_pair_handler_renders_trust_qr(index_html: str):
     iPhone-first-time section. Single click, both rendered."""
     idx = index_html.find('$("#btn-mint-pair")?.addEventListener')
     assert idx > 0
-    snippet = index_html[idx:idx + 6000]
+    snippet = index_html[idx : idx + 6000]
     # Trust wrap is populated.
-    assert '#ios-trust-qr-wrap' in snippet
+    assert "#ios-trust-qr-wrap" in snippet
     # The QR image src is the same qr.svg endpoint, but with the
     # profile URL as the encoded payload.
-    assert 'info.ios_profile_url' in snippet
-    assert 'encodeURIComponent(info.ios_profile_url)' in snippet
+    assert "info.ios_profile_url" in snippet
+    assert "encodeURIComponent(info.ios_profile_url)" in snippet
 
 
 def test_mint_pair_handler_skips_trust_qr_without_https(index_html: str):
@@ -305,8 +353,8 @@ def test_mint_pair_handler_skips_trust_qr_without_https(index_html: str):
     render a misleading 'install this profile' QR for an HTTP-only
     daemon (where the profile would do nothing useful)."""
     idx = index_html.find('$("#btn-mint-pair")?.addEventListener')
-    snippet = index_html[idx:idx + 6000]
-    assert 'info.https_available' in snippet
+    snippet = index_html[idx : idx + 6000]
+    assert "info.https_available" in snippet
 
 
 def test_reset_pair_card_clears_trust_qr(index_html: str):
@@ -315,7 +363,7 @@ def test_reset_pair_card_clears_trust_qr(index_html: str):
     if the daemon rotated certs since."""
     idx = index_html.find("function _resetPairPhoneCard")
     assert idx > 0
-    snippet = index_html[idx:idx + 1200]
+    snippet = index_html[idx : idx + 1200]
     assert "#ios-trust-qr-wrap" in snippet
 
 

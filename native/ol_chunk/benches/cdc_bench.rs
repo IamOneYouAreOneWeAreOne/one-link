@@ -4,7 +4,7 @@
 //! ≥ 2 GiB/s/core scalar; ≥ 5 GiB/s/core with AVX-512 / NEON dispatch.
 //!
 //! Run:
-//!   cargo bench --bench cdc_bench
+//!   cargo bench --bench `cdc_bench`
 //!
 //! These benches are part of the per-PR benchmark gate. PRs that regress
 //! `cdc_scan_random_1gib` throughput by > 5 % must be rejected.
@@ -16,7 +16,7 @@ use ol_chunk::{
 };
 
 /// Deterministic xorshift RNG so the benchmark workload is identical across
-/// machines and across CI runs. SEED matches our perf_lab convention.
+/// machines and across CI runs. SEED matches our `perf_lab` convention.
 fn fill_pseudo_random(buf: &mut [u8], mut state: u64) {
     for byte in buf.iter_mut() {
         state ^= state << 13;
@@ -102,6 +102,7 @@ fn bench_aead_key_derivation(c: &mut Criterion) {
 
 fn make_dummy_zip(entries: usize, entry_size: usize) -> Vec<u8> {
     let mut buf = Vec::with_capacity(entries * (ZIP_LFH_FIXED_LEN + 7 + entry_size));
+    let entry_size_u32 = u32::try_from(entry_size).expect("benchmark ZIP entry fits in u32");
     for i in 0..entries {
         buf.extend_from_slice(&ZIP_LFH_MAGIC);
         buf.extend_from_slice(&20u16.to_le_bytes()); // version_needed
@@ -110,13 +111,14 @@ fn make_dummy_zip(entries: usize, entry_size: usize) -> Vec<u8> {
         buf.extend_from_slice(&0u16.to_le_bytes()); // mod_time
         buf.extend_from_slice(&0u16.to_le_bytes()); // mod_date
         buf.extend_from_slice(&0u32.to_le_bytes()); // crc-32
-        buf.extend_from_slice(&(entry_size as u32).to_le_bytes()); // compressed
-        buf.extend_from_slice(&(entry_size as u32).to_le_bytes()); // uncompressed
+        buf.extend_from_slice(&entry_size_u32.to_le_bytes()); // compressed
+        buf.extend_from_slice(&entry_size_u32.to_le_bytes()); // uncompressed
         buf.extend_from_slice(&7u16.to_le_bytes()); // name_length
         buf.extend_from_slice(&0u16.to_le_bytes()); // extra_length
         let name = format!("file{i:02}\0");
         buf.extend_from_slice(&name.as_bytes()[..7]);
-        buf.extend(std::iter::repeat_n((i as u8) ^ 0xAB, entry_size));
+        let entry_marker = u8::try_from(i).expect("benchmark ZIP entry index fits in u8");
+        buf.extend(std::iter::repeat_n(entry_marker ^ 0xAB, entry_size));
     }
     buf
 }
@@ -202,13 +204,23 @@ fn bench_format_aware_scan(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_cdc_scan,
-    bench_blake3_chunk_address,
-    bench_aead_key_derivation,
-    bench_zip_lfh_walk,
-    bench_format_aware_scan,
-    bench_par_scan,
-);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{
+        bench_aead_key_derivation, bench_blake3_chunk_address, bench_cdc_scan,
+        bench_format_aware_scan, bench_par_scan, bench_zip_lfh_walk, criterion_group,
+    };
+
+    criterion_group!(
+        benches,
+        bench_cdc_scan,
+        bench_blake3_chunk_address,
+        bench_aead_key_derivation,
+        bench_zip_lfh_walk,
+        bench_format_aware_scan,
+        bench_par_scan,
+    );
+}
+criterion_main!(criterion_benchmark_harness::benches);

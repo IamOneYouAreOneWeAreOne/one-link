@@ -1,0 +1,55 @@
+{
+  "ctrl": 59714,
+  "pin": {
+    "ok": true,
+    "peer_fp": "fc9f0a5f1b91f3dd0acdbc1db709ddf0bbe3dd9bfaa549c71a3410c691eb2046",
+    "trust": "pinned"
+  },
+  "files": {
+    "4KiB": {
+      "ok": 5,
+      "total": 5,
+      "errors": [],
+      "median_ms": 159.1,
+      "median_mib_s": 0.02
+    },
+    "512KiB": {
+      "ok": 5,
+      "total": 5,
+      "errors": [],
+      "median_ms": 316.0,
+      "median_mib_s": 1.58
+    },
+    "2MiB": {
+      "ok": 3,
+      "total": 3,
+      "errors": [],
+      "median_ms": 466.5,
+      "median_mib_s": 4.29
+    },
+    "16MiB": {
+      "ok": 2,
+      "total": 2,
+      "errors": [],
+      "median_ms": 663.0,
+      "median_mib_s": 24.13
+    }
+  },
+  "diag": {
+    "ok": true,
+    "degradation_events": [],
+    "count": 0
+  },
+  "quic": {
+    "ok": true,
+    "native_quic_available": true,
+    "server_up": true,
+    "local_port": 59713,
+    "outbound": [],
+    "inbound": [],
+    "advertised_ports": {
+      "fc9f0a5f1b91f3dd0acdbc1db709ddf0bbe3dd9bfaa549c71a3410c691eb2046": 61453
+    },
+    "recent_paired_count": 0
+  }
+}

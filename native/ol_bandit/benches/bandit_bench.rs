@@ -1,9 +1,9 @@
 //! Throughput benchmarks for `ol_bandit`.
 //!
-//! The bandit is called on EVERY transfer decision (chunk size choice,
-//! parallelism, FEC ratio, etc.) so per-op cost matters. Target: < 1 µs
-//! per `select` and per `update` for arms ≤ 10. Anything substantially
-//! slower than this is on the daemon's hot path.
+//! The production consumer calls the bandit for transfer-route selection,
+//! so per-op cost matters. Target: < 1 µs per `select` and per `update`
+//! for arms ≤ 10. Proposed chunk-size, parallelism, FEC-ratio, prefetch,
+//! pacing, and compression controllers are not production-active.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use ol_bandit::{Bandit, BanditRng, BanditSeed};
@@ -69,5 +69,12 @@ fn bench_full_horizon(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_select, bench_update, bench_full_horizon);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{bench_full_horizon, bench_select, bench_update, criterion_group};
+
+    criterion_group!(benches, bench_select, bench_update, bench_full_horizon);
+}
+criterion_main!(criterion_benchmark_harness::benches);

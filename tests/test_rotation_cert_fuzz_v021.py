@@ -26,16 +26,13 @@ from __future__ import annotations
 
 import json
 import os
-import struct
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.identity_rotation import (
-    CERT_VERSION,
     CertVerifyError,
     RotationCertificate,
-    fingerprint_for_pubkey,
     mint_certificate,
     verify_certificate,
 )
@@ -99,6 +96,23 @@ def test_from_wire_dict_rejects_non_string_fields():
     ):
         with pytest.raises(ValueError):
             RotationCertificate.from_wire_dict(bad)
+
+
+def test_from_wire_dict_rejects_unknown_outer_fields():
+    _, _, cert = _good_cert()
+    wire = cert.to_wire_dict()
+    wire["shadow"] = "unsigned confusion"
+    with pytest.raises(ValueError, match="unknown fields"):
+        RotationCertificate.from_wire_dict(wire)
+
+
+def test_from_wire_dict_rejects_oversized_cert_before_json_parse():
+    from one_link.identity_rotation import MAX_CERT_JSON_BYTES
+    with pytest.raises(ValueError, match="size"):
+        RotationCertificate.from_wire_dict({
+            "cert_json": "{" + (" " * MAX_CERT_JSON_BYTES) + "}",
+            "sig_hex": "00" * 64,
+        })
 
 
 def test_from_wire_dict_rejects_sig_hex_wrong_length():
@@ -209,10 +223,31 @@ def test_canonical_wrong_version():
 
 
 def test_canonical_ts_ms_non_int():
-    for bad_ts in ("now", None, [], {"nested": 1}, 1.5):
+    for bad_ts in ("now", None, [], {"nested": 1}, 1.5, True):
         wire, _ = _mutated_canonical(lambda body, _t=bad_ts: {**body, "ts_ms": _t})
         with pytest.raises(ValueError):
             RotationCertificate.from_wire_dict(wire)
+
+
+@pytest.mark.parametrize("bad_ts", [-1, 2**63])
+def test_canonical_ts_ms_out_of_range(bad_ts: int):
+    wire, _ = _mutated_canonical(
+        lambda body: {**body, "ts_ms": bad_ts},
+    )
+    with pytest.raises(ValueError, match="out of range"):
+        RotationCertificate.from_wire_dict(wire)
+
+
+def test_cert_body_must_use_one_canonical_json_encoding():
+    old, _, cert = _good_cert()
+    body = json.loads(cert.canonical_bytes.decode("ascii"))
+    noncanonical = json.dumps(body, indent=2, sort_keys=False).encode("ascii")
+    wire = {
+        "cert_json": noncanonical.decode("ascii"),
+        "sig_hex": old.sign(noncanonical).hex(),
+    }
+    with pytest.raises(ValueError, match="not canonical"):
+        RotationCertificate.from_wire_dict(wire)
 
 
 def test_canonical_reason_unknown_value():

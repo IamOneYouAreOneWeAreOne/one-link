@@ -1,4 +1,4 @@
-"""Kademlia DHT primitive — sovereign rendezvous without a server.
+"""Kademlia routing-table and iterative-lookup algorithm primitives.
 
 The current rendezvous (rendezvous_server.py) is a single coordination
 point: every NAT-traversing peer registers there with its pubkey +
@@ -8,20 +8,21 @@ findings against it) but it's still a SPOF — operationally, legally,
 and in terms of "for the people" sovereignty: someone has to run it,
 pay for it, and choose not to log.
 
-Kademlia (Maymounkov + Mazières, 2002) replaces that single server
-with a network of equal peers, each holding a slice of the routing
-table. Lookups are iterative O(log N) hops; storage is replicated
-to the K closest nodes; node failures are tolerated by the
-redundancy. No central server, no operator, no logs in any one
-place. The same algorithm that backs BitTorrent's mainline DHT
-(currently ~30M peers) and Ethereum's discovery layer.
+In a complete deployment Kademlia (Maymounkov + Mazières, 2002) can replace a
+single rendezvous service with a network of independently operated nodes, each
+holding a slice of the routing table. Those nodes are still network servers and
+can observe, retain, correlate, or replicate lookup and endpoint metadata.
+Sybil/eclipse resistance, authenticated records, privacy, abuse controls,
+bootstrap diversity, churn maintenance, and operator policy are separate
+requirements; decentralization does not imply no operators or no logs.
 
-This module ships the **algorithm primitives**: NodeID, XOR distance,
-KBuckets with LRU eviction, RoutingTable, iterative lookup. The
-**transport** (UDP RPC for PING / STORE / FIND_NODE / FIND_VALUE)
-is a separate ship — once the algorithm is solid, swapping in any
-transport (UDP, WebRTC DataChannel, mixnet hop) becomes a contained
-plumbing exercise.
+This Python module ships only **algorithm primitives**: NodeID, XOR distance,
+KBuckets with LRU eviction, RoutingTable, and an injected-callback iterative
+lookup. It is not the current product rendezvous path. A production transport
+and deployment require protocol framing, authentication, replay bounds,
+resource limits, maintenance, bootstrapping, privacy analysis, and adversarial
+qualification; substituting UDP, WebRTC, or an anonymity network is not a
+contained plumbing change.
 
 Why ship the primitives separately? Two reasons:
 

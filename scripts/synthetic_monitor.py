@@ -33,7 +33,6 @@ import contextlib
 import json
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -45,6 +44,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from one_link import app as app_mod
+from one_link import control_ipc
 
 # ── helpers ────────────────────────────────────────────────────────
 
@@ -94,24 +95,26 @@ def _stop_daemon(proc: subprocess.Popen) -> None:
             proc.wait(timeout=5)
 
 
-def _read_port(home: Path) -> int | None:
-    p = home / "data" / "server.port"
-    if p.is_file():
-        try:
-            return int(p.read_text().strip())
-        except (ValueError, OSError):
-            return None
-    return None
-
-
-def _read_token(home: Path) -> str | None:
-    p = home / "data" / "ui.token"
-    if p.is_file():
-        try:
-            return p.read_text().strip() or None
-        except OSError:
-            return None
-    return None
+def _resolve_home(home: Path) -> app_mod.RunningDaemon | None:
+    data = home / "data"
+    try:
+        control_port = int(
+            control_ipc.read_private_bytes_strict(
+                data / "control.port",
+                max_bytes=64,
+                label="control port",
+            )
+            .decode("ascii")
+            .strip()
+        )
+        secret = control_ipc.read_control_secret(data)
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return app_mod.resolve_authenticated_daemon(
+        control_port,
+        secret,
+        timeout=2.0,
+    )
 
 
 def _api_get(base_url: str, path: str, token: str, timeout: float = 5.0) -> dict:
@@ -119,7 +122,8 @@ def _api_get(base_url: str, path: str, token: str, timeout: float = 5.0) -> dict
         f"{base_url}{path}",
         headers={"Authorization": f"Bearer {token}"},
     )
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    # Every caller constructs base_url from an integer port on 127.0.0.1.
+    with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -134,7 +138,8 @@ def _api_post(base_url: str, path: str, token: str, body: dict, timeout: float =
             "Content-Type": "application/json",
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    # Every caller constructs base_url from an integer port on 127.0.0.1.
+    with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -145,16 +150,17 @@ def _step_spawn_both_daemons(
     a_home: Path, b_home: Path,
     a_log: Path, b_log: Path,
 ) -> tuple[StepResult, subprocess.Popen | None, subprocess.Popen | None]:
-    """Both daemons spawn + write server.port + ui.token within 30s."""
+    """Both daemons expose authenticated control and UI within 30s."""
     t0 = _now_ms()
     a_proc = _spawn_daemon(a_home, a_log)
     b_proc = _spawn_daemon(b_home, b_log)
     deadline = time.time() + 30.0
+    a_daemon = None
+    b_daemon = None
     while time.time() < deadline:
-        if (
-            _read_port(a_home) and _read_token(a_home)
-            and _read_port(b_home) and _read_token(b_home)
-        ):
+        a_daemon = _resolve_home(a_home)
+        b_daemon = _resolve_home(b_home)
+        if a_daemon is not None and b_daemon is not None:
             break
         time.sleep(0.2)
     else:
@@ -162,23 +168,24 @@ def _step_spawn_both_daemons(
             StepResult(
                 name="spawn_both_daemons",
                 ok=False, duration_ms=_now_ms() - t0,
-                error="timeout waiting for ui.token + server.port files",
+                error="timeout waiting for authenticated daemon/UI readiness",
                 detail={
-                    "a_port": _read_port(a_home),
-                    "b_port": _read_port(b_home),
+                    "a_port": a_daemon.server_port if a_daemon else None,
+                    "b_port": b_daemon.server_port if b_daemon else None,
                     "a_log_tail": a_log.read_text(encoding="utf-8", errors="replace")[-1500:],
                     "b_log_tail": b_log.read_text(encoding="utf-8", errors="replace")[-1500:],
                 },
             ),
             a_proc, b_proc,
         )
+    assert a_daemon is not None and b_daemon is not None
     return (
         StepResult(
             name="spawn_both_daemons",
             ok=True, duration_ms=_now_ms() - t0,
             detail={
-                "a_port": _read_port(a_home),
-                "b_port": _read_port(b_home),
+                "a_port": a_daemon.server_port,
+                "b_port": b_daemon.server_port,
             },
         ),
         a_proc, b_proc,
@@ -190,15 +197,18 @@ def _step_api_me_reachable(
 ) -> StepResult:
     """GET /api/me returns the daemon's identity within 5s."""
     t0 = _now_ms()
-    port = _read_port(home)
-    tok = _read_token(home)
-    if not port or not tok:
+    daemon = _resolve_home(home)
+    if daemon is None:
         return StepResult(
             name=f"api_me_{label}", ok=False, duration_ms=_now_ms() - t0,
-            error="no port/token (daemon never came up)",
+            error="authenticated daemon/UI unavailable",
         )
     try:
-        me = _api_get(f"http://127.0.0.1:{port}", "/api/me", tok)
+        me = _api_get(
+            f"http://127.0.0.1:{daemon.server_port}",
+            "/api/me",
+            daemon.token,
+        )
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
         return StepResult(
             name=f"api_me_{label}", ok=False, duration_ms=_now_ms() - t0,
@@ -221,15 +231,19 @@ def _step_health_check(
 ) -> StepResult:
     """GET /api/one-health surfaces no critical failures."""
     t0 = _now_ms()
-    port = _read_port(home)
-    tok = _read_token(home)
-    if not port or not tok:
+    daemon = _resolve_home(home)
+    if daemon is None:
         return StepResult(
             name=f"health_{label}", ok=False, duration_ms=_now_ms() - t0,
-            error="no port/token",
+            error="authenticated daemon/UI unavailable",
         )
     try:
-        h = _api_get(f"http://127.0.0.1:{port}", "/api/one-health", tok, timeout=10.0)
+        h = _api_get(
+            f"http://127.0.0.1:{daemon.server_port}",
+            "/api/one-health",
+            daemon.token,
+            timeout=10.0,
+        )
     except Exception as e:
         return StepResult(
             name=f"health_{label}", ok=False, duration_ms=_now_ms() - t0,

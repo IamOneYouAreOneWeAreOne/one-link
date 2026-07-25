@@ -90,7 +90,9 @@ mod tests {
 
     #[test]
     fn too_many_hops_rejected() {
-        let many: Vec<HopDescriptor> = (0..(MAX_HOPS as u8 + 1)).map(fake_hop).collect();
+        let many: Vec<HopDescriptor> = (0..=MAX_HOPS)
+            .map(|index| fake_hop(u8::try_from(index).unwrap()))
+            .collect();
         let err = Circuit::new(many).unwrap_err();
         assert!(matches!(err, OnionError::TooManyHops { .. }));
     }

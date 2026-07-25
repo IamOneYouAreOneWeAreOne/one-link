@@ -78,12 +78,22 @@ fn bench_thousand_chunk_chain(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_next_message_key,
-    bench_fast_forward,
-    bench_peek_message_key,
-    bench_skipped_store_round_trip,
-    bench_thousand_chunk_chain,
-);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{
+        bench_fast_forward, bench_next_message_key, bench_peek_message_key,
+        bench_skipped_store_round_trip, bench_thousand_chunk_chain, criterion_group,
+    };
+
+    criterion_group!(
+        benches,
+        bench_next_message_key,
+        bench_fast_forward,
+        bench_peek_message_key,
+        bench_skipped_store_round_trip,
+        bench_thousand_chunk_chain,
+    );
+}
+criterion_main!(criterion_benchmark_harness::benches);

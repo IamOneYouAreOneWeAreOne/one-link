@@ -26,7 +26,7 @@ pub const DEFAULT_SKIPPED_CAP: usize = 1024;
 /// drops when capacity is exceeded. Receivers should size this to
 /// match the worst-case reordering window.
 pub struct SkippedKeyStore {
-    /// step → key. Use BTreeMap so iteration is in step-order (useful
+    /// step → key. Use `BTreeMap` so iteration is in step-order (useful
     /// for diagnostics + deterministic ordering across platforms).
     map: BTreeMap<u64, MessageKey>,
     /// Insertion order so we can evict the oldest entry.
@@ -167,7 +167,7 @@ mod tests {
     fn fifo_eviction_on_overflow() {
         let mut s = SkippedKeyStore::with_capacity(3);
         for i in 0..5u8 {
-            s.insert(i as u64, key(i)).unwrap();
+            s.insert(u64::from(i), key(i)).unwrap();
         }
         // After 5 inserts with cap=3: should hold the LAST 3 (steps 2, 3, 4).
         assert_eq!(s.len(), 3);
@@ -182,7 +182,7 @@ mod tests {
     fn drop_older_than_removes_expired() {
         let mut s = SkippedKeyStore::with_capacity(16);
         for i in 0..10u8 {
-            s.insert(i as u64, key(i)).unwrap();
+            s.insert(u64::from(i), key(i)).unwrap();
         }
         s.drop_older_than(5);
         assert_eq!(s.len(), 5);

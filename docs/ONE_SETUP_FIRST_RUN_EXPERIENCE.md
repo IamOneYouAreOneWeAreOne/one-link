@@ -8,7 +8,9 @@ The goal is not to explain the app. The goal is to make One Link work for the pe
 
 Core promise:
 
-> Your devices become one private fabric. No account. No cloud dependency. No confusion. You are One.
+> Your devices become one private fabric. No required account or central
+> message store. Optional network helpers are disclosed. No confusion. You are
+> One.
 
 ## Product Bar
 
@@ -97,7 +99,7 @@ Technical Mode phrases:
 - root identity
 - device certificate
 - self-mesh enrollment
-- trust code / SAS
+- five-word confirmation phrase / SAS
 - secure channel
 - route candidate
 - remote instruction
@@ -130,7 +132,7 @@ One Link has advanced systems under the hood. The setup experience must translat
 | Device certificate | This device belongs to you | Device cert, issuer, fingerprint, expiry/revocation |
 | Self-mesh | Your personal device fabric | Self-mesh device graph, presence, target selection |
 | Pairing invite | Add a device | Short-lived invite, QR payload, expiry, nonce |
-| SAS verification | Check the trust code | Transcript-bound SAS, authentication confirmation |
+| SAS verification | Check the five confirmation words | Transcript-bound SAS, authentication confirmation |
 | Secure channel | Private trusted connection | Encrypted session, peer fingerprint, replay window |
 | Comms fabric | Best private path | Route candidates, score, transport, fallback |
 | Remote instruct | Ask another device to do this | Signed command, capability scope, nonce, audit id |
@@ -156,7 +158,7 @@ The setup flow must know how these systems work:
 - self-mesh enrollment
 - self-mesh presence and best-device selection
 - QR/code pairing
-- trust-code verification
+- five-word confirmation verification
 - peer/device list rendering
 - secure channel establishment
 - chat send path
@@ -308,7 +310,8 @@ Headline:
 
 Body:
 
-Your devices can talk directly, privately, and without an account.
+Your devices can talk directly when a route permits, privately, and without a
+required account.
 
 Primary action:
 
@@ -495,36 +498,36 @@ Make security understandable and meaningful.
 
 Headline:
 
-**Check the trust code**
+**Check the confirmation words**
 
 Body:
 
-Both devices should show the same code.
+Both devices should show the same five words in the same order.
 
 Visual:
 
-- six-digit SAS code in large type
+- five-word transcript-bound safety phrase in large type
 - optional visual pattern/art
 - device names on both sides
 - "What if it does not match?" disclosure
 
 Primary action:
 
-**Codes match**
+**They match**
 
 Secondary action:
 
-**Codes do not match**
+**They don't match**
 
 Helpful actions:
 
-- **Read code aloud**
-- **Show visual code**
+- **Read words aloud**
+- **Show visual pattern**
 
 Behavior:
 
-- `Codes match` enrolls the device.
-- `Codes do not match` cancels pairing, records rejected trust event, and explains calmly.
+- `They match` enrolls the device.
+- `They don't match` cancels pairing, records a rejected trust event, and explains calmly.
 - The flow must never auto-trust a device without a clear user confirmation.
 
 Copy for mismatch:
@@ -936,7 +939,7 @@ Requirements:
 - screen-reader labels for every input and primary button
 - no icon-only required actions
 - QR code has code fallback
-- SAS code can be copied and read aloud
+- the five-word SAS can be copied and read aloud in order
 - text contrast passes WCAG AA
 - motion reduced when `prefers-reduced-motion`
 - progress must not rely on color alone
@@ -997,7 +1000,7 @@ Trust receipt fields:
 Use:
 
 - "Add your phone"
-- "Codes match"
+- "They match"
 - "Freeze a lost device"
 - "Clear app traces"
 - "No account needed"
@@ -1011,7 +1014,7 @@ Avoid:
 - "remote instruction capability"
 - "transport operator guide"
 - "daemon"
-- "SAS" unless paired with "trust code"
+- "SAS" unless paired with "five confirmation words"
 
 Technical language can exist in Details disclosures, never in the main path.
 
@@ -1060,8 +1063,8 @@ Needed endpoints or endpoint capabilities:
 - name current device
 - mint short-lived device invite
 - poll pairing status
-- confirm trust code match
-- reject trust code
+- confirm five-word phrase match
+- reject five-word phrase
 - send test message
 - send generated test file
 - fetch privacy proof for last setup action
@@ -1146,7 +1149,7 @@ Your phone is trusted.
 
 Technical:
 
-Device certificate enrolled under root identity. Trust-code confirmation completed. Audit event recorded.
+Device certificate enrolled under root identity. Transcript-bound five-word confirmation completed. Audit event recorded.
 
 ### First Message Sent
 
@@ -1202,11 +1205,11 @@ Action:
 
 **Create new invite**
 
-### Trust Code Mismatch
+### Confirmation Words Mismatch
 
 Message:
 
-The codes did not match, so One Link stopped before trusting anything.
+The confirmation words did not match, so One Link stopped before trusting anything.
 
 Action:
 
@@ -1256,7 +1259,7 @@ The setup flow must defend against:
 - expired invite reuse
 - QR screenshot reuse
 - pairing race with malicious nearby device
-- trust code mismatch ignored by user
+- confirmation-word mismatch ignored by user
 - device name spoofing
 - duplicate device names causing confusion
 - unauthorized freeze/revoke
@@ -1286,7 +1289,7 @@ Unit tests:
 - identity created only once
 - device name validation
 - invite expiration
-- trust-code mismatch rejection
+- confirmation-word mismatch rejection
 - privacy proof generation
 - audit event emission
 
@@ -1362,7 +1365,7 @@ Recommended implementation order:
 4. Wire device naming.
 5. Wire identity create/import.
 6. Wire add-device invite and pairing status.
-7. Wire trust-code confirmation and rejection.
+7. Wire five-word confirmation and rejection.
 8. Wire first test message.
 9. Wire generated test file.
 10. Wire privacy proof receipt.
@@ -1418,7 +1421,7 @@ These are layout blueprints, not visual mocks. The actual UI should use the One 
 │                                              │
 │                 You are One                  │
 │                                              │
-│  Your devices can talk directly, privately,  │
+│  Direct when routes permit; payloads are E2E.│
 │  and without an account.                     │
 │                                              │
 │      [ Set up One Link ]   [ Skip for now ]  │
@@ -1537,23 +1540,23 @@ Rules:
 ┌──────────────────────────────────────────────┐
 │  Step 4 of 6                                 │
 │                                              │
-│  Check the trust code                        │
-│  Both devices should show this same code.    │
+│  Check the confirmation words                │
+│  Both devices should show the same words.    │
 │                                              │
-│                 482 913                      │
+│        amber cedar harbor lunar willow       │
 │                                              │
 │  Alex's laptop                  Alex's phone │
 │  This device                    Pending      │
 │                                              │
-│  [ Codes match ] [ Codes do not match ]      │
+│  [ They match ] [ They don't match ]         │
 │                                              │
-│  [ Read aloud ] [ Show visual code ]         │
+│  [ Read aloud ] [ Show visual pattern ]       │
 └──────────────────────────────────────────────┘
 ```
 
 Rules:
 
-- "Codes match" must be deliberate
+- "They match" must be deliberate
 - mismatch must stop trust immediately
 - never phrase mismatch as user error
 
@@ -1660,7 +1663,8 @@ Headline:
 
 Body:
 
-Your devices can talk directly, privately, and without an account.
+Your devices can talk directly when a route permits, privately, and without a
+required account.
 
 Primary:
 
@@ -1740,7 +1744,7 @@ Waiting for your device...
 
 Detected:
 
-Device found. Check the trust code next.
+Device found. Check the five confirmation words next.
 
 Expired:
 
@@ -1750,19 +1754,19 @@ This invite expired. Create a fresh one when both devices are nearby.
 
 Headline:
 
-**Check the trust code**
+**Check the confirmation words**
 
 Body:
 
-Both devices should show the same code.
+Both devices should show the same five words in the same order.
 
 Primary:
 
-**Codes match**
+**They match**
 
 Secondary:
 
-**Codes do not match**
+**They don't match**
 
 Mismatch:
 
@@ -1866,7 +1870,7 @@ Fields:
 
 ### Pairing
 
-Short-lived pairing invite created. Pending device must complete transcript-bound trust-code verification before enrollment.
+Short-lived pairing invite created. Pending device must complete transcript-bound five-word verification before enrollment.
 
 Fields:
 
@@ -1878,7 +1882,7 @@ Fields:
 
 ### Trust
 
-Trust-code confirmation accepted. Device certificate enrolled under root identity. Audit event recorded.
+Five-word confirmation accepted. Device certificate enrolled under root identity. Audit event recorded.
 
 Fields:
 
@@ -2111,7 +2115,7 @@ Malicious device attempts to race pairing.
 Requirement:
 
 - pending device card must be visibly pending
-- trust code required
+- transcript-bound five-word confirmation required
 - device name alone never proves trust
 - expired/replayed invite fails
 
@@ -2191,7 +2195,7 @@ Screen reader:
 
 - each step announces heading and step count
 - QR code has text fallback announced nearby
-- trust code is read as grouped digits
+- all five words are read distinctly and in order
 - errors use `aria-live`
 - progress state is not color-only
 
@@ -2329,12 +2333,12 @@ Tests:
 Area:
 
 - secure pairing transcript
-- SAS/trust-code UI
+- SAS/five-word confirmation UI
 - audit events
 
 Work:
 
-- show trust code
+- show all five confirmation words in order
 - accept match
 - reject mismatch
 - enroll only after explicit match
@@ -2500,7 +2504,7 @@ Required scenarios:
 1. clean first launch, skip immediately
 2. clean first launch, complete setup without second device by choosing pair later
 3. clean first launch, complete setup with simulated second daemon
-4. trust-code mismatch
+4. confirmation-word mismatch
 5. expired invite
 6. first test message success
 7. first file success

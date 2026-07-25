@@ -18,7 +18,7 @@ pub enum RoutingError {
 }
 
 /// Adjacency list. Each entry maps `from -> [(to, edge_cost)]`. The
-/// caller computes edge_cost via [`crate::edge_cost`] (or any pure
+/// caller computes `edge_cost` via [`crate::edge_cost`] (or any pure
 /// f64 monotonic-in-quality metric).
 #[derive(Debug, Clone, Default)]
 pub struct AdjacencyGraph {
@@ -44,7 +44,7 @@ impl AdjacencyGraph {
 
     /// All neighbors of `node`, if any.
     pub fn neighbors(&self, node: &str) -> &[(NodeId, f64)] {
-        self.edges.get(node).map(|v| v.as_slice()).unwrap_or(&[])
+        self.edges.get(node).map_or(&[], std::vec::Vec::as_slice)
     }
 
     /// Number of distinct source nodes (nodes that appear as a `from`
@@ -64,7 +64,7 @@ pub struct PathResult {
     pub total_cost: f64,
 }
 
-/// Heap entry — we negate the cost since BinaryHeap is max-heap.
+/// Heap entry — we negate the cost since `BinaryHeap` is max-heap.
 #[derive(Debug)]
 struct HeapEntry {
     cost: f64,
@@ -73,7 +73,7 @@ struct HeapEntry {
 
 impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.cost == other.cost
+        self.cost.total_cmp(&other.cost).is_eq()
     }
 }
 impl Eq for HeapEntry {}
@@ -86,13 +86,9 @@ impl PartialOrd for HeapEntry {
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse so the BinaryHeap (a max-heap) behaves as a min-heap.
-        // NaN should never appear (callers pass f64 costs from
-        // edge_cost, which is well-defined for any non-negative
-        // input). If it ever does, treat NaN as equal.
-        other
-            .cost
-            .partial_cmp(&self.cost)
-            .unwrap_or(Ordering::Equal)
+        // `total_cmp` keeps `Ord` and `Eq` consistent even if a caller
+        // accidentally supplies NaN. Reverse so lower costs pop first.
+        other.cost.total_cmp(&self.cost)
     }
 }
 
@@ -186,7 +182,7 @@ mod tests {
         let g = simple_graph();
         let r = shortest_path(&g, "A", "A").unwrap();
         assert_eq!(r.path, vec!["A".to_string()]);
-        assert_eq!(r.total_cost, 0.0);
+        assert!(r.total_cost.abs() < f64::EPSILON);
     }
 
     #[test]

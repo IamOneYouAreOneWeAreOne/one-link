@@ -20,32 +20,41 @@ import base64
 import contextlib
 import json
 import os
+import secrets
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import blake3
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from one_link import channel as ch
 from one_link.daemon import (
     BINARY_FRAME_MAGIC,
     Daemon,
     IncomingFile,
     OutboundSession,
+    _align_cdc_pipeline_profile,
+    _bloom_manifest_binding,
     _decode_binary_frame,
     _final_stream_ack_deadline,
     _fast_fixed_chunk_size_for_peer,
     _stream_transfer_profile,
 )
 from one_link.capabilities import (
+    BLOOM_INIT_EXACT_V2,
+    BLOOM_INIT_V1,
     CHAT,
     FILES,
     FILE_ACK_BATCH,
     FILE_BINARY_FRAME,
     FILE_CDC,
     FILE_CDC_BINARY_FRAME,
+    FILE_COMMIT_RECEIPT_V1,
+    FRAME_PROVENANCE_V1,
+    NATIVE_TRANSFER_INDEXED_V1,
 )
 from one_link.discovery import Peer
 from one_link.identity import Identity, fingerprint_of
@@ -64,6 +73,39 @@ def _new_identity() -> Identity:
     )
 
 
+@pytest.fixture(scope="module")
+def module_scope_runtime_home_probe() -> tuple[Path, Path, Path]:
+    """A higher-scoped fixture must be contained before function setup."""
+
+    session_home = Path(os.environ["ONE_LINK_HOME"]).resolve()
+    daemon = Daemon(_new_identity())
+    return (
+        session_home,
+        daemon._resume_metadata_root.resolve(),
+        daemon._resume_registry.inbox_root.resolve(),
+    )
+
+
+def test_pytest_session_home_guard_contains_module_fixture(
+    module_scope_runtime_home_probe: tuple[Path, Path, Path],
+):
+    session_home, resume_root, inbox_root = module_scope_runtime_home_probe
+    assert session_home.name == "home"
+    assert session_home.parent.name.startswith("one-link-pytest-session-")
+    assert resume_root == session_home / "data" / "transfer_resume"
+    assert inbox_root == session_home / "data" / "inbox"
+
+
+def test_pytest_runtime_home_guard_contains_unannotated_daemon(tmp_path: Path):
+    """An ordinary Daemon test cannot resolve paths into the real profile."""
+
+    expected_home = tmp_path / "one-link-pytest-home"
+    assert Path(os.environ["ONE_LINK_HOME"]) == expected_home
+    daemon = Daemon(_new_identity())
+    assert daemon._resume_metadata_root == expected_home / "data" / "transfer_resume"
+    assert daemon._resume_registry.inbox_root == expected_home / "data" / "inbox"
+
+
 class _FakeChannel:
     """Stand-in for ch.Channel that records sent frames and serves
     queued replies. Used to isolate the send_file/lock path from real
@@ -76,6 +118,12 @@ class _FakeChannel:
         self.peer_caps: dict | None = None
         self.sent: list[dict] = []
         self._replies: asyncio.Queue[bytes] = asyncio.Queue()
+        # Tests historically pre-staged shorthand replies without ``of``.
+        # Production now requires exact request correlation, so bind those
+        # fixture replies at receive time to the earliest outstanding request.
+        # This keeps the fake protocol-realistic without forcing each test to
+        # predict UUIDs generated later inside send_file().
+        self._fixture_replied_ids: set[str] = set()
         self.closed = False
 
     async def send(self, payload: bytes) -> None:
@@ -89,7 +137,80 @@ class _FakeChannel:
     async def recv(self) -> bytes:
         if self.closed:
             raise RuntimeError("channel closed")
-        return await self._replies.get()
+        payload = await self._replies.get()
+        reply = decode_msg(payload)
+        reply_type = str(reply.get("t") or "")
+        if reply_type == "FILE_ACK_BATCH":
+            self._fixture_replied_ids.update(
+                str(value) for value in (reply.get("ofs") or []) if value
+            )
+            return payload
+        if reply_type in {
+            "ACK",
+            "FILE_WANTS",
+            "FILE_OFFER_HELD",
+            "FILE_COMMIT",
+        }:
+            response_to = reply.get("of")
+            if response_to is None:
+                if reply_type == "FILE_COMMIT":
+                    offer_request = next(
+                        request for request in reversed(self.sent)
+                        if request.get("t") == "FILE_OFFER"
+                    )
+                    response_to = str(offer_request["id"])
+                    reply["of"] = response_to
+                preferred_type = (
+                    "FILE_OFFER"
+                    if reply_type in {
+                        "FILE_WANTS",
+                        "FILE_OFFER_HELD",
+                        "FILE_COMMIT",
+                    }
+                    else None
+                )
+                for request in (self.sent if response_to is None else ()):
+                    request_id = str(request.get("id") or "")
+                    if (
+                        request_id
+                        and request_id not in self._fixture_replied_ids
+                        and request.get("t") != "FILE_PROVENANCE"
+                        and (
+                            preferred_type is None
+                            or request.get("t") == preferred_type
+                        )
+                    ):
+                        response_to = request_id
+                        reply["of"] = request_id
+                        break
+            if reply_type == "FILE_COMMIT":
+                offer = next(
+                    request for request in self.sent
+                    if request.get("t") == "FILE_OFFER"
+                    and str(request.get("id") or "") == str(response_to or "")
+                )
+                reply.update({
+                    "receipt_version": 1,
+                    "blob": offer["blob"],
+                    "size": offer["size"],
+                    "mode": "cdc" if offer.get("chunks") is not None else "stream",
+                    "delivery_id": offer["delivery_id"],
+                    "delivery_name": offer["name"],
+                    "delivery_rel_path": offer.get("rel_path", ""),
+                    "delivery_kind": "file",
+                    "ok": True,
+                    "durable": True,
+                    "committed_bytes": offer["size"],
+                    "verified_hash": offer["blob"],
+                    "reason": "",
+                    "retryable": False,
+                })
+            # HELD is an intermediate state; the same FILE_OFFER later
+            # receives FILE_WANTS/ACK after the user accepts it.
+            if response_to is not None and reply_type != "FILE_OFFER_HELD":
+                self._fixture_replied_ids.add(str(response_to))
+            return encode_msg(reply)
+        return payload
 
     async def close(self) -> None:
         self.closed = True
@@ -141,6 +262,58 @@ class _BatchAckFakeChannel(_TracingFakeChannel):
 
 
 # ─── ENDPOINT_UPDATE: pinned-only ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_inbound_ephemeral_source_port_never_overwrites_durable_endpoint(
+    tmp_path: Path,
+):
+    """An inbound client's TCP source port is not a peer dial target."""
+    receiver = _new_identity()
+    initiator = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(receiver)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=initiator.fingerprint,
+        short_id=initiator.short_id,
+        pubkey=initiator.public_bytes,
+        hostname="known-peer",
+        address="192.0.2.44",
+        port=42424,
+    )
+    state.set_peer_trust(initiator.fingerprint, "pinned")
+
+    server = await asyncio.start_server(
+        daemon._handle_peer, host="127.0.0.1", port=0,
+    )
+    listen_port = server.sockets[0].getsockname()[1]
+    channel = None
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", listen_port)
+        source_port = writer.get_extra_info("sockname")[1]
+        assert source_port != 42424
+        channel = await ch.initiate(
+            reader,
+            writer,
+            initiator,
+            expected_responder_ed_pub=receiver.public_bytes,
+        )
+        deadline = time.monotonic() + 2.0
+        while initiator.fingerprint not in daemon._inbound_live_channels:
+            assert time.monotonic() < deadline
+            await asyncio.sleep(0.01)
+
+        rec = state.get_peer(initiator.fingerprint)
+        assert rec is not None
+        assert rec.last_address == "192.0.2.44"
+        assert rec.last_port == 42424
+    finally:
+        if channel is not None:
+            await channel.close()
+        server.close()
+        await server.wait_closed()
+        state.close()
 
 @pytest.mark.asyncio
 async def test_endpoint_update_from_pinned_peer_queues_verified_promotion(tmp_path: Path):
@@ -365,6 +538,9 @@ async def test_send_file_reuses_existing_outbound_session(
     state.set_peer_trust(them.fingerprint, "pinned")
 
     chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chan.peer_caps = {
+        "features": [FILES, FILE_CDC, FRAME_PROVENANCE_V1],
+    }
     sess = OutboundSession(
         peer_fp=them.fingerprint, peer=Peer(
             short_id=them.short_id, hostname="them",
@@ -403,16 +579,380 @@ async def test_send_file_reuses_existing_outbound_session(
 
     assert dial_attempts == 0
     assert result["chunks"] == 1
-    # FILE_OFFER + 1 chunk on the existing channel.
+    # FILE_OFFER + its exact provenance + one chunk on the existing channel.
     sent_types = [s.get("t") for s in chan.sent]
-    assert "FILE_OFFER" in sent_types
-    assert "FILE_CDC_CHUNK" in sent_types
+    assert sent_types[:3] == [
+        "FILE_OFFER",
+        "FILE_PROVENANCE",
+        "FILE_CDC_CHUNK",
+    ]
+    offer = chan.sent[0]
+    provenance_message = chan.sent[1]
+    assert offer["blob"] == blake3.blake3(b"abc").hexdigest()
+    assert provenance_message["blob"] == offer["blob"]
+    from one_link.provenance_wiring import (
+        parse_inbound_provenance_msg,
+        verify_inbound,
+    )
+
+    parsed = parse_inbound_provenance_msg(provenance_message)
+    assert verify_inbound(parsed, me.public_bytes) is True
+    outbound_provenance = daemon._provenance_store.get_outbound(offer["blob"])
+    assert outbound_provenance is not None
+    assert outbound_provenance.provenance.segment_hash.hex() == offer["blob"]
     # Session counters bumped.
     assert sess.messages_sent == 1
     # Session NOT closed — kept for next reuse.
     assert chan.closed is False
     # Session still in the map.
     assert them.fingerprint in daemon._outbound_sessions
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_send_file_honors_lossless_bloom_response_end_to_end(
+    tmp_path: Path, monkeypatch
+):
+    """Bloom honor sends the exact delta and never trusts false positives."""
+
+    from one_link import bloom_init
+
+    if not bloom_init.HAS_NATIVE:
+        pytest.skip("native Bloom runtime is unavailable")
+
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    class _BloomChannel(_FakeChannel):
+        async def send(self, payload: bytes) -> None:
+            await super().send(payload)
+            sent = self.sent[-1]
+            if sent.get("t") == "FILE_OFFER":
+                chunks = list(sent["chunks"])
+                assert len(chunks) > 1
+                known = bytes.fromhex(chunks[0]["hash"])
+                wire = bloom_init.build_receiver_bloom([known])
+                decoded = bloom_init.decode_receiver_bloom(wire)
+                corrections = [
+                    int(chunk["index"])
+                    for chunk in chunks[1:]
+                    if decoded.contains(bytes.fromhex(chunk["hash"]))
+                ]
+                self.queue_reply(make_msg(
+                    "BLOOM_INIT_FILTER",
+                    them.short_id,
+                    of=sent["id"],
+                    blob=sent["blob"],
+                    bloom=base64.b64encode(wire).decode("ascii"),
+                    n_known=1,
+                    manifest_count=len(chunks),
+                    manifest_binding=_bloom_manifest_binding(chunks),
+                    corrections=corrections,
+                ))
+            elif sent.get("t") == "FILE_CDC_CHUNK":
+                self.queue_reply(make_msg(
+                    "ACK",
+                    them.short_id,
+                    of=sent["id"],
+                ))
+
+    channel = _BloomChannel(
+        peer_ed_pub=them.public_bytes,
+        peer_short_id=them.short_id,
+    )
+    channel.peer_caps = {
+        "features": [FILES, FILE_CDC, BLOOM_INIT_V1, BLOOM_INIT_EXACT_V2],
+    }
+    session = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=Peer(
+            short_id=them.short_id,
+            hostname="them",
+            address="127.0.0.1",
+            port=12345,
+            ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=channel,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = session
+
+    async def _unexpected_dial(*_args, **_kwargs):
+        raise AssertionError("Bloom transfer opened a second session")
+
+    monkeypatch.setattr(daemon, "_dial_peer", _unexpected_dial)
+    monkeypatch.setattr(daemon, "_dial_peer_with_regime", _unexpected_dial)
+    source = tmp_path / "bloom-delta.bin"
+    source.write_bytes(b"".join(
+        blake3.blake3(i.to_bytes(4, "little")).digest()
+        for i in range(32_768)
+    ))
+
+    result = await daemon.send_file(session.peer, source)
+
+    offer = next(msg for msg in channel.sent if msg.get("t") == "FILE_OFFER")
+    chunk_indexes = {
+        int(msg["index"])
+        for msg in channel.sent
+        if msg.get("t") == "FILE_CDC_CHUNK"
+    }
+    expected = {int(chunk["index"]) for chunk in offer["chunks"]} - {0}
+    assert chunk_indexes == expected
+    assert result["cdc"] is True
+    assert result["chunks"] == len(expected)
+    assert result["cdc_skipped"] == 1
+    transfer = state.get_transfer(result["transfer_id"])
+    assert transfer is not None
+    assert transfer.metadata["actual_method"] == "file_cdc_bloom"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_single_file_sender_waits_after_offer_held(tmp_path: Path):
+    """FILE_OFFER_HELD is a state transition, not an ignorable frame."""
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    chan.peer_caps = {
+        "features": [FILES, FILE_CDC, FILE_COMMIT_RECEIPT_V1],
+    }
+    sess = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=Peer(
+            short_id=them.short_id, hostname="them", address="127.0.0.1",
+            port=12345, ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(), last_used=time.time(), regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+    src = tmp_path / "held.bin"
+    src.write_bytes(b"held-content")
+    chan.queue_reply(make_msg("FILE_OFFER_HELD", them.short_id))
+    chan.queue_reply(make_msg("FILE_WANTS", them.short_id, wants=[0]))
+    chan.queue_reply(make_msg("ACK", them.short_id))
+    chan.queue_reply(make_msg("FILE_COMMIT", them.short_id))
+
+    recv_calls = 0
+    original_recv = chan.recv
+
+    async def _recv_with_state_assertion() -> bytes:
+        nonlocal recv_calls
+        recv_calls += 1
+        if recv_calls == 2:
+            row = state.list_transfers(limit=1)[0]
+            assert row.status == "offered"
+            assert row.metadata["delivery_state"] == "awaiting_remote_acceptance"
+        return await original_recv()
+
+    chan.recv = _recv_with_state_assertion  # type: ignore[method-assign]
+    result = await daemon.send_file(sess.peer, src)
+
+    assert result["chunks"] == 1
+    assert recv_calls >= 3
+    assert state.list_transfers(limit=1)[0].status == "complete"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_reuses_recorded_fixed_chunk_boundaries(
+    tmp_path: Path, monkeypatch,
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+    # This regression exercises CDC retry boundaries specifically.  Declare
+    # the peer capability explicitly so the test cannot fall back to the
+    # baseline stream path when another test changes compatibility defaults.
+    chan.peer_caps = {"features": [FILES, FILE_CDC]}
+    sess = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=Peer(
+            short_id=them.short_id, hostname="them", address="127.0.0.1",
+            port=12345, ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=chan,  # type: ignore[arg-type]
+        lock=asyncio.Lock(), last_used=time.time(), regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = sess
+    src = tmp_path / "stable.bin"
+    src.write_bytes(b"stable-boundaries" * 8192)
+    transfer_id = "out:stable"
+    state.upsert_transfer(
+        id=transfer_id, direction="out", peer_fp=them.fingerprint,
+        kind="file", name=src.name, size=src.stat().st_size, status="paused",
+        progress_bytes=0, total_bytes=src.stat().st_size,
+        chunks_done=0, chunks_total=2,
+        metadata={"path": str(src), "mode": "cdc", "fixed_chunk_size": 96 * 1024},
+    )
+    monkeypatch.setattr("one_link.daemon.CDC_AUTO_INDEX_MAX_BYTES", 1)
+    monkeypatch.setattr("one_link.daemon.FAST_FIXED_INDEX_MIN_BYTES", 1)
+    from one_link import daemon as daemon_module
+    real_fixed_index = daemon_module.fixed_index_file
+    observed: list[int] = []
+
+    def _capture_fixed_index(
+        handle, *, size: int, chunk_size: int, read_size: int = 1024 * 1024,
+    ):
+        observed.append(chunk_size)
+        return real_fixed_index(
+            handle,
+            size=size,
+            chunk_size=chunk_size,
+            read_size=read_size,
+        )
+
+    monkeypatch.setattr("one_link.daemon.fixed_index_file", _capture_fixed_index)
+    chan.queue_reply(make_msg("FILE_WANTS", them.short_id, wants=[]))
+
+    await daemon.send_file(sess.peer, src, transfer_id=transfer_id)
+
+    assert observed == [96 * 1024]
+    assert chan.sent[0]["chunks"][0]["size"] == 96 * 1024
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_file_uses_canonical_stream_eof_not_zero_length_cdc(
+    tmp_path: Path,
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    channel = _FakeChannel(
+        peer_ed_pub=them.public_bytes,
+        peer_short_id=them.short_id,
+    )
+    channel.peer_caps = {"features": [FILES, FILE_CDC]}
+    peer = Peer(
+        short_id=them.short_id,
+        hostname="them",
+        address="127.0.0.1",
+        port=12345,
+        ed_pub_hex=them.public_bytes.hex(),
+    )
+    daemon._outbound_sessions[them.fingerprint] = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=peer,
+        channel=channel,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    source = tmp_path / "empty.bin"
+    source.write_bytes(b"")
+    channel.queue_reply(make_msg("ACK", them.short_id))
+    channel.queue_reply(make_msg("ACK", them.short_id))
+
+    result = await daemon.send_file(peer, source)
+
+    offer = next(frame for frame in channel.sent if frame["t"] == "FILE_OFFER")
+    payload = next(frame for frame in channel.sent if frame["t"] == "FILE_CHUNK")
+    assert result["cdc"] is False
+    assert offer["mode"] == "stream"
+    assert "chunks" not in offer
+    assert payload["data"] == ""
+    assert payload["eof"] is True
+    terminal = state.list_transfers(limit=1)[0]
+    assert terminal.status == "failed"
+    assert terminal.metadata["delivery_state"] == "sent_unconfirmed"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_send_preparation_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    channel = _FakeChannel(
+        peer_ed_pub=them.public_bytes,
+        peer_short_id=them.short_id,
+    )
+    channel.peer_caps = {"features": [FILES]}
+    peer = Peer(
+        short_id=them.short_id,
+        hostname="them",
+        address="127.0.0.1",
+        port=12345,
+        ed_pub_hex=them.public_bytes.hex(),
+    )
+    daemon._outbound_sessions[them.fingerprint] = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=peer,
+        channel=channel,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    source = tmp_path / "slow-plan.bin"
+    source.write_bytes(b"off-loop planning")
+    real_prepare = daemon.prepare_file_for_transfer
+    preparation_threads: list[int] = []
+
+    def _slow_prepare(*args, **kwargs):
+        preparation_threads.append(threading.get_ident())
+        time.sleep(0.25)
+        return real_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(daemon, "prepare_file_for_transfer", _slow_prepare)
+    channel.queue_reply(make_msg("ACK", them.short_id))
+    channel.queue_reply(make_msg("ACK", them.short_id))
+    main_thread = threading.get_ident()
+    send_task = asyncio.create_task(daemon.send_file(peer, source))
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    await asyncio.sleep(0.03)
+
+    assert loop.time() - started < 0.12
+    assert not send_task.done()
+    await asyncio.wait_for(send_task, timeout=1.0)
+    assert preparation_threads and preparation_threads[0] != main_thread
     state.close()
 
 
@@ -696,14 +1236,10 @@ async def test_send_file_reuses_cached_file_index_without_rehashing(
     f = tmp_path / "repeat-video.bin"
     payload = b"unchanged media payload" * 1024
     f.write_bytes(payload)
-    st = f.stat()
     blob = blake3.blake3(payload).hexdigest()
     chunk_hash = blake3.blake3(payload).hexdigest()
     state.record_file_index_cache(
-        path=str(f.resolve()),
-        size=st.st_size,
-        mtime_ns=st.st_mtime_ns,
-        ctime_ns=st.st_ctime_ns,
+        **daemon._file_cache_signature(f),
         blob_hash=blob,
         index_kind="fixed",
         chunks=[{
@@ -816,6 +1352,41 @@ def test_stream_transfer_profile_scales_window_safely():
     assert big["window_chunks"] <= 16
 
 
+def test_385_mib_field_chunks_preserve_fresh_window_bytes_at_high_rtt():
+    """250 kB ratchet chunks must not turn a 4 MiB window into 1 MiB."""
+
+    size = 403_387_968
+    cadence_chunk = 250_000
+    chunk_count = (size + cadence_chunk - 1) // cadence_chunk
+    chunks = (
+        SimpleNamespace(size=cadence_chunk),
+        SimpleNamespace(size=size % cadence_chunk),
+    )
+
+    aligned = _align_cdc_pipeline_profile(
+        _stream_transfer_profile(size),
+        chunks,  # type: ignore[arg-type]
+        size=size,
+        fresh_content=True,
+    )
+
+    assert chunk_count == 1_614
+    assert aligned["chunk_size"] == cadence_chunk
+    assert aligned["window_chunks"] == 16
+    assert aligned["window_bytes"] == 4_000_000
+    assert aligned["window_bytes"] <= 4 * 1024 * 1024
+    # At the reported ~596 ms RTT, count-only clamping needed 404 ACK
+    # flights. Byte-aligned clamping needs 101: the ratchet cadence remains
+    # unchanged while the avoidable high-latency amplification disappears.
+    old_ack_flights = (chunk_count + 4 - 1) // 4
+    aligned_ack_flights = (
+        chunk_count + aligned["window_chunks"] - 1
+    ) // aligned["window_chunks"]
+    assert old_ack_flights == 404
+    assert aligned_ack_flights == 101
+    assert aligned_ack_flights * 0.596 < old_ack_flights * 0.596 / 3.9
+
+
 def test_final_stream_ack_deadline_gives_legacy_receivers_cache_grace():
     medium = _final_stream_ack_deadline(256 * 1024 * 1024)
     huge = _final_stream_ack_deadline(10 * 1024 * 1024 * 1024)
@@ -856,6 +1427,42 @@ def test_normalize_cdc_chunks_accepts_fast_fixed_chunk_size(tmp_path: Path):
     assert chunks[0]["size"] == 1024 * 1024
 
 
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        # Gap.
+        [
+            {"index": 0, "start": 0, "end": 4, "size": 4, "hash": "a" * 64},
+            {"index": 1, "start": 5, "end": 8, "size": 3, "hash": "b" * 64},
+        ],
+        # Overlap.
+        [
+            {"index": 0, "start": 0, "end": 5, "size": 5, "hash": "a" * 64},
+            {"index": 1, "start": 4, "end": 8, "size": 4, "hash": "b" * 64},
+        ],
+        # Reordered/duplicate wire index.
+        [
+            {"index": 1, "start": 0, "end": 4, "size": 4, "hash": "a" * 64},
+            {"index": 0, "start": 4, "end": 8, "size": 4, "hash": "b" * 64},
+        ],
+        # Zero-sized entry.
+        [
+            {"index": 0, "start": 0, "end": 0, "size": 0, "hash": "a" * 64},
+            {"index": 1, "start": 0, "end": 8, "size": 8, "hash": "b" * 64},
+        ],
+        # Does not cover the declared tail.
+        [
+            {"index": 0, "start": 0, "end": 7, "size": 7, "hash": "a" * 64},
+        ],
+    ],
+)
+def test_normalize_cdc_chunks_rejects_non_partition_manifests(
+    tmp_path: Path, chunks: list[dict],
+):
+    daemon = Daemon(_new_identity())
+    assert daemon._normalize_cdc_chunks(chunks, declared_size=8) is None
+
+
 @pytest.mark.asyncio
 async def test_send_file_ignores_fast_cache_for_legacy_peer(tmp_path: Path, monkeypatch):
     me = _new_identity()
@@ -872,12 +1479,8 @@ async def test_send_file_ignores_fast_cache_for_legacy_peer(tmp_path: Path, monk
     payload = b"a" * (1024 * 1024)
     f = tmp_path / "legacy-repeat.bin"
     f.write_bytes(payload)
-    st = f.stat()
     state.record_file_index_cache(
-        path=str(f.resolve()),
-        size=st.st_size,
-        mtime_ns=st.st_mtime_ns,
-        ctime_ns=st.st_ctime_ns,
+        **daemon._file_cache_signature(f),
         blob_hash=blake3.blake3(payload).hexdigest(),
         index_kind="fixed",
         chunks=[{
@@ -954,12 +1557,8 @@ async def test_send_file_upgrades_small_fixed_cache_for_modern_peer(
             "size": len(data),
             "hash": blake3.blake3(data).hexdigest(),
         })
-    st = f.stat()
     state.record_file_index_cache(
-        path=str(f.resolve()),
-        size=st.st_size,
-        mtime_ns=st.st_mtime_ns,
-        ctime_ns=st.st_ctime_ns,
+        **daemon._file_cache_signature(f),
         blob_hash=blake3.blake3(payload).hexdigest(),
         index_kind="fixed",
         chunks=old_chunks,
@@ -1015,6 +1614,7 @@ async def test_send_file_cdc_chunks_are_pipelined(tmp_path: Path, monkeypatch):
         pubkey=them.public_bytes,
     )
     state.set_peer_trust(them.fingerprint, "pinned")
+    daemon._stamp_pair_health(them.fingerprint, latency_ms=596.0)
 
     chan = _TracingFakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
     chan.peer_caps = {
@@ -1054,10 +1654,7 @@ async def test_send_file_cdc_chunks_are_pipelined(tmp_path: Path, monkeypatch):
             "hash": blake3.blake3(data).hexdigest(),
         })
     state.record_file_index_cache(
-        path=str(f.resolve()),
-        size=f.stat().st_size,
-        mtime_ns=f.stat().st_mtime_ns,
-        ctime_ns=f.stat().st_ctime_ns,
+        **daemon._file_cache_signature(f),
         blob_hash=blake3.blake3(f.read_bytes()).hexdigest(),
         index_kind="fixed",
         chunks=chunks,
@@ -1089,6 +1686,7 @@ async def test_send_file_cdc_chunks_are_pipelined(tmp_path: Path, monkeypatch):
     )
     assert row.metadata["transfer_report"]["wire_efficiency_ratio"] == 1.0
     assert row.metadata["adaptive_scheduler"]["ack_count"] == 5
+    assert row.metadata["adaptive_scheduler"]["target_ack_ms"] == 1490.0
     assert row.metadata["adaptive_scheduler"]["timeline"][0]["event"] == "start"
     assert all(not daemon._chunk_cache_path(c["hash"]).is_file() for c in chunks)
     assert state.chunks_sourced([c["hash"] for c in chunks]) == [c["hash"] for c in chunks]
@@ -1147,10 +1745,7 @@ async def test_send_file_cdc_ignores_stale_chunk_acks(tmp_path: Path, monkeypatc
             "hash": blake3.blake3(data).hexdigest(),
         })
     state.record_file_index_cache(
-        path=str(f.resolve()),
-        size=f.stat().st_size,
-        mtime_ns=f.stat().st_mtime_ns,
-        ctime_ns=f.stat().st_ctime_ns,
+        **daemon._file_cache_signature(f),
         blob_hash=blake3.blake3(f.read_bytes()).hexdigest(),
         index_kind="fixed",
         chunks=chunks,
@@ -1219,10 +1814,7 @@ async def test_send_file_cdc_uses_binary_frames_when_peer_supports_them(
         "hash": blake3.blake3(payload).hexdigest(),
     }]
     state.record_file_index_cache(
-        path=str(f.resolve()),
-        size=f.stat().st_size,
-        mtime_ns=f.stat().st_mtime_ns,
-        ctime_ns=f.stat().st_ctime_ns,
+        **daemon._file_cache_signature(f),
         blob_hash=blake3.blake3(payload).hexdigest(),
         index_kind="fixed",
         chunks=chunks,
@@ -1285,10 +1877,7 @@ async def test_send_file_cdc_keeps_json_for_stream_binary_only_peers(
     payload = b"compat-cdc-json"
     f.write_bytes(payload)
     state.record_file_index_cache(
-        path=str(f.resolve()),
-        size=f.stat().st_size,
-        mtime_ns=f.stat().st_mtime_ns,
-        ctime_ns=f.stat().st_ctime_ns,
+        **daemon._file_cache_signature(f),
         blob_hash=blake3.blake3(payload).hexdigest(),
         index_kind="fixed",
         chunks=[{
@@ -1367,10 +1956,7 @@ async def test_send_file_cdc_disables_compression_after_incompressible_chunks(
             "hash": blake3.blake3(data).hexdigest(),
         })
     state.record_file_index_cache(
-        path=str(f.resolve()),
-        size=f.stat().st_size,
-        mtime_ns=f.stat().st_mtime_ns,
-        ctime_ns=f.stat().st_ctime_ns,
+        **daemon._file_cache_signature(f),
         blob_hash=blake3.blake3(payload).hexdigest(),
         index_kind="fixed",
         chunks=chunks,
@@ -1403,10 +1989,14 @@ async def test_send_file_cdc_disables_compression_after_incompressible_chunks(
 async def test_receive_empty_cdc_wants_schedules_finish_after_reply(
     tmp_path: Path, monkeypatch
 ):
+    runtime_home = tmp_path / "cached-receive-home"
+    monkeypatch.setenv("ONE_LINK_HOME", str(runtime_home))
     me = _new_identity()
     them = _new_identity()
     state = State(db_path=tmp_path / "state.db")
     daemon = Daemon(me)
+    assert daemon._resume_metadata_root == runtime_home / "data" / "transfer_resume"
+    assert daemon._resume_registry.inbox_root == runtime_home / "data" / "inbox"
     daemon.state = state
     state.upsert_peer(
         fingerprint=them.fingerprint,
@@ -1421,7 +2011,7 @@ async def test_receive_empty_cdc_wants_schedules_finish_after_reply(
     daemon._store_chunk_cache(chunk_hash, payload, blob_hash=blob, chunk_index=0)
     scheduled: list[str] = []
 
-    def _schedule(blob_hex, peer_fp, peer_sid, src_msg):
+    def _schedule(blob_hex, peer_fp, peer_sid, src_msg, *, channel=None):
         scheduled.append(blob_hex)
 
     monkeypatch.setattr(daemon, "_schedule_finish_cdc_file", _schedule)
@@ -1455,6 +2045,7 @@ async def test_receive_empty_cdc_wants_schedules_finish_after_reply(
 async def test_receive_empty_cdc_wants_uses_durable_sources_after_cache_prune(
     tmp_path: Path, monkeypatch
 ):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
     me = _new_identity()
     them = _new_identity()
     state = State(db_path=tmp_path / "state.db")
@@ -1486,7 +2077,7 @@ async def test_receive_empty_cdc_wants_uses_durable_sources_after_cache_prune(
     monkeypatch.setattr(
         daemon,
         "_schedule_finish_cdc_file",
-        lambda blob_hex, *_args: scheduled.append(blob_hex),
+        lambda blob_hex, *_args, **_kwargs: scheduled.append(blob_hex),
     )
     chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
 
@@ -1511,7 +2102,126 @@ async def test_receive_empty_cdc_wants_uses_durable_sources_after_cache_prune(
     assert chan.sent[-1]["t"] == "FILE_WANTS"
     assert chan.sent[-1]["wants"] == []
     assert scheduled == [blob]
-    assert not daemon._chunk_cache_path(chunk_hash).is_file()
+    assert daemon._chunk_cache_path(chunk_hash).is_file()
+    assert daemon._read_chunk_cache(chunk_hash) == payload
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_cdc_finalize_cache_miss_re_requests_and_surfaces_paused_state(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Eviction between FILE_WANTS=[] and assembly is recoverable, not silent."""
+
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path / "home"))
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    cached = b"cache-still-present"
+    evicted = b"cache-evicted-before-finalize"
+    payload = cached + evicted
+    blob = blake3.blake3(payload).hexdigest()
+    cached_hash = blake3.blake3(cached).hexdigest()
+    evicted_hash = blake3.blake3(evicted).hexdigest()
+    daemon._store_chunk_cache(cached_hash, cached, blob_hash=blob, chunk_index=0)
+
+    out_path = tmp_path / "cache-race.partial"
+    handle = open(out_path, "x+b")
+    handle.truncate(len(payload))
+    transfer_id = f"in:{blob}"
+    chunks = [
+        {
+            "index": 0,
+            "start": 0,
+            "end": len(cached),
+            "size": len(cached),
+            "hash": cached_hash,
+        },
+        {
+            "index": 1,
+            "start": len(cached),
+            "end": len(payload),
+            "size": len(evicted),
+            "hash": evicted_hash,
+        },
+    ]
+    daemon._incoming_files[blob] = IncomingFile(
+        name="cache-race.bin",
+        size=len(payload),
+        blob_hex=blob,
+        out_path=out_path,
+        handle=handle,
+        hasher=blake3.blake3(),
+        cdc_chunks=chunks,
+        # The offer-time cache check believed both indices were available.
+        cdc_missing=set(),
+        cdc_parts={},
+        cdc_done_bytes=len(payload),
+        transfer_id=transfer_id,
+        acceptance_granted=True,
+    )
+    state.upsert_transfer(
+        id=transfer_id,
+        direction="in",
+        peer_fp=them.fingerprint,
+        kind="file",
+        name="cache-race.bin",
+        size=len(payload),
+        blob_hash=blob,
+        status="active",
+        progress_bytes=len(payload),
+        total_bytes=len(payload),
+        chunks_done=2,
+        chunks_total=2,
+        metadata={"mode": "cdc", "path": str(out_path)},
+    )
+    channel = _FakeChannel(
+        peer_ed_pub=them.public_bytes,
+        peer_short_id=them.short_id,
+    )
+    source_offer = make_msg(
+        "FILE_OFFER",
+        them.short_id,
+        id="offer-cache-race",
+        blob=blob,
+    )
+
+    await daemon._finish_cdc_file(
+        blob,
+        them.fingerprint,
+        them.short_id,
+        source_offer,
+        channel=channel,  # type: ignore[arg-type]
+    )
+
+    incoming = daemon._incoming_files[blob]
+    assert incoming.cdc_missing == {1}
+    assert incoming.cdc_done_bytes == len(cached)
+    assert not incoming.handle.closed
+    incoming.handle.seek(0)
+    assert incoming.handle.read(len(cached)) == cached
+    recovery = channel.sent[-1]
+    assert recovery["t"] == "FILE_WANTS"
+    assert recovery["of"] == "offer-cache-race"
+    assert recovery["wants"] == [1]
+    assert recovery["recovery"] == "cache_miss_during_finalize"
+    row = state.get_transfer(transfer_id)
+    assert row is not None
+    assert row.status == "paused"
+    assert row.progress_bytes == len(cached)
+    assert row.metadata["delivery_state"] == "recovering_cache_miss"
+    assert row.metadata["error_class"] == "ChunkCacheMiss"
+
+    incoming.handle.close()
     state.close()
 
 
@@ -1626,6 +2336,658 @@ async def test_file_offer_malformed_size_is_rejected_not_raised(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_file_offer_rejects_coercible_size_spoofs(tmp_path: Path):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
+
+    for spoofed in (True, 1.5, "1"):
+        await daemon._on_peer_message(
+            chan,
+            make_msg(
+                "FILE_OFFER",
+                them.short_id,
+                name="coercible-size.bin",
+                size=spoofed,
+                blob=secrets.token_hex(32),
+            ),
+        )
+        assert chan.sent[-1]["rejected"] == "admission_invalid_size"
+
+    assert daemon._transfer_reservation_ledger().snapshot() == ()
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_file_offer_global_reservation_released_on_abort(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    first_peer = _new_identity()
+    second_peer = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    for peer in (first_peer, second_peer):
+        state.upsert_peer(
+            fingerprint=peer.fingerprint,
+            short_id=peer.short_id,
+            pubkey=peer.public_bytes,
+        )
+        state.set_peer_trust(peer.fingerprint, "pinned")
+    daemon._transfer_admission_policy = daemon._transfer_admission_policy.__class__(
+        min_free_reserve_bytes=0,
+        free_reserve_ratio=0,
+        max_active_inbound_transfers_per_peer=3,
+        max_active_inbound_bytes_per_peer=1024,
+        max_active_inbound_transfers=1,
+        max_active_inbound_bytes=1024,
+    )
+    first_chan = _FakeChannel(
+        peer_ed_pub=first_peer.public_bytes,
+        peer_short_id=first_peer.short_id,
+    )
+    second_chan = _FakeChannel(
+        peer_ed_pub=second_peer.public_bytes,
+        peer_short_id=second_peer.short_id,
+    )
+    first_blob = blake3.blake3(b"a").hexdigest()
+    second_blob = blake3.blake3(b"b").hexdigest()
+
+    await daemon._on_peer_message(
+        first_chan,
+        make_msg(
+            "FILE_OFFER", first_peer.short_id,
+            name="first.bin", size=1, blob=first_blob,
+        ),
+    )
+    assert first_chan.sent[-1]["t"] == "ACK"
+    assert len(daemon._transfer_reservation_ledger().snapshot()) == 1
+
+    second_offer = make_msg(
+        "FILE_OFFER", second_peer.short_id,
+        name="second.bin", size=1, blob=second_blob,
+    )
+    await daemon._on_peer_message(second_chan, second_offer)
+    assert second_chan.sent[-1]["rejected"] == (
+        "admission_global_inbound_transfer_quota"
+    )
+
+    first = daemon._incoming_files[first_blob]
+    daemon._abort_incoming_file(first_blob, first)
+    assert daemon._transfer_reservation_ledger().snapshot() == ()
+
+    await daemon._on_peer_message(second_chan, second_offer)
+    assert second_chan.sent[-1]["t"] == "ACK"
+    second = daemon._incoming_files[second_blob]
+    daemon._abort_incoming_file(second_blob, second)
+    assert daemon._transfer_reservation_ledger().snapshot() == ()
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_inbound_reservation_released_when_disk_write_fails(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    daemon._transfer_admission_policy = daemon._transfer_admission_policy.__class__(
+        min_free_reserve_bytes=0,
+        free_reserve_ratio=0,
+    )
+    channel = _FakeChannel(
+        peer_ed_pub=them.public_bytes,
+        peer_short_id=them.short_id,
+    )
+    payload = b"write failure"
+    blob = blake3.blake3(payload).hexdigest()
+    await daemon._on_peer_message(
+        channel,
+        make_msg(
+            "FILE_OFFER", them.short_id,
+            name="write-fail.bin", size=len(payload), blob=blob,
+        ),
+    )
+    incoming = daemon._incoming_files[blob]
+    incoming.handle.close()
+
+    class _FailingHandle:
+        def write(self, _data):
+            raise OSError("simulated disk full")
+
+        def close(self):
+            return None
+
+    incoming.handle = _FailingHandle()  # type: ignore[assignment]
+
+    await daemon._on_peer_message(
+        channel,
+        make_msg(
+            "FILE_CHUNK",
+            them.short_id,
+            blob=blob,
+            seq=0,
+            data=base64.b64encode(payload).decode("ascii"),
+            eof=True,
+        ),
+    )
+
+    assert channel.sent[-1]["rejected"] == "receiver_disk_write_failed"
+    assert blob not in daemon._incoming_files
+    assert daemon._transfer_reservation_ledger().snapshot() == ()
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_inbound_blob_owner_cannot_be_hijacked_for_quota_or_chunks(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    owner = _new_identity()
+    interloper = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    for peer in (owner, interloper):
+        state.upsert_peer(
+            fingerprint=peer.fingerprint,
+            short_id=peer.short_id,
+            pubkey=peer.public_bytes,
+        )
+        state.set_peer_trust(peer.fingerprint, "pinned")
+    daemon._transfer_admission_policy = daemon._transfer_admission_policy.__class__(
+        min_free_reserve_bytes=0,
+        free_reserve_ratio=0,
+    )
+    owner_channel = _FakeChannel(
+        peer_ed_pub=owner.public_bytes,
+        peer_short_id=owner.short_id,
+    )
+    interloper_channel = _FakeChannel(
+        peer_ed_pub=interloper.public_bytes,
+        peer_short_id=interloper.short_id,
+    )
+    payload = b"owner-bound"
+    blob = blake3.blake3(payload).hexdigest()
+    await daemon._on_peer_message(
+        owner_channel,
+        make_msg(
+            "FILE_OFFER", owner.short_id,
+            name="owned.bin", size=len(payload), blob=blob,
+        ),
+    )
+
+    await daemon._on_peer_message(
+        interloper_channel,
+        make_msg(
+            "FILE_OFFER", interloper.short_id,
+            name="same-hash.bin", size=len(payload), blob=blob,
+        ),
+    )
+    assert interloper_channel.sent[-1]["rejected"] == (
+        "admission_blob_in_use_by_another_peer"
+    )
+    await daemon._on_peer_message(
+        interloper_channel,
+        make_msg(
+            "FILE_CHUNK",
+            interloper.short_id,
+            blob=blob,
+            seq=0,
+            data=base64.b64encode(payload).decode("ascii"),
+            eof=True,
+        ),
+    )
+    assert interloper_channel.sent[-1]["rejected"] == (
+        "file_transfer_owner_mismatch"
+    )
+    assert daemon._incoming_files[blob].peer_fp == owner.fingerprint
+    reservations = daemon._transfer_reservation_ledger().snapshot()
+    assert len(reservations) == 1
+    assert reservations[0].peer_fp == owner.fingerprint
+    daemon._abort_incoming_file(blob, daemon._incoming_files[blob])
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_stream_offer_retry_reuses_empty_writer_then_restarts_without_leak(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    daemon._transfer_admission_policy = daemon._transfer_admission_policy.__class__(
+        min_free_reserve_bytes=0,
+        free_reserve_ratio=0,
+    )
+    channel = _FakeChannel(
+        peer_ed_pub=them.public_bytes,
+        peer_short_id=them.short_id,
+    )
+    payload = b"restart a legacy stream safely"
+    first_part = payload[:11]
+    blob = blake3.blake3(payload).hexdigest()
+
+    def _offer(name: str = "original.bin") -> dict:
+        return make_msg(
+            "FILE_OFFER",
+            them.short_id,
+            name=name,
+            size=len(payload),
+            blob=blob,
+        )
+
+    await daemon._on_peer_message(channel, _offer())
+    initial = daemon._incoming_files[blob]
+    initial_path = initial.out_path
+    inbound_transfer_id = initial.transfer_id
+
+    # A retry before byte zero is the same transfer and must not allocate a
+    # second path/handle or accept a sender-provided rename.
+    await daemon._on_peer_message(channel, _offer())
+    assert daemon._incoming_files[blob] is initial
+    assert daemon._incoming_files[blob].name == "original.bin"
+    assert len(daemon._transfer_reservation_ledger().snapshot()) == 1
+
+    await daemon._on_peer_message(
+        channel,
+        make_msg(
+            "FILE_CHUNK",
+            them.short_id,
+            blob=blob,
+            seq=0,
+            data=base64.b64encode(first_part).decode("ascii"),
+            eof=False,
+        ),
+    )
+    before_retry = daemon._transfer_reservation_ledger().get(inbound_transfer_id)
+    assert before_retry is not None
+    assert before_retry.remaining_bytes == len(payload) - len(first_part)
+
+    # Legacy stream mode has no offset manifest. A reconnect after progress
+    # restarts from zero, closes and removes the superseded partial, and
+    # restores a full reservation for the replacement writer.
+    await daemon._on_peer_message(channel, _offer())
+    replacement = daemon._incoming_files[blob]
+    assert replacement is not initial
+    assert replacement.name == "original.bin"
+    assert initial.handle.closed
+    assert not initial_path.exists()
+    reservation = daemon._transfer_reservation_ledger().get(inbound_transfer_id)
+    assert reservation is not None
+    assert reservation.remaining_bytes == len(payload)
+
+    await daemon._on_peer_message(
+        channel,
+        make_msg(
+            "FILE_CHUNK",
+            them.short_id,
+            blob=blob,
+            seq=0,
+            data=base64.b64encode(payload).decode("ascii"),
+            eof=True,
+        ),
+    )
+    assert blob not in daemon._incoming_files
+    assert replacement.out_path.read_bytes() == payload
+    assert daemon._transfer_reservation_ledger().snapshot() == ()
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_cached_chunks_cannot_spoof_destination_disk_reservation(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "one_link.transfer_safety._disk_free_bytes",
+        lambda _path: 100,
+    )
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    daemon._transfer_admission_policy = daemon._transfer_admission_policy.__class__(
+        min_free_reserve_bytes=10,
+        free_reserve_ratio=0,
+    )
+    payload = b"x" * 100
+    blob = blake3.blake3(payload).hexdigest()
+    daemon._store_chunk_cache(blob, payload, blob_hash=blob, chunk_index=0)
+    channel = _FakeChannel(
+        peer_ed_pub=them.public_bytes,
+        peer_short_id=them.short_id,
+    )
+
+    await daemon._on_peer_message(
+        channel,
+        make_msg(
+            "FILE_OFFER",
+            them.short_id,
+            name="cache-hit.bin",
+            size=len(payload),
+            blob=blob,
+            chunks=[{
+                "index": 0,
+                "start": 0,
+                "end": len(payload),
+                "size": len(payload),
+                "hash": blob,
+            }],
+        ),
+    )
+
+    assert channel.sent[-1]["rejected"] == "admission_insufficient_disk_space"
+    assert blob not in daemon._incoming_files
+    assert daemon._transfer_reservation_ledger().snapshot() == ()
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_cdc_admission_reserves_and_consumes_cache_plus_output(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    daemon._transfer_admission_policy = daemon._transfer_admission_policy.__class__(
+        min_free_reserve_bytes=0,
+        free_reserve_ratio=0,
+    )
+    monkeypatch.setattr(daemon, "_schedule_finish_cdc_file", lambda *_a, **_k: None)
+    payload = b"cache and destination"
+    blob = blake3.blake3(payload).hexdigest()
+    channel = _FakeChannel(
+        peer_ed_pub=them.public_bytes,
+        peer_short_id=them.short_id,
+    )
+    await daemon._on_peer_message(
+        channel,
+        make_msg(
+            "FILE_OFFER",
+            them.short_id,
+            name="dual.bin",
+            size=len(payload),
+            blob=blob,
+            chunks=[{
+                "index": 0,
+                "start": 0,
+                "end": len(payload),
+                "size": len(payload),
+                "hash": blob,
+            }],
+        ),
+    )
+    reservation = daemon._transfer_reservation_ledger().snapshot()[0]
+    assert reservation.remaining_bytes == 2 * len(payload)
+
+    await daemon._on_peer_message(
+        channel,
+        make_msg(
+            "FILE_CDC_CHUNK",
+            them.short_id,
+            blob=blob,
+            index=0,
+            data=base64.b64encode(payload).decode("ascii"),
+        ),
+    )
+
+    reservation = daemon._transfer_reservation_ledger().snapshot()[0]
+    assert reservation.remaining_bytes == 0
+    daemon._abort_incoming_file(blob, daemon._incoming_files[blob])
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_cdc_cache_eviction_atomically_expands_storage_promise(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    daemon._transfer_admission_policy = daemon._transfer_admission_policy.__class__(
+        min_free_reserve_bytes=0,
+        free_reserve_ratio=0,
+    )
+    monkeypatch.setattr(daemon, "_schedule_finish_cdc_file", lambda *_a, **_k: None)
+    payload = b"evicted after offer"
+    blob = blake3.blake3(payload).hexdigest()
+    daemon._store_chunk_cache(blob, payload, blob_hash=blob, chunk_index=0)
+    channel = _FakeChannel(
+        peer_ed_pub=them.public_bytes,
+        peer_short_id=them.short_id,
+    )
+    offer = make_msg(
+        "FILE_OFFER",
+        them.short_id,
+        id="eviction-offer",
+        name="eviction.bin",
+        size=len(payload),
+        blob=blob,
+        chunks=[{
+            "index": 0,
+            "start": 0,
+            "end": len(payload),
+            "size": len(payload),
+            "hash": blob,
+        }],
+    )
+    await daemon._on_peer_message(channel, offer)
+    assert daemon._transfer_reservation_ledger().snapshot()[0].remaining_bytes == (
+        len(payload)
+    )
+    daemon._chunk_cache_path(blob).unlink()
+
+    await daemon._finish_cdc_file(
+        blob,
+        them.fingerprint,
+        them.short_id,
+        offer,
+        channel=channel,  # type: ignore[arg-type]
+    )
+
+    incoming = daemon._incoming_files[blob]
+    assert incoming.cdc_missing == {0}
+    assert daemon._transfer_reservation_ledger().snapshot()[0].remaining_bytes == (
+        2 * len(payload)
+    )
+    assert channel.sent[-1]["t"] == "FILE_WANTS"
+    assert channel.sent[-1]["wants"] == [0]
+    daemon._abort_incoming_file(blob, incoming)
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_cdc_uses_independent_ledgers_for_separate_cache_volume(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    monkeypatch.setattr("one_link.daemon.same_storage_volume", lambda *_a: False)
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    daemon._transfer_admission_policy = daemon._transfer_admission_policy.__class__(
+        min_free_reserve_bytes=0,
+        free_reserve_ratio=0,
+    )
+    monkeypatch.setattr(daemon, "_schedule_finish_cdc_file", lambda *_a, **_k: None)
+    payload = b"two physical volumes"
+    blob = blake3.blake3(payload).hexdigest()
+    channel = _FakeChannel(
+        peer_ed_pub=them.public_bytes,
+        peer_short_id=them.short_id,
+    )
+    await daemon._on_peer_message(
+        channel,
+        make_msg(
+            "FILE_OFFER",
+            them.short_id,
+            name="split-volume.bin",
+            size=len(payload),
+            blob=blob,
+            chunks=[{
+                "index": 0,
+                "start": 0,
+                "end": len(payload),
+                "size": len(payload),
+                "hash": blob,
+            }],
+        ),
+    )
+    primary = daemon._transfer_reservation_ledger()
+    cache = daemon._cache_reservation_ledger()
+    assert cache is not primary
+    assert primary.snapshot()[0].remaining_bytes == len(payload)
+    assert cache.snapshot()[0].remaining_bytes == len(payload)
+
+    await daemon._on_peer_message(
+        channel,
+        make_msg(
+            "FILE_CDC_CHUNK",
+            them.short_id,
+            blob=blob,
+            index=0,
+            data=base64.b64encode(payload).decode("ascii"),
+        ),
+    )
+    assert primary.snapshot()[0].remaining_bytes == 0
+    assert cache.snapshot()[0].remaining_bytes == 0
+    daemon._abort_incoming_file(blob, daemon._incoming_files[blob])
+    assert primary.snapshot() == ()
+    assert cache.snapshot() == ()
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_cache_volume_admission_failure_rolls_back_inbox_promise(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    monkeypatch.setattr("one_link.daemon.same_storage_volume", lambda *_a: False)
+    monkeypatch.setattr(
+        "one_link.transfer_safety._disk_free_bytes",
+        lambda path: 0 if Path(path).name == "file_chunks" else 1_000_000,
+    )
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+    daemon._transfer_admission_policy = daemon._transfer_admission_policy.__class__(
+        min_free_reserve_bytes=0,
+        free_reserve_ratio=0,
+    )
+    payload = b"cache disk full"
+    blob = blake3.blake3(payload).hexdigest()
+    channel = _FakeChannel(
+        peer_ed_pub=them.public_bytes,
+        peer_short_id=them.short_id,
+    )
+
+    await daemon._on_peer_message(
+        channel,
+        make_msg(
+            "FILE_OFFER",
+            them.short_id,
+            name="cache-full.bin",
+            size=len(payload),
+            blob=blob,
+            chunks=[{
+                "index": 0,
+                "start": 0,
+                "end": len(payload),
+                "size": len(payload),
+                "hash": blob,
+            }],
+        ),
+    )
+
+    assert channel.sent[-1]["rejected"] == "admission_insufficient_disk_space"
+    assert blob not in daemon._incoming_files
+    assert daemon._transfer_reservation_ledger().snapshot() == ()
+    assert daemon._cache_reservation_ledger().snapshot() == ()
+    state.close()
+
+
+@pytest.mark.asyncio
 async def test_file_offer_malformed_chunk_map_is_rejected_not_stream_downgraded(
     tmp_path: Path,
 ):
@@ -1705,6 +3067,7 @@ async def test_bad_cdc_chunk_is_rejected_and_partial_file_removed(tmp_path: Path
     )
     assert chan.sent[-1]["t"] == "FILE_WANTS"
     assert blob in daemon._incoming_files
+    inbound_transfer_id = daemon._incoming_files[blob].transfer_id
 
     await daemon._on_peer_message(
         chan,
@@ -1720,7 +3083,7 @@ async def test_bad_cdc_chunk_is_rejected_and_partial_file_removed(tmp_path: Path
     assert chan.sent[-1]["t"] == "ACK"
     assert chan.sent[-1]["rejected"] == "bad_cdc_chunk_index"
     assert blob not in daemon._incoming_files
-    assert state.get_transfer(f"in:{blob}").status == "failed"
+    assert state.get_transfer(inbound_transfer_id).status == "failed"
     state.close()
 
 
@@ -1787,6 +3150,115 @@ async def test_send_file_stream_pipelines_bounded_ack_window(
     )
     assert row.metadata["adaptive_scheduler"]["ack_count"] == 5
     assert row.metadata["adaptive_scheduler"]["timeline"][0]["event"] == "start"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_native_stream_clamps_adaptive_chunks_and_metadata_to_aead_limit(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A multi-MiB adaptive profile cannot overflow a native AEAD record."""
+
+    from one_link.native_transfer import MAX_CHUNK_PLAINTEXT_LEN
+
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, "pinned")
+
+    class _NativeRecorder:
+        def __init__(self) -> None:
+            self.plaintext_lengths: list[int] = []
+
+        def encrypt_chunk_bytes(self, data: bytes, *, address_kind: str):
+            assert address_kind in {"raw", "convergent"}
+            # This assertion is the native envelope's production contract.
+            assert len(data) <= MAX_CHUNK_PLAINTEXT_LEN
+            index = len(self.plaintext_lengths)
+            self.plaintext_lengths.append(len(data))
+            return SimpleNamespace(
+                chunk_index=index,
+                chunk_id=bytes([index + 1]) * 32,
+                plaintext_len=len(data),
+                ciphertext=b"encrypted:" + data,
+            )
+
+    native_session = _NativeRecorder()
+    channel = _TracingFakeChannel(
+        peer_ed_pub=them.public_bytes,
+        peer_short_id=them.short_id,
+    )
+    channel.peer_caps = {
+        "protocol": "OL1.2",
+        "features": [CHAT, FILES, NATIVE_TRANSFER_INDEXED_V1],
+        "from": them.short_id,
+        "app_version": "0.21.0",
+    }
+    channel.get_or_create_native_transfer_session = lambda: native_session  # type: ignore[attr-defined]
+    session = OutboundSession(
+        peer_fp=them.fingerprint,
+        peer=Peer(
+            short_id=them.short_id,
+            hostname="them",
+            address="127.0.0.1",
+            port=12345,
+            ed_pub_hex=them.public_bytes.hex(),
+        ),
+        channel=channel,  # type: ignore[arg-type]
+        lock=asyncio.Lock(),
+        last_used=time.time(),
+        regime="lan",
+    )
+    daemon._outbound_sessions[them.fingerprint] = session
+    monkeypatch.setattr(
+        "one_link.daemon.adapt_pipeline_profile",
+        lambda _profile, _decision: {
+            "chunk_size": 1024 * 1024,
+            "window_chunks": 2,
+            "window_bytes": 2 * 1024 * 1024,
+            "reason": "test_oversized_native_profile",
+        },
+    )
+
+    source = tmp_path / "native-profile.bin"
+    source.write_bytes(os.urandom(MAX_CHUNK_PLAINTEXT_LEN * 2 + 17))
+    channel.queue_reply(make_msg("ACK", them.short_id))
+    for _ in range(3):
+        channel.queue_reply(make_msg("ACK", them.short_id))
+
+    result = await daemon.send_file(session.peer, source)
+
+    native_chunks = [
+        frame for frame in channel.sent
+        if frame.get("t") == "FILE_NATIVE_CHUNK"
+    ]
+    assert result["chunks"] == 3
+    assert native_session.plaintext_lengths == [
+        MAX_CHUNK_PLAINTEXT_LEN,
+        MAX_CHUNK_PLAINTEXT_LEN,
+        17,
+    ]
+    assert [frame["plaintext_len"] for frame in native_chunks] == (
+        native_session.plaintext_lengths
+    )
+    row = state.list_transfers(limit=1)[0]
+    tuning = row.metadata["pipeline_tuning"]
+    assert row.metadata["stream_chunk_size"] == MAX_CHUNK_PLAINTEXT_LEN
+    assert tuning["chunk_size"] == MAX_CHUNK_PLAINTEXT_LEN
+    assert tuning["native_chunk_max_bytes"] == MAX_CHUNK_PLAINTEXT_LEN
+    assert tuning["native_chunk_size_capped"] is True
+    assert tuning["window_bytes"] == (
+        tuning["window_chunks"] * tuning["chunk_size"]
+    )
+    assert row.metadata["stream_window_bytes"] == tuning["window_bytes"]
     state.close()
 
 
@@ -1929,6 +3401,7 @@ async def test_stream_receiver_acks_final_chunk_before_cache_warm(
         fingerprint=them.fingerprint, short_id=them.short_id,
         pubkey=them.public_bytes,
     )
+    state.set_peer_trust(them.fingerprint, "pinned")
 
     content = b"final ack must not wait for chunk cache"
     blob = blake3.blake3(content).hexdigest()
@@ -1961,7 +3434,7 @@ async def test_stream_receiver_acks_final_chunk_before_cache_warm(
     chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
     cache_checked: list[bool] = []
 
-    def _cache_after_ack(path: Path) -> None:
+    def _cache_after_ack(path: Path, **_kwargs) -> None:
         assert any(
             m.get("t") == "ACK" and m.get("of") == "final-chunk"
             for m in chan.sent
@@ -2001,6 +3474,7 @@ async def test_binary_stream_receiver_writes_raw_payload_and_acks(
         fingerprint=them.fingerprint, short_id=them.short_id,
         pubkey=them.public_bytes,
     )
+    state.set_peer_trust(them.fingerprint, "pinned")
 
     content = b"raw payload no base64"
     blob = blake3.blake3(content).hexdigest()
@@ -2031,7 +3505,9 @@ async def test_binary_stream_receiver_writes_raw_payload_and_acks(
         transfer_id=transfer_id,
     )
     chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
-    monkeypatch.setattr(daemon, "_cache_file_chunks", lambda path: None)
+    monkeypatch.setattr(
+        daemon, "_cache_file_chunks", lambda path, **_kwargs: None,
+    )
 
     await daemon._on_peer_message(
         chan,
@@ -2069,6 +3545,7 @@ async def test_stream_receiver_batches_chunk_acks_when_sender_opts_in(
         short_id=them.short_id,
         pubkey=them.public_bytes,
     )
+    state.set_peer_trust(them.fingerprint, "pinned")
 
     chunks = [b"aa", b"bb", b"cc"]
     content = b"".join(chunks)
@@ -2100,7 +3577,9 @@ async def test_stream_receiver_batches_chunk_acks_when_sender_opts_in(
         transfer_id=transfer_id,
     )
     chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
-    monkeypatch.setattr(daemon, "_cache_file_chunks", lambda path: None)
+    monkeypatch.setattr(
+        daemon, "_cache_file_chunks", lambda path, **_kwargs: None,
+    )
 
     for seq, data in enumerate(chunks[:2]):
         await daemon._on_peer_message(
@@ -2154,6 +3633,7 @@ async def test_cdc_final_chunk_ack_schedules_finish_without_blocking(
         fingerprint=them.fingerprint, short_id=them.short_id,
         pubkey=them.public_bytes,
     )
+    state.set_peer_trust(them.fingerprint, "pinned")
 
     content = b"cdc final ack must not wait for file rebuild"
     blob = blake3.blake3(content).hexdigest()
@@ -2197,7 +3677,14 @@ async def test_cdc_final_chunk_ack_schedules_finish_without_blocking(
     chan = _FakeChannel(peer_ed_pub=them.public_bytes, peer_short_id=them.short_id)
     scheduled: list[str] = []
 
-    def _schedule(blob_arg: str, peer_fp: str, peer_sid: str, src_msg: dict) -> None:
+    def _schedule(
+        blob_arg: str,
+        peer_fp: str,
+        peer_sid: str,
+        src_msg: dict,
+        *,
+        channel=None,
+    ) -> None:
         assert any(
             m.get("t") == "ACK" and m.get("of") == "cdc-final"
             for m in chan.sent
@@ -2240,6 +3727,7 @@ async def test_cdc_receive_accepts_binary_payload_frame(tmp_path: Path, monkeypa
         short_id=them.short_id,
         pubkey=them.public_bytes,
     )
+    state.set_peer_trust(them.fingerprint, "pinned")
 
     content = b"binary cdc payload without base64"
     blob = blake3.blake3(content).hexdigest()
@@ -2285,7 +3773,7 @@ async def test_cdc_receive_accepts_binary_payload_frame(tmp_path: Path, monkeypa
     monkeypatch.setattr(
         daemon,
         "_schedule_finish_cdc_file",
-        lambda blob_arg, *_args: scheduled.append(blob_arg),
+        lambda blob_arg, *_args, **_kwargs: scheduled.append(blob_arg),
     )
 
     await daemon._on_peer_message(

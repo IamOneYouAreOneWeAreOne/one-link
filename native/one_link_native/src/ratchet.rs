@@ -36,7 +36,7 @@ impl PyChain {
     /// Advance the chain and return the message key for the current step.
     fn next_message_key<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyBytes> {
         let mk = self.inner.next_message_key();
-        PyBytes::new_bound(py, &mk[..])
+        PyBytes::new(py, &mk[..])
     }
 
     /// Fast-forward the chain to `target_step` without emitting keys.
@@ -56,7 +56,7 @@ impl PyChain {
             .inner
             .peek_message_key(target_step)
             .map_err(ratchet_err_to_py)?;
-        Ok(PyBytes::new_bound(py, &mk[..]))
+        Ok(PyBytes::new(py, &mk[..]))
     }
 
     fn __repr__(&self) -> String {
@@ -110,7 +110,7 @@ impl PySkippedKeyStore {
     /// Pop the key for `step`. Raises if not found.
     fn take<'py>(&mut self, py: Python<'py>, step: u64) -> PyResult<Bound<'py, PyBytes>> {
         let mk = self.inner.take(step).map_err(ratchet_err_to_py)?;
-        Ok(PyBytes::new_bound(py, &mk[..]))
+        Ok(PyBytes::new(py, &mk[..]))
     }
 
     /// Drop any keys older than `min_step`.
@@ -120,7 +120,7 @@ impl PySkippedKeyStore {
 }
 
 fn ratchet_err_to_py(err: RatchetError) -> PyErr {
-    crate::errors::OlRatchetError::new_err(err.to_string())
+    crate::errors::OlRatchetError::new_err(crate::errors::owned_error_message(err))
 }
 
 /// Register the `ratchet` submodule.

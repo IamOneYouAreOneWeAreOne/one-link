@@ -20,7 +20,7 @@ fn bridge_detector_flags_injected_partition_in_one_round() {
     // of a partition risk).
     let nodes: Vec<String> = ["a1", "a2", "a3", "B", "c1", "c2", "c3"]
         .iter()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
     let edges: Vec<(String, String)> = vec![
         // Left clique (a1, a2, a3) all co-hold; every left node also
@@ -47,7 +47,7 @@ fn bridge_detector_flags_injected_partition_in_one_round() {
     // Non-bridge nodes inside cliques should not be flagged.
     for chunk in &["a1", "a2", "a3", "c1", "c2", "c3"] {
         let s = report.scores.iter().find(|s| s.chunk_id == *chunk).unwrap();
-        assert!(!s.is_bridge, "{} should NOT be a bridge", chunk);
+        assert!(!s.is_bridge, "{chunk} should NOT be a bridge");
     }
 }
 
@@ -63,7 +63,7 @@ fn bridge_detector_false_positive_rate_below_5_percent() {
         // Deterministic 4-regular graph: circulant C_8(1, 2).
         // Every node i is connected to i±1 (mod 8) and i±2 (mod 8).
         let n_nodes = 8;
-        let nodes: Vec<String> = (0..n_nodes).map(|i| format!("n{}_{}", trial, i)).collect();
+        let nodes: Vec<String> = (0..n_nodes).map(|i| format!("n{trial}_{i}")).collect();
         let mut edges: Vec<(String, String)> = Vec::new();
         for i in 0..n_nodes {
             for offset in [1, 2] {
@@ -78,7 +78,7 @@ fn bridge_detector_false_positive_rate_below_5_percent() {
             false_positives += 1;
         }
     }
-    let fp_rate = false_positives as f64 / n_trials as f64;
+    let fp_rate = f64::from(false_positives) / f64::from(n_trials);
     assert!(
         fp_rate <= 0.05,
         "Phase D gate: bridge-detector FP rate ≤5% on 4-regular graphs; got {:.2}%",

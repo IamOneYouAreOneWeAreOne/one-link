@@ -8,6 +8,7 @@ byte-identical reconstruction.
 
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path
 
@@ -103,9 +104,8 @@ def test_chunk_id_swap_caught_by_aead_aad_binding():
     """The AEAD tag binds ``chunk_id`` as AAD: decrypting a record
     whose ``chunk_id`` was rewritten to point at a DIFFERENT chunk's
     ciphertext + length raises ``OlAeadError`` before any plaintext
-    is exposed. This is what lets us drop the explicit Python-level
-    BLAKE3 recompute on receive (a full hash pass per chunk that was
-    pure overhead given the AAD binding)."""
+    is exposed. The independent content-address check covers the distinct
+    case where a malicious sender generates a valid tag for a false ID."""
     from one_link import native_transfer
 
     sender, receiver = native_transfer.establish_session_pair()
@@ -125,7 +125,7 @@ def test_chunk_id_swap_caught_by_aead_aad_binding():
 
 def test_corrupted_ciphertext_caught_by_aead_tag():
     """Bit-flip in the ciphertext fails the AEAD tag check.
-    Necessary regression cover for dropping the BLAKE3 recompute."""
+    This remains independent of mandatory content-address verification."""
     from one_link import native_transfer
 
     sender, receiver = native_transfer.establish_session_pair()
@@ -144,8 +144,7 @@ def test_corrupted_ciphertext_caught_by_aead_tag():
 
 def test_corrupted_chunk_id_caught_by_aead_aad():
     """Bit-flip in the chunk_id (the AAD) fails the AEAD tag check.
-    This is the primitive that makes the post-decrypt BLAKE3 verify
-    redundant."""
+    The content-address check additionally covers authenticated false IDs."""
     from one_link import native_transfer
 
     sender, receiver = native_transfer.establish_session_pair()
@@ -160,6 +159,37 @@ def test_corrupted_chunk_id_caught_by_aead_aad():
     )
     with pytest.raises(Exception):
         receiver.decrypt_chunk(swapped)
+
+
+def test_authenticated_false_chunk_id_is_rejected_before_cache_poisoning():
+    """A paired sender can authenticate arbitrary AAD with its traffic key.
+
+    AEAD alone cannot prove ``chunk_id == address(plaintext)``. The receiver
+    must reject a correctly encrypted record carrying a false address before
+    a chunk store or swarm cache can persist it.
+    """
+    from one_link import native_transfer
+
+    sender, receiver = native_transfer.establish_session_pair()
+    record = sender.encrypt_chunk_bytes(
+        b"attacker-selected bytes",
+        chunk_id=b"\xa5" * 32,
+    )
+
+    with pytest.raises(ValueError, match="not a content address"):
+        receiver.decrypt_chunk(record)
+
+
+def test_convergent_content_address_passes_mandatory_receive_verification(tmp_path):
+    from one_link import native_transfer
+
+    sender, receiver = native_transfer.establish_session_pair()
+    payload = os.urandom(300 * 1024)
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(payload)
+
+    records = list(sender.encrypt_file(media))
+    assert receiver.decrypt_records_to_bytes(records) == payload
 
 
 def test_small_file_uses_single_chunk_fast_path(tmp_path):
@@ -216,6 +246,65 @@ def test_chunk_store_persistence_round_trip(tmp_path):
         assert cs.has_chunk(r.chunk_id), f"chunk {r.chunk_id.hex()[:16]} missing"
 
 
+def test_chunk_store_lookup_failure_degrades_without_stalling_transfer(caplog):
+    from one_link import native_transfer
+
+    sender, _receiver = native_transfer.establish_session_pair()
+    record = sender.encrypt_chunk_bytes(b"still deliver this chunk")
+
+    class UnavailableStore:
+        def has_chunk(self, _chunk_id):
+            raise OSError("chunk index unavailable")
+
+    sender._store = UnavailableStore()
+    with caplog.at_level("WARNING", logger="one_link.native_transfer"):
+        sender._maybe_store(record)
+
+    assert len(sender._store_failures) == 1
+    assert "chunk index unavailable" in sender._store_failures[0]["reason"]
+    assert "native chunk-store" in caplog.text
+
+
+def test_chunk_store_programming_failure_is_not_misreported_as_degradation():
+    from one_link import native_transfer
+
+    sender, _receiver = native_transfer.establish_session_pair()
+    record = sender.encrypt_chunk_bytes(b"surface local implementation bugs")
+
+    class BrokenStore:
+        def has_chunk(self, _chunk_id):
+            raise TypeError("bad store adapter")
+
+    sender._store = BrokenStore()
+    with pytest.raises(TypeError, match="bad store adapter"):
+        sender._maybe_store(record)
+
+
+def test_streaming_source_truncation_is_reported_instead_of_silent_eof(
+    tmp_path, monkeypatch,
+):
+    from one_link import native_transfer
+
+    sender, _receiver = native_transfer.establish_session_pair()
+    sender.SINGLE_CHUNK_FAST_PATH_MAX = 1024
+    sender.STREAMING_THRESHOLD = 2048
+    sender.FIXED_CHUNK_SIZE = 1024
+    path = tmp_path / "changing.bin"
+    payload = os.urandom(4096)
+    path.write_bytes(payload)
+    real_open = Path.open
+
+    def truncated_open(self, *args, **kwargs):
+        if self == path and args and args[0] == "rb":
+            return io.BytesIO(payload[:2048])
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", truncated_open)
+
+    with pytest.raises(OSError, match="changed or was truncated"):
+        list(sender.encrypt_file(path))
+
+
 def test_session_from_shared_secret_path(tmp_path):
     """Direct construction from a 32-byte shared secret — the call
     shape the daemon will use once channel.py wires this in."""
@@ -230,6 +319,101 @@ def test_session_from_shared_secret_path(tmp_path):
     records = list(sender.encrypt_file(p))
     recovered = receiver.decrypt_records_to_bytes(records)
     assert recovered == payload
+
+
+def test_shared_secret_default_cipher_is_protocol_fixed_chacha():
+    from one_link import native_transfer
+
+    session = native_transfer.session_from_shared_secret(b"\x55" * 32)
+    assert session.aead_kind == "chacha"
+
+
+def test_directional_derivation_is_deterministic_separated_and_context_bound():
+    from one_link import native_transfer
+
+    root = b"\x41" * 32
+    transcript = b"\x42" * 32
+    i_to_r, r_to_i = native_transfer.derive_directional_secrets(
+        root,
+        transcript_hash=transcript,
+    )
+    repeated = native_transfer.derive_directional_secrets(
+        root,
+        transcript_hash=transcript,
+    )
+    other_channel = native_transfer.derive_directional_secrets(
+        root,
+        transcript_hash=b"\x43" * 32,
+    )
+
+    assert (i_to_r, r_to_i) == repeated
+    assert i_to_r != r_to_i
+    assert (i_to_r, r_to_i) != other_channel
+    assert len(i_to_r) == len(r_to_i) == 32
+
+
+@pytest.mark.parametrize(
+    ("root", "transcript", "message"),
+    [
+        (b"short", b"\x42" * 32, "root_secret"),
+        (b"\x41" * 32, b"short", "transcript_hash"),
+    ],
+)
+def test_directional_derivation_rejects_malformed_inputs(root, transcript, message):
+    from one_link import native_transfer
+
+    with pytest.raises(ValueError, match=message):
+        native_transfer.derive_directional_secrets(
+            root,
+            transcript_hash=transcript,
+        )
+
+
+def test_duplex_factory_rejects_same_direction_secret():
+    from one_link import native_transfer
+
+    with pytest.raises(ValueError, match="must be distinct"):
+        native_transfer.duplex_session_from_directional_secrets(
+            b"\x77" * 32,
+            b"\x77" * 32,
+        )
+
+
+def test_decrypt_rejects_huge_index_without_advancing_ratchet():
+    from one_link import native_transfer
+
+    sender, receiver = native_transfer.establish_session_pair()
+    honest = sender.encrypt_chunk_bytes(b"bounded native record")
+    malicious = native_transfer.NativeChunkRecord(
+        chunk_id=honest.chunk_id,
+        chunk_index=2**63,
+        plaintext_len=honest.plaintext_len,
+        ciphertext=honest.ciphertext,
+    )
+    before = receiver._ratchet.current_index
+    with pytest.raises(ValueError, match="receive window"):
+        receiver.decrypt_chunk(malicious)
+    assert receiver._ratchet.current_index == before
+    assert receiver.decrypt_chunk(honest) == b"bounded native record"
+
+
+def test_bad_tag_at_current_index_does_not_advance_ratchet():
+    from one_link import native_transfer
+
+    sender, receiver = native_transfer.establish_session_pair()
+    honest = sender.encrypt_chunk_bytes(b"ratchet commit after tag")
+    corrupt = bytearray(honest.ciphertext)
+    corrupt[-1] ^= 1
+    forged = native_transfer.NativeChunkRecord(
+        chunk_id=honest.chunk_id,
+        chunk_index=honest.chunk_index,
+        plaintext_len=honest.plaintext_len,
+        ciphertext=bytes(corrupt),
+    )
+    with pytest.raises(Exception):
+        receiver.decrypt_chunk(forged)
+    assert receiver._ratchet.current_index == 0
+    assert receiver.decrypt_chunk(honest) == b"ratchet commit after tag"
 
 
 def test_rejects_short_shared_secret():

@@ -1,4 +1,4 @@
-//! Property tests for ol_threshold_recovery.
+//! Property tests for `ol_threshold_recovery`.
 //!
 //! Gate ladder (matches Phase C / D conventions):
 //!   - Default CI cadence: 100k plain-Shamir + 20k field-bound +
@@ -17,8 +17,7 @@ use ol_threshold_recovery::shamir::{reconstruct_bytes, share_bytes};
 
 fn nightly_gate() -> bool {
     std::env::var("ONE_LINK_F1_GATE")
-        .map(|v| v == "1" || v.to_lowercase() == "true")
-        .unwrap_or(false)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
 fn plain_cases() -> u32 {
@@ -69,7 +68,8 @@ proptest! {
         let mut st = PrngState::new(seed);
         let streams = share_bytes(&secret, k, n, &mut st).unwrap();
         // Pick K shares (the first K — they're all equivalent).
-        let xs: Vec<u8> = (1..=k as u8).collect();
+        let k_u8 = u8::try_from(k).expect("generated threshold fits in u8");
+        let xs: Vec<u8> = (1..=k_u8).collect();
         let refs: Vec<&[u8]> = streams[..k as usize]
             .iter()
             .map(Vec::as_slice)
@@ -104,7 +104,11 @@ proptest! {
         // proptest is reproducible per case.
         let mut score_prng = PrngState::new(score_seed);
         let holder_scores: Vec<f64> = (0..n)
-            .map(|_| score_prng.next_u64() as f64 / (u64::MAX as f64))
+            .map(|_| {
+                let high_word = u32::try_from(score_prng.next_u64() >> 32)
+                    .expect("shifted random word fits in u32");
+                f64::from(high_word) / f64::from(u32::MAX)
+            })
             .collect();
         let witness = FieldWitness {
             field_seed,
@@ -114,7 +118,8 @@ proptest! {
         let mut st = PrngState::new(seed);
         let masked = field_bound_split(&secret, k, n, &mut st, &witness)
             .expect("split");
-        let xs: Vec<u8> = (1..=k as u8).collect();
+        let k_u8 = u8::try_from(k).expect("generated threshold fits in u8");
+        let xs: Vec<u8> = (1..=k_u8).collect();
         let supplied: Vec<&[u8]> =
             masked[..k as usize].iter().map(Vec::as_slice).collect();
         let indices: Vec<usize> = (0..k as usize).collect();

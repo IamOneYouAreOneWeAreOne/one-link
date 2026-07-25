@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "tool": {
+    "name": "tla2tools",
+    "version": "1.7.4",
+    "sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+    "url": "https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar"
+  },
+  "models": [
+    {
+      "id": "capability",
+      "spec": "Capability.tla",
+      "config": "Capability.cfg",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "confidential-attestation",
+      "spec": "ConfidentialAttestation.tla",
+      "config": "ConfidentialAttestation.cfg",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "device-mesh-active-routing",
+      "spec": "DeviceMeshActiveRouting.tla",
+      "config": "DeviceMeshActiveRouting.cfg",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "device-mesh-compute",
+      "spec": "DeviceMeshCompute.tla",
+      "config": "DeviceMeshCompute.cfg",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "device-mesh-dfs",
+      "spec": "DeviceMeshDfs.tla",
+      "config": "DeviceMeshDfs.cfg",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "device-mesh-duress",
+      "spec": "DeviceMeshDuress.tla",
+      "config": "DeviceMeshDuress.cfg",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "device-mesh-fan-out",
+      "spec": "DeviceMeshFanOut.tla",
+      "config": "DeviceMeshFanOut.cfg",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "device-mesh-quorum",
+      "spec": "DeviceMeshQuorum.tla",
+      "config": "DeviceMeshQuorum.cfg",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "device-mesh-self-onion",
+      "spec": "DeviceMeshSelfOnion.tla",
+      "config": "DeviceMeshSelfOnion.cfg",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "device-mesh-self-routing",
+      "spec": "DeviceMeshSelfRouting.tla",
+      "config": "DeviceMeshSelfRouting.cfg",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "device-mesh-state",
+      "spec": "DeviceMeshState.tla",
+      "config": "DeviceMeshState.cfg",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "obfs-handshake",
+      "spec": "ObfsHandshake.tla",
+      "config": "ObfsHandshake.cfg",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "onion",
+      "spec": "Onion.tla",
+      "config": "Onion.cfg",
+      "timeout_seconds": 300
+    },
+    {
+      "id": "pair-qr",
+      "spec": "PairQr.tla",
+      "config": "PairQr.cfg",
+      "timeout_seconds": 300
+    }
+  ]
+}

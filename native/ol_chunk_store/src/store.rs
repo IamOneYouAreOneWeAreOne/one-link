@@ -7,17 +7,17 @@
 //!
 //! - Two log directories side-by-side: `<root>/chunk_log/`,
 //!   `<root>/manifest_log/`. Each managed by its own [`ol_wal::Wal`].
-//! - On `write_chunk`: append to chunk_log → flush → append matching
+//! - On `write_chunk`: append to `chunk_log` → flush → append matching
 //!   manifest entry with `chunk_log_anchor` set to the offset of the
 //!   chunk just written → flush. **Two fsyncs per logical write,
 //!   batched via group commit when the caller batches writes.**
-//! - On `read_chunk`: memtable lookup → resolve to (file_id, offset) →
+//! - On `read_chunk`: memtable lookup → resolve to (`file_id`, offset) →
 //!   `pread` the record → CRC verify → return chunk-record + ciphertext.
 //! - On boot: replay both logs in order, rebuild the memtable + bloom.
 //!   Reject any manifest record whose `chunk_log_anchor` doesn't
-//!   resolve to a real chunk in the chunk_log (orphan).
+//!   resolve to a real chunk in the `chunk_log` (orphan).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -27,7 +27,7 @@ use ol_wal::{LogKind, Record as WalRecord, Wal};
 
 use crate::chunk_record::{ChunkRecord, CHUNK_RECORD_HEADER_LEN};
 use crate::error::ChunkStoreError;
-use crate::location::ChunkLocation;
+use crate::location::{decode_chunk_log_anchor, encode_chunk_log_anchor, ChunkLocation};
 use crate::manifest_record::ManifestRecord;
 use crate::memtable::Memtable;
 
@@ -46,7 +46,7 @@ pub struct StoreStats {
     pub bytes_scanned_at_replay: u64,
     /// Files truncated during recovery (tail-CRC failures).
     pub files_truncated: usize,
-    /// Manifest records rejected for dangling chunk_log_anchor.
+    /// Manifest records rejected for dangling `chunk_log_anchor`.
     pub orphaned_manifest_records: usize,
 }
 
@@ -59,10 +59,10 @@ pub struct ChunkStore {
     chunk_log: Wal,
     manifest_log: Wal,
     memtable: Memtable,
-    /// Tracks the offset of the most recently appended chunk_log record;
-    /// used as the `chunk_log_anchor` for the next manifest record.
-    last_chunk_log_offset: u64,
-    /// LRU pool of open chunk_log file handles, keyed by file_id.
+    /// Packed `(file_id, offset)` of the most recently appended chunk-log
+    /// record; used as the next manifest's globally-unique anchor.
+    last_chunk_log_anchor: u64,
+    /// LRU pool of open `chunk_log` file handles, keyed by `file_id`.
     /// `Mutex` (instead of `RefCell`) so the chunk store stays `Sync`,
     /// which the pyo3 binding requires for `&self` methods that release
     /// the GIL via `allow_threads`. Lock contention is minimal: each
@@ -73,14 +73,14 @@ pub struct ChunkStore {
     closed: bool,
 }
 
-/// Maximum number of open chunk_log file handles to keep cached for
+/// Maximum number of open `chunk_log` file handles to keep cached for
 /// random-access reads. Each fd is ~few KiB of OS overhead; this is a
 /// generous cache that covers the working set of typical small-business
-/// workloads (a few hundred GiB at 64 KiB chunks → 1-4 chunk_log files).
+/// workloads (a few hundred GiB at 64 KiB chunks → 1-4 `chunk_log` files).
 pub const MAX_OPEN_CHUNK_LOG_FDS: usize = 16;
 
 /// LRU file-handle pool for `read_chunk`. Per ADR-0007, sealed
-/// chunk_log files are immutable; the active file is append-only and
+/// `chunk_log` files are immutable; the active file is append-only and
 /// safe to read concurrently with writes (the writer never overwrites
 /// already-fsync'd bytes). Holding read fds across many calls is
 /// therefore safe and dramatically faster than re-opening on every read.
@@ -125,7 +125,9 @@ impl FdPool {
             let f = File::open(&path)?;
             self.fds.insert(file_id, f);
         }
-        Ok(self.fds.get_mut(&file_id).expect("just inserted"))
+        self.fds.get_mut(&file_id).ok_or_else(|| {
+            std::io::Error::other("chunk-log descriptor cache insertion was not observable")
+        })
     }
 }
 
@@ -134,17 +136,92 @@ impl std::fmt::Debug for ChunkStore {
         f.debug_struct("ChunkStore")
             .field("root", &self.root)
             .field("memtable_len", &self.memtable.len())
-            .field("last_chunk_log_offset", &self.last_chunk_log_offset)
+            .field("last_chunk_log_anchor", &self.last_chunk_log_anchor)
             .field("closed", &self.closed)
             .field("stats", &self.stats)
-            .finish()
+            .finish_non_exhaustive()
     }
+}
+
+struct RecoveredChunkIndex {
+    memtable: Memtable,
+    coordinates: HashSet<(u64, u64)>,
+    last_anchor: u64,
+}
+
+fn rebuild_chunk_index(
+    chunk_dir: &Path,
+    record_count: usize,
+) -> Result<RecoveredChunkIndex, ChunkStoreError> {
+    let mut memtable = Memtable::with_capacity(record_count.max(1024));
+    let mut coordinates = HashSet::with_capacity(record_count);
+    let mut last_anchor = 0u64;
+
+    for (file_id, path) in sorted_log_files(chunk_dir)? {
+        let mut file = File::open(&path)?;
+        let file_len = file.metadata()?.len();
+        let mut cursor = ol_wal::FILE_HEADER_LEN;
+        while cursor < file_len {
+            file.seek(SeekFrom::Start(cursor))?;
+            let mut header_bytes = [0u8; ol_wal::RECORD_HEADER_LEN];
+            file.read_exact(&mut header_bytes)?;
+            let header = ol_wal::record::parse_header(&header_bytes, cursor)?;
+            let total =
+                ol_wal::RECORD_HEADER_LEN + header.length as usize + ol_wal::RECORD_TRAILER_LEN;
+            let mut record_bytes = vec![0u8; total];
+            record_bytes[..ol_wal::RECORD_HEADER_LEN].copy_from_slice(&header_bytes);
+            file.read_exact(&mut record_bytes[ol_wal::RECORD_HEADER_LEN..])?;
+            if !ol_wal::crc_valid_record(&record_bytes) {
+                return Err(ChunkStoreError::MalformedRecord {
+                    offset: cursor,
+                    reason: "WAL changed or failed CRC after replay",
+                });
+            }
+            let payload_end = ol_wal::RECORD_HEADER_LEN + header.length as usize;
+            let payload = &record_bytes[ol_wal::RECORD_HEADER_LEN..payload_end];
+            let record = ChunkRecord::decode(header.kind, header.flags, payload).map_err(
+                |error| match error {
+                    ChunkStoreError::MalformedRecord { reason, .. } => {
+                        ChunkStoreError::MalformedRecord {
+                            offset: cursor,
+                            reason,
+                        }
+                    }
+                    other => other,
+                },
+            )?;
+            let length_ciphertext = u32::try_from(record.ciphertext.len()).map_err(|_| {
+                ChunkStoreError::MalformedRecord {
+                    offset: cursor,
+                    reason: "ciphertext length cannot be represented in the index",
+                }
+            })?;
+            let location = ChunkLocation {
+                file_id,
+                wal_offset: cursor,
+                length_plaintext: record.length_plaintext,
+                length_ciphertext,
+                ratchet_key_id: record.ratchet_key_id,
+                stripe_descriptor: record.stripe_descriptor,
+            };
+            memtable.insert(record.chunk_id, location);
+            coordinates.insert((file_id, cursor));
+            last_anchor = encode_chunk_log_anchor(file_id, cursor)?;
+            cursor += total as u64;
+        }
+    }
+
+    Ok(RecoveredChunkIndex {
+        memtable,
+        coordinates,
+        last_anchor,
+    })
 }
 
 impl ChunkStore {
     /// Open or create a chunk store rooted at `root`.
     ///
-    /// On first run, creates the chunk_log + manifest_log subdirectories
+    /// On first run, creates the `chunk_log` + `manifest_log` subdirectories
     /// with their initial WAL files. On subsequent runs, replays both
     /// logs in order, rebuilds the memtable + bloom, and resumes
     /// appending to the highest WAL files.
@@ -154,7 +231,7 @@ impl ChunkStore {
     /// - I/O errors.
     /// - WAL header / CRC validation errors.
     /// - Dangling-anchor errors from the manifest log replay (manifests
-    ///   that reference chunk_log offsets that don't resolve).
+    ///   that reference `chunk_log` offsets that don't resolve).
     pub fn open(root: &Path) -> Result<Self, ChunkStoreError> {
         let chunk_dir = root.join(CHUNK_LOG_DIRNAME);
         let manifest_dir = root.join(MANIFEST_LOG_DIRNAME);
@@ -163,75 +240,35 @@ impl ChunkStore {
 
         // Replay chunk_log first to rebuild the memtable + bloom.
         let chunk_replay = ol_wal::replay_log_dir(&chunk_dir, LogKind::ChunkLog)?;
-        let mut memtable = Memtable::with_capacity(chunk_replay.records.len().max(1024));
+        let chunk_record_count = chunk_replay.records.len();
+        let chunk_bytes_scanned = chunk_replay.bytes_scanned;
+        let chunk_files_truncated = chunk_replay.truncated.len();
+        // Replay validates/truncates the WAL. Its owned payload copies are not
+        // needed for index construction, so release them before the offset
+        // scan instead of retaining an entire large transfer twice at boot.
+        drop(chunk_replay.records);
         // Reconstruct (chunk_id, location) by scanning records and
         // computing offsets. The replay returns records in append order
         // but doesn't expose per-record offsets; we re-walk the files
         // for offset reconstruction.
-        let chunk_files = sorted_log_files(&chunk_dir)?;
-        let mut chunk_offsets: Vec<(u64, u64, ChunkRecord)> =
-            Vec::with_capacity(chunk_replay.records.len());
-        for (file_id, path) in chunk_files {
-            let bytes = std::fs::read(&path)?;
-            let mut cursor: u64 = ol_wal::FILE_HEADER_LEN;
-            while (cursor as usize) < bytes.len() {
-                // Parse WAL framing manually to recover offsets.
-                let pos = cursor as usize;
-                if bytes.len() < pos + 8 {
-                    break;
-                }
-                let kind = bytes[pos];
-                let flags = bytes[pos + 1];
-                let length =
-                    u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().expect("4 bytes"));
-                let total = 8 + length as usize + 4;
-                if pos + total > bytes.len() {
-                    break;
-                }
-                // Validate the same CRC the replay layer validated, just
-                // to be safe (cheap).
-                let body = &bytes[pos..pos + total];
-                if !ol_wal::crc_valid_record(body) {
-                    break;
-                }
-                let payload = &bytes[pos + 8..pos + 8 + length as usize];
-                if let Ok(rec) = ChunkRecord::decode(kind, flags, payload) {
-                    chunk_offsets.push((file_id, cursor, rec));
-                }
-                cursor += total as u64;
-            }
-        }
-
-        let mut last_chunk_log_offset = 0u64;
-        for (file_id, wal_offset, rec) in &chunk_offsets {
-            let location = ChunkLocation {
-                file_id: *file_id,
-                wal_offset: *wal_offset,
-                length_plaintext: rec.length_plaintext,
-                length_ciphertext: rec.ciphertext.len() as u32,
-                ratchet_key_id: rec.ratchet_key_id,
-                stripe_descriptor: rec.stripe_descriptor,
-            };
-            memtable.insert(rec.chunk_id, location);
-            last_chunk_log_offset = *wal_offset;
-        }
+        let recovered_index = rebuild_chunk_index(&chunk_dir, chunk_record_count)?;
 
         // Replay manifest_log; reject orphans.
         let manifest_replay = ol_wal::replay_log_dir(&manifest_dir, LogKind::ManifestLog)?;
         let mut orphaned = 0usize;
         let mut manifest_count = 0usize;
-        let chunk_offset_set: std::collections::HashSet<u64> =
-            chunk_offsets.iter().map(|(_, off, _)| *off).collect();
         for r in &manifest_replay.records {
             match ManifestRecord::decode(r.kind, r.flags, &r.payload) {
                 Ok(m) => {
-                    if m.chunk_log_anchor != 0 && !chunk_offset_set.contains(&m.chunk_log_anchor) {
+                    let anchor_is_valid = decode_chunk_log_anchor(m.chunk_log_anchor)
+                        .is_none_or(|coordinate| recovered_index.coordinates.contains(&coordinate));
+                    if anchor_is_valid {
+                        manifest_count += 1;
+                    } else {
                         // Orphan: anchor doesn't resolve to a chunk_log
                         // offset. Per ADR-0005 recovery rule, reject
                         // the manifest record.
                         orphaned += 1;
-                    } else {
-                        manifest_count += 1;
                     }
                 }
                 Err(_) => {
@@ -245,10 +282,10 @@ impl ChunkStore {
         let manifest_log = Wal::open(&manifest_dir, LogKind::ManifestLog)?;
 
         let stats = StoreStats {
-            indexed_chunks: memtable.len(),
+            indexed_chunks: recovered_index.memtable.len(),
             manifest_records: manifest_count,
-            bytes_scanned_at_replay: chunk_replay.bytes_scanned + manifest_replay.bytes_scanned,
-            files_truncated: chunk_replay.truncated.len() + manifest_replay.truncated.len(),
+            bytes_scanned_at_replay: chunk_bytes_scanned + manifest_replay.bytes_scanned,
+            files_truncated: chunk_files_truncated + manifest_replay.truncated.len(),
             orphaned_manifest_records: orphaned,
         };
 
@@ -256,8 +293,8 @@ impl ChunkStore {
             root: root.to_path_buf(),
             chunk_log,
             manifest_log,
-            memtable,
-            last_chunk_log_offset,
+            memtable: recovered_index.memtable,
+            last_chunk_log_anchor: recovered_index.last_anchor,
             read_fds: Mutex::new(FdPool::new()),
             stats,
             closed: false,
@@ -271,14 +308,14 @@ impl ChunkStore {
         self.memtable.contains(chunk_id)
     }
 
-    /// Get a chunk's location without reading the chunk_log.
+    /// Get a chunk's location without reading the `chunk_log`.
     #[inline]
     #[must_use]
     pub fn locate_chunk(&self, chunk_id: &[u8; 32]) -> Option<ChunkLocation> {
         self.memtable.get(chunk_id).copied()
     }
 
-    /// Append a chunk record to the chunk_log. Does NOT fsync; call
+    /// Append a chunk record to the `chunk_log`. Does NOT fsync; call
     /// [`ChunkStore::flush`] (or rely on `write_chunk_durable` for the
     /// fsync-coupled variant) before treating the chunk as durable.
     ///
@@ -286,35 +323,41 @@ impl ChunkStore {
     ///
     /// # Errors
     ///
-    /// - WAL append errors (rotation cap, I/O).
+    /// - WAL append/automatic-rotation I/O errors.
     pub fn append_chunk(&mut self, record: &ChunkRecord) -> Result<u64, ChunkStoreError> {
         if self.closed {
             return Err(ChunkStoreError::Closed);
         }
-        let (kind, flags, payload) = record.encode();
+        record.validate()?;
+        let length_ciphertext = u32::try_from(record.ciphertext.len()).map_err(|_| {
+            ChunkStoreError::MalformedRecord {
+                offset: 0,
+                reason: "ciphertext length cannot be represented in the index",
+            }
+        })?;
+        let (kind, flags, payload) = record.encode()?;
         let wal_record = WalRecord {
             kind,
             flags,
             payload,
         };
-        let offset_in_file = self.chunk_log.active_file_size();
-        self.chunk_log.append(&wal_record)?;
+        let position = self.chunk_log.append(&wal_record)?;
         let location = ChunkLocation {
-            file_id: self.chunk_log.active_file_id(),
-            wal_offset: offset_in_file,
+            file_id: position.file_id,
+            wal_offset: position.offset,
             length_plaintext: record.length_plaintext,
-            length_ciphertext: record.ciphertext.len() as u32,
+            length_ciphertext,
             ratchet_key_id: record.ratchet_key_id,
             stripe_descriptor: record.stripe_descriptor,
         };
         self.memtable.insert(record.chunk_id, location);
-        self.last_chunk_log_offset = offset_in_file;
-        Ok(offset_in_file)
+        self.last_chunk_log_anchor = location.manifest_anchor()?;
+        Ok(position.offset)
     }
 
-    /// Append a manifest record to the manifest_log. The
+    /// Append a manifest record to the `manifest_log`. The
     /// `chunk_log_anchor` field is set automatically to the most-recent
-    /// chunk_log offset, per ADR-0005 atomicity protocol. Callers can
+    /// `chunk_log` offset, per ADR-0005 atomicity protocol. Callers can
     /// override by setting the field on the record explicitly before
     /// passing here (e.g. to point at an older chunk).
     ///
@@ -327,9 +370,9 @@ impl ChunkStore {
         }
         let mut rec = record.clone();
         if rec.chunk_log_anchor == 0 {
-            rec.chunk_log_anchor = self.last_chunk_log_offset;
+            rec.chunk_log_anchor = self.last_chunk_log_anchor;
         }
-        let (kind, flags, payload) = rec.encode();
+        let (kind, flags, payload) = rec.encode()?;
         let wal_record = WalRecord {
             kind,
             flags,
@@ -355,18 +398,18 @@ impl ChunkStore {
         Ok(())
     }
 
-    /// Read a chunk's full record (header + ciphertext) by chunk_id.
+    /// Read a chunk's full record (header + ciphertext) by `chunk_id`.
     ///
     /// Uses a persistent file-handle pool ([`FdPool`]) so warm reads do
     /// a single seek + read of just the chunk's bytes — no whole-file
-    /// re-read. Cold reads (file_id not in the pool) open the fd and
+    /// re-read. Cold reads (`file_id` not in the pool) open the fd and
     /// cache it; LRU evicts the oldest if the pool is at capacity.
     ///
     /// # Errors
     ///
     /// - [`ChunkStoreError::ChunkNotFound`] if the memtable doesn't
     ///   know about this chunk.
-    /// - I/O errors reading the chunk_log file.
+    /// - I/O errors reading the `chunk_log` file.
     /// - [`ChunkStoreError::MalformedRecord`] if the on-disk record
     ///   fails to parse (would indicate corruption past the WAL CRC,
     ///   which is logically impossible; raise loudly).
@@ -378,7 +421,14 @@ impl ChunkStore {
                 .ok_or_else(|| ChunkStoreError::ChunkNotFound {
                     chunk_id_hex_prefix: hex_lower_8(&chunk_id[..8]),
                 })?;
-        let total = 8 + CHUNK_RECORD_HEADER_LEN + location.length_ciphertext as usize + 4;
+        let total = ol_wal::RECORD_HEADER_LEN
+            .checked_add(CHUNK_RECORD_HEADER_LEN)
+            .and_then(|value| value.checked_add(location.length_ciphertext as usize))
+            .and_then(|value| value.checked_add(ol_wal::RECORD_TRAILER_LEN))
+            .ok_or(ChunkStoreError::MalformedRecord {
+                offset: location.wal_offset,
+                reason: "indexed chunk record length overflow",
+            })?;
         let mut buf = vec![0u8; total];
         {
             let mut pool = self
@@ -392,11 +442,29 @@ impl ChunkStore {
             fd.seek(SeekFrom::Start(location.wal_offset))?;
             fd.read_exact(&mut buf)?;
         }
-        let kind = buf[0];
-        let flags = buf[1];
-        let length = u32::from_le_bytes(buf[4..8].try_into().expect("4 bytes"));
-        let payload = &buf[8..8 + length as usize];
-        ChunkRecord::decode(kind, flags, payload).map_err(|e| match e {
+        if !ol_wal::crc_valid_record(&buf) {
+            return Err(ChunkStoreError::MalformedRecord {
+                offset: location.wal_offset,
+                reason: "chunk record CRC mismatch on read",
+            });
+        }
+        let mut header_bytes = [0u8; ol_wal::RECORD_HEADER_LEN];
+        header_bytes.copy_from_slice(&buf[..ol_wal::RECORD_HEADER_LEN]);
+        let header = ol_wal::record::parse_header(&header_bytes, location.wal_offset)?;
+        let payload_end = ol_wal::RECORD_HEADER_LEN
+            .checked_add(header.length as usize)
+            .ok_or(ChunkStoreError::MalformedRecord {
+                offset: location.wal_offset,
+                reason: "chunk record payload length overflow",
+            })?;
+        if payload_end + ol_wal::RECORD_TRAILER_LEN != buf.len() {
+            return Err(ChunkStoreError::MalformedRecord {
+                offset: location.wal_offset,
+                reason: "WAL length disagrees with indexed chunk length",
+            });
+        }
+        let payload = &buf[ol_wal::RECORD_HEADER_LEN..payload_end];
+        ChunkRecord::decode(header.kind, header.flags, payload).map_err(|e| match e {
             ChunkStoreError::MalformedRecord { reason, .. } => ChunkStoreError::MalformedRecord {
                 offset: location.wal_offset,
                 reason,
@@ -414,11 +482,11 @@ impl ChunkStore {
         s
     }
 
-    /// Collect all chunk_ids currently in the memtable. Used by
+    /// Collect all `chunk_ids` currently in the memtable. Used by
     /// higher-level engines (e.g. `ol_transfer`) that need to feed the
     /// inventory into a Bloom-init handshake or a manifest scope check.
     ///
-    /// Order is unspecified (HashMap iteration order). Cost is O(N).
+    /// Order is unspecified (`HashMap` iteration order). Cost is O(N).
     #[must_use]
     pub fn collect_chunk_ids(&self) -> Vec<[u8; 32]> {
         self.memtable.iter().map(|(cid, _)| *cid).collect()
@@ -545,7 +613,7 @@ mod tests {
         let mut store = ChunkStore::open(dir.path()).unwrap();
         let c = chunk(0x01, 100, 116);
         store.append_chunk(&c).unwrap();
-        let chunk_offset = store.last_chunk_log_offset;
+        let chunk_anchor = store.last_chunk_log_anchor;
         store
             .append_manifest(&manifest(ManifestRecordKind::ManifestVersion, b"folder-op"))
             .unwrap();
@@ -557,7 +625,65 @@ mod tests {
         assert_eq!(stats.indexed_chunks, 1);
         assert_eq!(stats.manifest_records, 1);
         assert_eq!(stats.orphaned_manifest_records, 0);
-        assert_eq!(store2.last_chunk_log_offset, chunk_offset);
+        assert_eq!(store2.last_chunk_log_anchor, chunk_anchor);
+    }
+
+    #[test]
+    fn packed_anchor_distinguishes_same_offset_across_rotated_files() {
+        let dir = tempdir().unwrap();
+        {
+            let mut store = ChunkStore::open(dir.path()).unwrap();
+            store.append_chunk(&chunk(0x01, 64, 80)).unwrap();
+            store.flush().unwrap();
+
+            // The first record of every WAL file starts at the same offset.
+            // Force an early seal so this regression stays fast while proving
+            // the manifest anchor includes file identity.
+            store.chunk_log.rotate().unwrap();
+            store.append_chunk(&chunk(0x02, 64, 80)).unwrap();
+            assert_eq!(
+                decode_chunk_log_anchor(store.last_chunk_log_anchor),
+                Some((2, ol_wal::FILE_HEADER_LEN)),
+            );
+            store
+                .append_manifest(&manifest(ManifestRecordKind::ManifestVersion, b"file-two"))
+                .unwrap();
+            store.flush().unwrap();
+        }
+
+        // Simulate loss of file 2's only chunk while leaving file 1's record
+        // at the identical byte offset. A bare-offset implementation falsely
+        // accepted the manifest; the packed coordinate must reject it.
+        let file_two = dir.path().join(CHUNK_LOG_DIRNAME).join("000002.wal");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(file_two)
+            .unwrap()
+            .set_len(ol_wal::FILE_HEADER_LEN)
+            .unwrap();
+        let recovered = ChunkStore::open(dir.path()).unwrap();
+        assert_eq!(recovered.stats().indexed_chunks, 1);
+        assert_eq!(recovered.stats().manifest_records, 0);
+        assert_eq!(recovered.stats().orphaned_manifest_records, 1);
+    }
+
+    #[test]
+    fn legacy_file_one_bare_offset_anchor_remains_readable() {
+        let dir = tempdir().unwrap();
+        {
+            let mut store = ChunkStore::open(dir.path()).unwrap();
+            let c = chunk(0x03, 64, 80);
+            store.append_chunk(&c).unwrap();
+            let location = store.locate_chunk(&c.chunk_id).unwrap();
+            assert_eq!(location.file_id, 1);
+            let mut old_manifest = manifest(ManifestRecordKind::ManifestVersion, b"legacy");
+            old_manifest.chunk_log_anchor = location.wal_offset;
+            store.append_manifest(&old_manifest).unwrap();
+            store.flush().unwrap();
+        }
+        let recovered = ChunkStore::open(dir.path()).unwrap();
+        assert_eq!(recovered.stats().manifest_records, 1);
+        assert_eq!(recovered.stats().orphaned_manifest_records, 0);
     }
 
     #[test]
@@ -597,13 +723,17 @@ mod tests {
         let mut store = ChunkStore::open(dir.path()).unwrap();
         let mut c = chunk(0x77, 100, 116);
         store.append_chunk(&c).unwrap();
-        let off_a = store.last_chunk_log_offset;
+        let anchor_a = store.last_chunk_log_anchor;
         c.ciphertext = vec![0xFFu8; 200]; // different content, same chunk_id
         c.length_plaintext = 184;
         store.append_chunk(&c).unwrap();
-        let off_b = store.last_chunk_log_offset;
-        assert_ne!(off_a, off_b);
-        assert_eq!(store.locate_chunk(&c.chunk_id).unwrap().wal_offset, off_b);
+        let anchor_b = store.last_chunk_log_anchor;
+        assert_ne!(anchor_a, anchor_b);
+        let (_, offset_b) = decode_chunk_log_anchor(anchor_b).unwrap();
+        assert_eq!(
+            store.locate_chunk(&c.chunk_id).unwrap().wal_offset,
+            offset_b
+        );
     }
 
     #[test]

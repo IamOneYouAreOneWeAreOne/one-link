@@ -261,11 +261,17 @@ impl CanonEncoder {
     }
 
     fn reserve(&mut self, n: usize) -> Result<(), EncodeError> {
-        if self.max_size > 0 && self.buffer.len() + n > self.max_size {
-            Err(EncodeError::BufferOverflow)
-        } else {
-            Ok(())
+        let new_len = self
+            .buffer
+            .len()
+            .checked_add(n)
+            .ok_or(EncodeError::SizeOverflow)?;
+        if self.max_size > 0 && new_len > self.max_size {
+            return Err(EncodeError::BufferOverflow);
         }
+        self.buffer
+            .try_reserve(n)
+            .map_err(|_| EncodeError::AllocationFailed)
     }
 }
 
@@ -312,6 +318,20 @@ mod tests {
         e.encode_null().unwrap();
         let err = e.encode_null().unwrap_err();
         assert_eq!(err, EncodeError::BufferOverflow);
+    }
+
+    #[test]
+    fn reserve_arithmetic_and_capacity_failures_are_typed() {
+        let mut encoder = CanonEncoder::new();
+        encoder.encode_null().unwrap();
+        assert_eq!(encoder.reserve(usize::MAX), Err(EncodeError::SizeOverflow));
+
+        let mut empty = CanonEncoder::new();
+        assert_eq!(
+            empty.reserve(usize::MAX),
+            Err(EncodeError::AllocationFailed)
+        );
+        assert!(empty.is_empty());
     }
 
     #[test]

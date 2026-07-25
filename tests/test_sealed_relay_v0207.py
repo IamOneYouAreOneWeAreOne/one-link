@@ -25,7 +25,7 @@ import time
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from one_link import caps_grants, sealed_relay
+from one_link import caps_grants, sealed_relay, sealed_sender
 
 
 def _gen_ed25519():
@@ -58,6 +58,27 @@ def test_round_trip_no_grant():
     assert frame.payload == payload
     assert frame.sender_ed_pub == sender_pub
     assert frame.grant is None
+
+
+def test_relay_envelope_cannot_be_replayed_as_generic_sealed_sender():
+    sender_seed, sender_pub = _gen_ed25519()
+    recipient_seed, recipient_pub = _gen_ed25519()
+    blob = sealed_relay.seal_for_relay(
+        payload=b"relay-domain-only",
+        sender_ed_priv_seed=sender_seed,
+        sender_ed_pub=sender_pub,
+        recipient_ed_pub=recipient_pub,
+    )
+    grant_len = int.from_bytes(blob[:2], "big")
+    envelope_offset = 2 + grant_len
+    envelope_len = int.from_bytes(blob[envelope_offset : envelope_offset + 4], "big")
+    envelope = blob[envelope_offset + 4 : envelope_offset + 4 + envelope_len]
+    with pytest.raises(ValueError, match="decrypt failed"):
+        sealed_sender.unseal(
+            blob=envelope,
+            my_ed_priv_seed=recipient_seed,
+            paired_ed_pubs=[sender_pub],
+        )
 
 
 def test_round_trip_with_grant():

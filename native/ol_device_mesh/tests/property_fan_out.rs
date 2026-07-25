@@ -56,10 +56,10 @@ proptest! {
         n_sources in 1u8..6u8,
         seed in any::<[u8; 32]>(),
     ) {
-        let chunks: Vec<ChunkHash> = (0..(n_chunks_stripes as usize * 3))
+        let chunks: Vec<ChunkHash> = (0..(usize::from(n_chunks_stripes) * 3))
             .map(|i| {
                 let mut h = [0u8; 32];
-                h[0] = i as u8;
+                h[0] = u8::try_from(i).expect("the generator creates at most 15 chunks");
                 h
             })
             .collect();
@@ -77,7 +77,7 @@ proptest! {
         let sources: Vec<SourceCapacity> = (0..n_sources)
             .map(|i| SourceCapacity {
                 device_id: [i; DEVICE_ID_LEN],
-                estimated_bps: u64::from(seed[i as usize]).max(1) * 1_000_000,
+                estimated_bps: u64::from(seed[usize::from(i)]).max(1) * 1_000_000,
                 current_load_bytes: 0,
             })
             .collect();
@@ -92,10 +92,10 @@ proptest! {
         n_chunks_stripes in 1u8..6u8,
         holder_byte in 0u8..6u8,
     ) {
-        let chunks: Vec<ChunkHash> = (0..(n_chunks_stripes as usize * 3))
+        let chunks: Vec<ChunkHash> = (0..(usize::from(n_chunks_stripes) * 3))
             .map(|i| {
                 let mut h = [0u8; 32];
-                h[0] = i as u8;
+                h[0] = u8::try_from(i).expect("the generator creates at most 15 chunks");
                 h
             })
             .collect();
@@ -128,10 +128,10 @@ proptest! {
     fn assigned_chunks_are_in_some_placement(
         n_stripes in 1u8..6u8,
     ) {
-        let chunks: Vec<ChunkHash> = (0..(n_stripes as usize * 3))
+        let chunks: Vec<ChunkHash> = (0..(usize::from(n_stripes) * 3))
             .map(|i| {
                 let mut h = [0u8; 32];
-                h[0] = i as u8;
+                h[0] = u8::try_from(i).expect("the generator creates at most 15 chunks");
                 h
             })
             .collect();
@@ -220,10 +220,10 @@ proptest! {
         n_chunks_stripes in 1u8..4u8,
         failed in 1u8..4u8,
     ) {
-        let chunks: Vec<ChunkHash> = (0..(n_chunks_stripes as usize * 3))
+        let chunks: Vec<ChunkHash> = (0..(usize::from(n_chunks_stripes) * 3))
             .map(|i| {
                 let mut h = [0u8; 32];
-                h[0] = i as u8;
+                h[0] = u8::try_from(i).expect("the generator creates at most nine chunks");
                 h
             })
             .collect();

@@ -7,7 +7,7 @@
 
 use ol_erasure::{
     decode_stripe as rust_decode, encode_stripe as rust_encode, stripe::stripe_id_of, ErasureError,
-    Shard as RustShard, ShardRole, StripeParams,
+    Shard as RustShard, ShardRole, StripeParams, MAX_SHARD_BYTES, MAX_STRIPE_PLAINTEXT_BYTES,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -15,7 +15,11 @@ use pyo3::types::{PyBytes, PyList};
 
 /// Python-visible stripe parameters. Three canonical profiles are
 /// exposed as classmethods; arbitrary `(k, m)` via the constructor.
-#[pyclass(name = "StripeParams", module = "one_link_native.erasure")]
+#[pyclass(
+    from_py_object,
+    name = "StripeParams",
+    module = "one_link_native.erasure"
+)]
 #[derive(Debug, Clone, Copy)]
 pub struct PyStripeParams {
     inner: StripeParams,
@@ -24,10 +28,10 @@ pub struct PyStripeParams {
 #[pymethods]
 impl PyStripeParams {
     #[new]
-    fn new(k: usize, m: usize) -> Self {
-        Self {
-            inner: StripeParams { k, m },
-        }
+    fn new(k: usize, m: usize) -> PyResult<Self> {
+        let inner = StripeParams { k, m };
+        inner.validate().map_err(erasure_err_to_py)?;
+        Ok(Self { inner })
     }
 
     /// `EPHEMERAL` profile (9 + 1; 1.11x).
@@ -64,7 +68,7 @@ impl PyStripeParams {
 }
 
 /// Python-visible shard. Exposes the bytes + role + index + stripe id.
-#[pyclass(name = "Shard", module = "one_link_native.erasure")]
+#[pyclass(from_py_object, name = "Shard", module = "one_link_native.erasure")]
 #[derive(Debug, Clone)]
 pub struct PyShard {
     inner: RustShard,
@@ -101,6 +105,17 @@ impl PyShard {
                 stripe_id.len()
             )));
         }
+        if bytes.is_empty() || bytes.len() > MAX_SHARD_BYTES {
+            return Err(PyValueError::new_err(format!(
+                "shard bytes must be in 1..={MAX_SHARD_BYTES}; got {}",
+                bytes.len()
+            )));
+        }
+        if plaintext_len == 0 || plaintext_len > MAX_STRIPE_PLAINTEXT_BYTES as u64 {
+            return Err(PyValueError::new_err(format!(
+                "plaintext_len must be in 1..={MAX_STRIPE_PLAINTEXT_BYTES}; got {plaintext_len}"
+            )));
+        }
         let mut sid = [0u8; 32];
         sid.copy_from_slice(stripe_id);
         let role = match role {
@@ -125,7 +140,7 @@ impl PyShard {
 
     #[getter]
     fn bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.bytes)
+        PyBytes::new(py, &self.inner.bytes)
     }
 
     /// `"data"` or `"parity"`.
@@ -149,7 +164,7 @@ impl PyShard {
 
     #[getter]
     fn stripe_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.stripe_id)
+        PyBytes::new(py, &self.inner.stripe_id)
     }
 
     fn __repr__(&self) -> String {
@@ -170,9 +185,9 @@ fn encode_stripe<'py>(
     params: &PyStripeParams,
 ) -> PyResult<Bound<'py, PyList>> {
     let shards = py
-        .allow_threads(|| rust_encode(plaintext, params.inner))
+        .detach(|| rust_encode(plaintext, params.inner))
         .map_err(erasure_err_to_py)?;
-    let out = PyList::empty_bound(py);
+    let out = PyList::empty(py);
     for shard in shards {
         out.append(Py::new(py, PyShard { inner: shard })?)?;
     }
@@ -187,7 +202,12 @@ fn decode_stripe<'py>(
     params: &PyStripeParams,
     present: &Bound<'py, PyList>,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let total = params.inner.k + params.inner.m;
+    params.inner.validate().map_err(erasure_err_to_py)?;
+    let total = params
+        .inner
+        .k
+        .checked_add(params.inner.m)
+        .ok_or_else(|| PyValueError::new_err("k + m overflow"))?;
     if present.len() != total {
         return Err(PyValueError::new_err(format!(
             "expected {total} present slots, got {}",
@@ -207,29 +227,38 @@ fn decode_stripe<'py>(
     let view: Vec<Option<&RustShard>> =
         owned.iter().map(|o| o.as_ref().map(|s| &s.inner)).collect();
     let plaintext = py
-        .allow_threads(|| rust_decode(params.inner, &view))
+        .detach(|| rust_decode(params.inner, &view))
         .map_err(erasure_err_to_py)?;
-    Ok(PyBytes::new_bound(py, &plaintext))
+    Ok(PyBytes::new(py, &plaintext))
 }
 
-/// Compute the canonical StripeId for `(plaintext, params)`.
+/// Compute the canonical `StripeId` for `(plaintext, params)`.
 #[pyfunction]
 fn stripe_id<'py>(
     py: Python<'py>,
     plaintext: &[u8],
     params: &PyStripeParams,
-) -> Bound<'py, PyBytes> {
+) -> PyResult<Bound<'py, PyBytes>> {
+    params.inner.validate().map_err(erasure_err_to_py)?;
+    if plaintext.is_empty() || plaintext.len() > MAX_STRIPE_PLAINTEXT_BYTES {
+        return Err(PyValueError::new_err(format!(
+            "plaintext must be in 1..={MAX_STRIPE_PLAINTEXT_BYTES}; got {}",
+            plaintext.len()
+        )));
+    }
     let id = stripe_id_of(plaintext, params.inner);
-    PyBytes::new_bound(py, &id)
+    Ok(PyBytes::new(py, &id))
 }
 
 fn erasure_err_to_py(err: ErasureError) -> PyErr {
-    crate::errors::OlErasureError::new_err(err.to_string())
+    crate::errors::OlErasureError::new_err(crate::errors::owned_error_message(err))
 }
 
 /// Register the `erasure` submodule.
 pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", ol_erasure::VERSION)?;
+    m.add("MAX_SHARD_BYTES", MAX_SHARD_BYTES)?;
+    m.add("MAX_STRIPE_PLAINTEXT_BYTES", MAX_STRIPE_PLAINTEXT_BYTES)?;
     m.add_class::<PyStripeParams>()?;
     m.add_class::<PyShard>()?;
     m.add_function(wrap_pyfunction!(encode_stripe, m)?)?;

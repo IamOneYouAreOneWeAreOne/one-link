@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install a per-user macOS one-link:// URL handler.
+# Install a per-user macOS one-link:// URL handler (LF-only script).
 #
 # macOS requires URL schemes to be declared by an app bundle. This script
 # creates a tiny AppleScript app in ~/Applications that delegates to the

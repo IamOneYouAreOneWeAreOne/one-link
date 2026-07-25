@@ -15,8 +15,8 @@
 //!
 //! Phase C-3 upgrade: AEAD primitives are provided by `ring` 0.17, which
 //! is BoringSSL-derived hand-tuned assembly. Replaces the earlier
-//! RustCrypto `aes-gcm` / `chacha20poly1305` backends (pure-Rust +
-//! intrinsics) which benchmarked 1.5-2x slower than BoringSSL on small
+//! `RustCrypto` `aes-gcm` / `chacha20poly1305` backends (pure-Rust +
+//! intrinsics) which benchmarked 1.5-2x slower than `BoringSSL` on small
 //! chunks. The on-wire format is unchanged: AES-256-GCM and
 //! ChaCha20-Poly1305 are RFC-specified algorithms — any conformant
 //! implementation produces byte-identical ciphertexts for the same
@@ -64,7 +64,7 @@ impl AeadKind {
 ///
 /// On x86, checks AES-NI via `std::arch::is_x86_feature_detected!`.
 /// On ARM64, checks AES intrinsics via `std::arch::is_aarch64_feature_detected!`.
-/// All other architectures return `false` (forces ChaCha20 fallback).
+/// All other architectures return `false` (forces `ChaCha20` fallback).
 #[must_use]
 pub fn has_hardware_aes() -> bool {
     #[cfg(target_arch = "x86_64")]

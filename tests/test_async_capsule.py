@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -26,6 +28,8 @@ from one_link.frame_provenance import (
     sign_provenance,
 )
 from one_link.identity import Identity
+
+PEER_FP = "b" * 64
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +84,7 @@ def test_empty_builder_cannot_finalize(alice: Identity) -> None:
         capsule_id="cap-001",
         call_id="call-x",
         sender_master_vk_hex=alice.fingerprint,
-        recipient_master_vk_hex="peer",
+        recipient_master_vk_hex=PEER_FP,
         kind=CapsuleKind.VOICE_NOTE_OUTGOING,
         started_at_ms=1_000,
     )
@@ -94,7 +98,7 @@ def test_builder_accumulates_chunks(alice: Identity) -> None:
         capsule_id="cap-001",
         call_id="call-x",
         sender_master_vk_hex=alice.fingerprint,
-        recipient_master_vk_hex="peer",
+        recipient_master_vk_hex=PEER_FP,
         kind=CapsuleKind.VOICE_NOTE_OUTGOING,
         started_at_ms=1_000,
     )
@@ -115,7 +119,7 @@ def test_empty_chunk_skipped(alice: Identity) -> None:
     b = CapsuleBuilder(
         capsule_id="cap-001", call_id="call-x",
         sender_master_vk_hex=alice.fingerprint,
-        recipient_master_vk_hex="peer",
+        recipient_master_vk_hex=PEER_FP,
         kind=CapsuleKind.VOICE_NOTE_OUTGOING, started_at_ms=1_000,
     )
     b.append_audio(
@@ -134,7 +138,7 @@ def test_finalize_produces_immutable_capsule(alice: Identity) -> None:
     b = CapsuleBuilder(
         capsule_id="cap-001", call_id="call-x",
         sender_master_vk_hex=alice.fingerprint,
-        recipient_master_vk_hex="bob",
+        recipient_master_vk_hex=PEER_FP,
         kind=CapsuleKind.VOICE_NOTE_OUTGOING, started_at_ms=1_000,
     )
     chunks = [b"opus-1", b"opus-2", b"opus-3"]
@@ -151,13 +155,96 @@ def test_finalize_produces_immutable_capsule(alice: Identity) -> None:
     assert cap.finalized_at_ms == 2_500
     assert cap.resumable_until_ms == 2_500 + 600_000
     assert len(cap.provenance_chain) == 3
+    assert cap.provenance_segment_sizes == tuple(len(chunk) for chunk in chunks)
+
+
+def test_capsule_schema_rejects_invalid_recipient_and_provenance_boundaries(
+    alice: Identity,
+) -> None:
+    builder = CapsuleBuilder(
+        capsule_id="cap-boundaries",
+        call_id="call-boundaries",
+        sender_master_vk_hex=alice.fingerprint,
+        recipient_master_vk_hex=PEER_FP,
+        kind=CapsuleKind.VOICE_NOTE_OUTGOING,
+        started_at_ms=1_000,
+    )
+    first = b"first-segment"
+    second = b"second-segment"
+    for index, chunk in enumerate((first, second)):
+        builder.append_audio(
+            chunk=chunk,
+            provenance=_signed_provenance(alice, chunk, timestamp_us=index),
+            timestamp_ms=1_100 + index * 100,
+        )
+    capsule = builder.finalize(
+        finalized_at_ms=1_500,
+        resume_window_ms=60_000,
+    )
+
+    with pytest.raises(ValueError, match="recipient identity"):
+        replace(capsule, recipient_master_vk_hex="not-a-fingerprint")
+    with pytest.raises(ValueError, match="segment count"):
+        replace(capsule, provenance_segment_sizes=(len(capsule.audio_payload),))
+    with pytest.raises(ValueError, match="does not cover audio"):
+        replace(
+            capsule,
+            provenance_segment_sizes=(len(first) + 1, len(second) - 1),
+        )
+    with pytest.raises(ValueError, match="must be a tuple"):
+        replace(  # type: ignore[arg-type]
+            capsule,
+            provenance_segment_sizes=[len(first), len(second)],
+        )
+    with pytest.raises(ValueError, match="capsule_id"):
+        replace(capsule, capsule_id="unsafe capsule id")
+    with pytest.raises(ValueError, match="call_id"):
+        replace(capsule, call_id="unsafe/call")
+    with pytest.raises(ValueError, match="precedes started"):
+        replace(capsule, finalized_at_ms=capsule.started_at_ms - 1)
+    with pytest.raises(ValueError, match="resume window"):
+        replace(
+            capsule,
+            resumable_until_ms=(
+                capsule.finalized_at_ms + 30 * 24 * 60 * 60 * 1000 + 1
+            ),
+        )
+    with pytest.raises(ValueError, match="non-empty"):
+        replace(
+            capsule,
+            audio_payload=b"",
+            provenance_chain=(),
+            provenance_segment_sizes=(),
+            payload_hash=make_segment_hash(b"").hex(),
+        )
+
+
+def test_builder_rejects_provenance_bound_to_another_device(
+    alice: Identity,
+    bob: Identity,
+) -> None:
+    builder = CapsuleBuilder(
+        capsule_id="cap-device-binding",
+        call_id="call-device-binding",
+        sender_master_vk_hex=alice.fingerprint,
+        recipient_master_vk_hex=PEER_FP,
+        kind=CapsuleKind.VOICE_NOTE_OUTGOING,
+        started_at_ms=0,
+    )
+    chunk = b"signed-by-bob"
+    with pytest.raises(ValueError, match="another device"):
+        builder.append_audio(
+            chunk=chunk,
+            provenance=_signed_provenance(bob, chunk),
+            timestamp_ms=1,
+        )
 
 
 def test_payload_hash_blake3_of_concatenated_payload(alice: Identity) -> None:
     b = CapsuleBuilder(
         capsule_id="cap-001", call_id="call-x",
         sender_master_vk_hex=alice.fingerprint,
-        recipient_master_vk_hex="bob",
+        recipient_master_vk_hex=PEER_FP,
         kind=CapsuleKind.VOICE_NOTE_OUTGOING, started_at_ms=0,
     )
     chunk = b"audio-payload"
@@ -177,7 +264,7 @@ def test_is_resumable_within_window(alice: Identity) -> None:
     b = CapsuleBuilder(
         capsule_id="cap-001", call_id="call-x",
         sender_master_vk_hex=alice.fingerprint,
-        recipient_master_vk_hex="bob",
+        recipient_master_vk_hex=PEER_FP,
         kind=CapsuleKind.VOICE_NOTE_OUTGOING, started_at_ms=0,
     )
     chunk = b"x"
@@ -197,7 +284,7 @@ def test_capsule_verifies_with_correct_sender_key(alice: Identity) -> None:
     b = CapsuleBuilder(
         capsule_id="cap-001", call_id="call-x",
         sender_master_vk_hex=alice.fingerprint,
-        recipient_master_vk_hex="bob",
+        recipient_master_vk_hex=PEER_FP,
         kind=CapsuleKind.VOICE_NOTE_OUTGOING, started_at_ms=0,
     )
     for i in range(3):
@@ -209,12 +296,20 @@ def test_capsule_verifies_with_correct_sender_key(alice: Identity) -> None:
     cap = b.finalize(finalized_at_ms=200, resume_window_ms=600_000)
     assert cap.all_frames_verified_by(alice.public_bytes) is True
 
+    # A declared identity with the same short id is still not the pinned full
+    # fingerprint and must not inherit the valid signatures.
+    colliding_declared_fp = alice.fingerprint[:8] + (
+        "0" if alice.fingerprint[8] != "0" else "1"
+    ) + alice.fingerprint[9:]
+    relabelled = replace(cap, sender_master_vk_hex=colliding_declared_fp)
+    assert relabelled.all_frames_verified_by(alice.public_bytes) is False
+
 
 def test_capsule_rejects_attacker_key(alice: Identity, bob: Identity) -> None:
     b = CapsuleBuilder(
         capsule_id="cap-001", call_id="call-x",
         sender_master_vk_hex=alice.fingerprint,
-        recipient_master_vk_hex="bob",
+        recipient_master_vk_hex=PEER_FP,
         kind=CapsuleKind.VOICE_NOTE_OUTGOING, started_at_ms=0,
     )
     chunk = b"x"
@@ -232,7 +327,7 @@ def test_capsule_rejects_tampered_chain(alice: Identity, bob: Identity) -> None:
     b = CapsuleBuilder(
         capsule_id="cap-001", call_id="call-x",
         sender_master_vk_hex=alice.fingerprint,
-        recipient_master_vk_hex="bob",
+        recipient_master_vk_hex=PEER_FP,
         kind=CapsuleKind.VOICE_NOTE_OUTGOING, started_at_ms=0,
     )
     # First two: alice's signatures
@@ -244,8 +339,18 @@ def test_capsule_rejects_tampered_chain(alice: Identity, bob: Identity) -> None:
         )
     # Third: bob impersonates
     chunk = bytes([99] * 8)
+    forged = sign_provenance(
+        segment_hash=make_segment_hash(chunk),
+        device_id=alice.short_id,
+        frame_kind=FrameKind.REAL,
+        path_class=PathClass.LAN,
+        recording_state=RecordingState.NOT_RECORDING,
+        timestamp_us=20,
+        produce_confidence=1.0,
+        signing_key=bob.private,
+    )
     b.append_audio(
-        chunk=chunk, provenance=_signed_provenance(bob, chunk),
+        chunk=chunk, provenance=forged,
         timestamp_ms=20,
     )
     cap = b.finalize(finalized_at_ms=100, resume_window_ms=600_000)
@@ -261,7 +366,7 @@ def test_offer_msg_has_required_fields(alice: Identity) -> None:
     b = CapsuleBuilder(
         capsule_id="cap-001", call_id="call-x",
         sender_master_vk_hex=alice.fingerprint,
-        recipient_master_vk_hex="bob",
+        recipient_master_vk_hex=PEER_FP,
         kind=CapsuleKind.VOICE_NOTE_OUTGOING, started_at_ms=0,
     )
     chunk = b"opus-payload-bytes"
@@ -275,6 +380,8 @@ def test_offer_msg_has_required_fields(alice: Identity) -> None:
     assert msg["payload_hash"] == cap.payload_hash
     assert msg["size"] == len(chunk)
     assert msg["codec"] == "opus"
+    assert len(msg["provenance_chain"]) == 1
+    assert msg["provenance_segment_sizes"] == [len(chunk)]
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +429,7 @@ def test_receiver_can_verify_and_render(alice: Identity) -> None:
         capsule_id="cap-real",
         call_id="call-real",
         sender_master_vk_hex=alice.fingerprint,
-        recipient_master_vk_hex="bob",
+        recipient_master_vk_hex=PEER_FP,
         kind=CapsuleKind.VOICE_NOTE_OUTGOING,
         started_at_ms=1_000,
         recording_state_at_conversion=RecordingState.NOT_RECORDING,

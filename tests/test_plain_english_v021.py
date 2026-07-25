@@ -416,28 +416,24 @@ def test_self_mesh_empty_state_points_user_at_the_action(index_html):
     )
 
 
-def test_install_warning_banner_reframes_smartscreen_as_a_feature(index_html):
-    """The 'Why isn't this app signed?' first-launch banner is the
-    in-app moment that turns the SmartScreen / Gatekeeper warning
-    into a trust beat (no corporation can revoke our right to
-    ship). Pin: the banner exists, fires once per device via
-    localStorage gate, and the explainer modal names the actual
-    sovereignty argument (no Microsoft / Apple permission gate,
-    no third-party can stop the binary running)."""
+def test_install_warning_banner_states_unverified_build_risk(index_html):
+    """The first-launch warning must not encourage bypassing OS defenses.
+
+    It identifies the missing release evidence, tells users to treat the
+    binary as untrusted, and states the local inventory verifier's limit.
+    """
     # Banner element exists.
     assert 'id="install-warning-banner"' in index_html, (
         "first-launch install-warning banner missing from DOM"
     )
-    # Visible copy reframes the warning positively.
-    assert "Glad you got past the security warning" in index_html
-    assert "no company has the power to revoke your right" in index_html
-    # The Why? modal explains the sovereignty stance in plain English.
-    assert "Why isn't this app signed?" in index_html
-    # Names the actual corporations to make the point concrete.
-    assert "Microsoft" in index_html
-    assert "Apple" in index_html
-    # Points users at the local verify path (no third-party trust).
+    assert "Treat an unverified binary as untrusted" in index_html
+    assert "does not yet publish a verified, platform-code-signed release" in index_html
+    assert "Why did the platform warn me?" in index_html
+    assert "Glad you got past the security warning" not in index_html
+    assert "no company has the power to revoke your right" not in index_html
+    # Points users at the local inventory verifier and states its limitation.
     assert "one-link verify-this-install" in index_html
+    assert "hashes alone do not prove authenticity" in index_html
     # Once-per-device gate.
     assert 'one_link.install_warning_seen' in index_html, (
         "install-warning banner must be gated by a localStorage "

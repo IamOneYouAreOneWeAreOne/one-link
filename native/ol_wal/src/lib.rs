@@ -15,7 +15,7 @@
 //!   the last valid record.
 //! - **Group commit**: writers batch into a single [`Wal::flush`] call
 //!   per group, so N concurrent writes amortize a single fdatasync /
-//!   F_FULLFSYNC / FlushFileBuffers.
+//!   `F_FULLFSYNC` / `FlushFileBuffers`.
 //! - **Replay is deterministic**: linear scan + CRC validation + version /
 //!   magic check. Two independent recovery runs over the same on-disk
 //!   state produce byte-identical recovered records.
@@ -62,7 +62,7 @@ pub use record::{
     RECORD_TRAILER_LEN,
 };
 pub use replay::{replay_log_dir, replay_log_file, ReplayOutcome};
-pub use wal::Wal;
+pub use wal::{AppendPosition, Wal};
 
 /// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

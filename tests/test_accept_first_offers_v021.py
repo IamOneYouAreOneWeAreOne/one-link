@@ -38,6 +38,11 @@ class _FakeChannel:
         self.sent.append(decode_msg(payload))
 
 
+class _ClosedChannel(_FakeChannel):
+    async def send(self, payload: bytes) -> None:
+        raise ConnectionResetError("sender disconnected")
+
+
 def _daemon(tmp_path: Path) -> Daemon:
     d = Daemon(_new_identity())
     d.state = State(db_path=tmp_path / "s.db")
@@ -143,6 +148,57 @@ async def test_accept_cdc_sends_file_wants(tmp_path):
         d.state.close()
 
 
+@pytest.mark.asyncio
+async def test_accept_survives_closed_channel_and_hides_reprompt(tmp_path):
+    """Consent is durable even when the sender's original session died."""
+    d = _daemon(tmp_path)
+    try:
+        peer = "dd" * 32
+        _held_transfer(d, "in:retry", peer)
+        d._pending_file_offers["in:retry"] = {
+            "channel": _ClosedChannel(), "peer_fp": peer, "peer_sid": "dddd",
+            "blob": "de" * 32, "msg_id": "old", "msg": {"id": "old"},
+            "mode": "cdc", "missing": [2, 3], "name": "ACE.zip",
+            "size": 100, "created_ms": 1, "accepted": False,
+        }
+
+        result = await d.accept_file_offer("in:retry")
+
+        assert result["ok"] is False
+        assert d._pending_file_offers["in:retry"]["accepted"] is True
+        assert d.list_pending_file_offers() == []
+        assert not any(
+            item["kind"] == "pending_accept"
+            for item in d.list_attention_items()
+        )
+        row = d.state.get_transfer("in:retry")
+        assert row.status == "paused"
+        assert row.metadata["needs_accept"] is False
+        assert row.metadata["delivery_state"] == "waiting_for_sender"
+    finally:
+        d.state.close()
+
+
+def test_prior_inline_offer_does_not_forge_resume_acceptance(tmp_path):
+    d = _daemon(tmp_path)
+    try:
+        peer = "ee" * 32
+        blob = "01" * 32
+        d.state.record_message(
+            id="original-offer", ts_ms=1, direction="in", peer_fp=peer,
+            msg_type="FILE_OFFER", body=None,
+            metadata={"blob": blob, "chat_inline": True, "name": "ACE.zip"},
+        )
+        assert d._prior_inbound_file_offer_state(peer, blob) == (
+            True, False, "ACE.zip",
+        )
+        assert d._prior_inbound_file_offer_state(peer, "02" * 32) == (
+            False, False, None,
+        )
+    finally:
+        d.state.close()
+
+
 # ── decline tells the sender + cleans up ────────────────────────
 
 
@@ -213,44 +269,16 @@ def test_file_offer_handler_holds_when_require_accept():
     assert "_file_accept_allow" in full
 
 
-# ── conversational-content bypass (heuristic + explicit flag) ────
-
-
-def test_inline_image_heuristic_recognises_small_images():
-    """Small image files (screenshots / paste-images) bypass the
-    accept-first prompt — they read as 'conversational content'."""
-    from one_link.daemon import _looks_like_inline_chat_image
-
-    # Image extensions under the size cap → yes.
-    for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".svg"):
-        assert _looks_like_inline_chat_image(f"shot{ext}", 1_500_000), ext
-        assert _looks_like_inline_chat_image(f"shot{ext.upper()}", 200), ext
-    # Other types → no.
-    for ext in (".pdf", ".zip", ".exe", ".docx", ".mp4", ".mov", ".bin"):
-        assert not _looks_like_inline_chat_image(f"x{ext}", 1_500_000), ext
-    # Image over the cap → no.
-    assert not _looks_like_inline_chat_image(
-        "huge.png", 100 * 1024 * 1024,
-    )
-    # Empty / zero size → no.
-    assert not _looks_like_inline_chat_image("x.png", 0)
-    assert not _looks_like_inline_chat_image("", 1000)
-
-
-def test_file_offer_gate_bypasses_chat_inline_flag():
-    """The receiver source must check msg.get('chat_inline') AND the
-    heuristic, both gating the accept-first hold so screenshots / pastes
-    don't trigger the prompt."""
+def test_file_offer_gate_rejects_sender_controlled_consent_bypass():
+    """Sender hints and filename heuristics must never replace consent."""
     import inspect
     from one_link import daemon as _dm
 
     full = inspect.getsource(_dm)
-    assert "msg.get(\"chat_inline\")" in full
-    assert "_looks_like_inline_chat_image" in full
-    # The gate must AND together with require_accept (not OR), so an
-    # inline image bypasses even when the user has accept-first on.
-    assert "and not _chat_inline_msg" in full
-    assert "and not _looks_inline" in full
+    assert "_looks_like_inline_chat_image" not in full
+    assert "and not _chat_inline_msg" not in full
+    assert "and not _looks_inline" not in full
+    assert "neither may bypass the accept-first boundary" in full
 
 
 def test_send_file_signature_supports_display_name_and_chat_inline():
@@ -262,3 +290,13 @@ def test_send_file_signature_supports_display_name_and_chat_inline():
     sig = str(inspect.signature(Daemon.send_file))
     assert "display_name" in sig
     assert "chat_inline" in sig
+
+
+def test_chat_renderer_collapses_retry_offers_by_blob():
+    html = (
+        Path(__file__).parents[1]
+        / "src" / "one_link" / "web" / "index.html"
+    ).read_text(encoding="utf-8")
+    assert "renderedOfferBlobs" in html
+    assert "renderedOfferBlobs.has(key)" in html
+    assert "renderedOfferBlobs.add(key)" in html

@@ -21,7 +21,6 @@ from one_link.frame_provenance import (
     RecordingState,
 )
 from one_link.live_frame_provenance import (
-    DEFAULT_WINDOW_MS,
     LIVE_SCHEMA_V2,
     WindowAttestor,
     WindowVerifier,
@@ -122,6 +121,36 @@ def test_callback_fires_on_window_close() -> None:
     attestor.observe_packet(b"b", timestamp_us=1_100_000)
     attestor.observe_packet(b"c", timestamp_us=2_200_000)
     assert len(seen) == 2
+
+
+@pytest.mark.parametrize("force_close", [False, True])
+def test_callback_failure_is_observable_without_breaking_capture(
+    caplog: pytest.LogCaptureFixture,
+    *,
+    force_close: bool,
+) -> None:
+    sk, _ = _mk_signing_key()
+
+    def fail_callback(_window: object, _provenance: object) -> None:
+        raise RuntimeError("transport unavailable")
+
+    attestor = WindowAttestor(
+        signing_key=sk,
+        device_id=_hex_device("a"),
+        path_class=PathClass.LAN,
+        recording_state=RecordingState.NOT_RECORDING,
+        on_window_signed=fail_callback,
+    )
+    attestor.observe_packet(b"a", timestamp_us=0)
+
+    with caplog.at_level("ERROR"):
+        if force_close:
+            signed = attestor.force_close(timestamp_us=500_000)
+        else:
+            signed = attestor.observe_packet(b"b", timestamp_us=1_100_000)
+
+    assert signed is not None
+    assert "live frame provenance callback failed" in caplog.text
 
 
 def test_set_recording_state_takes_on_next_window() -> None:

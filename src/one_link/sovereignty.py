@@ -3,44 +3,48 @@
 May 15 2026.
 
 One Link's promise is "no corps, no calls home, for the people." The
-strict no-defaults posture (no STUN, no update-check, etc.) is
-technically correct but makes cross-network pairing silently fail
-for normal users. The 3-tier model below gives users a usable
-default that's still corp-free, plus tighter modes for those who
-want them.
+3-tier model below makes LAN/direct operation convenient while keeping
+outside routes explicit. Community STUN can discover a public-facing
+ICE address; it is not signaling and it cannot relay traffic. A device
+on another network therefore still needs a configured signaling or
+rendezvous route and, when direct NAT traversal fails, a configured
+relay.
 
 Presets:
 
   - just_works: the default for fresh installs. Update-check ON.
     STUN ON via INDEPENDENT community-run servers (Nextcloud,
-    Sipgate — never Google/Cloudflare/Twilio). LAN discovery ON.
-    No corp accounts, no analytics, no cloud. Cross-network
-    pairing works out of the box.
+    Sipgate, Antisip — never Google/Cloudflare/Twilio). LAN discovery
+    ON. No corp accounts, no analytics, no cloud. LAN/direct routes
+    work automatically. Cross-network operation requires a configured
+    rendezvous/signaling route and, when needed, a configured relay;
+    the stock build supplies neither public endpoint.
 
   - quiet: zero outbound to anything non-LAN. Update-check OFF.
-    STUN OFF. LAN discovery ON. For users who'd rather pair
-    manually or run their own STUN.
+    STUN OFF. LAN discovery ON. For users who pair on their LAN.
 
   - off_grid: the activist / high-threat profile. Adds: mDNS OFF
     (no broadcast peer discovery), manual pair only via paste-
     connection-string. Pure paranoia mode.
 
-Each preset is defined as a dict of feature flags that the
-respective subsystems read at runtime. Individual settings can
-override the preset for power users — e.g. you can be on
-just_works but blank out the STUN list, and the runtime honors
-that override.
+Each preset is defined as a set of feature ceilings that the respective
+subsystems read at runtime. Individual settings can tighten the selected
+preset — e.g. you can be on just_works but blank out the STUN list. A stale
+setting or environment variable cannot loosen Quiet or Off-grid.
 
 Read order:
-  1. Explicit setting (state.settings.<key>) — always wins
-  2. Env var override (where one is defined) — second priority
-  3. Preset default — fallback
+  1. Preset prohibition — always wins
+  2. Explicit setting (state.settings.<key>) — may further disable
+  3. Env var override (where one is defined) — may further disable
+  4. Preset permit/default — fallback
 
 The audit endpoint surfaces which preset is active + which features
 are overridden, so the user always knows what's happening.
 """
 from __future__ import annotations
 
+import ipaddress
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -80,8 +84,8 @@ class SovereigntyPreset:
     mdns_discovery_enabled: bool
     rendezvous_enabled: bool
     # v0.21.x persistent UI sessions (local-only, never sent over
-    # the internet). Each preset picks a sensible default; user can
-    # still override per-feature in the Privacy panel.
+    # the internet). Each preset supplies a ceiling; users can turn a
+    # permitted feature off in the Privacy panel but cannot loosen it.
     #   just_works → both ON  (best UX)
     #   quiet      → persist ON, labels OFF (cookie survives but
     #                no browser fingerprint stored)
@@ -96,11 +100,12 @@ class SovereigntyPreset:
     #
     # turn_relay_enabled — when False, the daemon refuses to load
     #   any TURN servers (state setting + env var both ignored).
-    #   off_grid+quiet OFF; just_works ON (cross-NAT call rescue).
+    #   off_grid+quiet OFF; just_works ON as a policy permit for a
+    #   user/operator-configured relay. The preset supplies no TURN URL.
     # inherit_rendezvous_from_mdns_enabled — when False, the daemon
     #   ignores rendezvous URLs harvested from ambient LAN peers
-    #   even if the inherit setting is on. off_grid OFF; everywhere
-    #   else ON (this is how phones bootstrap onto your mesh).
+    #   even if the inherit setting is on. Quiet + Off-grid OFF;
+    #   Just Works ON as a policy permit.
     turn_relay_enabled: bool
     inherit_rendezvous_from_mdns_enabled: bool
     # UI hint — the chooser surfaces this as a one-line "what flows
@@ -112,13 +117,15 @@ JUST_WORKS = SovereigntyPreset(
     name="just_works",
     label="Just Works",
     description=(
-        "Best for most people. Connecting your phone, laptop, and "
-        "other computers works out of the box, even across different "
-        "networks. You'll see a small note when a new version of One "
-        "Link is available. No accounts, no profile, no tracking. "
-        "Uses a tiny bit of public internet (small community-run "
-        "servers, not Google or Microsoft) to help two devices find "
-        "each other when they're on different networks."
+        "Best for most people. Devices on the same local network and "
+        "other direct routes work automatically. Community STUN can "
+        "discover a public-facing address, but STUN is not signaling "
+        "and cannot relay traffic. Connecting across different networks "
+        "requires a configured rendezvous or signaling route and, where "
+        "direct traversal fails, a configured TURN or One Link relay. "
+        "The stock build includes no public rendezvous or TURN endpoint. "
+        "You'll see a note when a newer signed version is available. "
+        "No accounts, no profile, no tracking."
     ),
     update_check_enabled=True,
     stun_servers=COMMUNITY_STUN_SERVERS,
@@ -129,9 +136,10 @@ JUST_WORKS = SovereigntyPreset(
     turn_relay_enabled=True,
     inherit_rendezvous_from_mdns_enabled=True,
     outbound_summary=(
-        "Uses small community servers (Nextcloud, Sipgate) only to "
-        "help devices find each other. Checks for updates once every "
-        "6 hours. Local Wi-Fi sharing on."
+        "Uses disclosed community STUN for address discovery (not "
+        "signaling) and checks the public GitHub Releases API once every "
+        "6 hours. Local-network sharing is on. Rendezvous and TURN are "
+        "used only when an endpoint is configured."
     ),
 )
 
@@ -141,8 +149,8 @@ QUIET = SovereigntyPreset(
     description=(
         "Only talks to other devices on your local Wi-Fi. Connecting "
         "across different networks (for example, your phone at a "
-        "coffee shop to your laptop at home) will not work unless you "
-        "set it up yourself. Update notifications are off. Browser "
+        "coffee shop to your laptop at home) is unavailable while "
+        "Quiet is active. Update notifications are off. Browser "
         "labels in the sessions list are stripped (you'll see uuids "
         "only). Pick this for the strictest privacy without going "
         "completely offline."
@@ -150,10 +158,8 @@ QUIET = SovereigntyPreset(
     update_check_enabled=False,
     stun_servers=(),
     mdns_discovery_enabled=True,
-    # quiet = LAN-only. Rendezvous (an outside relay) is OFF by
-    # default; a user can still opt in explicitly via the
-    # rendezvous_enabled SETTING, which the resolver honours over
-    # the preset. off_grid stays False too.
+    # Quiet = LAN-only. Rendezvous is outside that boundary and remains
+    # forbidden even when an older setting says enabled.
     rendezvous_enabled=False,
     ui_session_persistence_enabled=True,
     ui_session_labels_enabled=False,
@@ -196,6 +202,11 @@ ALL_PRESETS: dict[str, SovereigntyPreset] = {
 # matches normal-person expectations. Strict modes are an opt-in.
 DEFAULT_PRESET_NAME = "just_works"
 
+MAX_ICE_SERVER_LIST_CHARS = 8192
+MAX_ICE_SERVER_URL_CHARS = 512
+MAX_ICE_SERVERS = 16
+_HOST_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
 
 def get_preset(name: Optional[str]) -> SovereigntyPreset:
     """Resolve a preset name to its definition. Unknown names fall
@@ -212,12 +223,15 @@ def resolve_update_check_enabled(
     env_var: Optional[str],
     preset_name: Optional[str],
 ) -> bool:
-    """Read order for the update-check flag.
+    """Resolve update-check permission under the preset ceiling.
 
-    1. ``state_setting`` (explicit user setting) wins if not None / not empty.
-    2. ``env_var`` (operator override) wins if set.
-    3. Preset default.
+    A preset is a privacy ceiling, not merely a UI default.  Quiet and
+    Off-grid therefore cannot be loosened by an older persisted toggle or an
+    environment variable.  Within a preset that permits checks, an explicit
+    setting/environment value may still turn them off.
     """
+    if not get_preset(preset_name).update_check_enabled:
+        return False
     # 1. Explicit setting wins. Strings "0"/"false"/"no"/"off" are
     #    explicit OFF; "1"/"true"/"yes"/"on" are explicit ON.
     s = (state_setting or "").strip().lower()
@@ -241,33 +255,154 @@ def resolve_stun_servers(
     env_var: Optional[str],
     preset_name: Optional[str],
 ) -> tuple[str, ...]:
-    """Read order for the STUN server list.
+    """Resolve STUN servers under the active preset's privacy ceiling.
 
     Setting + env var are comma-separated lists of stun:host:port
     URLs. Explicit empty string means "user wants NO stun even on a
     preset that defaults to community STUN" — honored.
 
-    1. ``state_setting`` (if not None) wins — empty string = []
-    2. ``env_var`` (if not None) wins next — empty string = []
-    3. Preset default.
+    Quiet and Off-grid permit no public STUN access, even when a stale setting
+    or operator environment variable contains servers.  Just Works permits a
+    validated override; an empty override remains an explicit opt-out.
     """
-    def _parse(raw: str) -> tuple[str, ...]:
-        out = []
-        seen: set[str] = set()
-        for u in raw.split(","):
-            u = u.strip()
-            if u and u not in seen:
-                out.append(u)
-                seen.add(u)
-        return tuple(out)
-
+    preset = get_preset(preset_name)
+    if not preset.stun_servers:
+        return ()
     # state_setting=None means "no override". Empty string means
     # "explicit opt-out of even the preset default."
     if state_setting is not None:
-        return _parse(state_setting)
+        return parse_ice_server_list(state_setting, allowed_schemes={"stun", "stuns"})
     if env_var is not None:
-        return _parse(env_var)
-    return get_preset(preset_name).stun_servers
+        return parse_ice_server_list(env_var, allowed_schemes={"stun", "stuns"})
+    return preset.stun_servers
+
+
+def parse_ice_server_list(
+    raw: str,
+    *,
+    allowed_schemes: set[str] | frozenset[str],
+) -> tuple[str, ...]:
+    """Return a bounded, canonical ICE URL list and drop invalid entries.
+
+    Settings are local/operator inputs, so a typo must fail closed to an
+    empty or reduced list rather than crash the call path or hand a browser
+    an ambiguous URI. The parser deliberately accepts only RFC-style
+    STUN/TURN authorities and TURN's single ``transport`` query.
+    """
+    if not isinstance(raw, str) or len(raw) > MAX_ICE_SERVER_LIST_CHARS:
+        return ()
+    normalized_schemes = frozenset(str(s).lower() for s in allowed_schemes)
+    if not normalized_schemes or not normalized_schemes <= {
+        "stun", "stuns", "turn", "turns",
+    }:
+        raise ValueError("unsupported ICE URL scheme policy")
+    out: list[str] = []
+    seen: set[str] = set()
+    for candidate in raw.split(","):
+        if len(out) >= MAX_ICE_SERVERS:
+            break
+        canonical = canonicalize_ice_server_url(
+            candidate, allowed_schemes=normalized_schemes
+        )
+        if canonical is not None and canonical not in seen:
+            seen.add(canonical)
+            out.append(canonical)
+    return tuple(out)
+
+
+def canonicalize_ice_server_url(
+    raw: str,
+    *,
+    allowed_schemes: frozenset[str],
+) -> str | None:
+    text = raw.strip() if isinstance(raw, str) else ""
+    if not text or len(text) > MAX_ICE_SERVER_URL_CHARS:
+        return None
+    try:
+        text.encode("ascii")
+    except UnicodeEncodeError:
+        return None
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text):
+        return None
+    if ":" not in text:
+        return None
+    raw_scheme, remainder = text.split(":", 1)
+    scheme = raw_scheme.lower()
+    if scheme not in allowed_schemes:
+        return None
+    if not remainder or any(ch in remainder for ch in "/#@"):
+        return None
+
+    authority, separator, query = remainder.partition("?")
+    if separator:
+        if scheme not in {"turn", "turns"}:
+            return None
+        if query.lower() not in {"transport=udp", "transport=tcp"}:
+            return None
+        query = query.lower()
+    elif "?" in authority:
+        return None
+
+    host: str
+    port_text = ""
+    port_specified = False
+    bracketed = authority.startswith("[")
+    if bracketed:
+        closing = authority.find("]")
+        if closing <= 1:
+            return None
+        host = authority[1:closing]
+        suffix = authority[closing + 1:]
+        if suffix:
+            if not suffix.startswith(":") or ":" in suffix[1:]:
+                return None
+            port_specified = True
+            port_text = suffix[1:]
+        try:
+            host = ipaddress.IPv6Address(host).compressed
+        except ValueError:
+            return None
+        rendered_host = f"[{host}]"
+    else:
+        if authority.count(":") > 1:
+            return None  # IPv6 literals must be bracketed.
+        if ":" in authority:
+            port_specified = True
+            host, port_text = authority.rsplit(":", 1)
+        else:
+            host = authority
+        host = host.rstrip(".").lower()
+        if not _valid_ice_hostname(host):
+            return None
+        rendered_host = host
+
+    rendered_port = ""
+    if port_specified:
+        if not port_text.isascii() or not port_text.isdecimal():
+            return None
+        port = int(port_text, 10)
+        if not 0 < port <= 65535:
+            return None
+        rendered_port = f":{port}"
+    canonical = f"{scheme}:{rendered_host}{rendered_port}"
+    if separator:
+        canonical += f"?{query}"
+    return canonical
+
+
+def _valid_ice_hostname(host: str) -> bool:
+    if not host or len(host) > 253:
+        return False
+    try:
+        ipaddress.IPv4Address(host)
+        return True
+    except ValueError:
+        pass
+    # Numeric dotted strings that are not canonical IPv4 addresses should
+    # not be reinterpreted as DNS names (e.g. legacy octal-like spellings).
+    if all(ch.isdigit() or ch == "." for ch in host):
+        return False
+    return all(_HOST_LABEL_RE.fullmatch(label) is not None for label in host.split("."))
 
 
 def _resolve_bool_setting(
@@ -275,9 +410,13 @@ def _resolve_bool_setting(
     state_setting: Optional[str],
     preset_value: bool,
 ) -> bool:
-    """Shared explicit-setting-wins resolver for boolean flags. The
-    user's explicit setting (true/false/etc.) overrides the preset;
-    anything else falls back to the preset default."""
+    """Resolve a boolean without allowing a preset prohibition to loosen.
+
+    Explicit settings may make a permitted feature stricter.  They cannot
+    re-enable a feature that the selected sovereignty preset forbids.
+    """
+    if not preset_value:
+        return False
     s = (state_setting or "").strip().lower()
     if s in ("1", "true", "yes", "on"):
         return True
@@ -291,10 +430,11 @@ def resolve_ui_session_persistence_enabled(
     state_setting: Optional[str],
     preset_name: Optional[str],
 ) -> bool:
-    """Should we mint persistent ol_session cookies? Explicit user
-    setting (from the Privacy panel feature row) wins; otherwise
-    falls back to the active preset's default. off_grid defaults
-    OFF; just_works / quiet default ON."""
+    """Should we mint persistent ol_session cookies?
+
+    An explicit setting may disable them. Off-grid's prohibition cannot be
+    overridden; Just Works and Quiet permit persistence.
+    """
     return _resolve_bool_setting(
         state_setting=state_setting,
         preset_value=get_preset(preset_name).ui_session_persistence_enabled,
@@ -307,8 +447,8 @@ def resolve_ui_session_labels_enabled(
     preset_name: Optional[str],
 ) -> bool:
     """Should we store browser User-Agent labels on session rows?
-    quiet + off_grid default OFF (no fingerprint); just_works
-    defaults ON (readable Settings list)."""
+    quiet + off_grid default OFF (no fingerprint); just_works defaults ON.
+    An explicit setting may only make the selected preset stricter."""
     return _resolve_bool_setting(
         state_setting=state_setting,
         preset_value=get_preset(preset_name).ui_session_labels_enabled,
@@ -322,7 +462,8 @@ def resolve_mdns_discovery_enabled(
 ) -> bool:
     """Should the daemon broadcast on mDNS (zeroconf) so other
     devices on the LAN can find it? off_grid OFF (the whole point);
-    just_works + quiet ON. Explicit user setting wins."""
+    just_works + quiet ON. An explicit setting may turn it off, never loosen
+    Off-grid."""
     return _resolve_bool_setting(
         state_setting=state_setting,
         preset_value=get_preset(preset_name).mdns_discovery_enabled,
@@ -334,10 +475,13 @@ def resolve_rendezvous_enabled(
     state_setting: Optional[str],
     preset_name: Optional[str],
 ) -> bool:
-    """Hard gate on rendezvous client startup. When False, even if
-    rendezvous URLs are configured in state.db, the daemon will NOT
-    contact them. All three current presets default OFF — rendezvous
-    requires explicit user opt-in via a setting override anyway."""
+    """Return the policy gate for rendezvous client startup.
+
+    ``True`` only permits configured URLs; it does not configure a service or
+    prove one is reachable. When False, the daemon will not contact preserved
+    URLs. Just Works permits configured routes, while Quiet and Off-grid deny
+    them as a hard ceiling.
+    """
     return _resolve_bool_setting(
         state_setting=state_setting,
         preset_value=get_preset(preset_name).rendezvous_enabled,
@@ -349,10 +493,12 @@ def resolve_turn_relay_enabled(
     state_setting: Optional[str],
     preset_name: Optional[str],
 ) -> bool:
-    """Should the daemon use TURN relays for cross-NAT call rescue?
-    just_works ON (calls work even on hostile NATs); quiet OFF (no
-    third-party relay traffic); off_grid OFF (no outbound at all).
-    Explicit user setting wins."""
+    """Return the policy gate for operator/user-configured TURN relays.
+
+    Just Works permits configured relays; it does not supply a TURN endpoint
+    or establish reachability. Quiet and Off-grid deny relay traffic as a hard
+    ceiling. An explicit setting may disable a permitted relay.
+    """
     return _resolve_bool_setting(
         state_setting=state_setting,
         preset_value=get_preset(preset_name).turn_relay_enabled,
@@ -364,10 +510,13 @@ def resolve_inherit_rendezvous_from_mdns_enabled(
     state_setting: Optional[str],
     preset_name: Optional[str],
 ) -> bool:
-    """Should the daemon adopt rendezvous URLs broadcast by other
-    LAN peers via mDNS TXT records? This is how phones bootstrap
-    onto an existing mesh, but it accepts URLs from any device on
-    the same Wi-Fi — quiet + off_grid refuse to do this."""
+    """May an explicitly enabled bootstrap adopt mDNS rendezvous URLs?
+
+    This policy permit is not auto-configuration: the separate
+    ``inherit_rendezvous_from_mdns`` setting must also be enabled. Because
+    ambient mDNS is unauthenticated, Quiet and Off-grid deny it as a hard
+    ceiling.
+    """
     return _resolve_bool_setting(
         state_setting=state_setting,
         preset_value=get_preset(

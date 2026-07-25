@@ -3,57 +3,191 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 from one_link import channel as ch
 from one_link import daemon as daemon_mod
 from one_link.daemon import Daemon
-from one_link.identity import load_or_create
+from one_link.identity import Identity, load_or_create
 
 
-async def _connected_pair() -> tuple[
+ConnectedPair = tuple[
     asyncio.StreamReader,
     asyncio.StreamWriter,
     asyncio.StreamReader,
     asyncio.StreamWriter,
-]:
-    """Two ends of an in-process pipe — left writes flow to right's reader and
-    vice versa. We back this with a TCP loopback because asyncio's pure
-    in-memory pair is awkward and TCP is what production uses anyway."""
-    server_done: asyncio.Future = asyncio.get_running_loop().create_future()
-    server_io: dict = {}
+]
+ConnectedPairFactory = Callable[[], Awaitable[ConnectedPair]]
+ChannelPairFactory = Callable[[Identity, Identity], Awaitable[tuple[ch.Channel, ch.Channel]]]
 
-    async def _server_cb(r: asyncio.StreamReader, w: asyncio.StreamWriter):
-        server_io["r"] = r
-        server_io["w"] = w
-        if not server_done.done():
-            server_done.set_result(None)
-        # keep open until torn down
+
+async def _close_stream_writers(writers: list[asyncio.StreamWriter]) -> None:
+    """Close every test stream while pytest's owning event loop is alive."""
+    for writer in writers:
+        writer.close()
+
+    async def _wait_closed(writer: asyncio.StreamWriter) -> None:
         try:
-            await asyncio.sleep(3600)
-        except asyncio.CancelledError:
+            await writer.wait_closed()
+        except (ConnectionError, OSError, RuntimeError):
+            # A peer may already have reset a negative-path handshake socket.
+            # The local transport has still been explicitly closed above.
             pass
 
-    server = await asyncio.start_server(_server_cb, "127.0.0.1", 0)
-    port = server.sockets[0].getsockname()[1]
-    client_r, client_w = await asyncio.open_connection("127.0.0.1", port)
-    await server_done
-    return client_r, client_w, server_io["r"], server_io["w"]
+    async with asyncio.timeout(5):
+        await asyncio.gather(*(_wait_closed(writer) for writer in writers))
+
+
+async def _finish_tasks(tasks: list[asyncio.Task[None]]) -> None:
+    """Await owned callbacks, cancelling them if shutdown stops progressing."""
+    if not tasks:
+        return
+    try:
+        async with asyncio.timeout(5):
+            await asyncio.gather(*tasks)
+    finally:
+        pending = [task for task in tasks if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
+@pytest_asyncio.fixture
+async def connected_pair() -> AsyncIterator[ConnectedPairFactory]:
+    """Create loopback pairs and own every listener and accepted stream."""
+    writers: list[asyncio.StreamWriter] = []
+    servers: list[asyncio.AbstractServer] = []
+    callback_tasks: list[asyncio.Task[None]] = []
+    keepalive_events: list[asyncio.Event] = []
+
+    async def _open() -> ConnectedPair:
+        loop = asyncio.get_running_loop()
+        accepted: asyncio.Future[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = (
+            loop.create_future()
+        )
+        keepalive = asyncio.Event()
+        keepalive_events.append(keepalive)
+
+        async def _server_cb(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            task = asyncio.current_task()
+            if task is not None:
+                callback_tasks.append(task)
+            writers.append(writer)
+            if not accepted.done():
+                accepted.set_result((reader, writer))
+            await keepalive.wait()
+
+        server = await asyncio.start_server(_server_cb, "127.0.0.1", 0)
+        servers.append(server)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            client_reader, client_writer = await asyncio.open_connection("127.0.0.1", port)
+            writers.append(client_writer)
+            server_reader, server_writer = await accepted
+        except BaseException:
+            server.close()
+            await server.wait_closed()
+            raise
+
+        return (
+            client_reader,
+            client_writer,
+            server_reader,
+            server_writer,
+        )
+
+    try:
+        yield _open
+    finally:
+        for server in servers:
+            server.close()
+        for keepalive in keepalive_events:
+            keepalive.set()
+        await _close_stream_writers(writers)
+        await _finish_tasks(callback_tasks)
+        await asyncio.gather(*(server.wait_closed() for server in servers))
+
+
+@pytest_asyncio.fixture
+async def channel_pair(
+    connected_pair: ConnectedPairFactory,
+) -> AsyncIterator[ChannelPairFactory]:
+    """Open authenticated channels and close them even after a failed assertion."""
+    channels: list[ch.Channel] = []
+
+    async def _open(alice: Identity, bob: Identity) -> tuple[ch.Channel, ch.Channel]:
+        alice_reader, alice_writer, bob_reader, bob_writer = await connected_pair()
+        tasks = (
+            asyncio.create_task(
+                ch.initiate(
+                    alice_reader,
+                    alice_writer,
+                    alice,
+                    expected_responder_ed_pub=bob.public_bytes,
+                )
+            ),
+            asyncio.create_task(ch.respond(bob_reader, bob_writer, bob)),
+        )
+        try:
+            alice_channel, bob_channel = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        channels.extend((alice_channel, bob_channel))
+        return alice_channel, bob_channel
+
+    try:
+        yield _open
+    finally:
+        async with asyncio.timeout(5):
+            await asyncio.gather(*(channel.close() for channel in reversed(channels)))
+
+
+def test_handshake_replay_check_insert_is_atomic_across_threads():
+    """Exactly one concurrent observer may claim a fresh HELLO nonce.
+
+    The barrier makes every worker contend on the same check-and-insert
+    boundary.  This remains a meaningful regression test on free-threaded
+    Python, where relying on the historical GIL would admit duplicate HELLOs.
+    """
+
+    workers = 32
+    barrier = threading.Barrier(workers)
+    peer_key = os.urandom(32)
+    nonce = os.urandom(ch.NONCE_LEN)
+    observed_at = time.monotonic()
+
+    def _contend() -> bool:
+        barrier.wait(timeout=10)
+        return ch._handshake_replay_seen(peer_key, nonce, observed_at)
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(lambda _index: _contend(), range(workers)))
+        assert results.count(False) == 1
+        assert results.count(True) == workers - 1
+    finally:
+        with ch._handshake_replay_lock:
+            ch._handshake_replay_cache.pop((peer_key, nonce), None)
 
 
 @pytest.mark.asyncio
-async def test_handshake_succeeds(tmp_path: Path):
+async def test_handshake_succeeds(tmp_path: Path, channel_pair: ChannelPairFactory):
     alice = load_or_create(tmp_path / "a.key")
     bob = load_or_create(tmp_path / "b.key")
-    a_r, a_w, b_r, b_w = await _connected_pair()
-    initiator_task = asyncio.create_task(ch.initiate(a_r, a_w, alice))
-    responder_task = asyncio.create_task(ch.respond(b_r, b_w, bob))
-    a_chan = await initiator_task
-    b_chan = await responder_task
+    a_chan, b_chan = await channel_pair(alice, bob)
 
     assert a_chan.peer_short_id == bob.short_id
     assert b_chan.peer_short_id == alice.short_id
@@ -61,8 +195,6 @@ async def test_handshake_succeeds(tmp_path: Path):
     assert b_chan.peer_ed_pub == alice.public_bytes
     assert len(a_chan.transcript_hash) == 32
     assert a_chan.transcript_hash == b_chan.transcript_hash
-    await a_chan.close()
-    await b_chan.close()
 
 
 @pytest.mark.asyncio
@@ -72,17 +204,23 @@ async def test_empty_pre_handshake_disconnect_is_benign(tmp_path: Path, caplog):
     in production logs."""
     bob = load_or_create(tmp_path / "b.key")
     daemon = Daemon(bob)
-    server = await asyncio.start_server(daemon._handle_peer, "127.0.0.1", 0)
+    handler_tasks: list[asyncio.Task[None]] = []
+
+    def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        handler_tasks.append(asyncio.create_task(daemon._handle_peer(reader, writer)))
+
+    server = await asyncio.start_server(_handle, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     caplog.set_level(logging.WARNING, logger="one_link.daemon")
     try:
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        _reader, writer = await asyncio.open_connection("127.0.0.1", port)
         writer.close()
         await writer.wait_closed()
         await asyncio.sleep(0.1)
     finally:
         server.close()
         await server.wait_closed()
+        await _finish_tasks(handler_tasks)
 
     assert "handshake failed" not in caplog.text
 
@@ -135,14 +273,10 @@ def test_asyncio_exception_handler_delegates_real_errors(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_send_recv_round_trip(tmp_path: Path):
+async def test_send_recv_round_trip(tmp_path: Path, channel_pair: ChannelPairFactory):
     alice = load_or_create(tmp_path / "a.key")
     bob = load_or_create(tmp_path / "b.key")
-    a_r, a_w, b_r, b_w = await _connected_pair()
-    a_chan, b_chan = await asyncio.gather(
-        ch.initiate(a_r, a_w, alice),
-        ch.respond(b_r, b_w, bob),
-    )
+    a_chan, b_chan = await channel_pair(alice, bob)
 
     await a_chan.send(b"hello bob")
     assert await b_chan.recv() == b"hello bob"
@@ -150,36 +284,23 @@ async def test_send_recv_round_trip(tmp_path: Path):
     await b_chan.send(b"hi alice")
     assert await a_chan.recv() == b"hi alice"
 
-    await a_chan.close()
-    await b_chan.close()
-
 
 @pytest.mark.asyncio
-async def test_many_messages_keep_keys_aligned(tmp_path: Path):
+async def test_many_messages_keep_keys_aligned(tmp_path: Path, channel_pair: ChannelPairFactory):
     alice = load_or_create(tmp_path / "a.key")
     bob = load_or_create(tmp_path / "b.key")
-    a_r, a_w, b_r, b_w = await _connected_pair()
-    a_chan, b_chan = await asyncio.gather(
-        ch.initiate(a_r, a_w, alice),
-        ch.respond(b_r, b_w, bob),
-    )
+    a_chan, b_chan = await channel_pair(alice, bob)
     for i in range(50):
         await a_chan.send(f"msg-{i}".encode())
     for i in range(50):
         assert await b_chan.recv() == f"msg-{i}".encode()
-    await a_chan.close()
-    await b_chan.close()
 
 
 @pytest.mark.asyncio
-async def test_bidirectional_interleaved(tmp_path: Path):
+async def test_bidirectional_interleaved(tmp_path: Path, channel_pair: ChannelPairFactory):
     alice = load_or_create(tmp_path / "a.key")
     bob = load_or_create(tmp_path / "b.key")
-    a_r, a_w, b_r, b_w = await _connected_pair()
-    a_chan, b_chan = await asyncio.gather(
-        ch.initiate(a_r, a_w, alice),
-        ch.respond(b_r, b_w, bob),
-    )
+    a_chan, b_chan = await channel_pair(alice, bob)
     await a_chan.send(b"a1")
     await b_chan.send(b"b1")
     assert await b_chan.recv() == b"a1"
@@ -188,34 +309,29 @@ async def test_bidirectional_interleaved(tmp_path: Path):
     await b_chan.send(b"b2")
     assert await a_chan.recv() == b"b2"
     assert await b_chan.recv() == b"a2"
-    await a_chan.close()
-    await b_chan.close()
 
 
 @pytest.mark.asyncio
-async def test_large_payload(tmp_path: Path):
+async def test_large_payload(tmp_path: Path, channel_pair: ChannelPairFactory):
     alice = load_or_create(tmp_path / "a.key")
     bob = load_or_create(tmp_path / "b.key")
-    a_r, a_w, b_r, b_w = await _connected_pair()
-    a_chan, b_chan = await asyncio.gather(
-        ch.initiate(a_r, a_w, alice),
-        ch.respond(b_r, b_w, bob),
-    )
+    a_chan, b_chan = await channel_pair(alice, bob)
     payload = os.urandom(1024 * 1024)  # 1 MiB
     await a_chan.send(payload)
     assert await b_chan.recv() == payload
-    await a_chan.close()
-    await b_chan.close()
 
 
 @pytest.mark.asyncio
-async def test_responder_rejects_bad_initiator_signature(tmp_path: Path):
+async def test_responder_rejects_bad_initiator_signature(
+    tmp_path: Path, connected_pair: ConnectedPairFactory
+):
     """If initiator's HELLO signature doesn't verify, responder must abort."""
     bob = load_or_create(tmp_path / "b.key")
-    a_r, a_w, b_r, b_w = await _connected_pair()
+    _a_r, a_w, b_r, b_w = await connected_pair()
 
     # Send a bogus HELLO: random bytes that match expected length.
     from one_link.wire import write_frame
+
     bogus = os.urandom(32 + 32 + ch.NONCE_LEN + 64)
     await write_frame(a_w, bogus)
 
@@ -224,77 +340,81 @@ async def test_responder_rejects_bad_initiator_signature(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_initiator_rejects_bad_responder_signature(tmp_path: Path):
+async def test_initiator_rejects_bad_responder_signature(
+    tmp_path: Path, connected_pair: ConnectedPairFactory
+):
     """If responder's REPLY signature doesn't verify, initiator must abort."""
     alice = load_or_create(tmp_path / "a.key")
-    a_r, a_w, b_r, b_w = await _connected_pair()
+    a_r, a_w, b_r, b_w = await connected_pair()
 
     # Spawn the legitimate initiator
-    init_task = asyncio.create_task(ch.initiate(a_r, a_w, alice))
+    init_task = asyncio.create_task(
+        ch.initiate(
+            a_r,
+            a_w,
+            alice,
+            expected_responder_ed_pub=os.urandom(32),
+        )
+    )
 
-    # Manually read the HELLO that initiator just sent
-    from one_link.wire import read_frame, write_frame
-    _ = await read_frame(b_r)
+    try:
+        # Manually read the HELLO that initiator just sent
+        from one_link.wire import read_frame, write_frame
 
-    # Send a bogus REPLY
-    bogus = os.urandom(32 + 32 + ch.NONCE_LEN + 64)
-    await write_frame(b_w, bogus)
+        _ = await read_frame(b_r)
 
-    with pytest.raises(RuntimeError, match="REPLY signature invalid"):
-        await init_task
+        # Send a bogus REPLY
+        bogus = os.urandom(32 + 32 + ch.NONCE_LEN + 64)
+        await write_frame(b_w, bogus)
+
+        with pytest.raises(RuntimeError, match="REPLY signature invalid"):
+            await init_task
+    finally:
+        if not init_task.done():
+            init_task.cancel()
+            await asyncio.gather(init_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
-async def test_responder_rejects_short_hello(tmp_path: Path):
+async def test_responder_rejects_short_hello(tmp_path: Path, connected_pair: ConnectedPairFactory):
     bob = load_or_create(tmp_path / "b.key")
-    a_r, a_w, b_r, b_w = await _connected_pair()
+    _a_r, a_w, b_r, b_w = await connected_pair()
     from one_link.wire import write_frame
+
     await write_frame(a_w, b"too short")
     with pytest.raises(RuntimeError, match="bad HELLO length"):
         await ch.respond(b_r, b_w, bob)
 
 
 @pytest.mark.asyncio
-async def test_aead_rejects_tampered_ciphertext(tmp_path: Path):
+async def test_aead_rejects_tampered_ciphertext(tmp_path: Path, channel_pair: ChannelPairFactory):
     """Flip a byte in a ciphertext frame; recv must raise."""
     alice = load_or_create(tmp_path / "a.key")
     bob = load_or_create(tmp_path / "b.key")
-    a_r, a_w, b_r, b_w = await _connected_pair()
-    a_chan, b_chan = await asyncio.gather(
-        ch.initiate(a_r, a_w, alice),
-        ch.respond(b_r, b_w, bob),
-    )
+    a_chan, b_chan = await channel_pair(alice, bob)
 
     # Send a legitimate frame, then immediately corrupt the wire by sending
     # a malformed encrypted frame *manually*.
     from one_link.wire import write_frame
+
     bad_ct = os.urandom(64)  # not a valid AEAD ciphertext under any key
-    await write_frame(a_w, bad_ct)
+    await write_frame(a_chan.writer, bad_ct)
     a_chan.tx_seq += 1  # keep sender state honest
 
     with pytest.raises(Exception):  # InvalidTag from cryptography
         await b_chan.recv()
 
-    await a_chan.close()
-    await b_chan.close()
-
 
 @pytest.mark.asyncio
-async def test_each_handshake_uses_fresh_ephemeral(tmp_path: Path):
+async def test_each_handshake_uses_fresh_ephemeral(
+    tmp_path: Path, channel_pair: ChannelPairFactory
+):
     """Two channels between same identities should derive different keys."""
     alice = load_or_create(tmp_path / "a.key")
     bob = load_or_create(tmp_path / "b.key")
 
-    a_r1, a_w1, b_r1, b_w1 = await _connected_pair()
-    c1a, c1b = await asyncio.gather(
-        ch.initiate(a_r1, a_w1, alice),
-        ch.respond(b_r1, b_w1, bob),
-    )
-    a_r2, a_w2, b_r2, b_w2 = await _connected_pair()
-    c2a, c2b = await asyncio.gather(
-        ch.initiate(a_r2, a_w2, alice),
-        ch.respond(b_r2, b_w2, bob),
-    )
+    c1a, c1b = await channel_pair(alice, bob)
+    c2a, c2b = await channel_pair(alice, bob)
 
     # Internal ChaCha20Poly1305 key bytes aren't exposed; instead, verify
     # that ciphertexts of the same plaintext differ across sessions.
@@ -306,8 +426,3 @@ async def test_each_handshake_uses_fresh_ephemeral(tmp_path: Path):
     assert await c1b.recv() == pt
     assert await c2b.recv() == pt
     assert c1a.transcript_hash != c2a.transcript_hash
-
-    await c1a.close()
-    await c1b.close()
-    await c2a.close()
-    await c2b.close()

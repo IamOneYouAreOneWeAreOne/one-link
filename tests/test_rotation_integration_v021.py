@@ -28,7 +28,6 @@ from tests.harness import (
     _bring_up,
     _stop,
     daemon_pair,
-    request,
 )
 
 
@@ -129,24 +128,6 @@ async def _pair_a_and_b(p):
         pytest.fail("pair did not settle to mutual pinned within 6s")
 
 
-@pytest.mark.skip(
-    reason=(
-        "2026-05-26 follow-up: the rotation-cert delivery currently "
-        "requires the OLD identity's still-trusted channel to be "
-        "live when the cert is sent. After A restarts under its NEW "
-        "identity, B sees A as non-pinned (the fingerprint changed) "
-        "and drops the connection at the pre-handshake stage with "
-        "'ENDPOINT_UPDATE from non-pinned peer dropped'. The "
-        "/api/peers/{fp}/_test_force_dial endpoint added in this "
-        "commit eliminates the mDNS-rediscovery delay (the original "
-        "skip reason) but exposes a real protocol gap: rotation "
-        "must be a *coordinated* handshake where the receiver also "
-        "knows to expect an old->new transition. Closing this "
-        "needs new wire surface — out of scope for the test-coverage "
-        "sweep. Leaving the test in place + skipped with the "
-        "updated finding."
-    ),
-)
 @pytest.mark.asyncio
 @pytest.mark.timeout(180)
 async def test_rotation_propagates_to_paired_peer_over_real_wire():
@@ -160,6 +141,12 @@ async def test_rotation_propagates_to_paired_peer_over_real_wire():
         # Snapshot A's old fp so we can confirm B forgets it.
         ta_old, port_a_old = _read_tok_and_port(p.a.home)
         base_a_old = f"http://127.0.0.1:{port_a_old}"
+        authority_paths = (
+            p.a.home / "data" / "master.seed",
+            p.a.home / "config" / "identity.key",
+            p.a.home / "data" / "data-root-key.bin",
+        )
+        authority_before = {path: path.read_bytes() for path in authority_paths}
 
         # Set a local alias on B for A so we can confirm the alias
         # survives the rotation (key property of transition_peer_fingerprint).
@@ -185,20 +172,39 @@ async def test_rotation_propagates_to_paired_peer_over_real_wire():
                 rotate = await r.json()
             assert rotate.get("ok"), f"rotate failed: {rotate}"
             assert rotate.get("restart_required") is True
-            assert rotate.get("queued_peer_count", 0) >= 1, (
-                f"expected >=1 peer queued; got: {rotate}"
+            assert rotate.get("queued_peer_count", -1) == 0, rotate
+            assert rotate.get("staged_peer_count", 0) >= 1, (
+                f"expected >=1 peer durably staged; got: {rotate}"
             )
             fp_a_new = rotate.get("new_fp")
             assert fp_a_new and fp_a_new != fp_a_old, (
                 f"new_fp not present or equals old: {rotate}"
             )
+            # The live daemon has only journaled the transition. No current
+            # authority or SQLite queue may change underneath open handles.
+            assert {path: path.read_bytes() for path in authority_paths} == (
+                authority_before
+            )
+            async with s.get(
+                f"{base_a_old}/api/v1/recovery/rotate/status",
+                headers={"Authorization": f"Bearer {ta_old}"},
+            ) as r:
+                staged_status = await r.json()
+            assert staged_status["staged_rotation"]["phase"] == "prepared"
+            assert staged_status["staged_rotation"]["staged_peer_count"] >= 1
+            assert staged_status["summary"]["total"] == 0
 
         # Restart A in place: kill the daemon process, then re-spawn
         # under the SAME home dir so the rotated seed loads on next
         # start. After respawn A has a new ui.token + ports.
         old_proc = p.a.proc
         old_log_fh = p.a.log_fh
-        _stop(old_proc)
+        _stop(
+            old_proc,
+            home=p.a.home,
+            control_port=p.a.control_port,
+            control_secret=p.a.control_secret,
+        )
         try:
             if old_log_fh is not None:
                 old_log_fh.close()
@@ -232,20 +238,29 @@ async def test_rotation_propagates_to_paired_peer_over_real_wire():
                 f"A post-restart fingerprint {me.get('fingerprint')!r} "
                 f"does not match rotated target {fp_a_new!r}"
             )
+            async with s.get(
+                f"{base_a_new}/api/v1/recovery/rotate/status",
+                headers={"Authorization": f"Bearer {ta_new}"},
+            ) as r:
+                committed_status = await r.json()
+            assert committed_status["staged_rotation"] is None
+            assert committed_status["summary"]["total"] >= 1
 
-            # v0.21.x: skip the slow mDNS rediscovery window by
-            # calling the test-only force-dial endpoint. A's peer
-            # state DB persists across the restart, so A still knows
-            # B's last address/port — we just need to trigger a dial
-            # explicitly without waiting for the periodic rediscovery
-            # to fire. The endpoint is gated behind
+            # v0.21.x: skip the slow mDNS rediscovery window by calling the
+            # test-only force-dial endpoint. A's authenticated peer state
+            # persists across restart, so the endpoint establishes a complete
+            # channel, exchanges transcript-bound CAPS, drains the queued
+            # rotation certificate, and proves liveness with PING/PONG. It is
+            # gated behind
             # ONE_LINK_ENABLE_TEST_API which the harness sets
             # automatically.
             async with s.post(
                 f"{base_a_new}/api/peers/{fp_b}/_test_force_dial",
                 headers={"Authorization": f"Bearer {ta_new}"},
             ) as r:
-                _ = await r.json()  # may fail; just primes the dial
+                force_dial_body = await r.json()
+                assert r.status == 200, force_dial_body
+                assert force_dial_body == {"ok": True, "fingerprint": fp_b}
 
             # Wait for A to re-handshake B + deliver the rotation cert.
             # The CAPS-time drain in daemon.py fires the cert as part of

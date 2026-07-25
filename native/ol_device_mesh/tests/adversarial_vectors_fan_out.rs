@@ -48,7 +48,9 @@ fn adversarial_fetch_request_wrong_subkey_rejected() {
 fn adversarial_fetch_request_oversize_rejected() {
     let master = MasterIdentity::generate(&mut OsRng);
     let (sk, _) = mint_subkey(&master, DeviceClass::Phone, [0xAA; DEVICE_ID_LEN], 0, 365).unwrap();
-    let chunks: Vec<ChunkHash> = (0..(MAX_CHUNKS_PER_FETCH as u32 + 1))
+    let max_chunks =
+        u32::try_from(MAX_CHUNKS_PER_FETCH).expect("the fetch chunk bound fits in u32");
+    let chunks: Vec<ChunkHash> = (0..=max_chunks)
         .map(|i| {
             let mut h = [0u8; 32];
             h[..4].copy_from_slice(&i.to_be_bytes());

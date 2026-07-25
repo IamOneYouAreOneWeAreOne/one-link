@@ -1,9 +1,10 @@
-//! Property tests for ol_pqsig at the F1.x bar.
+//! Property tests for `ol_pqsig` at the F1.x bar.
 //!
-//! CI default: 1M iters. Nightly (ONE_LINK_F1_GATE=1): 5M iters.
+//! CI default: 1M iters. Nightly (`ONE_LINK_F1_GATE=1)`: 5M iters.
 
 use proptest::prelude::*;
 use rand::rngs::OsRng;
+use std::sync::OnceLock;
 
 use ol_pqsig::{
     HybridSigningKey, HybridVerifyingKey, PqSigError, HYBRID_SIG_LEN, HYBRID_SK_LEN, HYBRID_VK_LEN,
@@ -23,6 +24,18 @@ fn light_cases() -> u32 {
     } else {
         10_000
     }
+}
+
+/// Signature-length rejection happens before either verification primitive
+/// observes the public key. Reuse one deterministic, structurally valid key so
+/// the 10,000 length cases measure the parser boundary rather than repeating
+/// identical ML-DSA key expansion.
+fn wrong_length_verifying_key() -> &'static HybridVerifyingKey {
+    static VERIFYING_KEY: OnceLock<HybridVerifyingKey> = OnceLock::new();
+    VERIFYING_KEY.get_or_init(|| {
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed_with_rand_core([0x51; 32]);
+        HybridSigningKey::generate(&mut rng).1
+    })
 }
 
 // ── Length-validation properties (1M cheap iters; no keygen) ────
@@ -45,7 +58,7 @@ proptest! {
         let r = HybridVerifyingKey::from_bytes(&bytes);
         let is_expected = matches!(
             r,
-            Err(PqSigError::BadLength { .. }) | Err(PqSigError::InvalidPubkey)
+            Err(PqSigError::BadLength { .. } | PqSigError::InvalidPubkey)
         );
         prop_assert!(is_expected);
     }
@@ -105,14 +118,11 @@ proptest! {
         if sig.len() == HYBRID_SIG_LEN {
             return Ok(());
         }
-        let mut rng = rand::thread_rng();
-        let (_, vk) = HybridSigningKey::generate(&mut rng);
-        let r = vk.verify(b"x", &sig);
+        let r = wrong_length_verifying_key().verify(b"x", &sig);
         let is_expected = matches!(
             r,
-            Err(PqSigError::BadLength { .. })
-                | Err(PqSigError::Ed25519VerifyFail)
-                | Err(PqSigError::MlDsaVerifyFail)
+            Err(PqSigError::BadLength { .. } | PqSigError::Ed25519VerifyFail |
+PqSigError::MlDsaVerifyFail)
         );
         prop_assert!(is_expected);
     }

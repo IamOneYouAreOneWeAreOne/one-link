@@ -4,7 +4,7 @@ across ≥ 1000 random seeds.
 
 Per ``docs/FILE_ENGINE_V2_PLAN.md``:
 
-    RaptorQ decode succeeds with K=1024 source symbols at 5% loss
+    LT fountain decode succeeds with K=1024 source symbols at 5% loss
     across ≥ 1000 random seeds.
 
 The shipped fountain codec is **LT** (Luby Transform — the simpler
@@ -42,7 +42,7 @@ def _require_fountain():
     except ImportError as e:
         raise RuntimeError(
             "one_link_native.fountain not installed; build via "
-            "`cd native && maturin develop --release`"
+            "`cd native && maturin develop --release --locked`"
         ) from e
 
 

@@ -48,7 +48,7 @@ def _require_field():
     except ImportError as e:
         raise RuntimeError(
             "one_link_native.coherence_field not installed; build via "
-            "`cd native && maturin develop --release`"
+            "`cd native && maturin develop --release --locked`"
         ) from e
 
 

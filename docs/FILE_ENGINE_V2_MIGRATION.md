@@ -106,13 +106,14 @@ and wire format are preserved both directions.
 |---|---|
 | WebRTC pairing | Works (no protocol change) |
 | Text messages | Works |
-| File transfers | Works (legacy chunk format; native pipeline is opt-in via `ONE_LINK_NATIVE_TRANSFER=1` + caps advertisement) |
+| File transfers | Works (legacy fallback; indexed native pipeline is default-on only when both peers advertise the required capabilities; `ONE_LINK_NATIVE_TRANSFER=0` is the incident rollback switch) |
 | Folder sync | Works (CRDT unchanged) |
 | Capability grants | Works (Ed25519 format unchanged) |
 
 Two v0.21+ daemons negotiate the native transfer pipeline via the
-`NATIVE_TRANSFER_V1` capability. If either side lacks it (e.g.
-v0.20.x), both fall back to the legacy path.
+`NATIVE_TRANSFER_INDEXED_V1` capability. If either side lacks it (e.g.
+v0.20.x), or an operator explicitly sets `ONE_LINK_NATIVE_TRANSFER=0`,
+the sender falls back to the legacy path.
 
 ## On-disk format compatibility
 

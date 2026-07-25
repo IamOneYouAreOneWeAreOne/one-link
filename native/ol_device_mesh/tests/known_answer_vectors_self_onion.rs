@@ -5,6 +5,15 @@ use ol_device_mesh::self_onion::{
     ONION_PUBKEY_LEN, ONION_SECRET_LEN, SELF_ONION_DOMAIN_PAYLOAD,
 };
 use ol_device_mesh::{MasterIdentity, DEVICE_ID_LEN};
+use std::fmt::Write as _;
+
+const EXPECTED_HEX: &str = concat!(
+    "4f4c2d6d6573682d6f6e696f6e2d6174746573746174696f6e2d7631", // domain
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",                         // device_id
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", // onion_pubkey
+    "0000000000000007",                                         // mint_day = 7
+    "000000000000016d",                                         // expiry_day = 365
+);
 
 fn check_regen<F: FnOnce()>(label: &str, dump: F) {
     if std::env::var("OL_SELF_ONION_KAT_REGEN").as_deref() == Ok("1") {
@@ -14,7 +23,11 @@ fn check_regen<F: FnOnce()>(label: &str, dump: F) {
 }
 
 fn to_hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    let mut hex = String::with_capacity(b.len() * 2);
+    for byte in b {
+        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
 }
 
 #[test]
@@ -60,12 +73,5 @@ fn kat_attestation_canonical_transcript_pinned() {
     check_regen("onion-attestation canonical_transcript", || {
         eprintln!("    EXPECTED_HEX = \"{hex}\"");
     });
-    const EXPECTED_HEX: &str = concat!(
-        "4f4c2d6d6573682d6f6e696f6e2d6174746573746174696f6e2d7631", // domain
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",                         // device_id
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", // onion_pubkey
-        "0000000000000007",                                         // mint_day = 7
-        "000000000000016d",                                         // expiry_day = 365
-    );
     assert_eq!(hex, EXPECTED_HEX, "onion-attestation transcript drift");
 }

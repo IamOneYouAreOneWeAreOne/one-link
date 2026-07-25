@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 
 from one_link import daemon as daemon_module
 from one_link.capabilities import (

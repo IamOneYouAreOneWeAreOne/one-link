@@ -145,3 +145,5 @@ def test_settings_save_feedback_is_visible_and_wired() -> None:
     assert 'setSettingsSaveStatus("Save failed."' in html
     assert 'setSettingsSaveStatus("Rendezvous save failed."' in html
     assert 'settingsBackdrop?.querySelectorAll("input, select, textarea")' in html
+    assert 'data-settings-transient="true"' in settings
+    assert 'if (ctl.dataset.settingsTransient === "true") return' in html

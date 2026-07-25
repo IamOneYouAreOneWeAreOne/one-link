@@ -23,12 +23,12 @@ pub type ChainKey = Zeroizing<[u8; CHAIN_KEY_LEN]>;
 /// 32-byte per-chunk AEAD key, zeroized on drop.
 pub type MessageKey = Zeroizing<[u8; MESSAGE_KEY_LEN]>;
 
-/// BLAKE3 derive_key context for the chain advance step. The chain
+/// BLAKE3 `derive_key` context for the chain advance step. The chain
 /// uses keyed-hash with a per-step counter to derive both the next
 /// chain key AND the message key for the corresponding chunk.
 const CHAIN_STEP_CONTEXT: &str = "ol-ratchet-chain-step-v1";
 
-/// BLAKE3 derive_key context used by [`derive_root_chain_key`] to
+/// BLAKE3 `derive_key` context used by [`derive_root_chain_key`] to
 /// turn a fresh KEM shared secret into the initial chain key.
 const ROOT_BOOTSTRAP_CONTEXT: &str = "ol-ratchet-root-bootstrap-v1";
 
@@ -87,7 +87,7 @@ impl Chain {
 
     /// Derive the message key for the current step + advance the chain.
     ///
-    /// Internally: produce 64 bytes via BLAKE3 derive_key. First 32
+    /// Internally: produce 64 bytes via BLAKE3 `derive_key`. First 32
     /// become the next chain key; second 32 become the message key.
     /// We then zeroize the intermediate buffer.
     pub fn next_message_key(&mut self) -> MessageKey {
@@ -107,9 +107,9 @@ impl Chain {
     /// # Errors
     ///
     /// - [`RatchetError::Rewind`] if `target_step < self.step`.
-    /// - [`RatchetError::SkipTooLarge`] if `target_step - self.step
-    ///   > MAX_SKIP_STEPS` (audit L11 May 2026 — closes the
-    ///   `seq = u64::MAX` indefinite-derive DoS).
+    /// - [`RatchetError::SkipTooLarge`] if
+    ///   `target_step - self.step > MAX_SKIP_STEPS` (audit L11 May 2026 — closes the
+    ///   `seq = u64::MAX` indefinite-derive denial-of-service attack).
     pub fn fast_forward(&mut self, target_step: u64) -> Result<(), RatchetError> {
         if target_step < self.step {
             return Err(RatchetError::Rewind {
@@ -139,8 +139,8 @@ impl Chain {
     /// # Errors
     ///
     /// - [`RatchetError::Rewind`] if `target_step < self.step`.
-    /// - [`RatchetError::SkipTooLarge`] if `target_step - self.step
-    ///   > MAX_SKIP_STEPS` (audit L11 May 2026).
+    /// - [`RatchetError::SkipTooLarge`] if
+    ///   `target_step - self.step > MAX_SKIP_STEPS` (audit L11 May 2026).
     pub fn peek_message_key(&self, target_step: u64) -> Result<MessageKey, RatchetError> {
         if target_step < self.step {
             return Err(RatchetError::Rewind {
@@ -170,20 +170,20 @@ impl Chain {
             s += 1;
         }
         // Derive message key at target_step from the fast-forwarded tmp.
-        let mk = self.derive_from(&tmp, target_step);
+        let mk = Self::derive_from(&tmp, target_step);
         // Explicit zeroize of the intermediate.
         tmp[..].zeroize();
         Ok(mk)
     }
 
-    /// Compute the message key for `step` from the current chain_key
+    /// Compute the message key for `step` from the current `chain_key`
     /// without mutating self.
     fn derive_step(&self, step: u64) -> MessageKey {
-        self.derive_from(&self.chain_key, step)
+        Self::derive_from(&self.chain_key, step)
     }
 
     /// Compute the message key from a specific chain-key snapshot.
-    fn derive_from(&self, chain_key: &ChainKey, step: u64) -> MessageKey {
+    fn derive_from(chain_key: &ChainKey, step: u64) -> MessageKey {
         // Mix the step counter into a per-step subcontext so re-use of
         // a chain key (defensive) cannot collide across steps.
         let mut input = [0u8; CHAIN_KEY_LEN + 8 + 1];

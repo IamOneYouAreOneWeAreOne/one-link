@@ -1,8 +1,9 @@
 //! Coherence Mesh Row 8 — Personal Device Mesh identity layer (Layer 1).
 //!
-//! Builds the cryptographic foundation that lets one logical identity
-//! own many devices without revealing the device count to friends and
-//! without sacrificing per-device forward secrecy.
+//! Builds cryptographic primitives for one logical identity to attest
+//! multiple device signing subkeys. The master-key abstraction does not
+//! guarantee device-count privacy: peers and infrastructure may infer count
+//! from attestations, routes, presence, traffic, or application behavior.
 //!
 //! ## What this crate provides
 //!
@@ -22,16 +23,17 @@
 //! - **Daily ratchet**: each subkey has an underlying *chain root* and
 //!   a current *day index*. `step_one_day()` advances the chain via
 //!   `S_{n+1} = HKDF(S_n, "ratchet")` and zeroizes `S_n`.  A stolen
-//!   device whose subkey is captured today cannot decrypt any prior
-//!   day's traffic, even with the master pubkey, because the prior
-//!   subkeys are not recoverable without the master *seed*.
-//! - **Field-binding hook**: subkey derivation optionally consumes a
-//!   [`ol_threshold_recovery::FieldWitness`] so a captured raw seed is
-//!   useless without reproducing the coherence-field state at mint.
+//!   device that exposes only today's subkey seed does not expose prior
+//!   seeds through this one-way API, assuming old copies were erased. These
+//!   are signing subkeys; traffic-confidentiality claims belong to the
+//!   channel protocol that consumes them.
+//! - **Field-context hook**: subkey derivation can mix caller-supplied
+//!   witness bytes. Public or low-entropy field output is context rather
+//!   than an independent secret and does not make a captured seed useless.
 //! - **Cross-witness attestation**: each device periodically signs a
 //!   `LivenessProof` over its own state + the wall-clock epoch.  A
-//!   sibling device that fails to produce a fresh proof gets flagged
-//!   for auto-revocation by quorum at Layer 2.
+//!   verifier can reject stale proofs. Automated revocation is a separate
+//!   policy/runtime concern and is not supplied by a signature primitive.
 //! - **`HardwareWrapper` trait**: opaque interface for wrapping the raw
 //!   subkey bytes under platform key storage (Secure Enclave / TPM /
 //!   `StrongBox` / `TrustZone`).  A software-only reference impl is
@@ -45,8 +47,8 @@
 //! - Subkey attestations are cross-signed by the master and verify
 //!   under the master's `HybridVerifyingKey`.
 //! - `LivenessProof` timing variance under the ct-gate ≤ 15 %.
-//! - 1M iters of property-testing on the subkey/ratchet/attestation
-//!   surface pass with no panics.
+//! - Release gates rerun the configured property/adversarial suite; a
+//!   historical iteration count is not a permanent security guarantee.
 //!
 //! ## Layer status
 //!

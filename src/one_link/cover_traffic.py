@@ -5,12 +5,13 @@ rate inter-arrival generator with a Python ``threading.Thread`` that
 calls a user-supplied ``emit_cover()`` callback at the scheduled
 intervals.
 
-The cover packet itself is a real Sphinx Coherence packet built via
-``one_link_native.sphinx.build_cover_packet`` (carries the
-``COVER_SENTINEL`` so the destination drops the payload). Indistinguishable
-on the wire from a real Sphinx packet of the same size — defeats traffic-
-analysis attacks that count how many real messages a peer sends per
-unit time.
+The cover packet uses the Sphinx Coherence encoding and carries the
+``COVER_SENTINEL`` so the destination drops the payload. It can match a real
+packet's encoded structure and length, but this scheduler does not shape normal
+message/file traffic or create a constant-rate product route. Timing, route,
+endpoint, count, connection, and application scheduling can distinguish or
+correlate traffic; emission is experimental cover-frame substrate, not an
+anonymity guarantee.
 
 Daemons that wire this:
 
@@ -35,9 +36,40 @@ from __future__ import annotations
 import logging
 import secrets
 import threading
+import hmac
 from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
+
+
+class _DeterministicSecureRandom:
+    """Tiny HMAC-DRBG-style stream used for cover-rate thinning.
+
+    A fixed seed remains reproducible for tests, but unlike MT19937 the
+    observed keep/skip sequence does not reveal the generator state and let a
+    traffic observer predict future cover emissions.
+    """
+
+    __slots__ = ("_counter", "_key")
+
+    def __init__(self, seed: bytes) -> None:
+        self._key = hmac.digest(
+            seed,
+            b"one-link/cover-traffic/thinning/v1",
+            "sha256",
+        )
+        self._counter = 0
+
+    def random(self) -> float:
+        self._counter += 1
+        sample = hmac.digest(
+            self._key,
+            self._counter.to_bytes(16, "big"),
+            "sha256",
+        )
+        # 53 bits exactly match Python float's significand width and produce a
+        # uniform value in [0, 1) without rounding up to 1.0.
+        return (int.from_bytes(sample[:8], "big") >> 11) / float(1 << 53)
 
 try:
     from one_link_native import sphinx as _native_sphinx  # type: ignore[import-not-found]
@@ -167,14 +199,10 @@ class CoverTrafficDaemon:
         # Default 1.0 = no adaptation (baseline rate).
         self._rate_multiplier: float = 1.0
         self._skipped: int = 0
-        # Dedicated RNG seeded from the same source so two daemons
-        # with the same seed produce the same skip pattern (testable).
-        import random as _random
-        self._rng = _random.Random()
-        # Derive a deterministic seed from the same bytes the scheduler
-        # got — when callers pass a fixed seed, the skip pattern is
-        # reproducible for tests.
-        self._rng.seed(int.from_bytes(seed, "big", signed=False))
+        # Dedicated cryptographic deterministic generator seeded from the same
+        # source. Fixed test seeds remain reproducible, while an observer
+        # cannot recover MT19937 state from a long keep/skip sequence.
+        self._rng = _DeterministicSecureRandom(seed)
 
     @property
     def rate_hz(self) -> float:
@@ -360,12 +388,14 @@ def build_cover_packet(circuit, cover_size: int) -> bytes:
     ``one_link_native.sphinx`` docs). Use the result as the wire
     payload of a normal Sphinx packet — destinations identify it via
     ``is_cover_payload(packet.payload)`` and drop the payload."""
-    if not HAS_NATIVE:
+    native = _native_sphinx
+    if not HAS_NATIVE or native is None:
         raise CoverTrafficNotInstalled(
             "one_link_native.sphinx unavailable. Build with "
             "`cd native && maturin develop --release`."
         )
-    return _native_sphinx.build_cover_packet(circuit, cover_size)  # type: ignore[union-attr]
+    ephemeral_secret, _ephemeral_public = native.generate_keypair()
+    return native.build_cover_packet(ephemeral_secret, circuit, cover_size)
 
 
 def is_cover_payload(payload: bytes) -> bool:

@@ -5,6 +5,7 @@ from one_link.capabilities import (
     FILE_CDC,
     FOLDER_SYNC,
     LOCAL_CAPABILITIES,
+    NATIVE_TRANSFER_INDEXED_V1,
     normalize_caps,
 )
 from one_link.sessions import protocol_catalog
@@ -75,6 +76,15 @@ def test_local_capabilities_include_new_sync_features():
     assert FILE_CDC in LOCAL_CAPABILITIES
     assert FILE_BINARY_FRAME in LOCAL_CAPABILITIES
     assert FOLDER_SYNC in LOCAL_CAPABILITIES
+    assert NATIVE_TRANSFER_INDEXED_V1 in LOCAL_CAPABILITIES
+
+
+def test_production_audit_accepts_nonce_safe_native_capability():
+    from scripts.production_readiness_audit import _check_capabilities_advertised
+
+    result = _check_capabilities_advertised()
+    assert result["status"] == "PASS"
+    assert result["missing_required"] == []
 
 
 def test_session_catalog_names_core_peer_flows():

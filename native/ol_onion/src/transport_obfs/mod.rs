@@ -2,19 +2,21 @@
 //!
 //! Two-part stack:
 //!
-//! 1. [`primitive`]: ChaCha20-keyed byte XOR. Length-preserving,
-//!    indistinguishable from random when the observer doesn't hold
-//!    the key. The foundation.
+//! 1. [`primitive`]: ChaCha20-keyed byte XOR. It is length-preserving
+//!    and removes obvious payload structure under correct key/nonce use;
+//!    it does not hide transport metadata or mimic another protocol.
 //! 2. [`handshake`]: obfs4-style ECDH + bridge-identity HMAC binding.
-//!    Negotiates the bulk-cipher key per connection, defends against
-//!    active probe attackers via the bridge-id HMAC.
+//!    Negotiates the bulk-cipher key per connection and requires a
+//!    bridge-id HMAC. That is one probe-authentication mechanism, not a
+//!    complete active-probe or censorship-resistance proof.
 //! 3. [`session`]: stateful per-direction Sealer/Opener built on
 //!    the handshake-derived keys + primitive obfuscate.
 //!
-//! Honest scope: this is the SECURITY layer for pluggable transport.
+//! Honest scope: these are cryptographic building blocks for a future
+//! pluggable transport.
 //! Full TLS-shape mimicry (Cloak / Snowflake JA3-perfect handshakes)
 //! is its own ship on top — the keys + nonces are here, the
-//! application-layer "look like Chrome ClientHello" is upstream.
+//! application-layer "look like Chrome `ClientHello`" is upstream.
 //!
 //! ## Example: bridge ↔ client handshake + bidirectional traffic
 //!

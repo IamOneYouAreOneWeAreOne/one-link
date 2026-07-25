@@ -43,7 +43,7 @@ impl TranscriptHash {
 
 /// Build the transcript hash from the invite and response.
 ///
-/// The PairConfirm message commits to this exact value; if anything
+/// The `PairConfirm` message commits to this exact value; if anything
 /// in either party's view of the invite/response diverges, the
 /// confirmation's signature fails to verify locally.
 pub fn transcript_hash(invite: &Invite, response: &PairResponse) -> TranscriptHash {
@@ -55,9 +55,19 @@ pub fn transcript_hash(invite: &Invite, response: &PairResponse) -> TranscriptHa
     let invite_bytes = invite.encode();
     let response_bytes = response.encode();
     let mut w = Writer::with_capacity(8 + invite_bytes.len() + response_bytes.len());
-    w.write_u32(invite_bytes.len() as u32);
+    let invite_len = match u32::try_from(invite_bytes.len()) {
+        Ok(len) => len,
+        Err(error) => panic!("encoded invite length must fit its u32 transcript prefix: {error}"),
+    };
+    w.write_u32(invite_len);
     w.write_fixed(&invite_bytes);
-    w.write_u32(response_bytes.len() as u32);
+    let response_len = match u32::try_from(response_bytes.len()) {
+        Ok(len) => len,
+        Err(error) => {
+            panic!("encoded response length must fit its u32 transcript prefix: {error}")
+        }
+    };
+    w.write_u32(response_len);
     w.write_fixed(&response_bytes);
     h.update(w.as_bytes());
     let digest = h.finalize();

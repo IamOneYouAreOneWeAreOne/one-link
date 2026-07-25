@@ -157,6 +157,7 @@ def test_send_sdp_offer_dispatches_wire_message(server, peer) -> None:
     wire = msgs_arg[0]
     assert wire["t"] == "CALL_SDP_OFFER"
     assert wire["call_id"] == "srv-call-1"
+    assert wire["call_kind"] == "voice"
     assert "sdp_offer" in wire
     assert wire["sdp_offer"]["sdp"] == SAMPLE_OFFER_SDP
     assert wire["sdp_offer"]["kind"] == "offer"
@@ -173,6 +174,23 @@ def test_send_sdp_offer_rejects_invalid_sdp(server) -> None:
     assert body["ok"] is False
     # Doctrine — plain language.
     assert "error" not in body["user_message"].lower()
+    assert server.daemon.send_to.await_count == 0
+
+
+def test_voice_call_rejects_video_sdp_before_wire_send(server) -> None:
+    video_sdp = SAMPLE_OFFER_SDP + (
+        "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+        "a=mid:1\r\n"
+    )
+    req = _FakeRequest({
+        "action": "send_sdp_offer",
+        "call_id": "srv-call-1",
+        "sdp": video_sdp,
+    })
+    resp = _run(server.api_call_action(req))
+    body = json.loads(resp.body.decode("utf-8"))
+    assert resp.status == 403
+    assert body["ok"] is False
     assert server.daemon.send_to.await_count == 0
 
 
@@ -225,6 +243,7 @@ def test_send_ice_candidate_dispatches_wire_message(server) -> None:
     assert body["ok"] is True
     wire = server.daemon.send_to.await_args.args[1][0]
     assert wire["t"] == "CALL_ICE"
+    assert wire["call_kind"] == "voice"
     assert wire["candidate"]["candidate"].startswith("candidate:")
     assert wire["candidate"]["sdpMid"] == "0"
     assert wire["candidate"]["sdpMLineIndex"] == 0
@@ -286,3 +305,4 @@ def test_initiate_action_now_flushes_outbound(me: Identity, peer: Identity) -> N
     assert d.send_to.await_count == 1
     msgs = d.send_to.await_args.args[1]
     assert msgs[0]["t"] == "CALL_INVITE"
+    assert msgs[0]["call_kind"] == "voice"

@@ -1,6 +1,6 @@
 //! Cross-platform determinism vector for `ol_erasure`.
 //!
-//! The StripeId is BLAKE3-derived and the shard bytes are RS(k, m)
+//! The `StripeId` is BLAKE3-derived and the shard bytes are RS(k, m)
 //! encoded — both must be deterministic across platforms.
 
 use ol_erasure::{encode_stripe, stripe::stripe_id_of, ShardRole, StripeParams};
@@ -18,7 +18,9 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[test]
 fn cross_platform_stripe_id_pinned() {
     // Fixed plaintext: 200 bytes of `(i * 31) as u8`.
-    let plaintext: Vec<u8> = (0..200u32).map(|i| (i.wrapping_mul(31)) as u8).collect();
+    let plaintext: Vec<u8> = (0..200u32)
+        .map(|i| i.wrapping_mul(31).to_le_bytes()[0])
+        .collect();
     let id_standard = stripe_id_of(&plaintext, StripeParams::STANDARD);
     let id_archival = stripe_id_of(&plaintext, StripeParams::ARCHIVAL);
 
@@ -51,7 +53,9 @@ fn cross_platform_data_shard_0_pinned() {
     // Encode a fixed plaintext with STANDARD(10,4); pin the bytes of
     // data shard 0. (Since the encoding is systematic, data shard 0
     // is just the first chunk of the padded plaintext.)
-    let plaintext: Vec<u8> = (0..200u32).map(|i| (i.wrapping_mul(31)) as u8).collect();
+    let plaintext: Vec<u8> = (0..200u32)
+        .map(|i| i.wrapping_mul(31).to_le_bytes()[0])
+        .collect();
     let shards = encode_stripe(&plaintext, StripeParams::STANDARD).unwrap();
     assert_eq!(shards.len(), 14);
     assert_eq!(shards[0].role, ShardRole::Data);

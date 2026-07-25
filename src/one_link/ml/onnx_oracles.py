@@ -16,18 +16,24 @@ So the call sites in semantic_voice_codec / semantic_scene_codec /
 neural_extrapolator can swap implementations behind a single
 ``load_voice_oracle()`` / ``load_scene_oracle()`` factory.
 
-Doctrine §3.4.c: no spinner / "loading model" UI surface — the oracle
-loads on daemon start, before the user does anything.
+The stable daemon does not load these oracles. A future graduated media path
+must initialize them outside an active call and preserve Doctrine §3.4.c's
+no-spinner UI contract.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
+
+from one_link.fault_observability import report_best_effort_failure
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -356,8 +362,8 @@ def load_voice_oracle(
     if prefer == "onnx" and onnx_path.exists():
         try:
             return OnnxVoiceOracle(onnx_path, sigma=sigma)
-        except Exception:
-            pass
+        except Exception as exc:
+            report_best_effort_failure(log, "onnx_voice_preferred_load", exc)
     if pt_path.exists():
         from one_link.ml.trained_voice_oracle import TrainedVoiceOracle
         return TrainedVoiceOracle(pt_path, device="cpu", sigma=sigma)
@@ -380,8 +386,8 @@ def load_scene_oracle(
     if prefer == "onnx" and onnx_path.exists():
         try:
             return OnnxSceneOracle(onnx_path, sigma=sigma)
-        except Exception:
-            pass
+        except Exception as exc:
+            report_best_effort_failure(log, "onnx_scene_preferred_load", exc)
     if pt_path.exists():
         from one_link.ml.trained_scene_oracle import TrainedSceneOracle
         return TrainedSceneOracle(pt_path, device="cpu", sigma=sigma)

@@ -1,7 +1,16 @@
 # Universal Comms Fabric
 
-Status: in_progress
-Last updated: 2026-05-12
+Status: in_progress design plus per-section implementation ledger; not a claim
+that every named adapter is live.
+Last truth review: 2026-07-24
+
+> **Current boundary:** direct LAN/native routes, signed browser WebRTC,
+> configured single-relay fallback, courier bundles, and selected route-planner
+> functions exist. Wi-Fi Direct activation, BLE data transfer, WebTransport,
+> USB-network automation, multi-source internet swarm, LoRa/SDR, and automatic
+> cross-adapter handoff are not one complete product path. The native v2 relay
+> blinds pairwise route tags and identity first flights but still exposes
+> endpoints, timing, sizes, counts, and tag linkage.
 
 This document captures the next major One Link frontier: every device should
 use every communication surface it has, automatically, safely, and
@@ -445,6 +454,16 @@ Behavior:
 Ship gate:
 
 - two devices on different networks can transfer with relay blind to plaintext.
+
+Current implementation status:
+
+- `partial`: independent Chromium and Firefox profiles complete signed direct
+  WebRTC DataChannel probes with outside STUN disabled;
+- the native configured relay forwards end-to-end ciphertext and its v2 route
+  hides identity public keys, but remains a single metadata-observing relay;
+- browser TURN/NAT diversity and physical cross-network qualification remain
+  open; WebTransport is experimental helper code and is not advertised or used
+  by the production send path.
 
 ### 5.8 QR / Optical Adapter
 

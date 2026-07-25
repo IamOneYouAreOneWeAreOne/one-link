@@ -18,18 +18,19 @@
 //!    plan's canonical-LE shape, produces byte-identical output.
 //!    "Byte-identical" is between the EMITTED encoder logic (as
 //!    interpreted by our reference) and the SPEC-CANONICAL encoder
-//!    (the one ol_canon will eventually ship). Until that lands, the
+//!    (the one `ol_canon` will eventually ship). Until that lands, the
 //!    reference IS the canonical encoder by definition.
 //!
 //! Iteration count is configurable via `OL_CODEGEN_GATE_ITERS`
-//! (default 10_000 for CI; gate run sets it to 100_000 — the plan's
+//! (default `10_000` for CI; gate run sets it to `100_000` — the plan's
 //! ≥1M target is for when the full grammar lands).
 
 use ol_codegen::{
     emit_rust_enum, emit_rust_struct, parse_enum, parse_struct, EmitOptions, FieldType,
 };
+use std::fmt::Write as _;
 
-/// SplitMix64 — deterministic PRNG, same as ol_crdt/ol_capability
+/// `SplitMix64` — deterministic PRNG, same as `ol_crdt/ol_capability`
 /// gates. Reproducibility matters more than crypto quality here.
 fn next_rng(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -39,14 +40,26 @@ fn next_rng(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
+fn random_below_usize(state: &mut u64, upper: usize) -> usize {
+    debug_assert!(upper > 0);
+    let upper_u64 = u64::try_from(upper).unwrap_or(u64::MAX);
+    usize::try_from(next_rng(state) % upper_u64)
+        .expect("a value reduced below a usize-derived bound fits in usize")
+}
+
+fn random_ascii_lowercase(state: &mut u64) -> char {
+    let offset = u8::try_from(next_rng(state) % 26).expect("a residue modulo 26 fits in u8");
+    char::from(b'a' + offset)
+}
+
 fn random_ident(state: &mut u64, max_len: usize) -> String {
-    let len = (next_rng(state) as usize) % max_len.max(2) + 1;
+    let len = random_below_usize(state, max_len.max(2)) + 1;
     let mut out = String::with_capacity(len);
     // First char a-z
-    out.push((b'a' + (next_rng(state) % 26) as u8) as char);
+    out.push(random_ascii_lowercase(state));
     for _ in 1..len {
         let c = match next_rng(state) % 27 {
-            0..=25 => (b'a' + (next_rng(state) % 26) as u8) as char,
+            0..=25 => random_ascii_lowercase(state),
             _ => '_',
         };
         out.push(c);
@@ -76,8 +89,8 @@ fn random_field_type(state: &mut u64) -> FieldType {
 
 fn random_struct_cl(state: &mut u64) -> String {
     let name = random_ident(state, 8);
-    let mut s = format!("struct {} {{\n", name);
-    let n_fields = (next_rng(state) as usize) % 5 + 1;
+    let mut s = format!("struct {name} {{\n");
+    let n_fields = random_below_usize(state, 5) + 1;
     for i in 0..n_fields {
         let fname = format!("field_{}_{}", i, random_ident(state, 4));
         let ft = random_field_type(state);
@@ -86,10 +99,10 @@ fn random_struct_cl(state: &mut u64) -> String {
             FieldType::U16 => "u16".to_string(),
             FieldType::U32 => "u32".to_string(),
             FieldType::U64 => "u64".to_string(),
-            FieldType::ByteArray(n) => format!("[u8; {}]", n),
+            FieldType::ByteArray(n) => format!("[u8; {n}]"),
             FieldType::String => "String".to_string(),
         };
-        s.push_str(&format!("    {}: {},\n", fname, ty_str));
+        writeln!(s, "    {fname}: {ty_str},").expect("writing to a String cannot fail");
     }
     s.push('}');
     s
@@ -105,19 +118,13 @@ fn property_random_struct_specs_round_trip() {
     let mut fail = 0u64;
     for _ in 0..iters {
         let cl = random_struct_cl(&mut state);
-        let parsed = match parse_struct(&cl) {
-            Ok(p) => p,
-            Err(_) => {
-                fail += 1;
-                continue;
-            }
+        let Ok(parsed) = parse_struct(&cl) else {
+            fail += 1;
+            continue;
         };
-        let rust = match emit_rust_struct(&parsed, &EmitOptions::default()) {
-            Ok(r) => r,
-            Err(_) => {
-                fail += 1;
-                continue;
-            }
+        let Ok(rust) = emit_rust_struct(&parsed, &EmitOptions::default()) else {
+            fail += 1;
+            continue;
         };
         // Verify the emitted Rust contains the expected encoder ops
         // for every field in the parsed spec.
@@ -175,7 +182,8 @@ fn reference_encode(fields: &[(String, FieldType, Vec<u8>)]) -> Vec<u8> {
             }
             FieldType::String => {
                 // length-prefixed u32 LE.
-                let len = value.len() as u32;
+                let len = u32::try_from(value.len())
+                    .expect("canonical strings must fit their u32 length prefix");
                 out.extend_from_slice(&len.to_le_bytes());
                 out.extend_from_slice(value);
             }
@@ -201,25 +209,25 @@ fn random_enum_cl(state: &mut u64) -> String {
         }
         n
     };
-    let mut s = format!("enum {} {{\n", name);
-    let n_variants = (next_rng(state) as usize) % 6 + 1;
+    let mut s = format!("enum {name} {{\n");
+    let n_variants = random_below_usize(state, 6) + 1;
     for i in 0..n_variants {
         let mut vname = format!("V{}_{}", i, random_ident(state, 4));
         if let Some(c) = vname.chars().next() {
             vname.replace_range(..1, &c.to_ascii_uppercase().to_string());
         }
         match random_variant_payload(state) {
-            None => s.push_str(&format!("    {},\n", vname)),
+            None => writeln!(s, "    {vname},").expect("writing to a String cannot fail"),
             Some(ft) => {
                 let ty_str = match ft {
                     FieldType::U8 => "u8".to_string(),
                     FieldType::U16 => "u16".to_string(),
                     FieldType::U32 => "u32".to_string(),
                     FieldType::U64 => "u64".to_string(),
-                    FieldType::ByteArray(n) => format!("[u8; {}]", n),
+                    FieldType::ByteArray(n) => format!("[u8; {n}]"),
                     FieldType::String => "String".to_string(),
                 };
-                s.push_str(&format!("    {}({}),\n", vname, ty_str));
+                writeln!(s, "    {vname}({ty_str}),").expect("writing to a String cannot fail");
             }
         }
     }
@@ -237,24 +245,18 @@ fn property_random_enum_specs_round_trip() {
     let mut fail = 0u64;
     for _ in 0..iters {
         let cl = random_enum_cl(&mut state);
-        let parsed = match parse_enum(&cl) {
-            Ok(p) => p,
-            Err(_) => {
-                fail += 1;
-                continue;
-            }
+        let Ok(parsed) = parse_enum(&cl) else {
+            fail += 1;
+            continue;
         };
-        let rust = match emit_rust_enum(&parsed, &EmitOptions::default()) {
-            Ok(r) => r,
-            Err(_) => {
-                fail += 1;
-                continue;
-            }
+        let Ok(rust) = emit_rust_enum(&parsed, &EmitOptions::default()) else {
+            fail += 1;
+            continue;
         };
         // Verify the emitted enum contains an arm + tag for every
         // variant in the parsed spec.
         for (idx, variant) in parsed.variants.iter().enumerate() {
-            let tag = idx as u8;
+            let tag = u8::try_from(idx).expect("the test generator emits at most six variants");
             let header = match variant.payload {
                 None => format!("{}::{} => {{ out.push({})", parsed.name, variant.name, tag),
                 Some(_) => format!("{}::{}(__payload) => {{", parsed.name, variant.name),
@@ -270,7 +272,7 @@ fn property_random_enum_specs_round_trip() {
             // The discriminant byte must appear inside the arm body
             // for payload variants too.
             if variant.payload.is_some() {
-                let needle = format!("out.push({});", tag);
+                let needle = format!("out.push({tag});");
                 if !rust.contains(&needle) {
                     eprintln!(
                         "MISSING discriminant byte {} for payload variant {}",

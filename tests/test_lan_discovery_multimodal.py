@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
 
 from one_link import lan_discovery
 from one_link.lan_discovery import (

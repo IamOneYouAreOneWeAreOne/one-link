@@ -12,6 +12,14 @@ pub enum EncodeError {
     /// past N bytes.
     #[error("encoder buffer would exceed configured limit")]
     BufferOverflow,
+
+    /// A requested write overflowed the platform's addressable length.
+    #[error("encoder length arithmetic overflow")]
+    SizeOverflow,
+
+    /// The allocator refused the requested capacity reservation.
+    #[error("encoder could not reserve requested capacity")]
+    AllocationFailed,
 }
 
 /// Errors the decoder can return. All variants leave the decoder's
@@ -58,5 +66,24 @@ pub enum DecodeError {
         claimed: u64,
         /// Bytes actually still available.
         remaining: usize,
+    },
+
+    /// A decoded integer cannot be represented by the target platform/type.
+    #[error("wire integer {value} does not fit {target}")]
+    NumericOverflow {
+        /// Value found on the wire.
+        value: u64,
+        /// Destination integer type.
+        target: &'static str,
+    },
+
+    /// A collection header claims more values than can possibly fit in the
+    /// remaining encoded bytes (every canonical value has at least a tag).
+    #[error("collection count {claimed} exceeds structural maximum {maximum}")]
+    CollectionTooLarge {
+        /// Element or field count found on the wire.
+        claimed: u64,
+        /// Maximum possible count given the remaining frame bytes.
+        maximum: usize,
     },
 }

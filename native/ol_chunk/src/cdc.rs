@@ -1,7 +1,7 @@
-//! Content-defined chunking via FastCDC + Gear-256.
+//! Content-defined chunking via `FastCDC` + Gear-256.
 //!
 //! Implements the kernel chosen in [ADR-0001](../../../docs/decisions/0001-cdc-kernel.md):
-//! FastCDC with 8 KiB min / 64 KiB avg / 256 KiB max chunk size, using the
+//! `FastCDC` with 8 KiB min / 64 KiB avg / 256 KiB max chunk size, using the
 //! reference Gear-256 hash table. SIMD acceleration is dispatched at runtime
 //! by the underlying `fastcdc` crate's v2020 implementation; the scalar
 //! fallback never falls below 1.2 GiB/s/core on commodity hardware.
@@ -26,14 +26,15 @@
 
 use crate::blake3_wrap;
 use crate::error::ChunkError;
+use rayon::prelude::*;
 
-/// FastCDC chunk size parameters fixed by [ADR-0001].
+/// `FastCDC` chunk size parameters fixed by [ADR-0001].
 ///
 /// Minimum 8 KiB: chunks below this floor incur metadata overhead
 /// (32-byte BLAKE3 + 16-byte ratchet-key-id + bloom slot) that exceeds
 /// the savings of dedup. Maximum 256 KiB: above this ceiling, FUSE read
-/// amplification gets bad. Average 64 KiB: matches the FastCDC paper's
-/// recommended parameter for general-purpose dedup, and matches OneField
+/// amplification gets bad. Average 64 KiB: matches the `FastCDC` paper's
+/// recommended parameter for general-purpose dedup, and matches `OneField`
 /// Mesh `transport/cdc_dedup.cl` family.
 #[derive(Debug, Clone, Copy)]
 pub struct CdcParams {
@@ -56,7 +57,7 @@ impl Default for CdcParams {
 }
 
 impl CdcParams {
-    /// Validate FastCDC invariants: min < avg < max, none zero, all within
+    /// Validate `FastCDC` invariants: min < avg < max, none zero, all within
     /// reasonable bounds (max ≤ 16 MiB for sanity).
     ///
     /// # Errors
@@ -112,7 +113,7 @@ impl Boundary {
 /// Streaming CDC scanner over a byte slice.
 ///
 /// Iterates chunk boundaries lazily; per-iteration cost is dominated by
-/// the underlying FastCDC scan plus a single BLAKE3 hash of the discovered
+/// the underlying `FastCDC` scan plus a single BLAKE3 hash of the discovered
 /// chunk. Callers consume `(start, end, blake3_hash)` triples without
 /// holding the whole boundary list in memory.
 pub struct ChunkScanner<'a> {
@@ -120,7 +121,7 @@ pub struct ChunkScanner<'a> {
     buffer: &'a [u8],
 }
 
-impl<'a> std::fmt::Debug for ChunkScanner<'a> {
+impl std::fmt::Debug for ChunkScanner<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChunkScanner")
             .field("buffer_len", &self.buffer.len())
@@ -139,7 +140,7 @@ impl<'a> ChunkScanner<'a> {
     /// # Errors
     ///
     /// Returns `ChunkError::InvalidParameters` if `params` violates
-    /// FastCDC invariants.
+    /// `FastCDC` invariants.
     pub fn with_params(buffer: &'a [u8], params: CdcParams) -> Result<Self, ChunkError> {
         params.validate()?;
         let inner =
@@ -148,7 +149,7 @@ impl<'a> ChunkScanner<'a> {
     }
 }
 
-impl<'a> Iterator for ChunkScanner<'a> {
+impl Iterator for ChunkScanner<'_> {
     type Item = Boundary;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -182,12 +183,12 @@ const PARALLEL_HASH_MIN_BYTES: usize = 1024 * 1024;
 /// Scan a buffer and collect boundaries, hashing chunks in parallel
 /// via Rayon for buffers ≥ 1 MiB.
 ///
-/// FastCDC boundary discovery is inherently sequential (the rolling
+/// `FastCDC` boundary discovery is inherently sequential (the rolling
 /// hash carries state across bytes), but BLAKE3 of each discovered
 /// chunk is independent and dominates the cycles/byte budget on multi-
 /// core hosts. We split the work into two passes:
 ///
-///  1. Sequential: walk the input via FastCDC, emit `(start, end)` ranges.
+///  1. Sequential: walk the input via `FastCDC`, emit `(start, end)` ranges.
 ///  2. Parallel: hash each `(start, end)` slice via Rayon's work-stealing
 ///     pool. The output preserves boundary order.
 ///
@@ -198,8 +199,6 @@ pub fn scan_to_vec_parallel(buffer: &[u8]) -> Vec<Boundary> {
     if buffer.len() < PARALLEL_HASH_MIN_BYTES {
         return scan_to_vec(buffer);
     }
-    use rayon::prelude::*;
-
     // Pass 1: discover ranges sequentially.
     let params = CdcParams::default();
     let ranges: Vec<(usize, usize)> =
@@ -247,7 +246,7 @@ mod tests {
         // 1 MiB of pseudo-random content via deterministic xorshift.
         let mut rng_state: u64 = 0x1234_5678_DEAD_BEEF;
         let mut buf = vec![0u8; 1024 * 1024];
-        for byte in buf.iter_mut() {
+        for byte in &mut buf {
             rng_state ^= rng_state << 13;
             rng_state ^= rng_state >> 7;
             rng_state ^= rng_state << 17;

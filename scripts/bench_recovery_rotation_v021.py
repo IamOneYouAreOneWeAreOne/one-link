@@ -52,7 +52,9 @@ from typing import Callable
 # does not crash the bench printer on Windows consoles.
 import contextlib as _contextlib
 with _contextlib.suppress(Exception):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    stdout_reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(stdout_reconfigure):
+        stdout_reconfigure(encoding="utf-8", errors="replace")
 
 # Add src/ so we can run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -392,7 +394,7 @@ def main() -> int:
         _bench_test_phrase_against_current_seed,
         _bench_test_bundle_against_phrase,
     ]
-    print(f"v0.21.x recovery + rotation primitives")
+    print("v0.21.x recovery + rotation primitives")
     print(f"{'name':<46} {'ns/op (med)':>14} {'ns/op (p95)':>14} {'ops/sec':>14}")
     print("-" * 92)
     results: list[dict] = []

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install a per-user Linux desktop handler for one-link:// URLs.
+# Install a per-user Linux desktop handler for one-link:// URLs (LF-only script).
 
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || command -v python)}"
 if [[ -z "${PYTHON_BIN}" ]]; then

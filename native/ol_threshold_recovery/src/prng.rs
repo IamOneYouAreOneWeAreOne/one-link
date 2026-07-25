@@ -1,4 +1,4 @@
-//! xoshiro256** PRNG with SplitMix64 seeding.
+//! xoshiro256** PRNG with `SplitMix64` seeding.
 //!
 //! Direct port of `OneField/onefield/privacy/sharding.cl` SECTION 2.
 //! Deterministic given a caller-supplied seed; reproducibility is the
@@ -16,7 +16,7 @@ pub struct PrngState {
 }
 
 impl PrngState {
-    /// Construct from a single 64-bit seed; expands via SplitMix64 to
+    /// Construct from a single 64-bit seed; expands via `SplitMix64` to
     /// fill the four xoshiro lanes (standard recommendation).
     #[must_use]
     pub fn new(seed: u64) -> Self {
@@ -51,7 +51,7 @@ impl PrngState {
     }
 }
 
-/// SplitMix64 step used for seeding xoshiro lanes.
+/// `SplitMix64` step used for seeding xoshiro lanes.
 #[derive(Debug)]
 pub struct SplitMix64;
 

@@ -33,7 +33,7 @@ impl PyTofuStore {
         })
     }
 
-    /// Returns one of "TofuOnly", "HardwareBound", "HardwareAttested".
+    /// Returns one of "`TofuOnly`", "`HardwareBound`", "`HardwareAttested`".
     fn guarantee(&self) -> &'static str {
         match self.inner.guarantee() {
             KeyGuarantee::TofuOnly => "TofuOnly",
@@ -47,18 +47,21 @@ impl PyTofuStore {
         self.inner
             .get_or_create(label)
             .map(|h| h.0)
-            .map_err(hwkey_err_to_py)
+            .map_err(|err| hwkey_err_to_py(&err))
     }
 
     /// 32-byte public key for the given handle.
     fn public_key<'py>(&self, py: Python<'py>, label: &str) -> PyResult<Bound<'py, PyBytes>> {
         let h = KeyHandle(label.to_string());
-        let pk = self.inner.public_key(&h).map_err(hwkey_err_to_py)?;
-        Ok(PyBytes::new_bound(py, &pk.0))
+        let pk = self
+            .inner
+            .public_key(&h)
+            .map_err(|err| hwkey_err_to_py(&err))?;
+        Ok(PyBytes::new(py, &pk.0))
     }
 
     /// True iff the presented public key matches the one recorded on
-    /// first use; False if it's a TOFU rotation; raises on NotFound.
+    /// first use; False if it's a TOFU rotation; raises on `NotFound`.
     fn check_tofu(&self, label: &str, presented: &[u8]) -> PyResult<bool> {
         if presented.len() != 32 {
             return Err(PyValueError::new_err(format!(
@@ -72,16 +75,16 @@ impl PyTofuStore {
         match self.inner.check_tofu(label, &pk) {
             Ok(()) => Ok(true),
             Err(HwKeyError::TofuMismatch) => Ok(false),
-            Err(other) => Err(hwkey_err_to_py(other)),
+            Err(other) => Err(hwkey_err_to_py(&other)),
         }
     }
 
     fn __repr__(&self) -> String {
-        "TofuStore(guarantee=TofuOnly)".to_string()
+        format!("TofuStore(guarantee={})", self.guarantee())
     }
 }
 
-fn hwkey_err_to_py(err: HwKeyError) -> PyErr {
+fn hwkey_err_to_py(err: &HwKeyError) -> PyErr {
     crate::errors::OlHwKeyError::new_err(err.to_string())
 }
 

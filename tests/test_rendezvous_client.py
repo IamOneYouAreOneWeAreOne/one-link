@@ -5,7 +5,6 @@ localhost ports and exercises the full client flow: start, register,
 lookup, refresh, multi-server fanout, graceful shutdown."""
 from __future__ import annotations
 
-import asyncio
 from typing import AsyncIterator
 
 import aiohttp

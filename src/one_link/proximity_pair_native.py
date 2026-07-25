@@ -1,45 +1,28 @@
-"""Adapter for the Coherence Mesh F1.4 channel-reciprocity primitive
+"""Adapter for experimental channel-reciprocity research primitives
 (``ol_proximity_pair`` via ``one_link_native``).
 
-Per COHERENCE_MESH_PLAN.md Phase F1.4 — physics-layer Factor-2 pair
-trust. Two devices in the same physical environment derive a
-matching 256-bit secret from their shared observations WITHOUT
-ever transmitting the secret.
+This module is not wired into the daemon and does not currently establish a
+Factor-2 secret. It lacks platform probe acquisition, aligned erasure handling,
+real interactive reconciliation, conservative entropy/leakage analysis, and
+hardware validation. The single-flip/multi-pass research algorithm can leave
+different bit strings, and a hash turns any residual difference into unrelated
+outputs.
 
-Typical daemon usage (alongside the QR-scanned Factor-1 secret):
+Research-only candidate derivation:
 
 .. code-block:: python
 
     from one_link import proximity_pair_native as pp
 
-    # During pair bootstrap, both daemons scan the local network
-    # environment (WiFi APs / BLE adverts / mDNS broadcasts). The
-    # scanner produces a byte vector summarising the observation.
-    my_obs = wifi_scanner.scan_and_serialize()  # platform-specific
-
-    # Bob ships its syndrome over the public channel (already
-    # bootstrap-encrypted by the Factor-1 QR-handshake).
-    bob_syndrome = pp.block_syndrome(my_bits)
-
-    # Alice runs the pipeline.
-    salt = transcript_hash_from_qr_scan  # 32 bytes
-    factor2_secret = pp.derive_factor2_secret(
+    candidate = pp.derive_unconfirmed_candidate(
         my_observations=my_obs,
         peer_syndrome=bob_syndrome,
-        salt=salt,
+        salt=transcript_hash,
     )
 
-    # Mix Factor-1 + Factor-2 into the Double Ratchet seed.
-    chain_key = blake3.derive_key(factor1_secret + factor2_secret)
-
-Honest scope notes:
-- The currently-shipped reconciliation is single-pass parity-flip,
-  good for ~93-97% bit agreement. Byte-identical keys require real
-  CASCADE bisection (Brassard-Salvail 1994), tracked as F1.4-polish
-  next ship.
-- The scanner (`wifi_scanner` above) is daemon-side platform code
-  and not part of this adapter — this adapter exposes only the
-  cryptographic pipeline.
+Never feed ``candidate`` directly into authentication, encryption, or ratchet
+state. The safe pair-QR Factor-2 API performs explicit equality confirmation,
+but physical provenance and entropy still remain unimplemented.
 """
 
 from __future__ import annotations
@@ -47,6 +30,14 @@ from __future__ import annotations
 import logging
 
 log = logging.getLogger(__name__)
+
+# The native module contains research primitives, not a daemon-wired,
+# entropy-validated, mutually confirmed proximity factor.
+PRODUCTION_FACTOR2_AVAILABLE = False
+
+
+class Factor2UnavailableError(RuntimeError):
+    """Raised when a caller requests the unimplemented high-level factor."""
 
 try:
     from one_link_native import proximity_pair as _native_pp  # type: ignore[import-not-found,attr-defined]
@@ -142,7 +133,7 @@ def multi_pass_reconcile(
     passes: int = CASCADE_PASSES_DEFAULT,
     permutation_seed: int = 0,
 ) -> bytes:
-    """Multi-pass reconciliation driver."""
+    """Experimental multi-pass parity alignment; not real CASCADE."""
     _require_native()
     return _native_pp.multi_pass_reconcile(
         bytes(my_bits),
@@ -174,10 +165,33 @@ def hamming_reconcile(my_bits: bytes, peer_parity: bytes) -> bytes:
 
 
 def privacy_amplify(reconciled_bits: bytes, *, salt: bytes) -> bytes:
-    """BLAKE3-keyed hash reconciled bits to 32 bytes. Salt must be
-    32 bytes; both sides must use the same salt."""
+    """Hash candidate bits to 32 bytes with BLAKE3 keyed by ``salt``.
+
+    This does not estimate entropy or prove information-theoretic secrecy.
+    """
     _require_native()
     return _native_pp.privacy_amplify(bytes(reconciled_bits), bytes(salt))
+
+
+def derive_unconfirmed_candidate(
+    *,
+    my_observations: bytes,
+    peer_syndrome: bytes,
+    salt: bytes,
+    min_bytes: int = OBSERVATION_BYTES_DEFAULT,
+    guard_band: float = GUARD_BAND_DEFAULT,
+    block_bits: int = SYNDROME_BLOCK_BITS_DEFAULT,
+) -> bytes:
+    """Return a research candidate with no agreement or entropy guarantee."""
+    _require_native()
+    return _native_pp.derive_unconfirmed_candidate(
+        bytes(my_observations),
+        bytes(peer_syndrome),
+        bytes(salt),
+        int(min_bytes),
+        float(guard_band),
+        int(block_bits),
+    )
 
 
 def derive_factor2_secret(
@@ -189,16 +203,22 @@ def derive_factor2_secret(
     guard_band: float = GUARD_BAND_DEFAULT,
     block_bits: int = SYNDROME_BLOCK_BITS_DEFAULT,
 ) -> bytes:
-    """One-shot full pipeline: quantize -> reconcile (one-pass) ->
-    privacy amplify. Returns the 32-byte Factor-2 secret."""
-    _require_native()
-    return _native_pp.derive_factor2_secret(
-        bytes(my_observations),
-        bytes(peer_syndrome),
-        bytes(salt),
-        int(min_bytes),
-        float(guard_band),
-        int(block_bits),
+    """Fail closed: a production Factor-2 secret is not implemented.
+
+    Parameters remain in the signature to turn legacy calls into an explicit
+    security failure even if an older native extension is installed.
+    """
+    del (
+        my_observations,
+        peer_syndrome,
+        salt,
+        min_bytes,
+        guard_band,
+        block_bits,
+    )
+    raise Factor2UnavailableError(
+        "channel-reciprocity Factor-2 is not available: current primitives "
+        "produce unconfirmed research candidates and are not daemon-wired"
     )
 
 

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from one_link import control_ipc
 from tests.harness import daemon_pair, request, require_live_daemon
 
 
@@ -34,6 +35,7 @@ def test_cli_import_has_no_windows_wmi_startup_hang():
             "import one_link.cli; print('ok')",
         ],
         capture_output=True,
+        stdin=subprocess.DEVNULL,
         text=True,
         timeout=10,
         check=False,
@@ -81,7 +83,12 @@ def test_stale_port_files_dont_break_daemon():
             assert ctrl is not None, log.read_text(encoding="utf-8", errors="replace")[-2000:]
 
             # Verify the new daemon is alive on the new port
-            res = request(ctrl, cmd="peers")
+            res = control_ipc.request_control(
+                ctrl,
+                {"cmd": "peers"},
+                timeout=30.0,
+                secret=control_ipc.read_control_secret(home / "data"),
+            )
             assert res["ok"]
         finally:
             try:
@@ -152,7 +159,7 @@ def test_control_liveness_requires_status_protocol():
 
 def test_daemon_survives_garbage_on_peer_port():
     """Hammer the peer port with garbage from many clients; daemon stays up."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         for _ in range(20):
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -171,7 +178,7 @@ def test_daemon_survives_garbage_on_peer_port():
 def test_daemon_survives_burst_of_disconnects():
     """Open then immediately close the peer port many times. Daemon must
     not leak descriptors or hang."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         for _ in range(50):
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -256,7 +263,7 @@ def test_two_daemons_in_same_home_second_fails_gracefully():
 def test_peer_disconnects_during_chunk_does_not_break_daemon():
     """Initiator opens a connection, sends a partial offer, drops mid-stream.
     Receiver daemon should clean up and continue serving good peers."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         # Open raw connection, send half of a HELLO frame, close.
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(2)
@@ -291,7 +298,7 @@ def test_burst_load_50_messages_no_silent_fallback():
     """
     from collections import Counter
     from tests.harness import message_log
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         N = 50
         for i in range(N):
             res = request(
@@ -347,7 +354,7 @@ def test_bidi_concurrent_sends_no_deadlock():
     must return ``ok`` within the timeout.
     """
     import threading
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         a_results: list[dict] = []
         b_results: list[dict] = []
         errors: list[BaseException] = []

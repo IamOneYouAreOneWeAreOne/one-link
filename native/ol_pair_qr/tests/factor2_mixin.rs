@@ -1,18 +1,18 @@
 //! Factor-2 channel-reciprocity mix-in integration tests.
 //!
 //! Confirms:
-//! - Both peers using the same factor-2 key derive byte-identical
-//!   chain keys (so AEAD framing works).
-//! - Different factor-2 keys produce different chain keys (so a
-//!   remote-relay attacker without RF access cannot reproduce the
-//!   chain key even with the full Ed25519 transcript).
+//! - Both peers using the same factor-2 candidate complete explicit
+//!   bidirectional key confirmation before either high-level inviter API
+//!   releases its chain key.
+//! - Different factor-2 candidates fail closed instead of silently
+//!   producing divergent ratchet state.
 //! - The plain non-F2 path still works (additive opt-in).
 
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 
 use ol_pair_qr::invite::CapabilityScope;
-use ol_pair_qr::{Inviter, Scanner};
+use ol_pair_qr::{Inviter, InviterState, PairError, Scanner, ScannerState};
 
 fn make_pair() -> (Inviter, Scanner, Vec<u8>) {
     let mut inviter = Inviter::new(
@@ -37,24 +37,30 @@ fn make_pair() -> (Inviter, Scanner, Vec<u8>) {
 fn factor2_same_key_produces_matching_chain_keys() {
     let (mut inviter, mut scanner, _) = make_pair();
     let f2 = [0xA5u8; 32];
-    let (confirm_bytes, k_inviter) = inviter.confirm_with_factor2(&f2).unwrap();
-    let k_scanner = scanner
+    let confirm_bytes = inviter.confirm_with_factor2(&f2).unwrap();
+    assert_eq!(inviter.state(), InviterState::AwaitingFactor2Ack);
+    let (ack, k_scanner) = scanner
         .receive_confirm_with_factor2(&confirm_bytes, &f2)
         .unwrap();
+    assert_eq!(scanner.state(), ScannerState::Done);
+    let k_inviter = inviter.receive_factor2_ack(&ack).unwrap();
+    assert_eq!(inviter.state(), InviterState::Done);
     assert_eq!(k_inviter, k_scanner);
 }
 
 #[test]
-fn factor2_different_keys_produce_divergent_chain_keys() {
+fn factor2_different_keys_fail_closed_without_releasing_scanner_key() {
     let (mut inviter, mut scanner, _) = make_pair();
     let f2a = [0xA5u8; 32];
     let mut f2b = [0xA5u8; 32];
     f2b[0] ^= 0x01;
-    let (confirm_bytes, k_inviter) = inviter.confirm_with_factor2(&f2a).unwrap();
-    let k_scanner = scanner
+    let confirm_bytes = inviter.confirm_with_factor2(&f2a).unwrap();
+    let err = scanner
         .receive_confirm_with_factor2(&confirm_bytes, &f2b)
-        .unwrap();
-    assert_ne!(k_inviter, k_scanner);
+        .unwrap_err();
+    assert_eq!(err, PairError::Factor2KeyConfirmationFailed);
+    assert_eq!(scanner.state(), ScannerState::AwaitingConfirm);
+    assert_eq!(inviter.state(), InviterState::AwaitingFactor2Ack);
 }
 
 #[test]
@@ -68,10 +74,11 @@ fn factor2_mix_differs_from_plain_path() {
     // Factor-2 path with arbitrary key — independent pairing run.
     let (mut inviter_f2, mut scanner_f2, _) = make_pair();
     let f2 = [0xA5u8; 32];
-    let (cb_f2, k_f2_inviter) = inviter_f2.confirm_with_factor2(&f2).unwrap();
-    let k_f2_scanner = scanner_f2
+    let cb_f2 = inviter_f2.confirm_with_factor2(&f2).unwrap();
+    let (ack_f2, k_f2_scanner) = scanner_f2
         .receive_confirm_with_factor2(&cb_f2, &f2)
         .unwrap();
+    let k_f2_inviter = inviter_f2.receive_factor2_ack(&ack_f2).unwrap();
     assert_eq!(k_f2_inviter, k_f2_scanner);
 
     // The two chain keys differ (different transcripts AND F2 mix-in).
@@ -79,13 +86,56 @@ fn factor2_mix_differs_from_plain_path() {
 }
 
 #[test]
-fn factor2_only_one_side_supplies_diverges() {
-    // Catches the bug where one side forgot to opt-in.
+fn factor2_only_one_side_supplies_is_rejected() {
     let (mut inviter, mut scanner, _) = make_pair();
     let f2 = [0xA5u8; 32];
-    let (confirm_bytes, k_inviter) = inviter.confirm_with_factor2(&f2).unwrap();
-    let k_scanner = scanner.receive_confirm(&confirm_bytes).unwrap();
-    assert_ne!(k_inviter, k_scanner);
+    let confirm_bytes = inviter.confirm_with_factor2(&f2).unwrap();
+    let err = scanner.receive_confirm(&confirm_bytes).unwrap_err();
+    assert!(matches!(err, PairError::Oversize { .. }));
+    assert_eq!(scanner.state(), ScannerState::AwaitingConfirm);
+}
+
+#[test]
+fn factor2_tampered_inviter_proof_is_rejected() {
+    let (mut inviter, mut scanner, _) = make_pair();
+    let f2 = [0xA5u8; 32];
+    let mut confirm_bytes = inviter.confirm_with_factor2(&f2).unwrap();
+    let last = confirm_bytes.len() - 1;
+    confirm_bytes[last] ^= 1;
+    let err = scanner
+        .receive_confirm_with_factor2(&confirm_bytes, &f2)
+        .unwrap_err();
+    assert_eq!(err, PairError::Factor2KeyConfirmationFailed);
+    assert_eq!(scanner.state(), ScannerState::AwaitingConfirm);
+}
+
+#[test]
+fn factor2_tampered_ack_is_rejected_without_releasing_inviter_key() {
+    let (mut inviter, mut scanner, _) = make_pair();
+    let f2 = [0xA5u8; 32];
+    let confirm_bytes = inviter.confirm_with_factor2(&f2).unwrap();
+    let (mut ack, _scanner_key) = scanner
+        .receive_confirm_with_factor2(&confirm_bytes, &f2)
+        .unwrap();
+    ack[0] ^= 1;
+    let err = inviter.receive_factor2_ack(&ack).unwrap_err();
+    assert_eq!(err, PairError::Factor2KeyConfirmationFailed);
+    assert_eq!(inviter.state(), InviterState::AwaitingFactor2Ack);
+}
+
+#[test]
+fn factor2_truncated_frames_are_rejected_before_parsing() {
+    let (mut inviter, mut scanner, _) = make_pair();
+    let f2 = [0xA5u8; 32];
+    let mut confirm_bytes = inviter.confirm_with_factor2(&f2).unwrap();
+    confirm_bytes.pop();
+    let err = scanner
+        .receive_confirm_with_factor2(&confirm_bytes, &f2)
+        .unwrap_err();
+    assert!(matches!(err, PairError::BadFactor2ConfirmationLen { .. }));
+
+    let err = inviter.receive_factor2_ack(&[0u8; 31]).unwrap_err();
+    assert!(matches!(err, PairError::BadFactor2ConfirmationLen { .. }));
 }
 
 #[test]
@@ -110,7 +160,8 @@ fn factor2_endpoint_smoke_using_proximity_pair_output() {
     assert_eq!(f2_a, f2_b);
 
     let (mut inviter, mut scanner, _) = make_pair();
-    let (cb, k_i) = inviter.confirm_with_factor2(&f2_a).unwrap();
-    let k_s = scanner.receive_confirm_with_factor2(&cb, &f2_b).unwrap();
+    let cb = inviter.confirm_with_factor2(&f2_a).unwrap();
+    let (ack, k_s) = scanner.receive_confirm_with_factor2(&cb, &f2_b).unwrap();
+    let k_i = inviter.receive_factor2_ack(&ack).unwrap();
     assert_eq!(k_i, k_s);
 }

@@ -1,8 +1,9 @@
-//! Empirical hop-blindness tests for Sphinx Coherence.
+//! Empirical alpha-evolution and structural-format tests.
 //!
-//! Verifies the load-bearing property: same-circuit alpha values at
-//! different hops are statistically indistinguishable from independent
-//! random Ristretto255 group elements.
+//! These tests check that alpha changes between hops, samples do not show
+//! gross byte-frequency bias, and encoded structure stays fixed. They do
+//! not prove statistical indistinguishability, hop anonymity, or resistance
+//! to a global observer with timing/volume/topology data.
 
 use rand::rngs::OsRng;
 use rand::Rng;
@@ -10,6 +11,7 @@ use std::collections::HashSet;
 
 use ol_onion::sphinx::core::{
     build_sphinx_onion, generate_static_keypair, peel_sphinx_layer, SphinxHop, SphinxPeelOutcome,
+    SPHINX_PACKET_LEN, SPHINX_VERSION,
 };
 use ol_onion::HopId;
 
@@ -32,7 +34,7 @@ fn chi_squared_uniform(bytes: &[u8]) -> f64 {
     for &b in bytes {
         counts[b as usize] += 1;
     }
-    let n = bytes.len() as f64;
+    let n = f64::from(u32::try_from(bytes.len()).unwrap());
     let expected = n / 256.0;
     if expected < 1.0 {
         return 0.0;
@@ -40,17 +42,16 @@ fn chi_squared_uniform(bytes: &[u8]) -> f64 {
     counts
         .iter()
         .map(|&c| {
-            let d = c as f64 - expected;
+            let d = f64::from(c) - expected;
             d * d / expected
         })
         .sum()
 }
 
 #[test]
-fn alpha_bytes_at_each_hop_look_uniform() {
+fn alpha_byte_sample_passes_coarse_frequency_smoke() {
     // Build 50 random 3-hop circuits, collect alpha at every hop,
-    // verify the aggregate byte distribution looks uniform via
-    // chi-squared.
+    // run a loose chi-squared smoke for gross implementation bias.
     let mut all_alpha_bytes = Vec::new();
     for _ in 0..50 {
         let (r1_sk, r1) = make_relay();
@@ -63,16 +64,20 @@ fn alpha_bytes_at_each_hop_look_uniform() {
         all_alpha_bytes.extend_from_slice(&packet.as_bytes()[1..33]);
 
         // peel r1
-        let next = match peel_sphinx_layer(&r1_sk, &packet).unwrap() {
-            SphinxPeelOutcome::Forward { next_packet, .. } => next_packet,
-            _ => panic!(),
+        let SphinxPeelOutcome::Forward {
+            next_packet: next, ..
+        } = peel_sphinx_layer(&r1_sk, &packet).unwrap()
+        else {
+            panic!();
         };
         all_alpha_bytes.extend_from_slice(&next.as_bytes()[1..33]);
 
         // peel r2
-        let next = match peel_sphinx_layer(&r2_sk, &next).unwrap() {
-            SphinxPeelOutcome::Forward { next_packet, .. } => next_packet,
-            _ => panic!(),
+        let SphinxPeelOutcome::Forward {
+            next_packet: next, ..
+        } = peel_sphinx_layer(&r2_sk, &next).unwrap()
+        else {
+            panic!();
         };
         all_alpha_bytes.extend_from_slice(&next.as_bytes()[1..33]);
     }
@@ -82,8 +87,8 @@ fn alpha_bytes_at_each_hop_look_uniform() {
         "alpha bytes: {} bytes, chi-sq vs uniform = {chi:.1}",
         all_alpha_bytes.len()
     );
-    // df=255 critical at p=0.001 is ~340. Ristretto255 compressed
-    // points should sit well under this.
+    // This loose bound is a regression heuristic, not a proof that
+    // compressed points are uniformly random or unlinkable.
     assert!(
         chi < 400.0,
         "alpha bytes deviate from uniform: chi-sq = {chi}"
@@ -107,18 +112,22 @@ fn alpha_at_consecutive_hops_pairwise_distinct() {
         alpha_set.insert(a0);
         total += 1;
 
-        let p1 = match peel_sphinx_layer(&r1_sk, &p0).unwrap() {
-            SphinxPeelOutcome::Forward { next_packet, .. } => next_packet,
-            _ => panic!(),
+        let SphinxPeelOutcome::Forward {
+            next_packet: p1, ..
+        } = peel_sphinx_layer(&r1_sk, &p0).unwrap()
+        else {
+            panic!();
         };
         let mut a1 = [0u8; 32];
         a1.copy_from_slice(&p1.as_bytes()[1..33]);
         alpha_set.insert(a1);
         total += 1;
 
-        let p2 = match peel_sphinx_layer(&r2_sk, &p1).unwrap() {
-            SphinxPeelOutcome::Forward { next_packet, .. } => next_packet,
-            _ => panic!(),
+        let SphinxPeelOutcome::Forward {
+            next_packet: p2, ..
+        } = peel_sphinx_layer(&r2_sk, &p1).unwrap()
+        else {
+            panic!();
         };
         let mut a2 = [0u8; 32];
         a2.copy_from_slice(&p2.as_bytes()[1..33]);
@@ -139,20 +148,23 @@ fn packet_structure_invariant_across_hops() {
     let (_, dest) = make_relay();
     let (eph_sk, _) = generate_static_keypair(&mut OsRng);
     let p0 = build_sphinx_onion(&eph_sk, &[r1, r2, dest], b"hop-blindness", &mut OsRng).unwrap();
-    use ol_onion::sphinx::core::{SPHINX_PACKET_LEN, SPHINX_VERSION};
     assert_eq!(p0.as_bytes().len(), SPHINX_PACKET_LEN);
     assert_eq!(p0.as_bytes()[0], SPHINX_VERSION);
 
-    let p1 = match peel_sphinx_layer(&r1_sk, &p0).unwrap() {
-        SphinxPeelOutcome::Forward { next_packet, .. } => next_packet,
-        _ => panic!(),
+    let SphinxPeelOutcome::Forward {
+        next_packet: p1, ..
+    } = peel_sphinx_layer(&r1_sk, &p0).unwrap()
+    else {
+        panic!();
     };
     assert_eq!(p1.as_bytes().len(), SPHINX_PACKET_LEN);
     assert_eq!(p1.as_bytes()[0], SPHINX_VERSION);
 
-    let p2 = match peel_sphinx_layer(&r2_sk, &p1).unwrap() {
-        SphinxPeelOutcome::Forward { next_packet, .. } => next_packet,
-        _ => panic!(),
+    let SphinxPeelOutcome::Forward {
+        next_packet: p2, ..
+    } = peel_sphinx_layer(&r2_sk, &p1).unwrap()
+    else {
+        panic!();
     };
     assert_eq!(p2.as_bytes().len(), SPHINX_PACKET_LEN);
     assert_eq!(p2.as_bytes()[0], SPHINX_VERSION);

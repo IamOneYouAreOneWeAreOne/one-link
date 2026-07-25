@@ -69,9 +69,27 @@ fn count_chunks_lost(path: &[String], n_chunks: usize, lossy_drop_rate: f64) -> 
         .windows(2)
         .filter(|w| w[0] == "relay_lossy" || w[1] == "relay_lossy")
         .count();
-    let survival = (1.0 - lossy_drop_rate).powi(hops_lossy as i32);
-    let survived = (n_chunks as f64 * survival).round() as usize;
+    let hops_lossy = i32::try_from(hops_lossy).expect("a test route has fewer than i32::MAX hops");
+    let survival = (1.0 - lossy_drop_rate).powi(hops_lossy);
+    let expected_survivors = (usize_as_f64(n_chunks) * survival)
+        .round()
+        .clamp(0.0, usize_as_f64(n_chunks));
+    // Counting against the rounded threshold avoids a lossy float-to-integer
+    // cast while retaining the benchmark's deterministic expected-loss model.
+    let survived = (0..n_chunks)
+        .take_while(|chunk| usize_as_f64(*chunk) < expected_survivors)
+        .count();
     n_chunks - survived
+}
+
+/// Convert a platform-sized count without hiding precision loss in an `as`
+/// cast. Splitting into base-2^32 limbs makes the conversion explicit and
+/// deterministic on every Rust target whose pointer width fits in `u64`.
+fn usize_as_f64(value: usize) -> f64 {
+    let value = u64::try_from(value).expect("supported Rust pointer widths fit in u64");
+    let high = u32::try_from(value >> 32).expect("the upper u64 limb fits in u32");
+    let low = u32::try_from(value & u64::from(u32::MAX)).expect("the lower u64 limb fits in u32");
+    f64::from(high).mul_add(4_294_967_296.0, f64::from(low))
 }
 
 #[test]
@@ -92,14 +110,8 @@ fn tau_field_routing_reduces_chunks_lost_on_partition_by_at_least_20_percent() {
     let naive_lost = count_chunks_lost(&naive_path, n_chunks, lossy_drop_rate);
     let tau_lost = count_chunks_lost(&tau_path, n_chunks, lossy_drop_rate);
 
-    eprintln!(
-        "naive path: {:?} → lost {} / {} chunks",
-        naive_path, naive_lost, n_chunks
-    );
-    eprintln!(
-        "tau path:   {:?} → lost {} / {} chunks",
-        tau_path, tau_lost, n_chunks
-    );
+    eprintln!("naive path: {naive_path:?} → lost {naive_lost} / {n_chunks} chunks");
+    eprintln!("tau path:   {tau_path:?} → lost {tau_lost} / {n_chunks} chunks");
 
     assert!(
         naive_lost > 0,
@@ -113,7 +125,7 @@ fn tau_field_routing_reduces_chunks_lost_on_partition_by_at_least_20_percent() {
     let reduction = if naive_lost == 0 {
         0.0
     } else {
-        (naive_lost as f64 - tau_lost as f64) / naive_lost as f64
+        usize_as_f64(naive_lost.saturating_sub(tau_lost)) / usize_as_f64(naive_lost)
     };
     eprintln!("chunk-loss reduction: {:.1}%", reduction * 100.0);
     assert!(

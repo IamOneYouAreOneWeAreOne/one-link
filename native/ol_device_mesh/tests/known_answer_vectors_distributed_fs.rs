@@ -4,7 +4,7 @@
 //!   1. Domain tags (manifest + attestation + file-id).
 //!   2. Bound constants.
 //!   3. Canonical manifest bytes for a fixed input.
-//!   4. FileId of the fixed manifest.
+//!   4. `FileId` of the fixed manifest.
 //!   5. Canonical attestation-transcript bytes.
 //!
 //! Regen path:
@@ -19,6 +19,32 @@ use ol_device_mesh::distributed_fs::{
     MAX_CHUNKS_PER_ATTESTATION, MAX_CHUNKS_PER_FILE, MAX_K_PLUS_M, MAX_MIME_LEN,
 };
 use ol_device_mesh::DEVICE_ID_LEN;
+use std::fmt::Write as _;
+
+const EXPECTED_MANIFEST_HEX: &str = concat!(
+    "4f4c2d6d6573682d66696c652d6d616e69666573742d7631", // "OL-mesh-file-manifest-v1"
+    "0000000000000001",                                 // file_size = 1
+    "00000100",                                         // chunk_size = 256
+    "02",                                               // policy.k = 2
+    "01",                                               // policy.m = 1
+    "01",                                               // policy.min_devices_per_shard = 1
+    "0000000000000001",                                 // created_unix = 1
+    "000a",                                             // mime length = 10
+    "746578742f706c61696e",                             // "text/plain"
+    "00000003",                                         // chunk_count = 3
+    "1111111111111111111111111111111111111111111111111111111111111111",
+    "2222222222222222222222222222222222222222222222222222222222222222",
+    "3333333333333333333333333333333333333333333333333333333333333333",
+);
+const EXPECTED_ATTEST_HEX: &str = concat!(
+    "4f4c2d6d6573682d73746f726167652d6174746573742d7631", // "OL-mesh-storage-attest-v1"
+    "11111111111111111111111111111111",                   // device_id
+    "0000000000000007",                                   // day_index = 7
+    "000000006553f100",                                   // attest_unix = 1_700_000_000
+    "00000002",                                           // chunk_count = 2
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+);
 
 fn check_regen<F: FnOnce()>(label: &str, dump: F) {
     if std::env::var("OL_DFS_KAT_REGEN").as_deref() == Ok("1") {
@@ -28,7 +54,11 @@ fn check_regen<F: FnOnce()>(label: &str, dump: F) {
 }
 
 fn to_hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    let mut hex = String::with_capacity(b.len() * 2);
+    for byte in b {
+        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
 }
 
 // ── 1. Domain tags pinned ─────────────────────────────────────────
@@ -73,21 +103,6 @@ fn kat_manifest_canonical_bytes_pinned() {
         eprintln!("    EXPECTED_MANIFEST_HEX = \"{hex}\"");
     });
 
-    const EXPECTED_MANIFEST_HEX: &str = concat!(
-        "4f4c2d6d6573682d66696c652d6d616e69666573742d7631", // "OL-mesh-file-manifest-v1"
-        "0000000000000001",                                 // file_size = 1
-        "00000100",                                         // chunk_size = 256
-        "02",                                               // policy.k = 2
-        "01",                                               // policy.m = 1
-        "01",                                               // policy.min_devices_per_shard = 1
-        "0000000000000001",                                 // created_unix = 1
-        "000a",                                             // mime length = 10
-        "746578742f706c61696e",                             // "text/plain"
-        "00000003",                                         // chunk_count = 3
-        "1111111111111111111111111111111111111111111111111111111111111111",
-        "2222222222222222222222222222222222222222222222222222222222222222",
-        "3333333333333333333333333333333333333333333333333333333333333333",
-    );
     assert_eq!(hex, EXPECTED_MANIFEST_HEX, "manifest canonical-bytes drift");
 }
 
@@ -129,14 +144,5 @@ fn kat_attestation_canonical_transcript_pinned() {
     check_regen("attestation canonical_transcript", || {
         eprintln!("    EXPECTED_ATTEST_HEX = \"{hex}\"");
     });
-    const EXPECTED_ATTEST_HEX: &str = concat!(
-        "4f4c2d6d6573682d73746f726167652d6174746573742d7631", // "OL-mesh-storage-attest-v1"
-        "11111111111111111111111111111111",                   // device_id
-        "0000000000000007",                                   // day_index = 7
-        "000000006553f100",                                   // attest_unix = 1_700_000_000
-        "00000002",                                           // chunk_count = 2
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    );
     assert_eq!(hex, EXPECTED_ATTEST_HEX, "attestation transcript drift");
 }

@@ -8,7 +8,7 @@
 //!
 //! ## Architecture (Kademlia, with sovereign-mesh additions)
 //!
-//! - **`node_id`**: 256-bit NodeId derived from the peer's Ed25519
+//! - **`node_id`**: 256-bit `NodeId` derived from the peer's Ed25519
 //!   master fingerprint. XOR distance metric. Constant-time bit ops.
 //! - **`routing`**: K-bucket routing table. For each prefix-length
 //!   bucket, keep the K most-recently-seen peers; refresh stale
@@ -16,7 +16,7 @@
 //! - **`record`**: Signed peer-announcement records. Each carries
 //!   reachability info (transport endpoints), a freshness timestamp,
 //!   and an Ed25519 signature by the publisher.
-//! - **`rpc`**: PING / STORE / FIND_NODE / FIND_VALUE envelope types.
+//! - **`rpc`**: `PING` / `STORE` / `FIND_NODE` / `FIND_VALUE` envelope types.
 //!   Wire-encoded as length-prefixed canonical bytes, signature-
 //!   bound, replay-protected via nonce + timestamp.
 //! - **`lookup`**: iterative α-parallel lookup. Queries up to α
@@ -36,10 +36,10 @@
 //!   re-announce on a tick (default 1h) so an offline peer's record
 //!   falls out of the swarm within the TTL window.
 //! - **Coherence-field-aware refresh** (optional): when two nodes
-//!   are at the same XOR distance, prefer the one with higher τ_c
+//!   are at the same XOR distance, prefer the one with higher `τ_c`
 //!   (Phase E coupling) — lookups route through more-coherent peers.
 //!   Falls back to vanilla Kademlia when no field state is available.
-//! - **Sybil resistance via Ed25519 cost**: a NodeId is the BLAKE3
+//! - **Sybil resistance via Ed25519 cost**: a `NodeId` is the BLAKE3
 //!   of the Ed25519 master pubkey. Generating an attractive ID
 //!   close to a specific target requires generating Ed25519 keys
 //!   until one hashes to a useful prefix — a real, GPU-resistant
@@ -103,7 +103,7 @@ pub use dht_node::{
 };
 pub use lookup::{
     Lookup, LookupError, LookupQueryResult, LookupResult, Transport, ALPHA_DEFAULT,
-    LOOKUP_K_DEFAULT, MAX_LOOKUP_ITERS,
+    LOOKUP_K_DEFAULT, MAX_LOOKUP_ALPHA, MAX_LOOKUP_CANDIDATES, MAX_LOOKUP_ITERS, MAX_LOOKUP_K,
 };
 pub use node_id::{NodeId, NODE_ID_BITS, NODE_ID_BYTES};
 pub use record::{PeerRecord, RecordError, SignedRecord, RECORD_DEFAULT_TTL_SECS};
@@ -112,7 +112,11 @@ pub use rpc::{
     FindValueOutcome, Header, Nonce, Request, Response, RpcEnvelope, RpcError, StoreOutcome,
     MAX_CLOCK_SKEW_SECS, MAX_FIND_RESULTS,
 };
-pub use udp_transport::{EndpointResolver, RequestHandler, UdpTransport, DEFAULT_QUERY_TIMEOUT_MS};
+pub use udp_transport::{
+    EndpointResolver, RequestHandler, UdpTransport, DEFAULT_QUERY_TIMEOUT_MS,
+    INBOUND_REQUEST_HANDLER_TIMEOUT_MS, MAX_INBOUND_REQUESTS_IN_FLIGHT, MAX_RATE_LIMIT_SOURCES,
+    MAX_REPLAY_WINDOW_ENTRIES, MAX_REQUESTS_GLOBAL_WINDOW, MAX_REQUESTS_PER_SOURCE_WINDOW,
+};
 pub use wire::{
     decode, encode_request, encode_response, DecodedEnvelope, WireError, MAX_WIRE_BYTES,
     WIRE_MAGIC, WIRE_VERSION,

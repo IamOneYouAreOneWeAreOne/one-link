@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -149,8 +148,13 @@ def test_verify_phrase_positions_rejects_out_of_range(tmp_path):
 
 def test_phrase_test_returns_matches_when_phrase_matches_current_seed(tmp_path):
     """Happy path: paste the daemon's own phrase, get matches=true."""
-    from one_link import master_seed, mnemonic, recovery_api
+    from one_link import master_seed, mnemonic, paths, recovery_api
     seed = master_seed.load_or_create_seed(tmp_path)[0]
+    master_seed.install_seed_derived_authority(
+        tmp_path,
+        identity_path=paths.key_path(),
+        seed=seed,
+    )
     phrase = mnemonic.encode(seed)
     res = recovery_api.test_phrase_against_current_seed(
         data_dir=tmp_path, phrase=phrase,
@@ -240,9 +244,11 @@ def test_daemon_shutdown_endpoint_registered_guarded_ratelimited():
     assert "_rate_limited(" in body
     assert '"daemon_shutdown"' in body
     assert "confirmed_shutdown" in body
-    # Reuses the auto-update path's response-then-exit pattern.
+    # Flush the response before asking the daemon to unwind cleanly.  A hard
+    # process exit would bypass task cancellation and durability cleanup.
     assert "_shutdown_soon" in body
-    assert "_os._exit(0)" in body
+    assert "request_shutdown" in body
+    assert "_os._exit" not in body
 
 
 def test_index_html_shutdown_button_wired_on_success_cards():
@@ -275,7 +281,7 @@ def test_bundle_test_round_trips_with_matching_phrase(tmp_path):
     decrypts cleanly with the corresponding phrase via the test
     helper. file_count + created_ms surface correctly."""
     import os
-    from one_link import backup_bundle, master_seed, mnemonic, recovery_api
+    from one_link import backup_bundle, mnemonic, recovery_api
     src = tmp_path
     (src / "state.db").write_bytes(b"SQLite format 3\x00" + os.urandom(512))
     (src / "master.seed").write_bytes(os.urandom(32))
@@ -322,6 +328,28 @@ def test_bundle_test_returns_invalid_on_bad_phrase(tmp_path):
     assert res["error"]
 
 
+def test_bundle_test_rejects_authenticated_but_malformed_archive(monkeypatch):
+    """Authenticated bytes that cannot restore are not a valid backup."""
+    from types import SimpleNamespace
+    from one_link import backup_bundle, mnemonic, recovery_api
+
+    monkeypatch.setattr(mnemonic, "decode", lambda _phrase: b"s" * 32)
+    monkeypatch.setattr(
+        backup_bundle,
+        "open_bundle",
+        lambda **_kwargs: (SimpleNamespace(created_ms=123), b"not-a-tar"),
+    )
+
+    result = recovery_api.test_bundle_against_phrase(
+        phrase="synthetic", bundle_bytes=b"authenticated-container",
+    )
+
+    assert result["valid_phrase"] is True
+    assert result["valid_bundle"] is False
+    assert result["file_count"] == 0
+    assert "archive is malformed" in result["error"]
+
+
 def test_bundle_test_endpoint_registered_guarded_ratelimited():
     from types import SimpleNamespace
     from one_link.server import UIServer
@@ -337,18 +365,16 @@ def test_bundle_test_endpoint_registered_guarded_ratelimited():
     assert "POST" in methods
 
     src = _server_src()
-    idx = src.find('"/api/v1/recovery/bundle/test"')
+    idx = src.find('r.add_post("/api/v1/recovery/bundle/test"')
     assert idx > 0
-    line_start = src.rfind("\n", 0, idx) + 1
-    line_end = src.find("\n", idx)
-    assert "self._guarded(" in src[line_start:line_end]
+    assert "self._guarded(" in src[idx:idx + 240]
 
     handler_idx = src.find("async def api_recovery_bundle_test(")
     assert handler_idx > 0
     body = src[handler_idx:handler_idx + 3500]
     assert "_rate_limited(" in body
     assert '"recovery_bundle_test"' in body
-    assert "MAX_B64_LEN" in body
+    assert "_read_recovery_bundle_request(request)" in body
     assert "_recovery_no_store_headers" in body
 
 
@@ -356,8 +382,10 @@ def test_index_html_bundle_test_button_and_handler():
     """Backup card has a 'Test a backup file' button + handler
     posting to the new endpoint."""
     html = _index_html()
-    assert "recoveryBundleTest(phrase, bundleB64)" in html
+    assert "recoveryBundleTest(phrase, bundleFile)" in html
     assert '"/api/v1/recovery/bundle/test"' in html
+    assert 'return this.postForm("/api/v1/recovery/bundle/test"' in html
+    assert "bundle: bundleFile" in html
     assert 'data-recwiz-backup="test"' in html
     assert "Test a backup file" in html
     assert "function _recwizBackupTestStart()" in html
@@ -373,9 +401,14 @@ def test_shares_test_returns_matches_when_quorum_reconstructs_current_seed(tmp_p
     a 2-share quorum, verify the recovery_api helper reports
     matches_current_identity=true."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from one_link import master_seed, recovery_api, social_recovery
+    from one_link import master_seed, paths, recovery_api, social_recovery
 
     seed = master_seed.load_or_create_seed(tmp_path)[0]
+    master_seed.install_seed_derived_authority(
+        tmp_path,
+        identity_path=paths.key_path(),
+        seed=seed,
+    )
     guardians = [Ed25519PrivateKey.generate() for _ in range(3)]
     wrapped = social_recovery.split_and_wrap(
         seed=seed,
@@ -709,9 +742,10 @@ def test_build_backup_bundle_round_trips(tmp_path):
     """Wizard's bundle bytes must decrypt back with the master seed."""
     from one_link import recovery_api as ra
     from one_link import backup_bundle, master_seed
-    # Minimal data dir contents the bundle pulls from.
-    (tmp_path / "state.db").write_bytes(b"SQLite format 3\x00" + os.urandom(2048))
+    # Production establishes recoverable authority before State creates its
+    # database; the fixture must preserve that boot invariant.
     seed = master_seed.load_or_create_seed(tmp_path)[0]
+    (tmp_path / "state.db").write_bytes(b"SQLite format 3\x00" + os.urandom(2048))
     bundle = ra.build_backup_bundle(data_dir=tmp_path)
     # Round-trip: bundle decrypts with the same seed.
     header, plaintext = backup_bundle.open_bundle(seed=seed, bundle_bytes=bundle)
@@ -1267,8 +1301,7 @@ def test_restore_seed_from_phrase_rejects_bad_phrase(tmp_path):
 
 
 def test_is_install_clean_for_restore_counts_each_dimension():
-    """The dirty signals: pinned peers, groups, self-mesh devices.
-    Any one of them flips the install from clean to dirty."""
+    """Every state family that identity replacement can orphan is gated."""
     from one_link import recovery_api as ra
     state = _fake_state()
     clean, ev = ra.is_install_clean_for_restore(state)
@@ -1283,6 +1316,73 @@ def test_is_install_clean_for_restore_counts_each_dimension():
     clean, ev = ra.is_install_clean_for_restore(state)
     assert clean is False
     assert ev["pinned_peers"] == 1
+
+    state._peers = []
+    for attribute, evidence_key in (
+        ("_messages", "messages"),
+        ("_group_messages", "group_messages"),
+        ("_group_ids", "groups"),
+        ("_folders", "shared_folders"),
+        ("_self_mesh_devices", "self_mesh_devices"),
+        ("_pending_transfers", "pending_transfers"),
+        ("_pending_outbox", "pending_outbox"),
+        ("_pending_folder_offers", "pending_folder_offers"),
+        ("_pending_rotation_announcements", "pending_rotation_announcements"),
+        ("_held_recovery_shares", "held_recovery_shares"),
+    ):
+        setattr(state, attribute, [object()])
+        clean, ev = ra.is_install_clean_for_restore(state)
+        assert clean is False
+        assert ev[evidence_key] == 1
+        setattr(state, attribute, [])
+
+
+def test_is_install_clean_for_restore_fails_closed_when_snapshot_fails():
+    from one_link import recovery_api as ra
+
+    class _BrokenState:
+        def recovery_safety_counts(self):
+            raise OSError("database unavailable")
+
+    clean, evidence = ra.is_install_clean_for_restore(_BrokenState())
+    assert clean is False
+    assert evidence["inspection_failures"] == 1
+
+
+@pytest.mark.asyncio
+async def test_restore_handler_requires_confirmation_when_inspection_fails(
+    monkeypatch, tmp_path,
+):
+    """An unreadable cleanliness snapshot must reach the HTTP 409 guard."""
+    import json
+
+    from one_link import master_seed, paths
+    from one_link.server import UIServer
+
+    class _BrokenState:
+        def recovery_safety_counts(self):
+            raise OSError("database unavailable")
+
+    class _Request:
+        transport = None
+        remote = "127.0.0.1"
+
+        async def json(self):
+            return {
+                "phrase": "synthetic phrase",
+                "force": False,
+                "confirmed_replace": False,
+            }
+
+    monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(master_seed, "has_seed", lambda _path: False)
+    server = UIServer(SimpleNamespace(state=_BrokenState(), peer_rtc=None))
+
+    response = await server.api_recovery_restore_phrase(_Request())
+    payload = json.loads(response.body)
+    assert response.status == 409
+    assert payload["error"] == "destructive_restore_requires_confirmation"
+    assert payload["evidence"]["inspection_failures"] == 1
 
 
 def test_restore_phrase_endpoint_registered_and_guarded():
@@ -1399,7 +1499,6 @@ def test_restore_from_bundle_round_trips(tmp_path):
     (src / "state.db").write_bytes(b"SQLite format 3\x00" + os.urandom(2048))
     (src / "master.seed").write_bytes(os.urandom(32))
     (src / "data-root-key.bin").write_bytes(os.urandom(32))
-    (src / "lockbox.salt").write_bytes(os.urandom(16))
     seed = (src / "master.seed").read_bytes()
     phrase = mnemonic.encode(seed)
     bundle = backup_bundle.create_bundle(seed=seed, data_dir=src)
@@ -1417,7 +1516,9 @@ def test_restore_from_bundle_round_trips(tmp_path):
     assert result["file_count"] > 0
     assert "state.db" in result["written"]
     assert (dst / "state.db").read_bytes() == (src / "state.db").read_bytes()
-    assert (dst / "master.seed").read_bytes() == (src / "master.seed").read_bytes()
+    # Restore persists the same authority under this machine's protection
+    # (DPAPI on Windows), so ciphertext bytes need not equal the archive.
+    assert master_seed.load_seed(dst) == seed
 
 
 def test_restore_from_bundle_rejects_wrong_phrase(tmp_path):
@@ -1425,7 +1526,7 @@ def test_restore_from_bundle_rejects_wrong_phrase(tmp_path):
     phrase decodes to a different seed than the bundle was created
     under."""
     import os
-    from one_link import backup_bundle, master_seed, mnemonic, recovery_api
+    from one_link import backup_bundle, mnemonic, recovery_api
     src = tmp_path / "src"
     src.mkdir()
     (src / "state.db").write_bytes(b"data" + os.urandom(256))
@@ -1488,12 +1589,10 @@ def test_restore_bundle_endpoint_registered_guarded_ratelimited():
     assert "POST" in methods
 
     src = _server_src()
-    idx = src.find('"/api/v1/recovery/restore/bundle"')
+    idx = src.find('r.add_post("/api/v1/recovery/restore/bundle"')
     assert idx > 0
-    line_start = src.rfind("\n", 0, idx) + 1
-    line_end = src.find("\n", idx)
-    line = src[line_start:line_end]
-    assert "self._guarded(" in line, f"not guarded: {line!r}"
+    route_window = src[idx:idx + 240]
+    assert "self._guarded(" in route_window, f"not guarded: {route_window!r}"
 
     handler_idx = src.find("async def api_recovery_restore_bundle(")
     assert handler_idx > 0
@@ -1501,13 +1600,14 @@ def test_restore_bundle_endpoint_registered_guarded_ratelimited():
     assert "_rate_limited(" in body
     assert '"recovery_restore_bundle"' in body
     assert "destructive_restore_requires_confirmation" in body
-    assert "MAX_B64_LEN" in body
+    assert "_read_recovery_bundle_request(request)" in body
 
 
 def test_index_html_exposes_bundle_restore_api_method():
     html = _index_html()
-    assert "recoveryRestoreBundle(phrase, bundleB64, force, confirmedReplace)" in html
+    assert "recoveryRestoreBundle(phrase, bundleFile, force, confirmedReplace)" in html
     assert '"/api/v1/recovery/restore/bundle"' in html
+    assert 'return this.postForm("/api/v1/recovery/restore/bundle"' in html
 
 
 def test_index_html_restore_modal_offers_optional_bundle_file():
@@ -1644,6 +1744,16 @@ def _fake_state():
         def __init__(self):
             self.settings = settings
             self._peers: list = []
+            self._messages: list = []
+            self._group_messages: list = []
+            self._group_ids: list = []
+            self._folders: list = []
+            self._self_mesh_devices: list = []
+            self._pending_transfers: list = []
+            self._pending_outbox: list = []
+            self._pending_folder_offers: list = []
+            self._pending_rotation_announcements: list = []
+            self._held_recovery_shares: list = []
 
         def get_setting(self, key):
             return self.settings.get(key)
@@ -1656,6 +1766,25 @@ def _fake_state():
 
         def list_peers(self):
             return list(self._peers)
+
+        def recovery_safety_counts(self):
+            return {
+                "pinned_peers": sum(
+                    1 for peer in self._peers if getattr(peer, "trust", None) == "pinned"
+                ),
+                "messages": len(self._messages),
+                "group_messages": len(self._group_messages),
+                "groups": len(self._group_ids),
+                "shared_folders": len(self._folders),
+                "self_mesh_devices": len(self._self_mesh_devices),
+                "pending_transfers": len(self._pending_transfers),
+                "pending_outbox": len(self._pending_outbox),
+                "pending_folder_offers": len(self._pending_folder_offers),
+                "pending_rotation_announcements": len(
+                    self._pending_rotation_announcements
+                ),
+                "held_recovery_shares": len(self._held_recovery_shares),
+            }
 
     return _S()
 

@@ -14,7 +14,7 @@ Phase C-3 shipped five native primitives in [`commit 25675d1`](../../). Each pri
 
 | Migration | Native primitive | Production call site | Wiring state |
 |---|---|---|---|
-| #1 PQ-hybrid (ADR-0017) | `ol_pqkem` ML-KEM-768 + X25519 | None on the channel hot path | **Deferred** — `pq_hybrid.py` has no production callers in the daemon today (only an audit-endpoint reference). The new `default_kem()` factory + `NativeHybridKEM` are ready; activation requires the chunk-store transport cutover (a future commit) to choose a KEM and call `default_kem()`. |
+| #1 PQ-hybrid (ADR-0017) | `ol_pqkem` ML-KEM-768 + X25519 | `channel.initiate` / `channel.respond` v3 handshake | **Authoritative for current daemon channels** — exact signed suite negotiation, transcript extraction, mutual key confirmation, runtime ABI self-test, and default refusal of legacy/classical handshakes. Explicit migration overrides remain non-PQ and are never reported as protected. |
 | #2 Bandit (ADR-0019) | `ol_bandit` Thompson sampler | `AdaptiveTransferBrain.observe()` | **Shadow** — every legacy observation now also feeds a `BanditRouteSelector`. The EMA-driven pareto-frontier is still authoritative for `.decide()`. `best_route_bandit()` exposes the bandit pick for diagnostics. Cutover replaces the pareto code with a bandit-first selection. |
 | #3 Per-chunk ratchet (ADR-0020) | `ol_ratchet` BLAKE3 chain | None on the chunk hot path | **Deferred** — `channel.py` still uses per-message Double Ratchet for text. Per-chunk forward secrecy applies to the chunk-store AEAD path which isn't live yet. `chunk_ratchet.ChunkRatchet` is ready; activation lands with the chunk-store cutover. |
 | #4 Capability layer (ADR-0021) | `ol_capability` macaroons | `Daemon.send_share_grant` (daemon.py:5394) | **Dual-issue** — every share mint emits the legacy Ed25519 grant on the wire AND stashes a macaroon-style `Capability` in `self._last_minted_macaroon`. Future commit advertises the macaroon in the share frame so capable peers can verify the new format; the cutover collapses to macaroon-only once all paired peers advertise support. |
@@ -33,7 +33,7 @@ Each migration touches code that the daemon's 2,952-test integration suite exerc
 - **Tests**: 39 migration unit tests + 5 call-site wiring integration tests + 2,952 daemon regression tests pass.
 - **Benchmarks** (`tests/benchmarks/bench_phase_c3_migration.py`): native paths are 3–16× faster on the operations that matter (capability mint+verify 16×, chunk-key derivation 8×, route selection 3×). PQ-hybrid is slower than the `NullKEM` placeholder because `NullKEM` is a no-op; the native path does real ML-KEM-768 + X25519 work and costs ~135 µs end-to-end.
 - **Type checks**: `mypy --config-file pyproject.toml` is clean on all nine adapter modules (`cap_migration.py`, `chunk_ratchet.py`, `folder_native.py`, plus the six `*_native.py` adapters).
-- **Stubs**: hand-written `.pyi` files under `stubs/one_link_native-stubs/` for pyright / IDE autocomplete; PEP 561 compliant.
+- **Stubs**: hand-written `.pyi` files live inline under the canonical `native/one_link_native/` package; the same files ship in every native wheel for mypy, pyright, and IDE autocomplete.
 
 ## What it would take to fully cut over
 
@@ -41,7 +41,7 @@ Per migration, the cutover commit looks like:
 
 | # | Cutover step |
 |---|---|
-| #1 PQ-hybrid | Wait for chunk-store transport. When it ships, call `pq_hybrid.default_kem()` once at channel startup. |
+| #1 PQ-hybrid | **Done for daemon channels.** Remaining product-wide gates are PQ identity signatures, browser/WebRTC parity, cross-version interoperability, and signed packaged-release qualification. |
 | #2 Bandit | Replace `AdaptiveTransferBrain.decide()`'s pareto-frontier ordering with `BanditRouteSelector.select_route()` for the route axis. Keep pareto for the mode axis. |
 | #3 Per-chunk ratchet | When the chunk-store AEAD path is active, derive each chunk key via `ChunkRatchet.next_key()` keyed off the channel's KEM shared secret. |
 | #4 Capability layer | Advertise `macaroon` in the share frame; on the receiver side prefer macaroon verification when present, fall back to Ed25519 grant. |

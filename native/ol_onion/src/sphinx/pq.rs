@@ -11,16 +11,18 @@
 //!   hybrid_shared    = BLAKE3("hybrid" || classical_shared || pq_shared || alpha)
 //! ```
 //!
-//! The hybrid binding flows down the chain via cumulative_blind:
-//! every subsequent alpha_i is `b_0 * b_1 * ... * b_{i-1} * alpha_0`
-//! where `b_0` is derived from `hybrid_shared`. So a quantum
-//! adversary cannot reproduce alpha_1+ without first breaking
-//! ML-KEM-768 (to recover b_0).
+//! The hybrid binding flows down the chain via `cumulative_blind`:
+//! every subsequent `alpha_i` is `b_0 * b_1 * ... * b_{i-1} * alpha_0`
+//! where `b_0` is derived from `hybrid_shared`. Under the security of
+//! ML-KEM-768 and the hybrid composition, recovering only the classical
+//! component is insufficient to reproduce this KDF input. The tests in
+//! this module establish input binding and round trips, not quantum-
+//! adversary resistance or a proof of the complete protocol.
 //!
 //! ## Wire format addition
 //!
 //! The PQ-hybrid Sphinx packet inserts an 1088-byte ML-KEM ciphertext
-//! between alpha and header_mac. Total packet size:
+//! between alpha and `header_mac`. Total packet size:
 //!
 //! ```text
 //!   1 + 32 + 1088 + 16 + 240 + 1024 = 2401 bytes
@@ -67,11 +69,11 @@ pub const ML_KEM_CT_LEN: usize = 1088;
 /// ML-KEM-768 encapsulation-key length.
 pub const ML_KEM_EK_LEN: usize = 1184;
 
-/// PQ Sphinx wire protocol version. Distinct from classical SPHINX_VERSION.
+/// PQ Sphinx wire protocol version. Distinct from classical `SPHINX_VERSION`.
 pub const PQ_SPHINX_VERSION: u8 = 4;
 
 /// Total fixed PQ-hybrid Sphinx packet size:
-/// version(1) + alpha(32) + pq_ct(1088) + mac(16) + header(240) + payload(1024).
+/// version(1) + alpha(32) + `pq_ct`(1088) + mac(16) + header(240) + payload(1024).
 pub const PQ_SPHINX_PACKET_LEN: usize =
     1 + RISTRETTO_POINT_LEN + ML_KEM_CT_LEN + SLOT_MAC_LEN + HEADER_LEN + PAYLOAD_LEN;
 
@@ -249,7 +251,7 @@ pub fn build_pq_sphinx_onion<R: RngCore + CryptoRng>(
     // ── Step 1: ML-KEM encapsulation to entry hop.
     let (pq_ct, pq_shared) = entry_pq_pk
         .encapsulate(rng)
-        .map_err(|_| OnionError::Internal("ML-KEM encapsulation failed"))?;
+        .map_err(|()| OnionError::Internal("ML-KEM encapsulation failed"))?;
     let pq_ct_bytes: &Array<u8, MlKemCtSize> = &pq_ct;
     let pq_shared_bytes: [u8; 32] = {
         let mut s = [0u8; 32];
@@ -296,7 +298,7 @@ pub fn build_pq_sphinx_onion<R: RngCore + CryptoRng>(
     let mut random_pad = vec![0u8; pad_len];
     rng.fill_bytes(&mut random_pad);
 
-    let built = build_header(&hop_keys, &next_hop_ids, &random_pad);
+    let built = build_header(&hop_keys, &next_hop_ids, &random_pad)?;
 
     // ── Step 4: build encrypted payload — in-place, no per-hop Vec.
     let mut payload_buf = [0u8; PAYLOAD_LEN];
@@ -367,7 +369,7 @@ pub fn peel_pq_sphinx_entry(
         Array::try_from(pq_ct_slice).map_err(|_| OnionError::Internal("ML-KEM ciphertext size"))?;
     let pq_shared = relay_pq_sk
         .decapsulate(&ct_arr)
-        .map_err(|_| OnionError::AeadFail)?;
+        .map_err(|()| OnionError::AeadFail)?;
     let pq_shared_bytes: [u8; 32] = {
         let mut s = [0u8; 32];
         s.copy_from_slice(&pq_shared);
@@ -411,7 +413,7 @@ fn finish_peel(
     alpha_point: RistrettoPoint,
 ) -> OnionResult<PqSphinxPeelOutcome> {
     let mac = packet.mac();
-    let outcome = peel_header(keys, packet.header(), &mac).map_err(|_| OnionError::AeadFail)?;
+    let outcome = peel_header(keys, packet.header(), &mac).map_err(|()| OnionError::AeadFail)?;
 
     let mut payload = vec![0u8; PAYLOAD_LEN];
     payload.copy_from_slice(packet.payload());
@@ -419,7 +421,7 @@ fn finish_peel(
 
     match outcome {
         HeaderPeelOutcome::Deliver => {
-            let plen = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+            let plen = usize::from(u16::from_be_bytes([payload[0], payload[1]]));
             if plen > PAYLOAD_LEN - 2 {
                 return Err(OnionError::Internal("destination payload length oversize"));
             }
@@ -466,30 +468,30 @@ mod tests {
     use rand::rngs::OsRng;
 
     fn make_entry_relay() -> (Scalar, MlKemDk, PqSphinxHop) {
-        let (x_sk, x_pk) = generate_static_keypair(&mut OsRng);
-        let (pq_dk, pq_ek) = generate_pq_keypair(&mut OsRng);
+        let (relay_secret, relay_public) = generate_static_keypair(&mut OsRng);
+        let (pq_receiver_key, pq_sender_key) = generate_pq_keypair(&mut OsRng);
         (
-            x_sk,
-            pq_dk,
+            relay_secret,
+            pq_receiver_key,
             PqSphinxHop {
                 // 32 INDEPENDENT random bytes; `[rand::random(); N]` would
                 // copy one byte and collide with DESTINATION_MARKER 1/256.
                 id: HopId::from_bytes(rand::random::<[u8; SLOT_ID_LEN]>()),
-                static_x_pk: x_pk,
-                static_pq_pk: Some(pq_ek),
+                static_x_pk: relay_public,
+                static_pq_pk: Some(pq_sender_key),
             },
         )
     }
 
     fn make_intermediate_relay() -> (Scalar, PqSphinxHop) {
-        let (x_sk, x_pk) = generate_static_keypair(&mut OsRng);
+        let (relay_secret, relay_public) = generate_static_keypair(&mut OsRng);
         (
-            x_sk,
+            relay_secret,
             PqSphinxHop {
                 // 32 INDEPENDENT random bytes; `[rand::random(); N]` would
                 // copy one byte and collide with DESTINATION_MARKER 1/256.
                 id: HopId::from_bytes(rand::random::<[u8; SLOT_ID_LEN]>()),
-                static_x_pk: x_pk,
+                static_x_pk: relay_public,
                 static_pq_pk: None,
             },
         )
@@ -510,7 +512,7 @@ mod tests {
         let outcome = peel_pq_sphinx_entry(&entry_sk, &entry_pq_sk, &packet).unwrap();
         match outcome {
             PqSphinxPeelOutcome::Deliver { payload } => assert_eq!(payload, b"pq-hybrid"),
-            _ => panic!(),
+            PqSphinxPeelOutcome::Forward { .. } => panic!(),
         }
     }
 
@@ -533,7 +535,7 @@ mod tests {
                 assert_eq!(next_hop, mid.id);
                 next_packet
             }
-            _ => panic!(),
+            PqSphinxPeelOutcome::Deliver { .. } => panic!(),
         };
 
         // Mid peels with classical-only.
@@ -546,14 +548,14 @@ mod tests {
                 assert_eq!(next_hop, dest.id);
                 next_packet
             }
-            _ => panic!(),
+            PqSphinxPeelOutcome::Deliver { .. } => panic!(),
         };
 
         // Dest peels with classical-only.
         let outcome = peel_pq_sphinx_intermediate(&dest_sk, &next).unwrap();
         match outcome {
             PqSphinxPeelOutcome::Deliver { payload } => assert_eq!(payload, b"three-hop pq"),
-            _ => panic!(),
+            PqSphinxPeelOutcome::Forward { .. } => panic!(),
         }
     }
 
@@ -590,9 +592,11 @@ mod tests {
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
         let packet = build_pq_sphinx_onion(&eph_sk, &[entry, mid, dest], b"x", &mut OsRng).unwrap();
         assert_eq!(packet.as_bytes().len(), PQ_SPHINX_PACKET_LEN);
-        let next = match peel_pq_sphinx_entry(&entry_sk, &entry_pq_sk, &packet).unwrap() {
-            PqSphinxPeelOutcome::Forward { next_packet, .. } => next_packet,
-            _ => panic!(),
+        let PqSphinxPeelOutcome::Forward {
+            next_packet: next, ..
+        } = peel_pq_sphinx_entry(&entry_sk, &entry_pq_sk, &packet).unwrap()
+        else {
+            panic!();
         };
         assert_eq!(next.as_bytes().len(), PQ_SPHINX_PACKET_LEN);
     }
@@ -616,19 +620,16 @@ mod tests {
         assert_ne!(h1, h2);
     }
 
-    /// Without ML-KEM-768, a quantum adversary cannot derive b_0 →
-    /// cannot reproduce alpha_1+ → cannot decrypt downstream
-    /// shared secrets. Property test: removing the PQ component
-    /// from the combiner produces a DIFFERENT hybrid shared, and
-    /// thus different downstream keys.
+    /// Input-binding regression: replacing the ML-KEM shared-secret
+    /// input changes the hybrid output. This deliberately does not
+    /// model a quantum adversary or prove cryptographic security.
     #[test]
-    fn quantum_adversary_cannot_reproduce_b_0_without_pq() {
+    fn changing_pq_component_changes_hybrid_output() {
         let cs = [0xAA; 32];
         let a = [0xBB; 32];
         // The "true" pq shared.
         let pq_true = [0xCC; 32];
-        // What a quantum adversary that recovered cs but couldn't break
-        // ML-KEM would compute (pq is unknown to them — guessed zero).
+        // A deliberately different PQ input.
         let pq_guess = [0u8; 32];
         let hybrid_true = combine_hybrid_shared(&cs, &pq_true, &a);
         let hybrid_guess = combine_hybrid_shared(&cs, &pq_guess, &a);

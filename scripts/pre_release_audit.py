@@ -6,14 +6,14 @@ Runs every check that MUST pass before a One Link release ships:
 1. Native test workspace clean (`cargo test --workspace --release`).
 2. Python test suite clean (`pytest -q`).
 3. mypy strict on the touched adapters.
-4. Per-PR perf gate against `bench_baselines/`.
+4. Portable production SLO gate for the coherence-field Python FFI.
 5. Adversarial coherence-field fuzz harness (quick).
 6. Phase E live demos (fragile-swarm + cross-domain).
 7. Sovereignty audit: every dep in the table from
    `FILE_ENGINE_V2_PLAN.md` is verified to be present + at the
    expected version.
 
-Exit code 0 ⟹ ready to ship. Non-zero ⟹ release blocked.
+Exit code 0 means ready to ship. Non-zero means release blocked.
 
 Usage:
     python scripts/pre_release_audit.py
@@ -28,6 +28,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -84,7 +85,7 @@ def run_step(
 def step_cargo_test() -> dict[str, Any]:
     return run_step(
         "cargo test --workspace --release (Phase A1/D/E native crates)",
-        ["cargo", "test", "--workspace", "--release"],
+        ["cargo", "test", "--locked", "--workspace", "--release"],
         cwd=REPO_ROOT / "native",
         timeout=1800,
     )
@@ -99,58 +100,51 @@ def step_pytest() -> dict[str, Any]:
 
 
 def step_mypy() -> dict[str, Any]:
-    """Strict mypy on the Phase E + native-adapter layer. The full
-    daemon hasn't fully cleared mypy; we gate on the modules we own."""
+    """Run the repository's full source-tree mypy gate."""
     return run_step(
-        "mypy on Phase E + native adapters",
+        "mypy on complete one_link source tree",
         [
             sys.executable,
             "-m",
             "mypy",
-            "src/one_link/daemon.py",
-            "src/one_link/coherence_field_native.py",
-            "src/one_link/chunk_ratchet.py",
-            "src/one_link/routing_native.py",
-            "src/one_link/field_snapshot.py",
-            "src/one_link/native_transfer.py",
+            "src/one_link",
         ],
         timeout=300,
     )
 
 
 def step_perf_gate() -> dict[str, Any]:
-    """Generate a fresh perf snapshot, compare against committed baseline."""
-    fresh = REPO_ROOT / "_fresh_perf.json"
-    snap = run_step(
-        "perf snapshot (ol_coherence_field)",
-        [
-            sys.executable,
-            "scripts/coherence_field_perf_snapshot.py",
-            "--out",
-            str(fresh),
-            "--quiet",
-        ],
-        timeout=300,
-    )
-    if not snap["ok"]:
-        return snap
-    gate = run_step(
-        "perf regression gate vs baseline",
-        [
-            sys.executable,
-            "scripts/bench_gate.py",
-            "--results",
-            str(fresh),
-            "--baseline",
-            "bench_baselines/coherence_field.json",
-            "--max-regression-percent",
-            "10",
-        ],
-        timeout=60,
-    )
-    if fresh.exists():
-        fresh.unlink()
-    return gate
+    """Generate a fresh snapshot and enforce portable production SLOs.
+
+    Historical relative microbenchmarks are meaningful only on a pinned,
+    dedicated runner. The operator-facing pre-release gate instead enforces
+    absolute end-to-end FFI ceilings with broad cross-platform headroom.
+    """
+    with tempfile.TemporaryDirectory(prefix="one-link-perf-") as temp_dir:
+        fresh = Path(temp_dir) / "snapshot.json"
+        snap = run_step(
+            "perf snapshot (ol_coherence_field)",
+            [
+                sys.executable,
+                "scripts/coherence_field_perf_snapshot.py",
+                "--out",
+                str(fresh),
+                "--quiet",
+            ],
+            timeout=300,
+        )
+        if not snap["ok"]:
+            return snap
+        return run_step(
+            "portable coherence-field FFI production SLO gate",
+            [
+                sys.executable,
+                "scripts/coherence_field_slo_gate.py",
+                "--results",
+                str(fresh),
+            ],
+            timeout=60,
+        )
 
 
 def step_fuzz_quick() -> dict[str, Any]:
@@ -177,7 +171,7 @@ def step_cross_domain_demo() -> dict[str, Any]:
     )
 
 
-# Sovereignty audit — the dep table from FILE_ENGINE_V2_PLAN.md.
+# Sovereignty audit - the dep table from FILE_ENGINE_V2_PLAN.md.
 SOVEREIGNTY_TABLE: list[tuple[str, str, str]] = [
     # (substrate, expected_status, doc_ref)
     ("RocksDB", "not_present_yet", "Phase A1 LSM is custom ol_chunk_store, not RocksDB"),
@@ -202,7 +196,7 @@ def step_sovereignty_audit() -> dict[str, Any]:
             "label": "sovereignty audit",
             "ok": False,
             "wall_seconds": 0.0,
-            "stderr_tail": "native/Cargo.lock missing — run `cargo build` first",
+            "stderr_tail": "native/Cargo.lock missing - run `cargo build` first",
             "stdout_tail": "",
             "cmd": "(internal)",
         }
@@ -212,11 +206,16 @@ def step_sovereignty_audit() -> dict[str, Any]:
         present = sub in lock_text
         if expected == "rejected" and present:
             findings.append(
-                f"  ❌ {substrate} present in Cargo.lock but plan says REJECT ({note})"
+                f"  FAIL: {substrate} present in Cargo.lock but plan says REJECT ({note})"
             )
         elif expected == "present" and not present:
             findings.append(
-                f"  ❌ {substrate} expected in Cargo.lock but missing ({note})"
+                f"  FAIL: {substrate} expected in Cargo.lock but missing ({note})"
+            )
+        elif expected == "not_present_yet" and present:
+            findings.append(
+                f"  FAIL: {substrate} unexpectedly present before its reviewed "
+                f"adoption gate ({note})"
             )
     ok = not findings
     return {
@@ -244,23 +243,23 @@ def main(argv: list[str] | None = None) -> int:
     steps: list[dict[str, Any]] = []
 
     # Cheap / fast first; expensive later.
-    print("→ sovereignty audit")
+    print("-> sovereignty audit")
     steps.append(step_sovereignty_audit())
-    print("→ mypy")
+    print("-> mypy")
     steps.append(step_mypy())
-    print("→ phase E fragile-swarm demo")
+    print("-> phase E fragile-swarm demo")
     steps.append(step_phase_e_live_demo())
-    print("→ phase E cross-domain demo")
+    print("-> phase E cross-domain demo")
     steps.append(step_cross_domain_demo())
-    print("→ adversarial fuzz (quick)")
+    print("-> adversarial fuzz (quick)")
     steps.append(step_fuzz_quick())
-    print("→ perf gate")
+    print("-> perf gate")
     steps.append(step_perf_gate())
     if not args.skip_cargo:
-        print("→ cargo test --workspace (this takes a while)")
+        print("-> cargo test --workspace (this takes a while)")
         steps.append(step_cargo_test())
     if not args.skip_pytest:
-        print("→ pytest -q")
+        print("-> pytest -q")
         steps.append(step_pytest())
 
     print()
@@ -287,12 +286,34 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"    {line}")
         out_code = 1
     else:
-        print(f"PASS: all {len(steps)} steps green. Release-gated.")
+        complete = not args.skip_cargo and not args.skip_pytest
+        if complete:
+            print(f"PASS: all {len(steps)} configured pre-release steps are green.")
+            print("NOTE: packaging, signing, and deployment require separate evidence.")
+        else:
+            skipped = []
+            if args.skip_cargo:
+                skipped.append("cargo")
+            if args.skip_pytest:
+                skipped.append("pytest")
+            print(
+                f"PASS: selected smoke checks are green; skipped {', '.join(skipped)}."
+            )
+            print("NOT RELEASE-GATED: required suites were explicitly skipped.")
         out_code = 0
 
     if args.json is not None:
+        complete = not args.skip_cargo and not args.skip_pytest
         args.json.write_text(
-            json.dumps({"steps": steps, "release_gated": out_code == 0}, indent=2),
+            json.dumps(
+                {
+                    "steps": steps,
+                    "checks_passed": out_code == 0,
+                    "complete": complete,
+                    "release_gated": out_code == 0 and complete,
+                },
+                indent=2,
+            ),
             encoding="utf-8",
         )
 

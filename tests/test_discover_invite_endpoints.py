@@ -13,7 +13,6 @@ Endpoints under test:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -164,6 +163,29 @@ async def test_invite_codes_are_unique(ctx):
     assert len(seen) == 8
 
 
+@pytest.mark.asyncio
+async def test_invite_store_has_hard_active_capacity(ctx, monkeypatch):
+    from one_link import server as server_mod
+
+    client, token = ctx
+    monkeypatch.setattr(server_mod, "MAX_DISCOVER_INVITES", 2)
+    for _ in range(2):
+        response = await client.post(
+            "/api/discover/invite", headers=_h(token), json={},
+        )
+        assert response.status == 200
+
+    response = await client.post(
+        "/api/discover/invite", headers=_h(token), json={},
+    )
+    assert response.status == 429
+    assert (await response.json())["error"] == "too_many_active_invites"
+
+
+def test_invite_store_is_not_shared_between_server_instances():
+    assert "_invite_store" not in UIServer.__dict__
+
+
 # ─── /install landing page ─────────────────────────────────────────
 
 
@@ -233,6 +255,42 @@ async def test_install_landing_ua_sniffs_android(ctx):
     lower = text.lower()
     assert "android" in lower
     assert code in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("user_agent", "expected_status"),
+    [
+        ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X)", "no verified app store build"),
+        ("Mozilla/5.0 (Linux; Android 14; Pixel 8)", "no verified play store build"),
+        ("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)", "no signed, verified public mac installer"),
+        ("Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "no signed, verified public windows installer"),
+        ("Mozilla/5.0 (X11; Linux x86_64)", "no verified distro package"),
+    ],
+)
+async def test_install_landing_never_claims_nonexistent_distribution_channel(
+    ctx,
+    user_agent,
+    expected_status,
+):
+    client, token = ctx
+    mint = await client.post(
+        "/api/discover/invite",
+        headers=_h(token),
+        json={},
+    )
+    code = (await mint.json())["code"]
+    response = await client.get(
+        f"/install?code={code}",
+        headers={"User-Agent": user_agent},
+    )
+    text = (await response.text()).lower()
+
+    assert expected_status in text
+    assert "view source and release status" in text
+    assert ">get one link<" not in text
+    assert "download the installer" not in text
+    assert "install one link from" not in text
 
 
 @pytest.mark.asyncio

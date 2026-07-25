@@ -48,7 +48,7 @@ def _require_field():
     except ImportError as e:
         raise RuntimeError(
             "one_link_native.coherence_field not installed; build via "
-            "`cd native && maturin develop --release`"
+            "`cd native && maturin develop --release --locked`"
         ) from e
 
 
@@ -120,7 +120,7 @@ def run_demo(quiet: bool = False) -> dict[str, Any]:
         ),
     }
     if not quiet:
-        print(f"=== Phase E cross-domain calibration demo ===")
+        print("=== Phase E cross-domain calibration demo ===")
         print(f"Topology: {PEERS}-peer ring")
         print()
         for name, info in per_domain.items():

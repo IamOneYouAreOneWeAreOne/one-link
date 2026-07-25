@@ -40,7 +40,7 @@ pub enum WalError {
         path: String,
     },
 
-    /// Record payload exceeds the per-record maximum (64 KiB).
+    /// Record payload exceeds the per-record maximum (1 MiB).
     #[error("record payload too large: {got} > max {max}")]
     PayloadTooLarge {
         /// Length received.
@@ -49,7 +49,7 @@ pub enum WalError {
         max: usize,
     },
 
-    /// File-level rotation cap exceeded; caller must rotate.
+    /// One encoded record cannot fit in an otherwise-empty WAL file.
     #[error("WAL file would exceed rotation cap of {cap} bytes (current {current})")]
     RotationCapExceeded {
         /// Current file size.
@@ -62,6 +62,15 @@ pub enum WalError {
     #[error("WAL record at offset {offset}: reserved bytes are non-zero")]
     InvalidRecordReserved {
         /// Offset within the file.
+        offset: u64,
+    },
+
+    /// Corruption appeared before the active log's crash-repairable tail.
+    #[error("non-tail WAL corruption at {path}:{offset}; refusing destructive truncation")]
+    NonTailCorruption {
+        /// Corrupt WAL path.
+        path: String,
+        /// First corrupt record offset.
         offset: u64,
     },
 }

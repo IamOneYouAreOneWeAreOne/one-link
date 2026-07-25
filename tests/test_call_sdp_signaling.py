@@ -161,6 +161,45 @@ def test_sdp_payload_from_wire_rejects_non_int_schema() -> None:
         )
 
 
+@pytest.mark.parametrize("schema", [True, "1", 1.0])
+def test_sdp_payload_rejects_coerced_schema_aliases(schema) -> None:
+    with pytest.raises(ValueError, match="schema"):
+        SdpPayload.from_wire(
+            {"schema": schema, "kind": "offer", "sdp": MINIMAL_OFFER_SDP}
+        )
+
+
+def test_sdp_payload_rejects_unknown_fields_and_kind_aliases() -> None:
+    wire = {
+        "schema": CALL_INVITE_SDP_V1,
+        "kind": "offer",
+        "sdp": MINIMAL_OFFER_SDP,
+        "shadow": True,
+    }
+    with pytest.raises(ValueError, match="unknown fields"):
+        SdpPayload.from_wire(wire)
+    wire.pop("shadow")
+    wire["kind"] = "OFFER"
+    with pytest.raises(ValueError, match="unknown sdp kind"):
+        SdpPayload.from_wire(wire)
+
+
+@pytest.mark.parametrize("body", ["not sdp", "v=0\r\n\x00\r\nm=audio 9 X"])
+def test_sdp_payload_rejects_structurally_invalid_body(body: str) -> None:
+    with pytest.raises(ValueError, match="malformed"):
+        SdpPayload.from_wire(
+            {"schema": CALL_INVITE_SDP_V1, "kind": "offer", "sdp": body}
+        )
+
+
+def test_sdp_payload_caps_utf8_bytes_not_only_codepoints() -> None:
+    body = "v=0\r\nm=audio 9 X\r\na=" + ("😀" * 40_000)
+    with pytest.raises(ValueError, match="too large"):
+        SdpPayload.from_wire(
+            {"schema": CALL_INVITE_SDP_V1, "kind": "offer", "sdp": body}
+        )
+
+
 # ---------------------------------------------------------------------------
 # IceCandidatePayload round-trip
 # ---------------------------------------------------------------------------
@@ -274,6 +313,57 @@ def test_ice_payload_from_wire_rejects_out_of_range_index() -> None:
                 "sdpMLineIndex": -1,
             }
         )
+
+
+def test_ice_payload_rejects_unknown_fields_and_bool_index() -> None:
+    wire = IceCandidatePayload(
+        schema=CALL_INVITE_SDP_V1,
+        candidate="candidate:1 1 udp 1 192.0.2.1 1234 typ host",
+        sdp_mid="0",
+        sdp_m_line_index=0,
+    ).to_wire()
+    wire["shadow"] = "confusion"
+    with pytest.raises(ValueError, match="unknown fields"):
+        IceCandidatePayload.from_wire(wire)
+    wire.pop("shadow")
+    wire["sdpMLineIndex"] = True
+    with pytest.raises(ValueError, match="not an int"):
+        IceCandidatePayload.from_wire(wire)
+
+
+@pytest.mark.parametrize("end", [1, "true", None])
+def test_ice_payload_rejects_truthy_end_sentinel_aliases(end) -> None:
+    wire = {
+        "schema": CALL_INVITE_SDP_V1,
+        "candidate": "candidate:1 1 udp 1 192.0.2.1 1234 typ host",
+        "sdpMid": "0",
+        "sdpMLineIndex": 0,
+        "endOfCandidates": end,
+    }
+    with pytest.raises(ValueError, match="boolean"):
+        IceCandidatePayload.from_wire(wire)
+
+
+def test_ice_payload_rejects_candidate_injection_and_sentinel_mismatch() -> None:
+    base = {
+        "schema": CALL_INVITE_SDP_V1,
+        "sdpMid": "0",
+        "sdpMLineIndex": 0,
+        "endOfCandidates": False,
+    }
+    with pytest.raises(ValueError, match="invalid characters"):
+        IceCandidatePayload.from_wire({
+            **base,
+            "candidate": "candidate:1 1 udp 1 host 9 typ host\r\na=evil",
+        })
+    with pytest.raises(ValueError, match="must start"):
+        IceCandidatePayload.from_wire({**base, "candidate": ""})
+    with pytest.raises(ValueError, match="sentinel"):
+        IceCandidatePayload.from_wire({
+            **base,
+            "candidate": "candidate:1 1 udp 1 host 9 typ host",
+            "endOfCandidates": True,
+        })
     with pytest.raises(ValueError, match="out of range"):
         IceCandidatePayload.from_wire(
             {
@@ -307,6 +397,17 @@ def test_extract_offer_returns_none_when_absent() -> None:
 def test_extract_offer_raises_when_malformed() -> None:
     with pytest.raises(ValueError):
         extract_offer({"sdp_offer": {"schema": 999, "kind": "offer", "sdp": "x"}})
+
+
+def test_extract_offer_rejects_answer_kind_confusion() -> None:
+    with pytest.raises(ValueError, match="offer kind"):
+        extract_offer({
+            "sdp_offer": {
+                "schema": CALL_INVITE_SDP_V1,
+                "kind": "answer",
+                "sdp": MINIMAL_ANSWER_SDP,
+            },
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +459,12 @@ def test_parse_ice_message_rejects_empty_call_id() -> None:
 def test_parse_ice_message_rejects_missing_candidate() -> None:
     with pytest.raises(ValueError, match="missing candidate"):
         parse_ice_message({"call_id": "xyz"})
+
+
+@pytest.mark.parametrize("call_id", ["x" * 129, " space", "x/../../y", "💥"])
+def test_parse_ice_message_rejects_noncanonical_call_id(call_id: str) -> None:
+    with pytest.raises(ValueError, match="call_id"):
+        parse_ice_message({"call_id": call_id, "candidate": {}})
 
 
 def test_end_of_candidates_helper_round_trip() -> None:

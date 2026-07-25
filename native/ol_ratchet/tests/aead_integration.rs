@@ -14,6 +14,7 @@ use ol_aead::{decrypt_chunk, encrypt_chunk, AeadCipher, AeadKind, ChunkAeadKey};
 use ol_ratchet::{Chain, MessageKey};
 
 const CHUNKS: usize = 100;
+type Ciphertext = (u64, [u8; 32], Vec<u8>, Vec<u8>);
 
 fn mk_to_aead_key(mk: &MessageKey) -> ChunkAeadKey {
     // The MessageKey is exactly 32 bytes; ChunkAeadKey is `from_bytes([u8; 32])`.
@@ -42,7 +43,8 @@ fn ratchet_per_chunk_round_trip_100_chunks() {
     // Stash one of the message keys to verify forward-secrecy spot check.
     let mut keys_seen: Vec<[u8; 32]> = Vec::with_capacity(CHUNKS);
 
-    for step in 0..CHUNKS as u64 {
+    let chunk_count = u64::try_from(CHUNKS).expect("supported Rust pointer widths fit in u64");
+    for step in 0..chunk_count {
         // Sender side.
         let mk = sender_chain.next_message_key();
         let mut mk_bytes = [0u8; 32];
@@ -86,7 +88,6 @@ fn ratchet_handles_reordered_delivery_via_skipped_keys() {
     let mut skipped = SkippedKeyStore::with_capacity(16);
 
     // Sender encrypts chunks 0..10.
-    type Ciphertext = (u64, [u8; 32], Vec<u8>, Vec<u8>);
     let mut ciphertexts: Vec<Ciphertext> = Vec::new();
     for step in 0..10u64 {
         let mk = sender_chain.next_message_key();

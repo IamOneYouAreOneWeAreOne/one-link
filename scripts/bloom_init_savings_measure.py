@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import secrets
 import sys
 from pathlib import Path
 from typing import Any
@@ -43,7 +42,7 @@ def _require_bloom():
     except ImportError as e:
         raise RuntimeError(
             "one_link_native.bloom not installed; build via "
-            "`cd native && maturin develop --release`"
+            "`cd native && maturin develop --release --locked`"
         ) from e
 
 

@@ -2,9 +2,9 @@
 //! engine (Phase E of `FILE_ENGINE_V2_PLAN.md`).
 //!
 //! This crate ports the **same scalar coherence field** the Coherence
-//! Energy Labs S_One derivation identifies as the source of dark-matter
+//! Energy Labs `S_One` derivation identifies as the source of dark-matter
 //! / dark-energy phenomenology, specialised to network routing. The
-//! same algebra is consumed by `OneField Mesh` (RF τ_c routing) and
+//! same algebra is consumed by `OneField Mesh` (RF `τ_c` routing) and
 //! `BioMesh` (biological signals); only the calibration constants
 //! `(D, Γ, S)` differ per domain.
 //!
@@ -44,7 +44,7 @@
 //! - [`anchor`] — apparent-horizon anchor `g_A` + screening length
 //!   `ell_screen` calibration.
 //! - [`calibration`] — per-domain (D, Γ) constants for One Link,
-//!   OneField, BioMesh.
+//!   `OneField`, `BioMesh`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

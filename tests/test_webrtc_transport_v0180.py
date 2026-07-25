@@ -43,34 +43,21 @@ def test_webrtc_protocol_constants_pinned(peer_html: str):
     assert "WEBRTC_BULK_LABEL" in peer_html
 
 
-def test_stun_list_empty_by_default_for_sovereignty(peer_html: str):
-    """May 15 2026 — sovereignty default. WEBRTC_STUN_SERVERS is now
-    an empty list out of the box; no third-party STUN servers are
-    contacted unless the user explicitly configures them via env
-    var ONE_LINK_STUN_SERVERS or the daemon setting
-    ``stun_servers``. The daemon's /api/v1/peer-rtc/ice-config
-    endpoint surfaces the user-configured set; peer.html fetches it
-    asynchronously and wires it via setConfiguration(). When the
-    user has configured nothing, ICE degrades to host-only =
-    LAN-only pairing = zero outbound calls to third parties."""
-    snippet = _snippet(peer_html, "WEBRTC_STUN_SERVERS", 1200)
-    assert "WEBRTC_STUN_SERVERS = []" in snippet, (
-        "default STUN list must be empty for sovereignty (zero calls "
-        "to Google / Cloudflare / Twilio / Nextcloud / etc.)"
-    )
-    # peer.html must fetch user-configured STUN at runtime for the
-    # opt-in path to work.
-    assert "/api/v1/peer-rtc/ice-config" in peer_html, (
-        "peer.html must fetch the user-configured ICE config from "
-        "the daemon for opt-in STUN to work"
-    )
-    # And NO hardcoded third-party hosts.
+def test_stun_policy_is_daemon_resolved_before_peer_connection(peer_html: str):
+    """The page carries no hidden provider list; the daemon applies presets."""
+    loader = _snippet(peer_html, "async function loadPublicIceConfig", 2600)
+    assert 'fetch("/api/v1/peer-rtc/ice-config"' in loader
+    assert "_validPublicIceServer" in loader
+    assert 'assist.scope === "same-device-or-lan"' in loader
+    assert "assist.external === false" in loader
+    assert "_validObservedCandidateAddress" in loader
+    assert "WEBRTC_STUN_SERVERS" not in peer_html
     for host in (
         "stun.l.google.com",
         "global.stun.twilio.com",
         "stun.cloudflare.com",
     ):
-        assert host not in snippet, (
+        assert host not in peer_html, (
             f"third-party STUN host {host!r} hardcoded in peer.html — "
             f"sovereignty default violated"
         )
@@ -79,12 +66,51 @@ def test_stun_list_empty_by_default_for_sovereignty(peer_html: str):
 def test_peer_connection_uses_datachannels(peer_html: str):
     snippet = _snippet(peer_html, "function createPeerConnection", 5200)
     assert "new RTCPeerConnection" in snippet
-    assert "iceServers: WEBRTC_STUN_SERVERS" in snippet
+    assert "await loadPublicIceConfig()" in snippet
+    assert "iceServers," in snippet
+    assert "local_candidate_addresses: iceConfig.localCandidateAddresses" in snippet
+    assert "pc.setConfiguration(" not in snippet
     assert "createDataChannel(WEBRTC_CONTROL_LABEL" in snippet
     assert "createDataChannel(WEBRTC_BULK_LABEL" in snippet
     assert "ordered: false" in snippet
     assert "maxRetransmits: 0" in snippet
     assert "pc.ondatachannel" in snippet
+
+
+def test_manual_signal_waits_for_bounded_ice_complete_blob(peer_html: str):
+    waiter = _snippet(peer_html, "function _waitForIceGatheringComplete", 1800)
+    assert 'iceGatheringState === "complete"' in waiter
+    assert "setTimeout" in waiter
+    assert "resolve(false)" in waiter
+    offer = _snippet(peer_html, "async function createOfferSignal", 1200)
+    assert offer.index("setLocalDescription") < offer.index(
+        "await _waitForIceGatheringComplete"
+    ) < offer.index('_signSignal("offer"')
+    answer = _snippet(peer_html, "async function acceptOfferSignal", 1500)
+    assert answer.index("setLocalDescription") < answer.index(
+        "await _waitForIceGatheringComplete"
+    ) < answer.index('_signSignal("answer"')
+
+
+def test_local_numeric_candidate_preserves_browser_candidate_and_is_signed(
+    peer_html: str,
+) -> None:
+    """Firefox mDNS recovery adds, never substitutes, a daemon-observed route."""
+
+    augment = _snippet(peer_html, "function _descriptionForSignal", 2400)
+    assert "output.push(line)" in augment
+    assert "output.push(numeric)" in augment
+    assert augment.index("output.push(line)") < augment.index("output.push(numeric)")
+    candidate = _snippet(peer_html, "function _numericCandidateLine", 2600)
+    assert 'endsWith(".local")' not in candidate  # exact bounded regex, not suffix-only
+    assert 'parts[1] !== "1"' in candidate
+    assert 'toUpperCase() !== "UDP"' in candidate
+    assert 'parts[7] !== "host"' in candidate
+    assert "parts[4] = address" in candidate
+    offer = _snippet(peer_html, "async function createOfferSignal", 1200)
+    answer = _snippet(peer_html, "async function acceptOfferSignal", 1500)
+    assert '_signSignal("offer", _descriptionForSignal(session))' in offer
+    assert '_signSignal("answer", _descriptionForSignal(session))' in answer
 
 
 def test_webrtc_signals_are_signed_and_verified(peer_html: str):
@@ -110,10 +136,12 @@ def test_offer_answer_ice_helpers_present(peer_html: str):
     assert "pc.createOffer" in offer
     assert 'type: "offer"' not in offer  # type is assigned by _signSignal
     answer = _snippet(peer_html, "async function acceptOfferSignal", 1700)
-    assert "verifySignal(envelope, \"offer\")" in answer
+    assert '_verifiedSignalBinding(envelope, "offer")' in answer
+    assert "_commitSignalSigner(session, binding)" in answer
     assert "pc.createAnswer" in answer
     ice = _snippet(peer_html, "async function addIceSignal", 900)
-    assert "verifySignal(envelope, \"ice\")" in ice
+    assert '_verifiedSignalBinding(envelope, "ice")' in ice
+    assert "_assertSignalSignerContinuity(session, binding)" in ice
     assert "addIceCandidate" in ice
 
 
@@ -135,6 +163,10 @@ def test_manual_signal_ui_wiring(peer_html: str):
     assert "acceptAnswerSignal" in accept
     assert "addIceSignal" in accept
     assert "navigator.clipboard.writeText" in copy
+    # Manual mode is a one-blob UX; late trickle candidates must not overwrite
+    # the completed offer/answer textarea after an ICE timeout.
+    assert "onSignal: _writeLocalSignal" not in offer
+    assert "onSignal: _writeLocalSignal" not in accept
 
 
 def test_webrtc_card_shown_after_identity(peer_html: str):

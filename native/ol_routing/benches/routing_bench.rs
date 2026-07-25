@@ -28,7 +28,7 @@ fn build_grid(n: usize) -> AdjacencyGraph {
     let mut g = AdjacencyGraph::new();
     for i in 0..n {
         for j in 0..n {
-            let me = format!("n_{}_{}", i, j);
+            let me = format!("n_{i}_{j}");
             if i + 1 < n {
                 let down = format!("n_{}_{}", i + 1, j);
                 g.add_edge(me.clone(), down.clone(), edge_cost(0.001, 100.0, 0.0));
@@ -60,5 +60,12 @@ fn bench_shortest_path_grid(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_edge_math, bench_shortest_path_grid);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{bench_edge_math, bench_shortest_path_grid, criterion_group};
+
+    criterion_group!(benches, bench_edge_math, bench_shortest_path_grid);
+}
+criterion_main!(criterion_benchmark_harness::benches);

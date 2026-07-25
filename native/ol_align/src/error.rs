@@ -31,7 +31,7 @@ pub enum AlignError {
         hop: f32,
         /// The staleness input at the point of failure.
         staleness: f32,
-        /// The L_session input at the point of failure.
+        /// The `L_session` input at the point of failure.
         l: f32,
     },
 

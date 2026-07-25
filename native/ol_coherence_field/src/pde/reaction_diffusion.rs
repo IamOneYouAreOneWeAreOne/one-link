@@ -122,14 +122,11 @@ mod tests {
         let gamma = 3.0;
         let result =
             solve_reaction_diffusion_steady(&g, 1.0, gamma, &s, EulerConfig::default()).unwrap();
-        #[allow(clippy::needless_range_loop)]
-        // i indexes result.field + s and labels the failure message
-        for i in 0..n {
+        for (i, (&actual, &source)) in result.field.iter().zip(&s).enumerate() {
+            let expected = source / gamma;
             assert!(
-                (result.field[i] - s[i] / gamma).abs() < 1e-5,
-                "node {i}: got {}, expected {}",
-                result.field[i],
-                s[i] / gamma
+                (actual - expected).abs() < 1e-5,
+                "node {i}: got {actual}, expected {expected}"
             );
         }
     }

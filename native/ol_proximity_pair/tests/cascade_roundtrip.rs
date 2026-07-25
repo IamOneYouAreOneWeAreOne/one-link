@@ -1,26 +1,30 @@
-//! THE alien-tech acceptance gate: co-located devices derive
-//! BYTE-IDENTICAL Factor-2 secrets via multi-pass CASCADE.
+//! Deferred agreement target for a future real reconciliation protocol.
 //!
-//! This is the property the daemon's protocol depends on:
-//! plug the result into Double Ratchet as a chain key; both sides
-//! produce matching keys.
+//! The ignored test records the currently failing byte-identical property;
+//! current outputs must not be used as ratchet keys.
+
+use std::fmt::Write as _;
 
 use ol_proximity_pair::{
-    multi_pass_reconcile, multi_pass_syndromes, privacy_amplify, quantize_observations,
-    QuantizeConfig,
+    block_syndrome, multi_pass_reconcile, multi_pass_syndromes, permutation_for_pass,
+    privacy_amplify, quantize_observations, QuantizeConfig,
 };
 
 /// Simulate two devices observing the same environment with small
 /// independent noise. Bigger sample so we have lots of entropy.
 fn co_located_observations(seed: u64) -> (Vec<u8>, Vec<u8>) {
+    let seed32 = u32::try_from(seed).expect("test seed fits in u32");
     let base: Vec<u8> = (0..1024u32)
-        .map(|i| ((i.wrapping_mul(seed as u32 + 7919)) % 256) as u8)
+        .map(|i| {
+            u8::try_from((i.wrapping_mul(seed32.wrapping_add(7_919))) % 256)
+                .expect("value is reduced modulo 256")
+        })
         .collect();
     let mut rng_a = seed.wrapping_mul(31);
     let mut rng_b = seed.wrapping_mul(37);
     let perturb = |v: u8, rng: u64| -> u8 {
         let r = (rng >> 32) & 0xFF;
-        let s = v as i16;
+        let s = i16::from(v);
         let n = if r < 6 {
             s - 1
         } else if r > 250 {
@@ -28,19 +32,23 @@ fn co_located_observations(seed: u64) -> (Vec<u8>, Vec<u8>) {
         } else {
             s
         };
-        n.clamp(0, 255) as u8
+        u8::try_from(n.clamp(0, 255)).expect("clamped sample fits in u8")
     };
     let alice: Vec<u8> = base
         .iter()
         .map(|&v| {
-            rng_a = rng_a.wrapping_mul(6364136223846793005).wrapping_add(1);
+            rng_a = rng_a
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             perturb(v, rng_a)
         })
         .collect();
     let bob: Vec<u8> = base
         .iter()
         .map(|&v| {
-            rng_b = rng_b.wrapping_mul(6364136223846793005).wrapping_add(1);
+            rng_b = rng_b
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             perturb(v, rng_b)
         })
         .collect();
@@ -48,8 +56,8 @@ fn co_located_observations(seed: u64) -> (Vec<u8>, Vec<u8>) {
 }
 
 #[test]
-#[ignore = "F1.4-polish: requires real CASCADE bisection — current single-flip impl does NOT converge to byte-identical (mathematically can't); tracked as next ship"]
-fn alien_tech_acceptance_byte_identical_keys() {
+#[ignore = "requires a real interactive reconciliation protocol; current single-flip implementation cannot converge to byte-identical output"]
+fn byte_identical_agreement_target_not_yet_met() {
     let (alice_obs, bob_obs) = co_located_observations(0xCAFE_BABE);
     let qcfg = QuantizeConfig {
         min_bytes: 256,
@@ -82,8 +90,9 @@ fn alien_tech_acceptance_byte_identical_keys() {
         .zip(bob_trim.iter())
         .filter(|(a, b)| a != b)
         .count();
-    let agreement_rate =
-        (alice_reconciled.len() - mismatches) as f64 / alice_reconciled.len() as f64;
+    let agreed = alice_reconciled.len() - mismatches;
+    let agreement_rate = f64::from(u32::try_from(agreed).expect("test vector fits u32"))
+        / f64::from(u32::try_from(alice_reconciled.len()).expect("test vector fits u32"));
     assert!(
         agreement_rate >= 0.99,
         "post-CASCADE agreement only {:.3}% ({} mismatches), need >= 99%",
@@ -115,7 +124,9 @@ fn cascade_block_parities_align_after_multi_pass() {
     // doesn't drive bit error to zero on its own; it aligns block
     // PARITIES. Real bisection (F1.4-polish next ship) drives bit
     // error to zero. Test what the current impl actually delivers.
-    let peer_bits: Vec<u8> = (0..512).map(|i| ((i * 11 + 5) & 1) as u8).collect();
+    let peer_bits: Vec<u8> = (0..512)
+        .map(|i| u8::from(((i * 11 + 5) & 1) != 0))
+        .collect();
     let mut my_bits = peer_bits.clone();
     my_bits[15] ^= 1;
     my_bits[143] ^= 1;
@@ -127,7 +138,6 @@ fn cascade_block_parities_align_after_multi_pass() {
     let reconciled = multi_pass_reconcile(&my_bits, &syndromes, block_bits, passes, seed);
     // After all passes, the last-pass-permuted block parities of
     // `reconciled` MUST match peer's last-pass syndrome.
-    use ol_proximity_pair::{block_syndrome, permutation_for_pass};
     let n = reconciled.len();
     let last_perm = permutation_for_pass(seed, passes - 1, n);
     let permuted: Vec<u8> = last_perm.iter().map(|&p| reconciled[p]).collect();
@@ -138,7 +148,7 @@ fn cascade_block_parities_align_after_multi_pass() {
 #[test]
 fn cascade_handles_arbitrary_error_distributions_without_panic() {
     // Robustness: many different error patterns, all must run cleanly.
-    let peer_bits: Vec<u8> = (0..512).map(|i| ((i * 13) & 1) as u8).collect();
+    let peer_bits: Vec<u8> = (0..512).map(|i| u8::from(((i * 13) & 1) != 0)).collect();
     for error_positions in &[
         vec![0u32],
         vec![511],
@@ -147,7 +157,7 @@ fn cascade_handles_arbitrary_error_distributions_without_panic() {
     ] {
         let mut my_bits = peer_bits.clone();
         for &p in error_positions {
-            my_bits[p as usize] ^= 1;
+            my_bits[usize::try_from(p).expect("test index fits usize")] ^= 1;
         }
         let seed = 0xABCD;
         let syndromes = multi_pass_syndromes(&peer_bits, 8, 8, seed);
@@ -158,5 +168,9 @@ fn cascade_handles_arbitrary_error_distributions_without_panic() {
 
 fn hex_short(b: &[u8]) -> String {
     let n = b.len().min(8);
-    b[..n].iter().map(|x| format!("{x:02x}")).collect()
+    let mut encoded = String::with_capacity(n * 2);
+    for byte in &b[..n] {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
 }

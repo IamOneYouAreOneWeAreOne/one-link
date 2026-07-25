@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from one_link.fault_observability import report_best_effort_failure
+
 log = logging.getLogger(__name__)
 
 
@@ -167,9 +169,14 @@ class FieldSnapshotManager:
                 cal = cf.one_link_calibration()
                 self._config.helmholtz_d = float(cal["d"])
                 self._config.helmholtz_gamma = float(cal["gamma"])
-        except Exception:
+        except Exception as exc:
             # Stays on the dataclass defaults; not fatal.
-            pass
+            report_best_effort_failure(
+                log,
+                "field_native_calibration",
+                exc,
+                level=logging.DEBUG,
+            )
 
     # ── topology + source updates (called from daemon) ─────────────
 
@@ -287,9 +294,14 @@ class FieldSnapshotManager:
                 continue
             try:
                 g.add_edge(index[a], index[b], float(w))
-            except Exception:
+            except (IndexError, KeyError, RuntimeError, TypeError, ValueError) as exc:
                 # Duplicate edges from the daemon's view: tolerate.
-                pass
+                report_best_effort_failure(
+                    log,
+                    "field_graph_edge",
+                    exc,
+                    level=logging.DEBUG,
+                )
         density = [0.0] * len(peers)
         flux = [0.0] * len(peers)
         for p, (d, f) in sources.items():
@@ -329,10 +341,15 @@ class FieldSnapshotManager:
                         coupling_strength=fragility_strength,
                     )
                     source_vec = source_vec_out
-                except Exception:  # pragma: no cover
+                except Exception as exc:  # pragma: no cover
                     # Native crate raised; fall through with the
                     # un-injected source. Couplings degrade gracefully.
-                    pass
+                    report_best_effort_failure(
+                        log,
+                        "field_fragility_injection",
+                        exc,
+                        level=logging.DEBUG,
+                    )
 
         t0 = time.perf_counter_ns()
         try:

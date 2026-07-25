@@ -30,7 +30,6 @@ from one_link.call_session import (
     ORSet,
     ParticipantState,
     Rung,
-    VerificationState,
 )
 
 

@@ -108,6 +108,14 @@ class _FakeMultipartReq:
 
     def __init__(self, parts):
         self._parts = parts
+        # Conservative multipart upper bound used by the production upload
+        # reservation gate. Exact framing is irrelevant to this test double;
+        # it only needs to be no smaller than its file payloads.
+        self.content_length = 512 + sum(
+            len(getattr(part, "_data", b""))
+            + len((getattr(part, "_text", None) or "").encode("utf-8"))
+            for part in parts
+        )
 
     async def multipart(self):
         return _FakeMultipart(self._parts)
@@ -532,7 +540,7 @@ async def test_server_unauth_returns_401():
 
 
 @pytest.mark.asyncio
-async def test_server_index_serves_html_and_sets_cookie():
+async def test_server_index_serves_html_and_scopes_browser_bearer_to_origin():
     with daemon_pair() as p:
         base, token = _server_addr(p.a.home)
         async with aiohttp.ClientSession() as s:
@@ -540,15 +548,15 @@ async def test_server_index_serves_html_and_sets_cookie():
                 assert r.status == 200
                 txt = await r.text()
                 assert "<!doctype html>" in txt.lower() or "<html" in txt.lower()
-                assert any(c.key == "ol_ui" for c in r.cookies.values())
-                # 2026-05-23: switched from no-store to
-                # no-cache+must-revalidate + ETag. Bullet-proof cache
-                # busting: every load is a conditional GET, 304 for
-                # unchanged content, 200 for any code change. no-store
-                # alone was insufficient on Edge / Safari which
-                # restored stale UI from disk cache on back-button
-                # and saved-tab navigations.
-                assert r.headers.get("Cache-Control") == "no-cache, must-revalidate"
+                capture = txt.index("sessionStorage.setItem('ol_session_token',b)")
+                scrub = txt.index("history.replaceState")
+                assert capture < scrub
+                assert 'localStorage.setItem("ol_session_token"' not in txt
+                assert token not in txt
+                assert all(c["max-age"] == "0" for c in r.cookies.values())
+                # Credential-bearing bootstrap responses are never cached.
+                # Clean-URL reloads below retain ETag revalidation.
+                assert r.headers.get("Cache-Control") == "no-store"
                 assert r.headers.get("ETag", "").startswith('"')
 
 
@@ -558,13 +566,13 @@ async def test_server_index_returns_304_on_matching_etag():
     304 (no body) so unchanged content costs zero bandwidth on
     every reload. Without this the ETag is decoration."""
     with daemon_pair() as p:
-        base, token = _server_addr(p.a.home)
+        base, _token = _server_addr(p.a.home)
         async with aiohttp.ClientSession() as s:
-            async with s.get(f"{base}/?t={token}") as r:
+            async with s.get(f"{base}/") as r:
                 etag = r.headers.get("ETag")
                 assert etag
             async with s.get(
-                f"{base}/?t={token}",
+                f"{base}/",
                 headers={"If-None-Match": etag},
             ) as r:
                 assert r.status == 304
@@ -572,7 +580,26 @@ async def test_server_index_returns_304_on_matching_etag():
 
 
 @pytest.mark.asyncio
-async def test_stale_index_token_recovers_for_local_document_navigation():
+async def test_server_bootstrap_ignores_matching_etag_and_mints_origin_session():
+    """A cached public shell must not turn a credential bootstrap into 304."""
+    with daemon_pair() as p:
+        base, token = _server_addr(p.a.home)
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{base}/") as r:
+                etag = r.headers.get("ETag")
+                assert etag
+            async with s.get(
+                f"{base}/?t={token}",
+                headers={"If-None-Match": etag},
+            ) as r:
+                assert r.status == 200
+                assert r.headers.get("Cache-Control") == "no-store"
+                assert all(c["max-age"] == "0" for c in r.cookies.values())
+                assert "ol_persistent_session_token" in await r.text()
+
+
+@pytest.mark.asyncio
+async def test_stale_index_token_never_mints_loopback_owner_credentials():
     with daemon_pair() as p:
         base, _token = _server_addr(p.a.home)
         async with aiohttp.ClientSession() as s:
@@ -583,11 +610,11 @@ async def test_stale_index_token_recovers_for_local_document_navigation():
                     "Sec-Fetch-Dest": "document",
                 },
             ) as r:
-                assert r.status == 200
+                assert r.status == 401
                 txt = await r.text()
-                assert "old local session" in txt
-                assert "location.replace(location.pathname)" in txt
-                assert any(c.key == "ol_ui" for c in r.cookies.values())
+                assert "Access denied" in txt
+                assert "could not authenticate this tab" in txt
+                assert all(c["max-age"] == "0" for c in r.cookies.values())
                 assert r.headers.get("Cache-Control") == "no-store"
 
 
@@ -608,7 +635,7 @@ async def test_stale_index_token_still_rejects_subresource_request():
 
 
 @pytest.mark.asyncio
-async def test_local_document_reopen_without_query_token_refreshes_cookie():
+async def test_local_document_reopen_without_query_token_sets_no_cookie():
     with daemon_pair() as p:
         base, _token = _server_addr(p.a.home)
         async with aiohttp.ClientSession() as s:
@@ -620,7 +647,7 @@ async def test_local_document_reopen_without_query_token_refreshes_cookie():
                 },
             ) as r:
                 assert r.status == 200
-                assert any(c.key == "ol_ui" for c in r.cookies.values())
+                assert all(c["max-age"] == "0" for c in r.cookies.values())
                 # 2026-05-23: cache header is now no-cache+revalidate
                 # + ETag (same as bootstrap path). Bullet-proof cache
                 # busting for the desktop UI bundle.
@@ -635,14 +662,15 @@ async def test_query_token_only_bootstraps_index_not_api():
         async with aiohttp.ClientSession() as s:
             async with s.get(f"{base}/") as r:
                 assert r.status == 200
-                assert not any(c.key == "ol_ui" for c in r.cookies.values())
+                assert all(c["max-age"] == "0" for c in r.cookies.values())
 
         async with aiohttp.ClientSession() as s:
             async with s.get(f"{base}/?t={token}") as r:
                 assert r.status == 200
                 txt = await r.text()
                 assert "history.replaceState" in txt
-                assert any(c.key == "ol_ui" for c in r.cookies.values())
+                assert all(c["max-age"] == "0" for c in r.cookies.values())
+                assert token not in txt
 
         async with aiohttp.ClientSession() as s:
             async with s.get(f"{base}/api/me?t={token}") as r:
@@ -827,6 +855,162 @@ async def test_api_send_file_paused_keeps_staged_upload(tmp_path: Path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_api_send_file_missing_peer_cleans_staging_and_reservation(
+    tmp_path: Path, monkeypatch,
+):
+    from one_link.server import UIServer
+
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+
+    class _Daemon:
+        state = None
+        me = SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa")
+
+    server = UIServer(_Daemon())
+    response = await server.api_send_file(_FakeMultipartReq([
+        _FakePart("file", data=b"must be removed", filename="orphan.bin"),
+    ]))
+
+    assert response.status == 400
+    assert not list((tmp_path / "uploads").glob("*"))
+    assert server._upload_reservations.snapshot() == ()
+
+
+@pytest.mark.asyncio
+async def test_api_send_file_rejects_multiple_file_parts_without_leak(
+    tmp_path: Path, monkeypatch,
+):
+    from one_link.server import UIServer
+
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+
+    class _Daemon:
+        state = None
+        me = SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa")
+
+    server = UIServer(_Daemon())
+    response = await server.api_send_file(_FakeMultipartReq([
+        _FakePart("peer", text="bbbbbbbb"),
+        _FakePart("file", data=b"one", filename="one.bin"),
+        _FakePart("file", data=b"two", filename="two.bin"),
+    ]))
+
+    assert response.status == 400
+    assert not list((tmp_path / "uploads").glob("*"))
+    assert server._upload_reservations.snapshot() == ()
+
+
+@pytest.mark.asyncio
+async def test_api_send_file_bounds_metadata_before_staging(
+    tmp_path: Path, monkeypatch,
+):
+    from one_link.server import UI_UPLOAD_METADATA_LIMITS, UIServer
+
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+
+    class _Daemon:
+        state = None
+        me = SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa")
+
+    oversized_peer = "p" * (UI_UPLOAD_METADATA_LIMITS["peer"] + 1)
+    server = UIServer(_Daemon())
+    response = await server.api_send_file(_FakeMultipartReq([
+        _FakePart("peer", text=oversized_peer),
+        _FakePart("file", data=b"never staged", filename="bounded.bin"),
+    ]))
+
+    assert response.status == 400
+    assert not list((tmp_path / "uploads").glob("*"))
+    assert server._upload_reservations.snapshot() == ()
+
+
+@pytest.mark.asyncio
+async def test_api_send_file_rejects_ambiguous_boolean_metadata(
+    tmp_path: Path, monkeypatch,
+):
+    from one_link.server import UIServer
+
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+
+    class _Daemon:
+        state = None
+        me = SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa")
+
+    server = UIServer(_Daemon())
+    response = await server.api_send_file(_FakeMultipartReq([
+        _FakePart("peer", text="bbbbbbbb"),
+        _FakePart("chat_inline", text="sometimes"),
+        _FakePart("file", data=b"never staged", filename="boolean.bin"),
+    ]))
+
+    assert response.status == 400
+    assert not list((tmp_path / "uploads").glob("*"))
+    assert server._upload_reservations.snapshot() == ()
+
+
+@pytest.mark.asyncio
+async def test_api_send_file_rejects_unknown_or_excess_multipart_parts(
+    tmp_path: Path, monkeypatch,
+):
+    import one_link.server as server_module
+    from one_link.server import UIServer
+
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+
+    class _Daemon:
+        state = None
+        me = SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa")
+
+    unknown_server = UIServer(_Daemon())
+    unknown = await unknown_server.api_send_file(_FakeMultipartReq([
+        _FakePart("peer", text="bbbbbbbb"),
+        _FakePart("unrecognized", text="ignored historically"),
+        _FakePart("file", data=b"never staged", filename="unknown.bin"),
+    ]))
+    assert unknown.status == 400
+    assert unknown_server._upload_reservations.snapshot() == ()
+
+    # Lower the production ceiling so the test proves the counter itself,
+    # independently of the stricter duplicate/unknown-field grammar.
+    monkeypatch.setattr(server_module, "UI_UPLOAD_MULTIPART_MAX_PARTS", 1)
+    excess_server = UIServer(_Daemon())
+    excess = await excess_server.api_send_file(_FakeMultipartReq([
+        _FakePart("peer", text="bbbbbbbb"),
+        _FakePart("file", data=b"never staged", filename="excess.bin"),
+    ]))
+    assert excess.status == 400
+    assert not list((tmp_path / "uploads").glob("*"))
+    assert excess_server._upload_reservations.snapshot() == ()
+
+
+@pytest.mark.asyncio
+async def test_api_send_file_resolution_failure_removes_staged_upload(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from one_link.server import UIServer
+
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+
+    class _Daemon:
+        state = None
+        me = SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa")
+
+        async def resolve_for_send(self, _needle):
+            raise ConnectionError("rendezvous unavailable")
+
+    server = UIServer(_Daemon())
+    response = await server.api_send_file(_FakeMultipartReq([
+        _FakePart("peer", text="bbbbbbbb"),
+        _FakePart("file", data=b"must not leak", filename="orphan.bin"),
+    ]))
+
+    assert response.status >= 400
+    assert not list((tmp_path / "uploads").glob("*"))
+    assert server._upload_reservations.snapshot() == ()
+
+
+@pytest.mark.asyncio
 async def test_api_send_file_online_creates_durable_intent_before_send(
     tmp_path: Path, monkeypatch,
 ):
@@ -928,6 +1112,67 @@ async def test_api_send_file_online_creates_durable_intent_before_send(
     }]
     assert queued and queued[0]["path"].is_file() is True
     assert queued[0]["path"].read_bytes() == b"send me safely"
+    state.close()
+
+
+@pytest.mark.asyncio
+async def test_api_send_file_ledger_failure_is_503_and_never_calls_send(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from one_link.server import UIServer
+    from one_link.state import State
+
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    state = State(db_path=tmp_path / "state.db")
+    peer_fp = "bb" * 32
+    state.upsert_peer(
+        fingerprint=peer_fp,
+        short_id="bbbbbbbb",
+        pubkey=b"\xbb" * 32,
+        hostname="LedgerFailBox",
+        trust_default="pinned",
+    )
+    sends: list[Path] = []
+
+    class _Daemon:
+        me = SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa")
+
+        def __init__(self):
+            self.state = state
+
+        async def resolve_for_send(self, _needle):
+            return SimpleNamespace(
+                short_id="bbbbbbbb",
+                ed_pub_hex=(b"\xbb" * 32).hex(),
+            )
+
+        def _peer_fp_from_peer(self, _peer):
+            return peer_fp
+
+        def queue_file_transfer(self, **_kwargs):
+            raise OSError("injected sqlite outage")
+
+        async def send_file(self, _peer, path, **_kwargs):
+            sends.append(Path(path))
+            raise AssertionError("send_file must not run without a durable row")
+
+    server = UIServer(_Daemon())
+    response = await server.api_send_file(_FakeMultipartReq([
+        _FakePart("peer", text="bbbbbbbb"),
+        _FakePart("file", data=b"retain staged bytes", filename="ledger.bin"),
+    ]))
+    body = json.loads(response.text)
+
+    assert response.status == 503
+    assert body["code"] == "transfer_ledger_unavailable"
+    assert sends == []
+    # Staging names are random and never embed caller-controlled filenames
+    # (prevents NTFS ADS/reserved-name/path-length attacks). The retained inode
+    # still owns the exact bytes for ledger recovery/GC.
+    staged = list(tmp_path.rglob("*.upload"))
+    assert len(staged) == 1
+    assert staged[0].read_bytes() == b"retain staged bytes"
     state.close()
 
 
@@ -1356,6 +1601,9 @@ async def test_api_audit_describes_surface():
             assert "FILE_CDC_CHUNK" in j["peer_protocol"]["message_types"]
             assert "MANIFEST_PUSH" in j["peer_protocol"]["message_types"]
             assert "CAPS" in j["peer_protocol"]["message_types"]
+            assert "CAPSULE_RECEIPT" in j["peer_protocol"]["message_types"]
+            assert "FILE_COMMIT" in j["peer_protocol"]["message_types"]
+            assert "CALL_SDP_ANSWER" in j["peer_protocol"]["message_types"]
             assert any(s["name"] == "file_cdc_transfer" for s in j["peer_protocol"]["sessions"])
             assert "file_cdc" in j["local_capabilities"]
             assert j["performance"]["cdc_cache"]["max_bytes"] > 0
@@ -1363,6 +1611,12 @@ async def test_api_audit_describes_surface():
             assert "BDP-aware" in j["performance"]["file_transfer"]["autopilot"]
             assert "transfer_autopilot" in j["performance"]
             assert any("mdns" in d["kind"] for d in j["outbound_destinations"])
+            destination_kinds = {d["kind"] for d in j["outbound_destinations"]}
+            assert {
+                "stun", "turn_relay", "rendezvous", "encrypted_relay",
+                "update_check",
+            }.issubset(destination_kinds)
+            assert "not proof of calls made" in j["outbound_inventory_scope"]
             doctrine = j["sovereign_network"]
             assert doctrine["privacy_guarantees"]["mandatory_relay"] is False
             assert "open-source distribution" in doctrine["principles"]
@@ -1639,3 +1893,118 @@ async def test_settings_round_trip():
             assert j3["display_name"] is None
             _, me2 = await _get_json(s, f"{base_a}/api/me", token=tok_a)
             assert me2["display_name"] == me2["hostname"]
+
+
+@pytest.mark.asyncio
+async def test_retry_complete_transfer_is_idempotent_noop():
+    """A completed delivery must never emit a second FILE_OFFER."""
+    from one_link.server import UIServer
+
+    rec = SimpleNamespace(
+        id="out:" + ("ab" * 32) + ":123456789abc",
+        direction="out",
+        status="complete",
+        metadata={"commit_confirmed": True},
+    )
+
+    async def unexpected_network_call(*_args, **_kwargs):
+        raise AssertionError("completed transfer attempted network I/O")
+
+    server = object.__new__(UIServer)
+    server.daemon = SimpleNamespace(
+        state=SimpleNamespace(get_transfer=lambda _transfer_id: rec),
+        resolve_for_send=unexpected_network_call,
+        send_file=unexpected_network_call,
+    )
+    request = _FakeReq()
+    request.match_info["transfer_id"] = rec.id
+
+    response = await server.api_retry_transfer(request)
+    body = json.loads(response.text)
+
+    assert response.status == 200
+    assert body["ok"] is True
+    assert body["already_complete"] is True
+    assert body["transfer_id"] == rec.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {
+            "delivery_state": "sent_unconfirmed",
+            "commit_confirmed": False,
+            "error_class": "DeliveryUnconfirmed",
+        },
+        {
+            "delivery_state": "outcome_unknown",
+            "error_class": "SenderCommitAccountingError",
+        },
+    ],
+)
+async def test_retry_refuses_outcome_unknown_delivery(metadata):
+    """Legacy/ambiguous commits are never blindly re-sent."""
+    from one_link.server import UIServer
+
+    rec = SimpleNamespace(
+        id="out:" + ("cd" * 32) + ":123456789abc",
+        direction="out",
+        status="failed",
+        metadata=metadata,
+    )
+
+    async def unexpected_network_call(*_args, **_kwargs):
+        raise AssertionError("outcome-unknown transfer attempted network I/O")
+
+    server = object.__new__(UIServer)
+    server.daemon = SimpleNamespace(
+        state=SimpleNamespace(get_transfer=lambda _transfer_id: rec),
+        resolve_for_send=unexpected_network_call,
+        send_file=unexpected_network_call,
+    )
+    request = _FakeReq()
+    request.match_info["transfer_id"] = rec.id
+
+    response = await server.api_retry_transfer(request)
+    body = json.loads(response.text)
+
+    assert response.status == 409
+    assert body["ok"] is False
+    assert body["code"] == "delivery_outcome_unknown"
+    assert body["outcome_unknown"] is True
+
+
+@pytest.mark.asyncio
+async def test_retry_fails_closed_when_commit_marker_check_errors():
+    """Unreadable durability evidence is not permission to duplicate."""
+    from one_link.server import UIServer
+
+    rec = SimpleNamespace(
+        id="out:" + ("ef" * 32) + ":123456789abc",
+        direction="out",
+        status="failed",
+        metadata={"error_class": "ConnectionError"},
+    )
+
+    def broken_failstop_check(_transfer_id):
+        raise OSError("commit marker store unavailable")
+
+    async def unexpected_network_call(*_args, **_kwargs):
+        raise AssertionError("unresolved transfer attempted network I/O")
+
+    server = object.__new__(UIServer)
+    server.daemon = SimpleNamespace(
+        state=SimpleNamespace(get_transfer=lambda _transfer_id: rec),
+        _remote_commit_is_failstopped=broken_failstop_check,
+        resolve_for_send=unexpected_network_call,
+        send_file=unexpected_network_call,
+    )
+    request = _FakeReq()
+    request.match_info["transfer_id"] = rec.id
+
+    response = await server.api_retry_transfer(request)
+    body = json.loads(response.text)
+
+    assert response.status == 409
+    assert body["code"] == "delivery_outcome_unknown"

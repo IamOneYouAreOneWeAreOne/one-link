@@ -1,61 +1,15 @@
-"""Post-quantum hybrid KEM — defense against harvest-now-decrypt-later.
+"""Post-quantum hybrid KEM primitives and explicit downgrade policy.
 
-A sufficiently powerful quantum computer running Shor's algorithm
-breaks Curve25519 (and every other discrete-log curve) in
-polynomial time. State actors today record encrypted traffic
-they can't read NOW, betting they'll be able to read it
-LATER when the quantum hardware arrives. This is the
-"harvest-now-decrypt-later" threat (HNDL): every X25519 frame
-on the wire today is a potential plaintext for whoever has
-storage + patience.
+The production backend is ``one_link_native.pqkem``: ML-KEM-768 (FIPS 203)
+combined with X25519.  :func:`default_kem` requires that native backend and
+fails closed if it is absent or fails its runtime round-trip self-test.
 
-The standard mitigation is a **hybrid KEM**: combine a classical
-KEM (X25519) with a post-quantum KEM (ML-KEM-768, formerly Kyber)
-such that the resulting shared secret is secure unless BOTH KEMs
-are broken. The PQ side covers HNDL; the classical side covers
-the (currently real) possibility that a brand-new PQ scheme has
-a structural flaw not yet found.
-
-Bundle 37 ships the **hybrid combine architecture**:
-
-  - A KEM Protocol interface (keypair / encapsulate / decapsulate)
-  - X25519 as a KEM, using the standard "ephemeral pubkey +
-    ECDH-shared-secret" trick so it slots into the same protocol
-  - A NullKEM placeholder for the PQ slot — emits empty bytes,
-    contributes zero entropy to the combine. ML-KEM-768 will
-    replace this when ``cryptography`` ships it (FIPS 203, finalized
-    August 2024; the Python ``cryptography`` library hasn't shipped
-    bindings as of v42). The wire format already has the slot, so
-    a rolling upgrade just swaps the import.
-  - HybridKEM that runs both KEMs in parallel, concatenates
-    ciphertexts, HKDF-combines shared secrets with a domain-
-    separation tag (``OL/hybrid-kem|v1``).
-
-Why ship NullKEM today?
-
-  - Wire-format compatibility: encoded HybridKEM ciphertexts are
-    serialized with explicit ``pq_ct_len``. When ML-KEM lands and
-    pq_ct grows from 0 to 1088 bytes (ML-KEM-768 ct size), old
-    peers receive frames they can't decapsulate the PQ half of —
-    BUT the daemon's negotiation layer can detect "peer doesn't
-    advertise pq=ml-kem-768" and fall back to NullKEM = X25519-only.
-    Today's wire format pre-allocates the slot.
-
-  - HKDF-combine logic: the security argument for the hybrid
-    rests on the combine function. We pin the combine semantics
-    today (HKDF-Extract over classical_ss || pq_ss with a fixed
-    info string) so when the PQ slot lights up, the security
-    proof transfers cleanly.
-
-  - Test surface: the combine logic, the wire format, the KEM
-    Protocol — all unit-testable today. ML-KEM proper has its own
-    huge test surface (KAT vectors) which lives with the
-    eventual implementation.
-
-Future bundle: replace NullKEM with a real ML-KEM-768 — either via
-``cryptography``'s bindings (when shipped), the ``kyber-py`` pure-
-Python reference, or a from-scratch FIPS 203 implementation. The
-HybridKEM caller surface stays identical.
+``HybridKEM`` and ``NullKEM`` remain only as an explicitly selected legacy
+compatibility/test surface.  ``NullKEM`` contributes no post-quantum entropy
+and must never be advertised as PQ protection.  The live peer-channel
+handshake in :mod:`one_link.channel` uses the native ABI directly, signs the
+complete version/suite/key transcript, combines an independent X25519 secret,
+and performs mutual key confirmation before returning a channel.
 """
 from __future__ import annotations
 
@@ -167,13 +121,15 @@ class X25519KEM:
         return shared
 
 
-# ── NullKEM (placeholder for ML-KEM-768) ───────────────────────────
+# ── NullKEM (legacy/test-only classical downgrade) ────────────────
 
 
 class NullKEM:
-    """Placeholder PQ KEM that contributes zero entropy. Used until
-    ML-KEM-768 lands in the ``cryptography`` library (or we vendor
-    a pure-Python ref). The hybrid combine HKDF-extracts over
+    """Legacy compatibility KEM that contributes zero PQ entropy.
+
+    It exists for explicit migration tests only. The production ML-KEM-768
+    implementation is native and :func:`default_kem` never selects this class
+    silently. The legacy hybrid combine HKDF-extracts over
     (classical_ss || empty), which is mathematically equivalent to
     HKDF-extracting over classical_ss alone — so the security level
     today is exactly X25519's, with the wire format slot
@@ -292,16 +248,18 @@ class HybridKey:
         if off + pqlen > len(raw):
             raise ValueError("hybrid key truncated at pq body")
         pq = raw[off:off + pqlen]
+        off += pqlen
+        if off != len(raw):
+            raise ValueError("hybrid key has trailing bytes")
         return cls(classical=classical, pq=pq)
 
 
 class HybridKEM:
-    """Combines a classical KEM with a PQ KEM. The PQ slot is NullKEM
-    by default (zero bytes, zero contribution) for wire-format
-    compatibility with peers that haven't enabled ML-KEM-768. New
-    peers should use :func:`default_kem` which returns a native ML-KEM-
-    backed implementation when available; that path produces non-empty
-    pq_ss bytes and provides actual HNDL resistance.
+    """Legacy pluggable combiner; its default PQ slot is deliberately null.
+
+    This constructor is not the production selector. New code must call
+    :func:`default_kem`, which requires a verified native ML-KEM backend unless
+    the caller explicitly authorizes a classical downgrade.
 
     Wire-format compatibility: the encoded ``HybridKey`` always
     length-prefixes both halves, so a Python ``HybridKEM(NullKEM)``
@@ -384,10 +342,10 @@ class NativeHybridKEM:
     def __init__(self) -> None:
         from . import pqkem_native
 
-        if not pqkem_native.HAS_NATIVE:
+        if not pqkem_native.runtime_is_usable():
             raise RuntimeError(
-                "NativeHybridKEM requires one_link_native.pqkem; build via "
-                "`cd native && maturin develop --release`"
+                "NativeHybridKEM requires a verified one_link_native.pqkem "
+                "runtime; build via `cd native && maturin develop --release`"
             )
         self._native = pqkem_native
 
@@ -478,7 +436,7 @@ def default_kem(*, allow_classical_downgrade: bool = False) -> HybridKEM | Nativ
     consciously decided X25519-only is acceptable for that channel."""
     from . import pqkem_native
 
-    if pqkem_native.HAS_NATIVE:
+    if pqkem_native.runtime_is_usable():
         return NativeHybridKEM()
     if not allow_classical_downgrade:
         raise PQUnavailableError(

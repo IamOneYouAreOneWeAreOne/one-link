@@ -15,15 +15,12 @@ Covers:
 
 from __future__ import annotations
 
-import pytest
 
 from one_link.call_immune import ImmuneAction, ImmuneDecision
 from one_link.call_session import Rung
 from one_link.presence_compiler import (
     LADDER,
     PresenceCompiler,
-    RungSpec,
-    RungTransition,
 )
 
 

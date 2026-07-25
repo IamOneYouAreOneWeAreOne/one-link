@@ -2,7 +2,7 @@
 Type=Application
 Name=One Link
 GenericName=Peer-to-peer chat & file sync
-Comment=Peer-to-peer chat, file sync, and live voice/video. No accounts. No servers.
+Comment=Peer-to-peer chat, file sync, and live voice/video. No required account; direct-first with optional discovery and relay.
 Exec=one-link app
 Icon=one-link
 Categories=Network;Chat;FileTransfer;

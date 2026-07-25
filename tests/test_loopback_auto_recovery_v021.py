@@ -1,4 +1,4 @@
-"""v0.21.x: same-machine browser auto-recovery.
+"""Loopback routing is not owner authentication.
 
 Pre-v0.21.x, the index handler's silent stale-token recovery was
 gated on `_is_loopback_bound()` — i.e. the daemon's bind config
@@ -6,20 +6,15 @@ had to be 127.0.0.1. A LAN-bound daemon (0.0.0.0) sent local
 browsers to the ACCESS DENIED help page even when the request
 came from the same machine.
 
-v0.21.x adds `_request_from_loopback` so the recovery decision
-looks at the request's SOURCE IP (peer IP), not the daemon's
-bind. A request whose peer IP is 127.0.0.1 / ::1 came from a
-process on the same machine. That process could read `ui.token`
-from disk already, so trusting it for silent cookie recovery
-adds no attack surface. Cross-machine requests (peer IP outside
-the loopback set) stay strictly token-gated.
+`_request_from_loopback` identifies a network route, not an OS uid. Another
+local account or sandboxed process can connect and spoof browser navigation
+headers, so loopback must never mint owner/session credentials.
 
 This file pins:
   1. `_request_from_loopback` honors the SOURCE IP including
      IPv6 (::1) and IPv4-mapped IPv6 (::ffff:127.0.0.1).
-  2. `_is_local_document_navigation` returns True for loopback-
-     sourced browser tabs even when the daemon is LAN-bound.
-  3. Cross-machine sources stay denied (no silent recovery).
+  2. No local-document helper is used as an authentication primitive.
+  3. Cross-machine sources stay denied.
   4. The boot-time API call uses _bootApiGetWithRetry so a single
      auth-race failure can't fire the 'Can't reach One Link' toast.
 """
@@ -126,57 +121,12 @@ def test_request_from_loopback_rejects_empty_peer():
     assert s._request_from_loopback(req) is False
 
 
-# ── _is_local_document_navigation upgrade ─────────────────────────
-
-
-def test_local_doc_nav_true_for_loopback_source_on_lan_bound_daemon():
-    """The whole point of the fix: a LAN-bound daemon (0.0.0.0)
-    must still recognize same-machine browsers as local doc
-    navigations so the silent-recovery path fires."""
-    s = _mk_server(bind_host="0.0.0.0")
-    req = _mk_request(peer_ip="127.0.0.1")
-    assert s._is_local_document_navigation(req) is True
-
-
-def test_local_doc_nav_false_for_lan_source_on_lan_bound_daemon():
-    """Cross-machine browsers are NOT trusted for silent recovery;
-    they must present a valid token like before."""
-    s = _mk_server(bind_host="0.0.0.0")
-    req = _mk_request(peer_ip="192.168.1.50")
-    assert s._is_local_document_navigation(req) is False
-
-
-def test_local_doc_nav_still_true_for_loopback_bound_legacy_path():
-    """The pre-v0.21.x recovery path (loopback-bound daemon) must
-    keep working unchanged. Regression guard."""
-    s = _mk_server(bind_host="127.0.0.1")
-    # Even without a peer IP (some test paths), bind-loopback +
-    # Host header check + document accept should suffice.
-    req = _mk_request(
-        peer_ip=None,
-        accept="text/html",
-        host="127.0.0.1:7117",
-    )
-    assert s._is_local_document_navigation(req) is True
-
-
-def test_local_doc_nav_false_when_xhr_dest():
-    """Sec-Fetch-Dest=empty (XHR/fetch) is NOT a top-level
-    document nav. A CSRF-bait page could send loopback-sourced
-    fetches; those must still fail the document-nav check so
-    we don't silently mint a cookie for them."""
-    s = _mk_server(bind_host="0.0.0.0")
-    req = _mk_request(peer_ip="127.0.0.1", sec_fetch_dest="empty")
-    assert s._is_local_document_navigation(req) is False
-
-
 # ── source-code structural pins ───────────────────────────────────
 
 
 def test_request_from_loopback_helper_present(server_src):
     assert "def _request_from_loopback(" in server_src, (
-        "missing _request_from_loopback helper — auth auto-recovery "
-        "would fall back to bind-config-only check"
+        "missing _request_from_loopback transport-policy helper"
     )
 
 
@@ -190,16 +140,10 @@ def test_loopback_source_helper_covers_v4_mapped_v6(server_src):
     )
 
 
-def test_local_doc_nav_uses_request_source(server_src):
-    """The is_local_document_navigation upgrade must consult the
-    new loopback-source helper, not just the bind config."""
-    idx = server_src.find("def _is_local_document_navigation(")
-    body = server_src[idx:idx + 1500]
-    assert "_request_from_loopback(" in body, (
-        "_is_local_document_navigation must accept loopback-by-source "
-        "or LAN-bound daemons send local browsers to the access-denied "
-        "page instead of recovering"
-    )
+def test_loopback_navigation_is_not_an_authentication_primitive(server_src):
+    assert "def _is_local_document_navigation(" not in server_src
+    assert "or local_document_reopen" not in server_src
+    assert "same uid context" not in server_src
 
 
 # ── UI: silent boot retry ─────────────────────────────────────────

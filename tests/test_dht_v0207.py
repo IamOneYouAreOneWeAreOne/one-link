@@ -19,12 +19,8 @@ What's tested:
 """
 from __future__ import annotations
 
-import os
 import secrets
-from dataclasses import dataclass
-from typing import Iterable
 
-import pytest
 
 from one_link import dht
 

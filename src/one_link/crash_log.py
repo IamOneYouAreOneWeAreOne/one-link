@@ -44,6 +44,28 @@ _MAX_CRASH_FILES = 50  # rolling cap; oldest pruned on each new dump
 _INSTALLED = False
 
 
+def _last_resort_stderr(operation: str, exc: BaseException) -> bool:
+    """Emit a recursion-safe, redacted failure marker to fd 2.
+
+    Crash handling cannot safely call the logging stack after a logger or hook
+    itself fails.  ``os.write`` avoids that recursion and the message contains
+    only fixed operation text plus the exception class, never exception text.
+    """
+
+    safe_operation = "".join(
+        ch if ch.isalnum() or ch in "._-" else "_" for ch in operation[:80]
+    ) or "unknown"
+    payload = (
+        f"\n!! crash observability degraded: {safe_operation} "
+        f"(error_type={type(exc).__name__})\n"
+    ).encode("ascii", errors="replace")
+    try:
+        os.write(2, payload)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _crashes_dir() -> Path:
     p = data_dir() / _CRASHES_SUBDIR
     p.mkdir(parents=True, exist_ok=True)
@@ -119,15 +141,16 @@ def dump_crash(
             except OSError: pass
         _prune_old()
         return path
-    except Exception:
+    except Exception as dump_exc:
         # Last-ditch: keep the trace on stderr so something survives.
         try:
             sys.stderr.write(f"\n!! crash_log.dump_crash failed for {reason}\n")
             if exc is not None:
                 traceback.print_exception(type(exc), exc, exc.__traceback__)
             sys.stderr.flush()
-        except Exception:
-            pass
+        except Exception as stderr_exc:
+            _last_resort_stderr("dump_crash_stderr", stderr_exc)
+        _last_resort_stderr("dump_crash", dump_exc)
         return None
 
 
@@ -153,11 +176,15 @@ def install_excepthooks() -> None:
         _LOG.critical(
             "uncaught main-thread exception", exc_info=(exc_type, exc, tb),
         )
-        try: dump_crash("main-excepthook", exc)
-        except Exception: pass
+        try:
+            dump_crash("main-excepthook", exc)
+        except Exception as dump_exc:
+            _last_resort_stderr("main_hook_dump", dump_exc)
         # Chain to the previous hook so default formatting still hits stderr.
-        try: prev_sys(exc_type, exc, tb)
-        except Exception: pass
+        try:
+            prev_sys(exc_type, exc, tb)
+        except Exception as hook_exc:
+            _last_resort_stderr("previous_sys_hook", hook_exc)
     sys.excepthook = _sys_hook
 
     prev_thread = threading.excepthook
@@ -180,10 +207,12 @@ def install_excepthooks() -> None:
                 args.exc_value,
                 extra={"thread": tname},
             )
-        except Exception:
-            pass
-        try: prev_thread(args)
-        except Exception: pass
+        except Exception as dump_exc:
+            _last_resort_stderr("thread_hook_dump", dump_exc)
+        try:
+            prev_thread(args)
+        except Exception as hook_exc:
+            _last_resort_stderr("previous_thread_hook", hook_exc)
     threading.excepthook = _thread_hook
 
 
@@ -209,8 +238,8 @@ async def _contained_coro(coro, name: str, on_error) -> None:
                 f"task-{name}", e,
                 extra={"task": name, "contained": True},
             )
-        except Exception:
-            pass
+        except Exception as dump_exc:
+            _last_resort_stderr("contained_task_dump", dump_exc)
         if on_error is not None:
             try:
                 on_error(e)
@@ -281,8 +310,8 @@ def install_loop_hook(loop) -> None:
                     exc,
                     extra={"message": context.get("message", "")},
                 )
-            except Exception:
-                pass
+            except Exception as dump_exc:
+                _last_resort_stderr("asyncio_handler_dump", dump_exc)
         if prev is not None:
             prev(loop, context)
         else:

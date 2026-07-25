@@ -242,7 +242,11 @@ def test_file_native_chunk_wire_keeps_session_chunk_index_across_files():
         plaintext_len=second_wire["plaintext_len"],
         ciphertext=base64.b64decode(second_wire["data"]),
     )
-    fresh_receiver = bob.establish_native_transfer()
+    bob_tx, bob_rx = bob.derive_native_transfer_direction_secrets()
+    fresh_receiver = native_transfer.duplex_session_from_directional_secrets(
+        bob_tx,
+        bob_rx,
+    )
     fresh_receiver.decrypt_chunk(first_rebuilt)
     with pytest.raises(Exception):
         fresh_receiver.decrypt_chunk(broken_rebuilt)
@@ -253,8 +257,6 @@ def test_file_native_chunk_aead_tag_rejects_swapped_chunk_id():
     receiver's AEAD-AAD-bound tag check must reject before any
     plaintext leaks (the explicit BLAKE3 verify is dropped, so the
     AEAD is the only gate)."""
-    import base64
-
     from one_link import native_transfer
 
     alice, bob = _matched_channels()
@@ -281,8 +283,6 @@ def test_file_native_chunk_aead_tag_rejects_swapped_chunk_id():
 def test_multi_chunk_round_trip_via_paired_channels():
     """Stream 8 chunks via the sender, decode each through the
     receiver. Mirrors what daemon's send_file loop does end-to-end."""
-    from one_link import native_transfer
-
     alice, bob = _matched_channels()
     sender = alice.get_or_create_native_transfer_session()
     receiver = bob.get_or_create_native_transfer_session()

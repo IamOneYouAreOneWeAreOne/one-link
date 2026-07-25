@@ -198,6 +198,7 @@ pub fn replan_after_source_failure(
     still_needed_chunks: &[ChunkHash],
     overrequest_factor: f64,
 ) -> DeviceMeshResult<FanOutPlan> {
+    manifest.shape_check()?;
     // Synthesize a sub-manifest containing ONLY the still-needed
     // chunks. The planner is policy-agnostic so this is sound; it
     // just needs the chunk list + chunk_size to compute load.
@@ -224,8 +225,11 @@ pub fn replan_after_source_failure(
     chunks.sort_unstable();
     chunks.dedup();
     // Pad to stripe multiple.
+    let Some(&last_chunk) = chunks.last() else {
+        return Err(DeviceMeshError::FanOutNothingToReplan);
+    };
     while !chunks.len().is_multiple_of(stripe) {
-        chunks.push(*chunks.last().expect("non-empty"));
+        chunks.push(last_chunk);
     }
     let sub_manifest = FileManifest {
         file_size: manifest.file_size,

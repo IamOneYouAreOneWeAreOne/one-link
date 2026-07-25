@@ -8,24 +8,17 @@ test module.
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
-import pytest
 
 from one_link.share_link import (
-    DEFAULT_TTL_SECONDS,
     SAS_PHRASE_WORDS,
-    SCHEMA_VERSION,
     TOKEN_LEN,
-    ShareLink,
     ShareLinkRegistry,
     derive_sas_phrase,
-    load,
     mint_token,
     persist,
-    scan,
     sidecar_path,
 )
 

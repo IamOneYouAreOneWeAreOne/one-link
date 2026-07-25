@@ -20,18 +20,20 @@ use rand::rngs::OsRng;
 const SAMPLES_PER_BUCKET: usize = 200;
 
 fn relative_stddev(samples: &[f64]) -> f64 {
-    let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
-    let variance: f64 =
-        samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+    assert!(!samples.is_empty(), "timing sample set must not be empty");
+    let sample_count =
+        f64::from(u32::try_from(samples.len()).expect("timing sample count fits u32"));
+    let mean: f64 = samples.iter().sum::<f64>() / sample_count;
+    let variance: f64 = samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / sample_count;
     variance.sqrt() / mean
 }
 
-fn measure<F: FnMut()>(mut work: F, iterations: usize) -> u128 {
+fn measure<F: FnMut()>(mut work: F, iterations: usize) -> f64 {
     let start = Instant::now();
     for _ in 0..iterations {
         work();
     }
-    start.elapsed().as_nanos()
+    start.elapsed().as_secs_f64() * 1_000_000_000.0
 }
 
 #[test]
@@ -76,7 +78,7 @@ fn verify_constant_time_across_tamper_positions() {
                 );
             },
             SAMPLES_PER_BUCKET,
-        ) as f64;
+        );
         totals.push(ns);
     }
     let rel = relative_stddev(&totals);

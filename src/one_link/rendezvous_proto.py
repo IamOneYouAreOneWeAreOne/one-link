@@ -43,13 +43,16 @@ Replay defense:
 Forward-compat:
   - `protocol_version` field; rendezvous rejects requests it doesn't
     know how to verify
-  - unknown JSON fields are tolerated on the rendezvous (ignored)
-    but the signature covers only the fields explicitly named below
+  - each protocol version has a closed schema. Extensions therefore
+    require a new version instead of creating signed/parsed ambiguity.
 """
 from __future__ import annotations
 
 import base64
+import binascii
+import ipaddress
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -78,6 +81,33 @@ MAX_ADVERTISED_ENDPOINTS = 8
 # Opaque payload size sanity (kilobytes, not megabytes).
 MAX_REQUEST_BYTES = 8 * 1024
 
+# Every variable-length field is bounded before expensive parsing or
+# allocation. These limits comfortably cover the current capability set
+# while keeping a hostile rendezvous response cheap to reject.
+MAX_HOST_LENGTH = 253
+MAX_CAPABILITIES = 128
+MAX_CAPABILITY_LENGTH = 128
+MAX_TIMESTAMP_MS = (1 << 63) - 1
+
+_NAT_TYPES = frozenset({"open", "restricted", "symmetric", "unknown"})
+_CAPABILITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+_DNS_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
+_REGISTER_KEYS = frozenset({
+    "v", "type", "pubkey_b64", "timestamp_ms", "ttl_s",
+    "advertised_endpoints", "nat_type", "capabilities", "signature",
+})
+_REGISTER_ACK_KEYS = frozenset({
+    "v", "type", "observed_host", "observed_port", "server_time_ms",
+    "expires_at_ms",
+})
+_LOOKUP_ACK_KEYS = frozenset({
+    "v", "type", "pubkey_b64", "observed_endpoint",
+    "advertised_endpoints", "nat_type", "capabilities", "expires_at_ms",
+    "server_time_ms",
+})
+_REVOKE_KEYS = frozenset({"v", "type", "pubkey_b64", "timestamp_ms", "signature"})
+_ENDPOINT_KEYS = frozenset({"host", "port"})
+
 
 # ─── helpers ────────────────────────────────────────────────────────
 
@@ -85,9 +115,22 @@ def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
 
-def _b64d(s: str) -> bytes:
-    pad = "=" * ((4 - len(s) % 4) % 4)
-    return base64.urlsafe_b64decode((s + pad).encode("ascii"))
+def _b64d(s: str, *, expected_size: int, name: str) -> bytes:
+    """Decode canonical unpadded base64url with a pre-decode size bound."""
+    if not isinstance(s, str):
+        raise ValueError(f"{name} must be a string")
+    expected_chars = (expected_size * 8 + 5) // 6
+    if len(s) != expected_chars or "=" in s:
+        raise ValueError(f"{name} has invalid encoded length")
+    try:
+        raw_ascii = s.encode("ascii")
+        pad = b"=" * ((4 - len(raw_ascii) % 4) % 4)
+        decoded = base64.b64decode(raw_ascii + pad, altchars=b"-_", validate=True)
+    except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
+        raise ValueError(f"{name} is not canonical base64url") from exc
+    if len(decoded) != expected_size or _b64(decoded) != s:
+        raise ValueError(f"{name} is not canonical base64url")
+    return decoded
 
 
 def _canonical_bytes(payload: dict) -> bytes:
@@ -105,6 +148,73 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _require_exact_keys(d: object, expected: frozenset[str], name: str) -> dict:
+    if not isinstance(d, dict):
+        raise ValueError(f"{name} must be an object")
+    actual = set(d)
+    if actual != expected:
+        missing = sorted(expected - actual, key=repr)
+        unknown = sorted(actual - expected, key=repr)
+        raise ValueError(f"{name} fields invalid (missing={missing}, unknown={unknown})")
+    return d
+
+
+def _validate_timestamp(value: object, name: str) -> int:
+    ts = _require_int(value, name)
+    if not 0 <= ts <= MAX_TIMESTAMP_MS:
+        raise ValueError(f"{name} out of range")
+    return ts
+
+
+def _validate_host(value: object, name: str = "host") -> str:
+    host = _require_str(value, name)
+    if not host or len(host) > MAX_HOST_LENGTH or host != host.strip():
+        raise ValueError(f"{name} is invalid")
+    try:
+        host.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be ASCII") from exc
+    if any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in host):
+        raise ValueError(f"{name} contains invalid characters")
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        # A colon is only valid in a syntactically valid IPv6 literal.
+        if ":" in host:
+            raise ValueError(f"{name} is not a valid IP address")
+        if all(ch.isdigit() or ch == "." for ch in host):
+            raise ValueError(f"{name} is not a valid IPv4 address")
+    if host.endswith("."):
+        host = host[:-1]
+    labels = host.split(".")
+    if not host or any(_DNS_LABEL_RE.fullmatch(label) is None for label in labels):
+        raise ValueError(f"{name} is not a valid DNS name")
+    return host
+
+
+def _validate_capabilities(value: object) -> list[str]:
+    if not isinstance(value, list) or len(value) > MAX_CAPABILITIES:
+        raise ValueError(f"capabilities must be a list of length <= {MAX_CAPABILITIES}")
+    result: list[str] = []
+    for cap in value:
+        if (
+            not isinstance(cap, str)
+            or len(cap) > MAX_CAPABILITY_LENGTH
+            or _CAPABILITY_RE.fullmatch(cap) is None
+        ):
+            raise ValueError("capabilities contains an invalid token")
+        result.append(cap)
+    return result
+
+
+def _validate_nat_type(value: object) -> str:
+    nat_type = _require_str(value, "nat_type")
+    if nat_type not in _NAT_TYPES:
+        raise ValueError(f"invalid nat_type: {nat_type!r}")
+    return nat_type
+
+
 # ─── frame types ────────────────────────────────────────────────────
 
 @dataclass
@@ -117,18 +227,26 @@ class Endpoint:
     host: str
     port: int
 
+    def __post_init__(self) -> None:
+        self.host = _validate_host(self.host, "endpoint.host")
+        self.port = _require_int(self.port, "endpoint.port")
+        if not 0 < self.port < 65536:
+            raise ValueError("endpoint.port must be 1..65535")
+
     def to_json(self) -> dict:
-        return {"host": str(self.host), "port": int(self.port)}
+        # Revalidate because dataclass fields are intentionally mutable.
+        host = _validate_host(self.host, "endpoint.host")
+        port = _require_int(self.port, "endpoint.port")
+        if not 0 < port < 65536:
+            raise ValueError("endpoint.port must be 1..65535")
+        return {"host": host, "port": port}
 
     @classmethod
     def from_json(cls, d: dict) -> "Endpoint":
-        if not isinstance(d, dict):
-            raise ValueError("endpoint must be an object")
-        host = d.get("host")
-        port = d.get("port")
-        if not isinstance(host, str) or not host:
-            raise ValueError("endpoint.host required")
-        if not isinstance(port, int) or not (0 < port < 65536):
+        d = _require_exact_keys(d, _ENDPOINT_KEYS, "endpoint")
+        host = _validate_host(d["host"], "endpoint.host")
+        port = _require_int(d["port"], "endpoint.port")
+        if not 0 < port < 65536:
             raise ValueError("endpoint.port must be 1..65535")
         return cls(host=host, port=port)
 
@@ -147,64 +265,66 @@ class RegisterReq:
     signature: bytes = b""
 
     def to_signing_dict(self) -> dict:
+        pubkey = _require_bytes_exact(self.pubkey, 32, "pubkey")
+        timestamp_ms = _validate_timestamp(self.timestamp_ms, "timestamp_ms")
+        ttl_s = _require_int(self.ttl_s, "ttl_s")
+        if not 0 < ttl_s <= MAX_REGISTRATION_TTL_S:
+            raise ValueError(f"ttl_s out of range: {ttl_s}")
+        endpoints = _validate_endpoints(self.advertised_endpoints)
+        nat_type = _validate_nat_type(self.nat_type)
+        capabilities = _validate_capabilities(self.capabilities)
         return {
             "v": PROTOCOL_VERSION,
             "type": "register",
-            "pubkey_b64": _b64(self.pubkey),
-            "timestamp_ms": int(self.timestamp_ms),
-            "ttl_s": int(self.ttl_s),
-            "advertised_endpoints": [e.to_json() for e in self.advertised_endpoints],
-            "nat_type": str(self.nat_type),
-            "capabilities": list(self.capabilities),
+            "pubkey_b64": _b64(pubkey),
+            "timestamp_ms": timestamp_ms,
+            "ttl_s": ttl_s,
+            "advertised_endpoints": [e.to_json() for e in endpoints],
+            "nat_type": nat_type,
+            "capabilities": capabilities,
         }
 
     def to_wire(self) -> dict:
         d = self.to_signing_dict()
-        d["signature"] = _b64(self.signature)
+        d["signature"] = _b64(_require_bytes_exact(self.signature, 64, "signature"))
         return d
 
     @classmethod
     def from_wire(cls, d: dict) -> "RegisterReq":
-        _require_str(d.get("v"), "v")
-        if d.get("v") != PROTOCOL_VERSION:
-            raise ValueError(f"unsupported protocol version: {d.get('v')!r}")
-        if d.get("type") != "register":
-            raise ValueError(f"unexpected type: {d.get('type')!r}")
-        pubkey = _b64d(_require_str(d.get("pubkey_b64"), "pubkey_b64"))
-        if len(pubkey) != 32:
-            raise ValueError("pubkey must be 32 bytes")
-        ttl_s = _require_int(d.get("ttl_s"), "ttl_s")
+        d = _require_exact_keys(d, _REGISTER_KEYS, "register")
+        if d["v"] != PROTOCOL_VERSION:
+            raise ValueError(f"unsupported protocol version: {d['v']!r}")
+        if d["type"] != "register":
+            raise ValueError(f"unexpected type: {d['type']!r}")
+        pubkey = _b64d(d["pubkey_b64"], expected_size=32, name="pubkey_b64")
+        ttl_s = _require_int(d["ttl_s"], "ttl_s")
         if ttl_s <= 0 or ttl_s > MAX_REGISTRATION_TTL_S:
             raise ValueError(f"ttl_s out of range: {ttl_s}")
-        eps_raw = d.get("advertised_endpoints") or []
+        eps_raw = d["advertised_endpoints"]
         if not isinstance(eps_raw, list) or len(eps_raw) > MAX_ADVERTISED_ENDPOINTS:
             raise ValueError("advertised_endpoints must be a list of length <= "
                              f"{MAX_ADVERTISED_ENDPOINTS}")
         eps = [Endpoint.from_json(e) for e in eps_raw]
-        nat_type = str(d.get("nat_type") or "unknown")
-        if nat_type not in ("open", "restricted", "symmetric", "unknown"):
-            raise ValueError(f"invalid nat_type: {nat_type!r}")
-        caps = d.get("capabilities") or []
-        if not isinstance(caps, list) or any(not isinstance(c, str) for c in caps):
-            raise ValueError("capabilities must be a list of strings")
-        sig = _b64d(_require_str(d.get("signature"), "signature"))
-        if len(sig) != 64:
-            raise ValueError("signature must be 64 bytes")
+        nat_type = _validate_nat_type(d["nat_type"])
+        caps = _validate_capabilities(d["capabilities"])
+        sig = _b64d(d["signature"], expected_size=64, name="signature")
         return cls(
             pubkey=pubkey,
-            timestamp_ms=_require_int(d.get("timestamp_ms"), "timestamp_ms"),
+            timestamp_ms=_validate_timestamp(d["timestamp_ms"], "timestamp_ms"),
             ttl_s=ttl_s,
             advertised_endpoints=eps,
             nat_type=nat_type,
-            capabilities=[str(c) for c in caps],
+            capabilities=caps,
             signature=sig,
         )
 
     def verify(self) -> None:
         """Verify the signature; raises ValueError if invalid."""
+        signing_dict = self.to_signing_dict()
+        signature = _require_bytes_exact(self.signature, 64, "signature")
         try:
             Ed25519PublicKey.from_public_bytes(self.pubkey).verify(
-                self.signature, _canonical_bytes(self.to_signing_dict())
+                signature, _canonical_bytes(signing_dict)
             )
         except InvalidSignature:
             raise ValueError("register signature does not verify")
@@ -220,15 +340,17 @@ def sign_register(
     capabilities: list[str] | None = None,
     timestamp_ms: int | None = None,
 ) -> RegisterReq:
+    _require_matching_public_key(private_key, pubkey)
     req = RegisterReq(
         pubkey=pubkey,
         timestamp_ms=timestamp_ms if timestamp_ms is not None else now_ms(),
         ttl_s=ttl_s,
         advertised_endpoints=list(advertised_endpoints),
         nat_type=nat_type,
-        capabilities=list(capabilities or []),
+        capabilities=list(capabilities) if capabilities is not None else [],
     )
-    sig = private_key.sign(_canonical_bytes(req.to_signing_dict()))
+    signing_dict = req.to_signing_dict()
+    sig = private_key.sign(_canonical_bytes(signing_dict))
     req.signature = sig
     return req
 
@@ -244,24 +366,35 @@ class RegisterAck:
     expires_at_ms: int
 
     def to_wire(self) -> dict:
+        host = _validate_host(self.observed_host, "observed_host")
+        port = _require_port(self.observed_port, "observed_port")
+        server_time_ms = _validate_timestamp(self.server_time_ms, "server_time_ms")
+        expires_at_ms = _validate_timestamp(self.expires_at_ms, "expires_at_ms")
+        if expires_at_ms < server_time_ms:
+            raise ValueError("expires_at_ms must not precede server_time_ms")
         return {
             "v": PROTOCOL_VERSION,
             "type": "register_ack",
-            "observed_host": self.observed_host,
-            "observed_port": int(self.observed_port),
-            "server_time_ms": int(self.server_time_ms),
-            "expires_at_ms": int(self.expires_at_ms),
+            "observed_host": host,
+            "observed_port": port,
+            "server_time_ms": server_time_ms,
+            "expires_at_ms": expires_at_ms,
         }
 
     @classmethod
     def from_wire(cls, d: dict) -> "RegisterAck":
-        if d.get("v") != PROTOCOL_VERSION or d.get("type") != "register_ack":
+        d = _require_exact_keys(d, _REGISTER_ACK_KEYS, "register_ack")
+        if d["v"] != PROTOCOL_VERSION or d["type"] != "register_ack":
             raise ValueError("not a register_ack")
+        server_time_ms = _validate_timestamp(d["server_time_ms"], "server_time_ms")
+        expires_at_ms = _validate_timestamp(d["expires_at_ms"], "expires_at_ms")
+        if expires_at_ms < server_time_ms:
+            raise ValueError("expires_at_ms must not precede server_time_ms")
         return cls(
-            observed_host=_require_str(d.get("observed_host"), "observed_host"),
-            observed_port=_require_int(d.get("observed_port"), "observed_port"),
-            server_time_ms=_require_int(d.get("server_time_ms"), "server_time_ms"),
-            expires_at_ms=_require_int(d.get("expires_at_ms"), "expires_at_ms"),
+            observed_host=_validate_host(d["observed_host"], "observed_host"),
+            observed_port=_require_port(d["observed_port"], "observed_port"),
+            server_time_ms=server_time_ms,
+            expires_at_ms=expires_at_ms,
         )
 
 
@@ -279,46 +412,55 @@ class LookupAck:
     server_time_ms: int
 
     def to_wire(self) -> dict:
+        pubkey = _require_bytes_exact(self.pubkey, 32, "pubkey")
+        endpoints = _validate_endpoints(self.advertised_endpoints)
+        observed = self.observed_endpoint
+        if observed is not None and not isinstance(observed, Endpoint):
+            raise ValueError("observed_endpoint must be an Endpoint or null")
+        nat_type = _validate_nat_type(self.nat_type)
+        capabilities = _validate_capabilities(self.capabilities)
+        expires_at_ms = _validate_timestamp(self.expires_at_ms, "expires_at_ms")
+        server_time_ms = _validate_timestamp(self.server_time_ms, "server_time_ms")
         return {
             "v": PROTOCOL_VERSION,
             "type": "lookup_ack",
-            "pubkey_b64": _b64(self.pubkey),
+            "pubkey_b64": _b64(pubkey),
             "observed_endpoint": (
-                self.observed_endpoint.to_json()
-                if self.observed_endpoint is not None
+                observed.to_json()
+                if observed is not None
                 else None
             ),
-            "advertised_endpoints": [e.to_json() for e in self.advertised_endpoints],
-            "nat_type": self.nat_type,
-            "capabilities": list(self.capabilities),
-            "expires_at_ms": int(self.expires_at_ms),
-            "server_time_ms": int(self.server_time_ms),
+            "advertised_endpoints": [e.to_json() for e in endpoints],
+            "nat_type": nat_type,
+            "capabilities": capabilities,
+            "expires_at_ms": expires_at_ms,
+            "server_time_ms": server_time_ms,
         }
 
     @classmethod
     def from_wire(cls, d: dict) -> "LookupAck":
-        if d.get("v") != PROTOCOL_VERSION or d.get("type") != "lookup_ack":
+        d = _require_exact_keys(d, _LOOKUP_ACK_KEYS, "lookup_ack")
+        if d["v"] != PROTOCOL_VERSION or d["type"] != "lookup_ack":
             raise ValueError("not a lookup_ack")
-        pubkey = _b64d(_require_str(d.get("pubkey_b64"), "pubkey_b64"))
-        if len(pubkey) != 32:
-            raise ValueError("pubkey must be 32 bytes")
-        oe = d.get("observed_endpoint")
+        pubkey = _b64d(d["pubkey_b64"], expected_size=32, name="pubkey_b64")
+        oe = d["observed_endpoint"]
         observed = Endpoint.from_json(oe) if oe is not None else None
-        adv_raw = d.get("advertised_endpoints") or []
-        if not isinstance(adv_raw, list):
-            raise ValueError("advertised_endpoints must be a list")
+        adv_raw = d["advertised_endpoints"]
+        if not isinstance(adv_raw, list) or len(adv_raw) > MAX_ADVERTISED_ENDPOINTS:
+            raise ValueError(
+                "advertised_endpoints must be a list of length <= "
+                f"{MAX_ADVERTISED_ENDPOINTS}"
+            )
         adv = [Endpoint.from_json(e) for e in adv_raw]
-        caps = d.get("capabilities") or []
-        if not isinstance(caps, list):
-            raise ValueError("capabilities must be a list")
+        caps = _validate_capabilities(d["capabilities"])
         return cls(
             pubkey=pubkey,
             observed_endpoint=observed,
             advertised_endpoints=adv,
-            nat_type=str(d.get("nat_type") or "unknown"),
-            capabilities=[str(c) for c in caps],
-            expires_at_ms=_require_int(d.get("expires_at_ms"), "expires_at_ms"),
-            server_time_ms=_require_int(d.get("server_time_ms"), "server_time_ms"),
+            nat_type=_validate_nat_type(d["nat_type"]),
+            capabilities=caps,
+            expires_at_ms=_validate_timestamp(d["expires_at_ms"], "expires_at_ms"),
+            server_time_ms=_validate_timestamp(d["server_time_ms"], "server_time_ms"),
         )
 
 
@@ -330,38 +472,39 @@ class RevokeReq:
     signature: bytes = b""
 
     def to_signing_dict(self) -> dict:
+        pubkey = _require_bytes_exact(self.pubkey, 32, "pubkey")
+        timestamp_ms = _validate_timestamp(self.timestamp_ms, "timestamp_ms")
         return {
             "v": PROTOCOL_VERSION,
             "type": "revoke",
-            "pubkey_b64": _b64(self.pubkey),
-            "timestamp_ms": int(self.timestamp_ms),
+            "pubkey_b64": _b64(pubkey),
+            "timestamp_ms": timestamp_ms,
         }
 
     def to_wire(self) -> dict:
         d = self.to_signing_dict()
-        d["signature"] = _b64(self.signature)
+        d["signature"] = _b64(_require_bytes_exact(self.signature, 64, "signature"))
         return d
 
     @classmethod
     def from_wire(cls, d: dict) -> "RevokeReq":
-        if d.get("v") != PROTOCOL_VERSION or d.get("type") != "revoke":
+        d = _require_exact_keys(d, _REVOKE_KEYS, "revoke")
+        if d["v"] != PROTOCOL_VERSION or d["type"] != "revoke":
             raise ValueError("not a revoke request")
-        pubkey = _b64d(_require_str(d.get("pubkey_b64"), "pubkey_b64"))
-        if len(pubkey) != 32:
-            raise ValueError("pubkey must be 32 bytes")
-        sig = _b64d(_require_str(d.get("signature"), "signature"))
-        if len(sig) != 64:
-            raise ValueError("signature must be 64 bytes")
+        pubkey = _b64d(d["pubkey_b64"], expected_size=32, name="pubkey_b64")
+        sig = _b64d(d["signature"], expected_size=64, name="signature")
         return cls(
             pubkey=pubkey,
-            timestamp_ms=_require_int(d.get("timestamp_ms"), "timestamp_ms"),
+            timestamp_ms=_validate_timestamp(d["timestamp_ms"], "timestamp_ms"),
             signature=sig,
         )
 
     def verify(self) -> None:
+        signing_dict = self.to_signing_dict()
+        signature = _require_bytes_exact(self.signature, 64, "signature")
         try:
             Ed25519PublicKey.from_public_bytes(self.pubkey).verify(
-                self.signature, _canonical_bytes(self.to_signing_dict())
+                signature, _canonical_bytes(signing_dict)
             )
         except InvalidSignature:
             raise ValueError("revoke signature does not verify")
@@ -373,11 +516,13 @@ def sign_revoke(
     pubkey: bytes,
     timestamp_ms: int | None = None,
 ) -> RevokeReq:
+    _require_matching_public_key(private_key, pubkey)
     req = RevokeReq(
         pubkey=pubkey,
         timestamp_ms=timestamp_ms if timestamp_ms is not None else now_ms(),
     )
-    req.signature = private_key.sign(_canonical_bytes(req.to_signing_dict()))
+    signing_dict = req.to_signing_dict()
+    req.signature = private_key.sign(_canonical_bytes(signing_dict))
     return req
 
 
@@ -393,7 +538,16 @@ def timestamp_within_replay_window(
     replay window relative to server time. The window is symmetric
     so honest clock skew in either direction is tolerated."""
     now = server_now_ms if server_now_ms is not None else now_ms()
-    return abs(int(now) - int(timestamp_ms)) <= window_ms
+    if (
+        not _is_valid_timestamp(timestamp_ms)
+        or not _is_valid_timestamp(now)
+        or not isinstance(window_ms, int)
+        or isinstance(window_ms, bool)
+        or window_ms < 0
+        or window_ms > MAX_TIMESTAMP_MS
+    ):
+        return False
+    return abs(now - timestamp_ms) <= window_ms
 
 
 # ─── input validation helpers ───────────────────────────────────────
@@ -408,3 +562,52 @@ def _require_int(v, name: str) -> int:
     if not isinstance(v, int) or isinstance(v, bool):
         raise ValueError(f"{name} must be an integer")
     return v
+
+
+def _require_bytes_exact(value: object, expected: int, name: str) -> bytes:
+    if not isinstance(value, bytes) or len(value) != expected:
+        raise ValueError(f"{name} must be {expected} bytes")
+    return value
+
+
+def _require_port(value: object, name: str) -> int:
+    port = _require_int(value, name)
+    if not 0 < port < 65536:
+        raise ValueError(f"{name} must be 1..65535")
+    return port
+
+
+def _validate_endpoints(value: object) -> list[Endpoint]:
+    if not isinstance(value, list) or len(value) > MAX_ADVERTISED_ENDPOINTS:
+        raise ValueError(
+            "advertised_endpoints must be a list of length <= "
+            f"{MAX_ADVERTISED_ENDPOINTS}"
+        )
+    endpoints: list[Endpoint] = []
+    for endpoint in value:
+        if not isinstance(endpoint, Endpoint):
+            raise ValueError("advertised_endpoints must contain Endpoint values")
+        # Validate mutated instances without reusing or coercing wire input.
+        endpoint.to_json()
+        endpoints.append(endpoint)
+    return endpoints
+
+
+def _require_matching_public_key(
+    private_key: Ed25519PrivateKey,
+    pubkey: object,
+) -> bytes:
+    if not isinstance(private_key, Ed25519PrivateKey):
+        raise ValueError("private_key must be an Ed25519 private key")
+    claimed = _require_bytes_exact(pubkey, 32, "pubkey")
+    if private_key.public_key().public_bytes_raw() != claimed:
+        raise ValueError("pubkey does not match private_key")
+    return claimed
+
+
+def _is_valid_timestamp(value: object) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= MAX_TIMESTAMP_MS
+    )

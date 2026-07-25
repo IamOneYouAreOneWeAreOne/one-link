@@ -136,7 +136,7 @@ The daemon's `send_file()` call site can now invoke `channel.establish_native_tr
 | `native_transfer.py` module | **Live** — importable, tested, benchmarked. |
 | `daemon.send_file()` call site | **Legacy still authoritative**. The daemon's `channel.py` continues to use `ChaCha20Poly1305 + tx_seq` for chunk encryption. |
 | ChunkRatchet activation | **Live in the pipeline**, **dormant in production** until call-site swap. |
-| PQ-hybrid `default_kem()` activation | **Live in the pipeline**, **dormant in production** until call-site swap. |
+| PQ-hybrid session root | **Live on current daemon channels** — native transfer derives from the channel's confirmed v3 hybrid root. The standalone in-process helper also fails closed by default; classical construction requires an explicit argument. |
 | Production call-site swap | **Deferred** to a separate commit per ADR-0024's cutover gate (zero-divergence shadow window first). |
 
 The shadow-window requirement: before the daemon's `send_file()` swaps from legacy to `native_transfer`, the bandit + folder-mirror + capability-dual paths must report zero divergence over a measurable production window (per ADR-0024). Those shadow counters are still accumulating; the swap is a follow-up commit, not this one.

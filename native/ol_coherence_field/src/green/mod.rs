@@ -2,7 +2,7 @@
 //!
 //! ## Theory
 //!
-//! From the S_One first-principles galaxy bridge (2026-03-28):
+//! From the `S_One` first-principles galaxy bridge (2026-03-28):
 //!
 //! ```text
 //! g_coh(x) = (c² / (4π · D · τ_∞)) · ∫ S_b(x') · (x − x') / |x − x'|³ dx'
@@ -107,8 +107,7 @@ mod tests {
         for w in contributions.windows(2) {
             assert!(
                 w[1] < w[0],
-                "expected monotonic decrease, got {:?}",
-                contributions
+                "expected monotonic decrease, got {contributions:?}"
             );
         }
     }

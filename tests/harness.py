@@ -7,6 +7,7 @@ control ports + identities for the test body. Cleans up on exit.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -16,10 +17,14 @@ import sys
 import tempfile
 import time
 import uuid
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import BinaryIO, Iterator
+
+from one_link import control_ipc
 
 
 # ── live-daemon integration gate ───────────────────────────────────
@@ -44,6 +49,7 @@ from typing import Iterator
 # _spawn_daemon), so it skips PER TEST: a hermetic test sharing a file
 # with a daemon-spawning one still runs in the default gate.
 LIVE_INTEGRATION_ENV = "ONE_LINK_RUN_LIVE_INTEGRATION"
+_CONTROL_SECRETS: dict[int, str] = {}
 
 
 def live_integration_enabled() -> bool:
@@ -79,12 +85,14 @@ class DaemonHandle:
     control_port: int
     peer_port: int
     short_id: str
+    fingerprint: str
     hostname: str
+    control_secret: str
     # Audit fix: keep the log file handle on the handle so it can be
     # closed deterministically on _stop. Without this Python's GC
     # closes the BufferedWriter at finalization time, emitting a
     # ResourceWarning that shows up under pytest -W error::ResourceWarning.
-    log_fh: object | None = None
+    log_fh: BinaryIO | None = None
 
 
 @dataclass
@@ -140,39 +148,28 @@ def request(control_port: int, *, timeout: float = 30.0, **req) -> dict:
     but the timeout still caps the total wait at ~timeout seconds.
     """
     import time as _time
-    last_buf = b""
     last_exc: Exception | None = None
     backoff_s = (0.1, 0.4, 1.6)
     max_attempts = len(backoff_s) + 1
     for attempt in range(max_attempts):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(timeout)
         try:
-            try:
-                s.connect(("127.0.0.1", control_port))
-                s.sendall((json.dumps(req) + "\n").encode("utf-8"))
-                buf = b""
-                while not buf.endswith(b"\n"):
-                    chunk = s.recv(65536)
-                    if not chunk:
-                        break
-                    buf += chunk
-            except (ConnectionAbortedError, ConnectionResetError, OSError) as e:
-                last_exc = e
-                buf = b""
-        finally:
-            s.close()
-        last_buf = buf
-        if buf and buf.endswith(b"\n"):
-            return json.loads(buf.decode("utf-8").strip() or "{}")
+            secret = _CONTROL_SECRETS[int(control_port)]
+            return control_ipc.request_control(
+                control_port,
+                req,
+                timeout=timeout,
+                secret=secret,
+            )
+        except (ConnectionAbortedError, ConnectionResetError, OSError) as e:
+            last_exc = e
         if attempt < len(backoff_s):
             _time.sleep(backoff_s[attempt])
-    if last_exc is not None and not last_buf:
+    if last_exc is not None:
         raise last_exc
-    return json.loads(last_buf.decode("utf-8").strip() or "{}")
+    raise RuntimeError("control request returned no response")
 
 
-def _spawn(home: Path, log: Path, mdns_type: str | None = None) -> tuple[subprocess.Popen, object]:
+def _spawn(home: Path, log: Path, mdns_type: str | None = None) -> tuple[subprocess.Popen, BinaryIO]:
     """Returns (proc, log_fh). Caller stores the log_fh on the handle
     and closes it after the proc exits — keeps Python's GC from
     emitting ResourceWarning at random later moments."""
@@ -185,11 +182,9 @@ def _spawn(home: Path, log: Path, mdns_type: str | None = None) -> tuple[subproc
     # the same LAN — the live lane stays reliable on a busy host.
     if mdns_type:
         env["ONE_LINK_MDNS_SERVICE_TYPE"] = mdns_type
-    # 2026-05-22 UX: the production default changed to LAN-bind
-    # (0.0.0.0) so phones can complete the pair flow without an env
-    # var. Tests stay loopback-only — they don't need LAN exposure
-    # and binding 0.0.0.0 conflicts with any other daemon (test or
-    # real) holding the well-known port on a different interface.
+    # Production and tests default to loopback. LAN exposure is an explicit
+    # launcher opt-in and would also conflict with another local test/daemon
+    # holding a well-known port on a different interface.
     env.setdefault("ONE_LINK_BIND_HOST", "127.0.0.1")
     # v0.7.x: defence-in-depth. conftest.py already sets this at
     # module-import time, but if a future test path starts a daemon
@@ -223,7 +218,13 @@ def _spawn(home: Path, log: Path, mdns_type: str | None = None) -> tuple[subproc
     return proc, f
 
 
-def _stop(proc: subprocess.Popen) -> None:
+def _stop(
+    proc: subprocess.Popen,
+    *,
+    home: Path | None = None,
+    control_port: int | None = None,
+    control_secret: str | None = None,
+) -> None:
     """Stop a test daemon GRACEFULLY so it has a chance to send mDNS goodbye
     packets — this is what stops cross-test pollution where a dead daemon's
     record lingers in another daemon's discovery registry.
@@ -235,40 +236,154 @@ def _stop(proc: subprocess.Popen) -> None:
     On POSIX, SIGTERM does the same job via Python's default signal handling.
     SIGKILL (terminate's behaviour on Windows, .kill() everywhere) is the
     last-resort fallback.
+
+    ``Popen.pid`` is not necessarily the socket-owning daemon PID on Windows:
+    a virtual-environment ``python.exe`` launcher can remain as the parent of
+    the base interpreter.  Teardown therefore authenticates the daemon through
+    its per-home control secret first, then verifies and reaps every remaining
+    One Link process whose ``ONE_LINK_HOME`` exactly matches this test home.
     """
-    if proc.poll() is not None:
+    resolved_home = Path(home).resolve() if home is not None else None
+    serving_pid: int | None = None
+    resolved_control_port = control_port
+    secret = control_secret
+
+    if resolved_home is not None:
+        if resolved_control_port is None:
+            try:
+                resolved_control_port = _read_port(
+                    resolved_home,
+                    "control.port",
+                    timeout=0.25,
+                )
+            except RuntimeError:
+                resolved_control_port = None
+        if secret is None:
+            try:
+                secret = control_ipc.read_control_secret(resolved_home / "data")
+            except RuntimeError:
+                secret = None
+        if resolved_control_port is not None and secret is not None:
+            try:
+                status = control_ipc.request_control(
+                    resolved_control_port,
+                    {"cmd": "status"},
+                    timeout=2.0,
+                    secret=secret,
+                )
+                expected_data = os.path.normcase(
+                    str((resolved_home / "data").resolve())
+                )
+                reported_data = os.path.normcase(
+                    str(Path(str(status.get("home") or "")).resolve())
+                )
+                candidate_pid = status.get("pid")
+                if (
+                    status.get("ok") is True
+                    and type(candidate_pid) is int
+                    and candidate_pid > 0
+                    and reported_data == expected_data
+                ):
+                    serving_pid = candidate_pid
+                    control_ipc.request_control(
+                        resolved_control_port,
+                        {"cmd": "shutdown"},
+                        timeout=2.0,
+                        secret=secret,
+                    )
+            except (OSError, RuntimeError, ValueError):
+                pass
+
+    if proc.poll() is not None and resolved_home is None:
         return
 
     import signal
 
-    sent_graceful = False
-    try:
-        if os.name == "nt":
-            proc.send_signal(signal.CTRL_BREAK_EVENT)
-        else:
-            proc.send_signal(signal.SIGTERM)
-        sent_graceful = True
-    except Exception:
-        pass
+    # Give an authenticated shutdown enough time to flush state, withdraw
+    # runtime publications, and send mDNS goodbye before using OS signals.
+    if serving_pid is not None:
+        try:
+            import psutil
 
-    if sent_graceful:
+            psutil.Process(serving_pid).wait(timeout=8.0)
+        except ImportError:
+            pass
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.TimeoutExpired:
+            pass
+
+    sent_graceful = False
+    if proc.poll() is None:
+        try:
+            if os.name == "nt":
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                proc.send_signal(signal.SIGTERM)
+            sent_graceful = True
+        except Exception:
+            pass
+
+    if sent_graceful and proc.poll() is None:
         try:
             proc.wait(timeout=5)
-            return
         except subprocess.TimeoutExpired:
             pass
 
-    # Fall through: hard terminate / kill
-    try:
-        proc.terminate()
-        proc.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    if resolved_home is not None:
+        # Fail-safe cleanup is strictly scoped to this test's exact home and a
+        # One Link daemon command line. It can never target the developer's
+        # normal daemon or another concurrent cohort.
         try:
+            import psutil
+
+            expected_home = os.path.normcase(str(resolved_home))
+            matches: list[psutil.Process] = []
+            for candidate in psutil.process_iter(["cmdline"]):
+                try:
+                    argv = candidate.info.get("cmdline") or []
+                    lowered = [str(arg).strip().lower() for arg in argv]
+                    is_daemon = (
+                        "-m" in lowered
+                        and "one_link.cli" in lowered
+                        and "daemon" in lowered
+                    )
+                    candidate_home = candidate.environ().get("ONE_LINK_HOME")
+                    if (
+                        is_daemon
+                        and candidate_home
+                        and os.path.normcase(str(Path(candidate_home).resolve()))
+                        == expected_home
+                    ):
+                        matches.append(candidate)
+                except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+                    continue
+            for candidate in matches:
+                with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+                    candidate.terminate()
+            _, alive = psutil.wait_procs(matches, timeout=3.0)
+            for candidate in alive:
+                with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+                    candidate.kill()
+            _, alive = psutil.wait_procs(alive, timeout=3.0)
+            if alive:
+                raise RuntimeError(
+                    "test daemon teardown left exact-home processes alive: "
+                    + ", ".join(str(candidate.pid) for candidate in alive)
+                )
+        except ImportError:
+            pass
+
+    # Reap or terminate the launcher stub after its serving child is gone.
+    if proc.poll() is None:
+        try:
+            proc.terminate()
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
-            pass
-        proc.wait(timeout=5)
+            proc.kill()
+            proc.wait(timeout=5)
+    if resolved_control_port is not None:
+        _CONTROL_SECRETS.pop(int(resolved_control_port), None)
 
 
 def _read_log(p: Path, n: int = 4000) -> str:
@@ -283,6 +398,12 @@ def _bring_up(home: Path, log: Path, label: str, mdns_type: str | None = None) -
     try:
         ctrl = _read_port(home, "control.port")
         peer = _read_port(home, "peer.port")
+        secret_path = home / "data" / control_ipc.CONTROL_SECRET_FILE
+        secret_deadline = time.time() + 8.0
+        while time.time() < secret_deadline and not secret_path.is_file():
+            time.sleep(0.05)
+        secret = control_ipc.read_control_secret(home / "data")
+        _CONTROL_SECRETS[ctrl] = secret
         if not _wait_port(ctrl, timeout=8.0):
             raise RuntimeError(
                 f"daemon {label} control socket not responsive\n--- log ---\n"
@@ -327,11 +448,13 @@ def _bring_up(home: Path, log: Path, label: str, mdns_type: str | None = None) -
             control_port=ctrl,
             peer_port=peer,
             short_id=info["me"]["short_id"],
+            fingerprint=info["me"]["fingerprint"],
             hostname=info["me"]["hostname"],
+            control_secret=secret,
             log_fh=log_fh,
         )
     except Exception:
-        _stop(proc)
+        _stop(proc, home=home)
         try:
             log_fh.close()
         except Exception:
@@ -339,9 +462,52 @@ def _bring_up(home: Path, log: Path, label: str, mdns_type: str | None = None) -
         raise
 
 
+def _pin_test_peer(source: DaemonHandle, peer: DaemonHandle) -> None:
+    """Pin one live test peer through the authenticated production API.
+
+    mDNS discovery deliberately leaves new peers pending. Transport tests that
+    exercise chat/files must opt into a paired cohort instead of depending on
+    the historical ``policy=None`` fail-open behavior for pending LAN peers.
+    The HTTP path keeps the fixture aligned with the daemon's canonical trust
+    mutation and mDNS-seeding semantics; it does not write SQLite directly.
+    """
+    server_port = int((source.home / "data" / "server.port").read_text().strip())
+    ui_token = (source.home / "data" / "ui.token").read_text().strip()
+    body = json.dumps({"trust": "pinned"}).encode("utf-8")
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{server_port}/api/peers/{peer.fingerprint}/trust",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {ui_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10.0) as response:
+            status = int(response.status)
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"test trust pin {source.short_id}->{peer.short_id} failed "
+            f"with HTTP {exc.code}: {detail}"
+        ) from exc
+    if status != 200 or not payload.get("ok"):
+        raise RuntimeError(
+            f"test trust pin {source.short_id}->{peer.short_id} returned "
+            f"HTTP {status}: {payload!r}"
+        )
+
+
 @contextmanager
-def daemon_pair() -> Iterator[DaemonPair]:
-    """Spin up two daemons, wait for mDNS convergence, yield, then tear down."""
+def daemon_pair(*, pin_trust: bool = False) -> Iterator[DaemonPair]:
+    """Spin up two daemons, converge mDNS, and optionally pin both peers.
+
+    ``pin_trust=False`` preserves the pending-peer surface needed by pairing
+    and authorization tests. Live transport tests pass ``pin_trust=True`` so
+    capability checks run with the same post-pairing authority as production.
+    """
     # Gate: spawning real daemon subprocesses is the live-integration
     # lane. Skip the calling test in the default (hermetic) gate.
     require_live_daemon()
@@ -377,17 +543,30 @@ def daemon_pair() -> Iterator[DaemonPair]:
                 f"--- A log ---\n{_read_log(a_log)}\n"
                 f"--- B log ---\n{_read_log(b_log)}"
             )
+        if pin_trust:
+            _pin_test_peer(a, b)
+            _pin_test_peer(b, a)
         yield DaemonPair(a=a, b=b, tmp=tmp)
     finally:
         if a is not None:
-            _stop(a.proc)
+            _stop(
+                a.proc,
+                home=a.home,
+                control_port=a.control_port,
+                control_secret=a.control_secret,
+            )
             try:
                 if a.log_fh is not None:
                     a.log_fh.close()
             except Exception:
                 pass
         if b is not None:
-            _stop(b.proc)
+            _stop(
+                b.proc,
+                home=b.home,
+                control_port=b.control_port,
+                control_secret=b.control_secret,
+            )
             try:
                 if b.log_fh is not None:
                     b.log_fh.close()

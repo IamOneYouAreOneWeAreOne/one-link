@@ -1,0 +1,137 @@
+{
+  "status": {
+    "ok": true,
+    "pid": 28980,
+    "app_version": "0.21.0-alpha",
+    "package_root": "C:\\Users\\Josh\\Projects\\Coherence\\One_link\\src\\one_link",
+    "source_fingerprint": "2700bbde6642951c73df7421a8a4749e",
+    "protocol_version": "OL1.2",
+    "schema_version": 21,
+    "python": "C:\\Users\\Josh\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+    "home": "C:\\Users\\Josh\\AppData\\Local\\Coherence\\One_link",
+    "ui_server_port": 7119,
+    "ui_https_port": 7120,
+    "me": {
+      "short_id": "f815dc8e",
+      "fingerprint": "f815dc8e2e3d83e34d87133ae030fe5a16f1b06f5d9644a1496a6c1942185c31",
+      "hostname": "WeareOne"
+    },
+    "peer_rtc_attestation": {
+      "require_attested_peers": false,
+      "gate_drop_count": 0,
+      "scope": "webrtc-dc"
+    },
+    "native_status": {
+      "prefetch": {
+        "available": true,
+        "storage_entries": 0
+      },
+      "routing": {
+        "available": true
+      },
+      "homology": {
+        "available": true
+      },
+      "coherence_field": {
+        "available": true,
+        "calibration": {
+          "d": 100.0,
+          "gamma": 0.01,
+          "screening_length": 100.0,
+          "apparent_horizon_anchor": 1591549.4309189534
+        },
+        "snapshot_metrics": {
+          "field_solve_count": 0,
+          "field_solve_failures": 0,
+          "field_last_solve_ns": 0,
+          "field_topology_edge_count": 0,
+          "field_source_peer_count": 0,
+          "field_snapshot_peer_count": 0,
+          "field_snapshot_age_ms": -1.0
+        }
+      },
+      "bloom_init": {
+        "available": true,
+        "advertised": true
+      },
+      "quic_transport": {
+        "available": true,
+        "advertised": true,
+        "endpoint_up": true,
+        "local_port": 63685,
+        "known_peer_ports": 1
+      },
+      "native_transfer_v1": {
+        "advertised": false
+      },
+      "native_transfer_indexed_v1": {
+        "advertised": true
+      },
+      "macaroon_dual_issue": {
+        "last_minted": false,
+        "last_minted_len": 0
+      }
+    }
+  },
+  "quic": [
+    5.723,
+    3.592,
+    4.702,
+    3.966,
+    4.357,
+    2.572,
+    3.012,
+    3.932,
+    2.884,
+    5.409
+  ],
+  "chat": [
+    8.786899999904563,
+    146.24280000134604,
+    121.57709999883082,
+    120.44360000072629,
+    124.98629999936384,
+    134.52549999965413,
+    120.20769999980985,
+    128.21510000139824,
+    145.95379999991565,
+    122.33340000057069
+  ],
+  "files": {
+    "4KiB": [
+      189.58269999893673,
+      238.53690000032657,
+      175.95099999925878
+    ],
+    "512KiB": [
+      291.7993999999453,
+      360.16299999937473,
+      277.78630000102567
+    ],
+    "16MiB": [
+      652.2303000001557
+    ]
+  },
+  "quic_status": {
+    "ok": true,
+    "native_quic_available": true,
+    "server_up": true,
+    "local_port": 63685,
+    "outbound": [
+      {
+        "peer_fp": "fc9f0a5f1b91f3dd0acdbc1db709ddf0bbe3dd9bfaa549c71a3410c691eb2046",
+        "alive": true
+      }
+    ],
+    "inbound": [],
+    "advertised_ports": {
+      "fc9f0a5f1b91f3dd0acdbc1db709ddf0bbe3dd9bfaa549c71a3410c691eb2046": 61453
+    },
+    "recent_paired_count": 0
+  },
+  "transfer_diagnostics": {
+    "ok": true,
+    "degradation_events": [],
+    "count": 0
+  }
+}

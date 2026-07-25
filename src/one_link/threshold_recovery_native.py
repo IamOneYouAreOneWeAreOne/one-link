@@ -15,7 +15,7 @@ Two usage modes:
         from one_link import threshold_recovery_native as tr
 
         # Mint: split a 32-byte master seed across 5 trusted contacts.
-        streams = tr.shamir_split(master_seed, k=3, n=5, seed=os.urandom(8))
+        streams = tr.shamir_split_secure(master_seed, k=3, n=5)
         # Each `streams[i]` is the per-byte y-stream for share i+1.
         # Hand streams[i] (plus the x value i+1) to contact i.
 
@@ -31,38 +31,107 @@ Two usage modes:
         from one_link import threshold_recovery_native as tr
         from one_link import coherence_field_native as cf
 
-        # Derive a 32-byte field seed from the current Helmholtz solve.
+        import secrets
+        from blake3 import blake3
+
+        # The public field output is context, not secret entropy. Generate an
+        # independent secret and use the canonical field bytes only as keyed-KDF
+        # input. Keep binding_key/witness separate from the masked shares.
         field_state = field_snapshot_manager.snapshot()
-        field_seed = ...  # 32 bytes from field_state.field via BLAKE3
+        field_context = canonicalize_field_context(field_state)
+        binding_key = secrets.token_bytes(32)
+        field_seed = blake3(field_context, key=binding_key).digest()
         scores = [field_snapshot_manager.field_score_for_peer(p) for p in contacts]
         witness = tr.FieldWitness(field_seed, scores, epoch_ns)
 
         # Mint with the witness.
-        masked = tr.field_bound_split(master_seed, k=3, n=5, seed=..., witness)
+        masked = tr.field_bound_split_secure(master_seed, k=3, n=5, witness=witness)
 
         # Recover: requires the witness AND >= K masked shares.
         recovered = tr.field_bound_reconstruct(xs, ys, share_indices, k, witness)
 
-In Mode 2, an attacker holding all 5 raw masked shares but lacking
-the field witness cannot reconstruct — the masked bytes are
-information-theoretically independent of the secret without the
-witness-derived OTPs.
+In Mode 2, the field-binding key is a separate defense-in-depth factor. The
+Shamir threshold remains the primary protection; the witness must never be
+stored beside the masked shares.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 log = logging.getLogger(__name__)
 
+
+class ThresholdRecoveryCapabilityError(RuntimeError):
+    """The installed native extension cannot satisfy its declared ABI."""
+
+
+_REQUIRED_NATIVE_CALLABLES = (
+    "shamir_split",
+    "shamir_split_secure",
+    "shamir_reconstruct",
+    "shamir_max_participants",
+    "shamir_params_valid",
+    "field_bound_split",
+    "field_bound_split_secure",
+    "field_bound_reconstruct",
+)
+_FALLBACK_POLICY_ENV = "ONE_LINK_THRESHOLD_RECOVERY_PYTHON_FALLBACK"
+
+
+def _missing_native_abi(module: Any) -> tuple[str, ...]:
+    """Return the full missing/non-callable ABI set for one candidate module."""
+
+    missing = [
+        name
+        for name in _REQUIRED_NATIVE_CALLABLES
+        if not callable(getattr(module, name, None))
+    ]
+    witness = getattr(module, "FieldWitness", None)
+    if not callable(witness):
+        missing.append("FieldWitness")
+    elif not callable(getattr(witness, "placeholder", None)):
+        missing.append("FieldWitness.placeholder")
+    return tuple(missing)
+
+
+def python_fallback_permitted() -> bool:
+    """Return the explicit compatibility policy for reviewed Python Shamir.
+
+    The existing product contract permits the CSPRNG-backed pure-Python
+    implementation when native code is absent.  Hardened deployments can set
+    the variable to ``0``/``false``/``no`` and receive a capability error
+    instead.  Unknown values fail closed rather than silently weakening policy.
+    """
+
+    raw = os.environ.get(_FALLBACK_POLICY_ENV, "1").strip().casefold()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    log.error("invalid %s value %r; Python fallback disabled", _FALLBACK_POLICY_ENV, raw)
+    return False
+
+
+_NATIVE_MISSING_ABI: tuple[str, ...] = ()
+_NATIVE_IMPORT_ERROR = ""
 try:
     from one_link_native import threshold_recovery as _native_tr  # type: ignore[import-not-found,attr-defined]
 
-    HAS_NATIVE: bool = True
+    _NATIVE_MISSING_ABI = _missing_native_abi(_native_tr)
+    HAS_NATIVE: bool = not _NATIVE_MISSING_ABI
+    if _NATIVE_MISSING_ABI:
+        log.warning(
+            "one_link_native.threshold_recovery has an incomplete/stale ABI "
+            "(missing: %s); native threshold recovery disabled",
+            ", ".join(_NATIVE_MISSING_ABI),
+        )
 except ImportError as exc:
     HAS_NATIVE = False
     _native_tr = None  # type: ignore[assignment]
+    _NATIVE_IMPORT_ERROR = str(exc)
     log.info(
         "one_link_native.threshold_recovery not installed (%s); "
         "sovereign identity recovery unavailable. Build via "
@@ -80,15 +149,29 @@ def shamir_split(
     ``len(secret)`` and is the per-byte y-stream of the polynomial
     p_b(x = i + 1) for each secret byte b. Hand share i to contact i.
 
-    ``seed`` is a 64-bit value the caller supplies for deterministic
-    coefficient generation. Production callers should use a fresh
-    cryptographic RNG sample.
+    ``seed`` selects deterministic coefficient generation and is intended
+    for test vectors and migrations. Production code should call
+    :func:`shamir_split_secure`; a 64-bit seed cannot provide a modern
+    cryptographic security margin.
 
     Raises ``ValueError`` on invalid (k, n).
     """
     _require_native()
     result: list[bytes] = _native_tr.shamir_split(
         secret, int(k), int(n), int(seed)
+    )
+    return result
+
+
+def shamir_split_secure(secret: bytes, *, k: int, n: int) -> list[bytes]:
+    """Split using fresh operating-system CSPRNG entropy.
+
+    This is the production entry point. Randomness is generated inside the
+    native boundary and is never returned to Python.
+    """
+    _require_native()
+    result: list[bytes] = _native_tr.shamir_split_secure(
+        bytes(secret), int(k), int(n)
     )
     return result
 
@@ -127,6 +210,8 @@ def split_compat(
     native extension isn't installed.
     """
     if not HAS_NATIVE:
+        if not python_fallback_permitted():
+            _require_native()
         from one_link import threshold as _py_threshold
 
         shares = _py_threshold.split(
@@ -142,13 +227,7 @@ def split_compat(
             f"invalid threshold={threshold} / num_shares={num_shares}; "
             f"need 2 <= threshold <= num_shares <= 255"
         )
-    import os
-    # Use a fresh 8-byte CSPRNG seed for coefficient generation. The
-    # native impl XORs this with BLAKE3-derived per-byte randomness
-    # to produce the polynomial coefficients; production-safe.
-    seed_bytes = os.urandom(8)
-    seed_u64 = int.from_bytes(seed_bytes, "little", signed=False)
-    streams = shamir_split(bytes(secret), k=threshold, n=num_shares, seed=seed_u64)
+    streams = shamir_split_secure(bytes(secret), k=threshold, n=num_shares)
     return [(i + 1, streams[i]) for i in range(num_shares)]
 
 
@@ -161,6 +240,8 @@ def combine_compat(shares: list[tuple[int, bytes]], *, threshold: int) -> bytes:
     are accepted (we drop to the first `threshold` for the LU solve).
     """
     if not HAS_NATIVE:
+        if not python_fallback_permitted():
+            _require_native()
         from one_link import threshold as _py_threshold
 
         return _py_threshold.combine(
@@ -241,6 +322,21 @@ def field_bound_split(
     return result
 
 
+def field_bound_split_secure(
+    secret: bytes,
+    *,
+    k: int,
+    n: int,
+    witness: Any,
+) -> list[bytes]:
+    """Production field-bound split using native OS CSPRNG entropy."""
+    _require_native()
+    result: list[bytes] = _native_tr.field_bound_split_secure(
+        bytes(secret), int(k), int(n), witness
+    )
+    return result
+
+
 def field_bound_reconstruct(
     xs: list[int] | bytes,
     streams: list[bytes],
@@ -271,8 +367,13 @@ def field_bound_reconstruct(
 
 def _require_native() -> None:
     if not HAS_NATIVE:
-        raise RuntimeError(
-            "one_link_native.threshold_recovery required for sovereign "
-            "identity recovery but not installed; build via "
+        detail = (
+            f"installed extension is incomplete (missing: {', '.join(_NATIVE_MISSING_ABI)})"
+            if _NATIVE_MISSING_ABI
+            else f"extension import failed ({_NATIVE_IMPORT_ERROR or 'not installed'})"
+        )
+        raise ThresholdRecoveryCapabilityError(
+            "complete one_link_native.threshold_recovery ABI required by policy; "
+            f"{detail}. Build/install the matching release via "
             "`cd native && maturin develop --release`."
         )

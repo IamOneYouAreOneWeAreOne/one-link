@@ -4,6 +4,14 @@
 **Phase:** A2 (item #10: QUIC transport)
 **Depends on:** ADR-0003 (chunk record format), ADR-0007 (WAL framing semantics)
 
+> **Integration truth review (2026-07-24):** this ADR records the transport
+> design decision, not proof that every listed property is active in the
+> product. The current daemon runtime-gates identity-bound native QUIC file
+> lanes after capability/ABI checks; it has not replaced the authenticated
+> control/message channel or browser WebRTC. The 0-RTT and connection-migration
+> statements below are design requirements until their named physical and
+> packaged-runtime gates are archived.
+
 ---
 
 ## Context

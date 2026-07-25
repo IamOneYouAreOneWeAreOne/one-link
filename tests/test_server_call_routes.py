@@ -21,8 +21,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import blake3
 
 from one_link.call_manager import (
-    CallManager,
-    CallManagerRegistry,
     ManagerEvent,
     ManagerEventKind,
 )
@@ -97,6 +95,7 @@ def test_call_api_cached_on_first_access() -> None:
 async def test_initiate_returns_call_id_and_phase() -> None:
     srv, daemon = _server_with_daemon()
     peer = _identity("mom-routes")
+    daemon._call_capability_allowed = lambda _peer, _kind: True  # type: ignore[method-assign]
     daemon.flush_call_api_response = AsyncMock(  # type: ignore[method-assign]
         return_value=(peer.fingerprint,),
     )
@@ -119,6 +118,7 @@ async def test_initiate_returns_call_id_and_phase() -> None:
 async def test_initiate_reports_unreachable_when_invite_not_delivered() -> None:
     srv, daemon = _server_with_daemon()
     peer = _identity("mom-unreachable")
+    daemon._call_capability_allowed = lambda _peer, _kind: True  # type: ignore[method-assign]
     daemon.flush_call_api_response = AsyncMock(return_value=())  # type: ignore[method-assign]
     req = _FakeRequest(body={
         "action": "initiate",
@@ -132,6 +132,51 @@ async def test_initiate_reports_unreachable_when_invite_not_delivered() -> None:
     assert payload["phase"] == "inviting"
     assert payload["delivered"] == []
     assert "Computer 2 is not reachable right now" in payload["user_message"]
+
+
+@pytest.mark.asyncio
+async def test_initiate_enforces_voice_video_capability_before_allocation() -> None:
+    srv, daemon = _server_with_daemon()
+    peer = _identity("call-policy-denied")
+    seen: list[tuple[str, str]] = []
+
+    def _deny(peer_fp: str, kind: str) -> bool:
+        seen.append((peer_fp, kind))
+        return False
+
+    daemon._call_capability_allowed = _deny  # type: ignore[method-assign]
+    resp = await srv.api_call_action(_FakeRequest(body={  # type: ignore[arg-type]
+        "action": "initiate",
+        "peer_master_vk_hex": peer.fingerprint,
+        "kind": "video",
+    }))
+    import json
+    payload = json.loads(resp._body or b"")
+    assert resp.status == 403
+    assert payload["ok"] is False
+    assert seen == [(peer.fingerprint, "video")]
+    assert len(daemon._call_registry) == 0
+
+
+@pytest.mark.asyncio
+async def test_initiate_propagates_kind_to_wire_response() -> None:
+    srv, daemon = _server_with_daemon()
+    peer = _identity("video-kind-routes")
+    daemon._call_capability_allowed = lambda _peer, kind: kind == "video"  # type: ignore[method-assign]
+    daemon.flush_call_api_response = AsyncMock(  # type: ignore[method-assign]
+        return_value=(peer.fingerprint,),
+    )
+    resp = await srv.api_call_action(_FakeRequest(body={  # type: ignore[arg-type]
+        "action": "initiate",
+        "peer_master_vk_hex": peer.fingerprint,
+        "kind": "video",
+    }))
+    import json
+    payload = json.loads(resp._body or b"")
+    assert payload["ok"] is True
+    assert payload["call_kind"] == "video"
+    result = daemon.flush_call_api_response.await_args.args[0]
+    assert result.outbound[0].payload["call_kind"] == "video"
 
 
 @pytest.mark.asyncio

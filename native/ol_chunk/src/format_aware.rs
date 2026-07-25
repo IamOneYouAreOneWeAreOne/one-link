@@ -11,7 +11,7 @@
 //! 1. Detect format from path-extension hint + leading bytes magic.
 //! 2. If a structured format is detected, walk the buffer and collect
 //!    **forced cut offsets**: positions where the chunk boundary should
-//!    be pinned regardless of FastCDC's rolling-hash decision.
+//!    be pinned regardless of `FastCDC`'s rolling-hash decision.
 //! 3. Run CDC on each `[forced_cut_i .. forced_cut_{i+1})` segment
 //!    independently. The forced cuts become hard boundaries.
 //!
@@ -185,12 +185,12 @@ pub fn mp4_box_offsets(buffer: &[u8]) -> Vec<usize> {
     let mut offsets = Vec::new();
     let mut pos = 0usize;
     while pos + 8 <= buffer.len() {
-        let size = u32::from_be_bytes([
+        let size = u64::from(u32::from_be_bytes([
             buffer[pos],
             buffer[pos + 1],
             buffer[pos + 2],
             buffer[pos + 3],
-        ]) as u64;
+        ]));
         let kind = &buffer[pos + 4..pos + 8];
         // Sanity: the 4-byte type MUST be 4 ASCII chars. Any non-
         // printable rejects the rest of the buffer.
@@ -219,7 +219,13 @@ pub fn mp4_box_offsets(buffer: &[u8]) -> Vec<usize> {
         if advance < 8 {
             break;
         }
-        pos = pos.saturating_add(advance as usize);
+        let Ok(advance) = usize::try_from(advance) else {
+            break;
+        };
+        let Some(next_pos) = pos.checked_add(advance) else {
+            break;
+        };
+        pos = next_pos;
     }
     offsets
 }
@@ -267,7 +273,7 @@ pub fn wav_data_offset(buffer: &[u8]) -> Option<usize> {
 /// (`0x50` = `'P'`), then checks the full 4-byte sequence + sanity
 /// gate at each candidate. On x86 with SSE2/AVX2 this runs at
 /// ~10-30 GiB/s through `buffer` — far faster than the 5 GiB/s budget
-/// the FastCDC kernel itself runs at.
+/// the `FastCDC` kernel itself runs at.
 #[must_use]
 pub fn zip_lfh_offsets(buffer: &[u8]) -> Vec<usize> {
     let mut out = Vec::new();
@@ -485,6 +491,7 @@ mod tests {
         // doesn't have a central directory; the scanner only cares
         // about LFH offsets.
         let mut buf = Vec::new();
+        let entry_size_u32 = u32::try_from(entry_size).expect("test ZIP entry fits in u32");
         for i in 0..entries {
             // LFH:
             buf.extend_from_slice(&ZIP_LFH_MAGIC);
@@ -494,14 +501,15 @@ mod tests {
             buf.extend_from_slice(&0u16.to_le_bytes()); // mod_time
             buf.extend_from_slice(&0u16.to_le_bytes()); // mod_date
             buf.extend_from_slice(&0u32.to_le_bytes()); // crc-32
-            buf.extend_from_slice(&(entry_size as u32).to_le_bytes()); // compressed_size
-            buf.extend_from_slice(&(entry_size as u32).to_le_bytes()); // uncompressed_size
+            buf.extend_from_slice(&entry_size_u32.to_le_bytes()); // compressed_size
+            buf.extend_from_slice(&entry_size_u32.to_le_bytes()); // uncompressed_size
             buf.extend_from_slice(&7u16.to_le_bytes()); // name_length
             buf.extend_from_slice(&0u16.to_le_bytes()); // extra_length
             let name = format!("file{i:02}\0");
             buf.extend_from_slice(&name.as_bytes()[..7]);
             // Entry body.
-            buf.extend(std::iter::repeat_n(0xAB ^ (i as u8), entry_size));
+            let entry_marker = u8::try_from(i).expect("test ZIP entry index fits in u8");
+            buf.extend(std::iter::repeat_n(0xAB ^ entry_marker, entry_size));
         }
         buf
     }
@@ -556,7 +564,7 @@ mod tests {
     fn wav_data_offset_finds_data_chunk() {
         // RIFF + WAVE + fmt (24 bytes) + data + payload (8 bytes)
         let mut buf = vec![0u8; 12 + 24 + 8 + 8];
-        let payload_len = (buf.len() - 8) as u32;
+        let payload_len = u32::try_from(buf.len() - 8).expect("test RIFF payload fits in u32");
         buf[0..4].copy_from_slice(b"RIFF");
         buf[4..8].copy_from_slice(&payload_len.to_le_bytes());
         buf[8..12].copy_from_slice(b"WAVE");
@@ -685,7 +693,7 @@ mod tests {
         // Random binary that does NOT look like ZIP.
         let mut buf = vec![0u8; 512 * 1024];
         for (i, b) in buf.iter_mut().enumerate() {
-            *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+            *b = i.to_le_bytes()[0].wrapping_mul(31).wrapping_add(7);
         }
         let r = scan_format_aware(&buf, Some(ContainerFormat::Zip), CdcParams::default()).unwrap();
         let plain: Vec<Boundary> = ChunkScanner::new(&buf).collect();

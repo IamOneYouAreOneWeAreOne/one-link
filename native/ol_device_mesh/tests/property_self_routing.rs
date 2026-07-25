@@ -68,7 +68,9 @@ proptest! {
         let announcer = [0u8; DEVICE_ID_LEN];
         let links: Vec<PeerLink> = (0..n).map(|i| {
             let mut peer = [0u8; DEVICE_ID_LEN];
-            peer[0] = i as u8 + 1;
+            peer[0] = u8::try_from(i)
+                .expect("the generator creates at most 15 links")
+                + 1;
             link_for(peer, 100, 1)
         }).collect();
         let bytes = RouteAnnouncement::canonical_transcript(&announcer, 0, 0, &links);
@@ -100,8 +102,13 @@ proptest! {
         let vk = HybridVerifyingKey::from_bytes(&att.subkey_vk_bytes).unwrap();
         let links: Vec<PeerLink> = (1..=n_links).map(|i| {
             let mut peer = [0u8; DEVICE_ID_LEN];
-            peer[0] = i as u8 + 1;
-            link_for(peer, (i as TauScore) * 10, i as u64)
+            peer[0] = u8::try_from(i)
+                .expect("the generator creates at most 15 links")
+                + 1;
+            let tau = TauScore::try_from(i).expect("the generated link count fits in TauScore");
+            let last_seen =
+                u64::try_from(i).expect("supported Rust pointer widths fit in u64");
+            link_for(peer, tau * 10, last_seen)
         }).collect();
         let ann = sign_route_announcement(&sk, announced_at, links).unwrap();
         ann.verify(&vk).unwrap();
@@ -135,7 +142,12 @@ fn make_devices(
     let mut sks = Vec::new();
     let mut vks = Vec::new();
     for _ in 0..n {
-        let id = [(ids.len() + 1) as u8; DEVICE_ID_LEN];
+        let ordinal = ids
+            .len()
+            .checked_add(1)
+            .and_then(|value| u8::try_from(value).ok())
+            .expect("test meshes contain at most u8::MAX devices");
+        let id = [ordinal; DEVICE_ID_LEN];
         let (sk, att) = mint_subkey(&master, DeviceClass::Phone, id, 0, 365).unwrap();
         let vk = HybridVerifyingKey::from_bytes(&att.subkey_vk_bytes).unwrap();
         ids.push(id);

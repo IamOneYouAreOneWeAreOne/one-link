@@ -155,6 +155,32 @@ def test_state_chain_key_first_byte_collision_is_safe(tmp_path):
         state.close()
 
 
+def test_state_chain_key_rejects_invalid_storage_envelope_length(tmp_path):
+    state = _new_state(tmp_path)
+    try:
+        state.upsert_sender_chain(
+            group_id=b"g" * 16,
+            sender_pub=b"s" * 32,
+            direction="out",
+            epoch=6,
+            chain_key=b"k" * 32,
+            counter=0,
+        )
+        state._conn.execute(
+            "UPDATE group_sender_chains SET chain_key = ?",
+            (lb.WRAP_MARKER + b"x" * 32,),
+        )
+
+        with pytest.raises(ValueError, match="invalid stored chain_key length"):
+            state.get_sender_chain(
+                group_id=b"g" * 16,
+                sender_pub=b"s" * 32,
+                direction="out",
+            )
+    finally:
+        state.close()
+
+
 def test_lockbox_top_level_helpers_passthrough_when_none():
     assert maybe_wrap(b"hello", None) == b"hello"
     assert maybe_unwrap(b"hello", None) == b"hello"

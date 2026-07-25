@@ -16,7 +16,10 @@ use rand_core::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
-use crate::chain_key::{derive_chain_key, ChainKey};
+use crate::chain_key::{
+    derive_chain_key, factor2_confirmation_matches, factor2_confirmation_tag, mix_factor2_recip,
+    ChainKey, Factor2ConfirmationRole, FACTOR2_CONFIRMATION_TAG_LEN,
+};
 use crate::confirm::PairConfirm;
 use crate::errors::{PairError, PairResult};
 use crate::invite::{CapabilityScope, Invite, INVITE_NONCE_LEN};
@@ -31,6 +34,9 @@ pub enum InviterState {
     AwaitingResponse,
     /// Response received + verified; waiting for user to confirm SAS.
     AwaitingUserConfirm,
+    /// A Factor-2 confirm was sent. The final chain key remains sealed until
+    /// the scanner proves possession of the same mixed key.
+    AwaitingFactor2Ack,
     /// User confirmed; chain key derived; pairing complete.
     Done,
     /// Pairing was aborted (e.g. user said SAS mismatch).
@@ -129,7 +135,9 @@ impl Inviter {
         self.sas = Some(sas);
         self.pending_chain_key = Some(chain_key);
         self.state = InviterState::AwaitingUserConfirm;
-        Ok(self.sas.as_ref().expect("just set"))
+        self.sas
+            .as_ref()
+            .ok_or(PairError::Internal("SAS state update failed"))
     }
 
     /// View the SAS without advancing state (e.g. for re-displaying
@@ -142,21 +150,81 @@ impl Inviter {
     /// User confirmed the SAS matches. Sign the [`PairConfirm`] and
     /// finalize the chain key. Returns `(confirm_bytes, chain_key)`.
     pub fn confirm(&mut self) -> PairResult<(Vec<u8>, ChainKey)> {
-        self.confirm_inner(None)
+        self.confirm_inner()
     }
 
-    /// Like [`Inviter::confirm`] but mixes in a Factor-2
-    /// channel-reciprocity key (output of `ol_proximity_pair::privacy_amplify`).
-    /// Both peers MUST supply the same factor-2 key; otherwise the
-    /// chain keys diverge and the first ciphertext fails to decrypt.
-    pub fn confirm_with_factor2(
-        &mut self,
-        factor2_key: &[u8; 32],
-    ) -> PairResult<(Vec<u8>, ChainKey)> {
-        self.confirm_inner(Some(factor2_key))
+    /// Begin a mutually confirmed Factor-2 exchange.
+    ///
+    /// The returned frame contains the signed `PairConfirm` followed by a
+    /// transcript-bound proof of the final mixed chain key. Unlike the plain
+    /// [`Inviter::confirm`] path, this method deliberately does **not** return
+    /// a chain key. The caller must send the frame to the scanner and pass
+    /// its acknowledgement to [`Inviter::receive_factor2_ack`]. This prevents
+    /// divergent or unconfirmed Factor-2 material from entering a ratchet.
+    pub fn confirm_with_factor2(&mut self, factor2_key: &[u8; 32]) -> PairResult<Vec<u8>> {
+        if self.state != InviterState::AwaitingUserConfirm {
+            return Err(PairError::WrongState);
+        }
+        let transcript = self
+            .transcript
+            .ok_or(PairError::Internal("transcript missing"))?;
+        let base_chain_key = self
+            .pending_chain_key
+            .take()
+            .ok_or(PairError::Internal("chain_key missing"))?;
+        let final_chain_key = mix_factor2_recip(&base_chain_key, factor2_key);
+        let confirm = PairConfirm::sign(&self.id_signing, transcript);
+        let mut bytes = confirm.encode();
+        let tag = factor2_confirmation_tag(
+            &final_chain_key,
+            &transcript,
+            Factor2ConfirmationRole::Inviter,
+        );
+        bytes.extend_from_slice(&tag);
+
+        self.pending_chain_key = Some(final_chain_key);
+        self.state = InviterState::AwaitingFactor2Ack;
+        self.ephemeral_secret = None;
+        Ok(bytes)
     }
 
-    fn confirm_inner(&mut self, factor2_key: Option<&[u8; 32]>) -> PairResult<(Vec<u8>, ChainKey)> {
+    /// Verify the scanner's Factor-2 acknowledgement and release the final
+    /// chain key only after both peers have proven possession of the same
+    /// mixed key.
+    pub fn receive_factor2_ack(&mut self, ack: &[u8]) -> PairResult<ChainKey> {
+        if self.state != InviterState::AwaitingFactor2Ack {
+            return Err(PairError::WrongState);
+        }
+        if ack.len() != FACTOR2_CONFIRMATION_TAG_LEN {
+            return Err(PairError::BadFactor2ConfirmationLen {
+                expected: FACTOR2_CONFIRMATION_TAG_LEN,
+                got: ack.len(),
+            });
+        }
+        let transcript = self
+            .transcript
+            .ok_or(PairError::Internal("transcript missing"))?;
+        let chain_key = self
+            .pending_chain_key
+            .as_ref()
+            .ok_or(PairError::Internal("chain_key missing"))?;
+        let expected =
+            factor2_confirmation_tag(chain_key, &transcript, Factor2ConfirmationRole::Scanner);
+        let mut supplied = [0u8; FACTOR2_CONFIRMATION_TAG_LEN];
+        supplied.copy_from_slice(ack);
+        if !factor2_confirmation_matches(&expected, &supplied) {
+            return Err(PairError::Factor2KeyConfirmationFailed);
+        }
+
+        let confirmed_key = self
+            .pending_chain_key
+            .take()
+            .ok_or(PairError::Internal("chain_key missing"))?;
+        self.state = InviterState::Done;
+        Ok(confirmed_key)
+    }
+
+    fn confirm_inner(&mut self) -> PairResult<(Vec<u8>, ChainKey)> {
         if self.state != InviterState::AwaitingUserConfirm {
             return Err(PairError::WrongState);
         }
@@ -167,10 +235,6 @@ impl Inviter {
             .pending_chain_key
             .take()
             .ok_or(PairError::Internal("chain_key missing"))?;
-        let final_chain_key = match factor2_key {
-            Some(f2) => crate::chain_key::mix_factor2_recip(&chain_key, f2),
-            None => chain_key,
-        };
         let confirm = PairConfirm::sign(&self.id_signing, t);
         let bytes = confirm.encode();
         self.state = InviterState::Done;
@@ -178,7 +242,7 @@ impl Inviter {
         if let Some(esk) = self.ephemeral_secret.take() {
             drop(esk);
         }
-        Ok((bytes, final_chain_key))
+        Ok((bytes, chain_key))
     }
 
     /// User rejected the SAS comparison. Mark the machine aborted

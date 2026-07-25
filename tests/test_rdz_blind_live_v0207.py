@@ -20,9 +20,8 @@ from __future__ import annotations
 
 import time
 
-import pytest
 
-from one_link import rdz_blind, rendezvous_server as rs_mod
+from one_link import rdz_blind
 from one_link.rendezvous_server import Registry, Registration
 
 

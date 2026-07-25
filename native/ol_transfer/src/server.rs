@@ -55,7 +55,6 @@ impl TransferEngine {
                 }
                 Some(Err(e)) => {
                     warn!(error = ?e, "endpoint accept error; continuing");
-                    continue;
                 }
                 Some(Ok(conn)) => {
                     let engine = Arc::clone(&self);
@@ -105,9 +104,9 @@ impl TransferEngine {
             return self.handle_fountain_request(&request, send, recv).await;
         }
         let reply = match request.kind {
-            FrameKind::ChunkRequest => self.handle_chunk_request(&request).await?,
-            FrameKind::BloomFilter => self.handle_bloom_filter(&request, &[]).await?,
-            FrameKind::ScopedBloomFilter => self.handle_scoped_bloom_filter(&request).await?,
+            FrameKind::ChunkRequest => self.handle_chunk_request(&request)?,
+            FrameKind::BloomFilter => self.handle_bloom_filter(&request, &[])?,
+            FrameKind::ScopedBloomFilter => Self::handle_scoped_bloom_filter(&request)?,
             FrameKind::Ping => Frame::new(FrameKind::Pong, request.payload.clone())?,
             FrameKind::Close => {
                 debug!("peer requested stream close");
@@ -154,7 +153,10 @@ impl TransferEngine {
 
         // Look up the chunk; serialize to "source bytes" = (kind, flags, payload).
         let record_opt = {
-            let store = self.store.read().expect("store rwlock poisoned");
+            let store = self
+                .store
+                .read()
+                .map_err(|_| TransferError::StoreLockPoisoned)?;
             if store.has_chunk(&chunk_id) {
                 Some(store.read_chunk(&chunk_id)?)
             } else {
@@ -168,7 +170,7 @@ impl TransferEngine {
                 .map_err(|e| TransferError::Transport(e.into()))?;
             return Ok(());
         };
-        let (kind_byte, flags_byte, body) = record.encode();
+        let (kind_byte, flags_byte, body) = record.encode()?;
         let mut source = Vec::with_capacity(2 + body.len());
         source.push(kind_byte);
         source.push(flags_byte);
@@ -201,7 +203,7 @@ impl TransferEngine {
         // Step 1: initial burst.
         while sid < initial_burst && sid < FOUNTAIN_MAX_SYMBOLS {
             let symbol = encoder.encode_symbol(sid);
-            let packet = FountainPacket::new(chunk_id, k, sid, source_len_u32, symbol).encode();
+            let packet = FountainPacket::new(chunk_id, k, sid, source_len_u32, symbol).encode()?;
             let frame = Frame::new(FrameKind::FountainBurst, packet)?;
             write_frame(send, &frame).await?;
             sid += 1;
@@ -211,8 +213,7 @@ impl TransferEngine {
         loop {
             match tokio::time::timeout(ack_wait, read_frame(recv)).await {
                 Ok(Ok(ack)) if ack.kind == FrameKind::FountainAck => break,
-                Ok(Ok(_)) => break,  // unexpected frame; bail
-                Ok(Err(_)) => break, // stream error; bail
+                Ok(Ok(_) | Err(_)) => break, // unexpected frame or stream error; bail
                 Err(_) => {
                     // Timeout: top up if there's headroom.
                     if sid >= FOUNTAIN_MAX_SYMBOLS {
@@ -221,8 +222,8 @@ impl TransferEngine {
                     let limit = (sid + top_up).min(FOUNTAIN_MAX_SYMBOLS);
                     while sid < limit {
                         let symbol = encoder.encode_symbol(sid);
-                        let packet =
-                            FountainPacket::new(chunk_id, k, sid, source_len_u32, symbol).encode();
+                        let packet = FountainPacket::new(chunk_id, k, sid, source_len_u32, symbol)
+                            .encode()?;
                         let frame = Frame::new(FrameKind::FountainBurst, packet)?;
                         write_frame(send, &frame).await?;
                         sid += 1;
@@ -238,46 +239,45 @@ impl TransferEngine {
     /// Server-side handler for `ChunkRequest`. Looks up the chunk and
     /// either replies with `ChunkResponse` (full record bytes) or
     /// `ChunkNotFound` echoing the requested id.
-    async fn handle_chunk_request(&self, request: &Frame) -> Result<Frame, TransferError> {
+    fn handle_chunk_request(&self, request: &Frame) -> Result<Frame, TransferError> {
         let chunk_id = wire::decode_chunk_request(&request.payload)?;
         let record_opt = {
-            let store = self.store.read().expect("store rwlock poisoned");
+            let store = self
+                .store
+                .read()
+                .map_err(|_| TransferError::StoreLockPoisoned)?;
             if store.has_chunk(&chunk_id) {
                 Some(store.read_chunk(&chunk_id)?)
             } else {
                 None
             }
         };
-        match record_opt {
-            Some(record) => {
-                let (kind, flags, payload) = record.encode();
-                let payload = wire::encode_chunk_response(kind, flags, &payload);
-                Ok(Frame::new(FrameKind::ChunkResponse, payload)?)
-            }
-            None => {
-                let payload = wire::encode_chunk_not_found(&chunk_id);
-                Ok(Frame::new(FrameKind::ChunkNotFound, payload)?)
-            }
-        }
+        let Some(record) = record_opt else {
+            let payload = wire::encode_chunk_not_found(&chunk_id);
+            return Ok(Frame::new(FrameKind::ChunkNotFound, payload)?);
+        };
+        let (kind, flags, payload) = record.encode()?;
+        let payload = wire::encode_chunk_response(kind, flags, &payload);
+        Ok(Frame::new(FrameKind::ChunkResponse, payload)?)
     }
 
-    /// Server-side handler for `ScopedBloomFilter`. Parses the want_list
-    /// and bloom from the payload, walks the want_list against the bloom,
+    /// Server-side handler for `ScopedBloomFilter`. Parses the `want_list`
+    /// and bloom from the payload, walks the `want_list` against the bloom,
     /// and returns the subset NOT in the bloom (i.e. chunks the peer
     /// doesn't yet have).
     ///
     /// Crucially, this path does **not** scan the local memtable — the
     /// scope is fully client-supplied. For large servers (≥ 1M chunks)
-    /// this is the difference between O(server_memtable) and
-    /// O(want_list) work per handshake.
-    async fn handle_scoped_bloom_filter(&self, request: &Frame) -> Result<Frame, TransferError> {
+    /// this is the difference between `O(server_memtable)` and
+    /// `O(want_list)` work per handshake.
+    fn handle_scoped_bloom_filter(request: &Frame) -> Result<Frame, TransferError> {
         let (want_list, bloom_bytes) = wire::decode_scoped_bloom(&request.payload)?;
         let bloom = Bloom::decode(bloom_bytes)?;
         let missing: Vec<[u8; 32]> = want_list
             .into_iter()
             .filter(|cid| !bloom.contains(cid))
             .collect();
-        let payload = wire::encode_missing_chunks(&missing);
+        let payload = wire::encode_missing_chunks(&missing)?;
         Ok(Frame::new(FrameKind::MissingChunks, payload)?)
     }
 
@@ -290,9 +290,9 @@ impl TransferEngine {
     /// from the caller; the server-side default uses `&[]` which means
     /// "no manifest scope known" → empty `MissingChunks`. Callers that
     /// want the meaningful behavior should pre-register a manifest hook
-    /// via [`TransferEngine::set_manifest_scope`] (future API; v1 uses
-    /// the local memtable's chunk_ids as the implicit scope).
-    async fn handle_bloom_filter(
+    /// via `TransferEngine::set_manifest_scope` (future API; v1 uses
+    /// the local memtable's `chunk_ids` as the implicit scope).
+    fn handle_bloom_filter(
         &self,
         request: &Frame,
         _explicit_scope: &[[u8; 32]],
@@ -302,14 +302,17 @@ impl TransferEngine {
         // narrow this to a specific manifest's chunk set; for v1 we
         // serve the engine's whole inventory.
         let local_ids: Vec<[u8; 32]> = {
-            let store = self.store.read().expect("store rwlock poisoned");
+            let store = self
+                .store
+                .read()
+                .map_err(|_| TransferError::StoreLockPoisoned)?;
             store.collect_chunk_ids()
         };
         let missing: Vec<[u8; 32]> = local_ids
             .into_iter()
             .filter(|cid| !bloom.contains(cid))
             .collect();
-        let payload = wire::encode_missing_chunks(&missing);
+        let payload = wire::encode_missing_chunks(&missing)?;
         Ok(Frame::new(FrameKind::MissingChunks, payload)?)
     }
 }

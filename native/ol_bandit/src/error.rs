@@ -12,6 +12,15 @@ pub enum BanditError {
     #[error("bandit needs at least one arm")]
     NoArms,
 
+    /// Arm count exceeds the bounded adaptive-decision surface.
+    #[error("bandit arm count {got} exceeds maximum {max}")]
+    TooManyArms {
+        /// Requested arm count.
+        got: usize,
+        /// Maximum accepted arm count.
+        max: usize,
+    },
+
     /// `update` called with arm index out of range.
     #[error("arm index {got} out of range for bandit with {n_arms} arms")]
     ArmIndexOutOfRange {

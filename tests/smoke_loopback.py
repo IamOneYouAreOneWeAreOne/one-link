@@ -8,7 +8,6 @@ Exits 0 on success, non-zero on any failure. Cleans up daemons on exit.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import socket
@@ -17,6 +16,11 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+from one_link import control_ipc
+
+
+_CONTROL_SECRETS: dict[int, str] = {}
 
 
 def _wait_port(port: int, timeout: float = 10.0) -> bool:
@@ -48,20 +52,12 @@ def _read_port(home: Path, name: str, timeout: float = 10.0) -> int:
 
 
 def _request(control_port: int, **req) -> dict:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(15.0)
-    s.connect(("127.0.0.1", control_port))
-    try:
-        s.sendall((json.dumps(req) + "\n").encode("utf-8"))
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf.decode("utf-8").strip() or "{}")
-    finally:
-        s.close()
+    return control_ipc.request_control(
+        control_port,
+        req,
+        timeout=15.0,
+        secret=_CONTROL_SECRETS[control_port],
+    )
 
 
 def _spawn_daemon(home: Path, log_path: Path) -> subprocess.Popen:
@@ -99,6 +95,8 @@ def main() -> int:
     try:
         ctrl_a = _read_port(home_a, "control.port")
         ctrl_b = _read_port(home_b, "control.port")
+        _CONTROL_SECRETS[ctrl_a] = control_ipc.read_control_secret(home_a / "data")
+        _CONTROL_SECRETS[ctrl_b] = control_ipc.read_control_secret(home_b / "data")
         print(f"[smoke] control ports: A={ctrl_a} B={ctrl_b}")
 
         if not _wait_port(ctrl_a) or not _wait_port(ctrl_b):
@@ -120,7 +118,7 @@ def main() -> int:
                 break
             time.sleep(0.5)
         else:
-            print(f"[smoke] FAIL — mDNS discovery never converged")
+            print("[smoke] FAIL — mDNS discovery never converged")
             print(f"   A.peers = {res_a.get('peers')}")
             print(f"   B.peers = {res_b.get('peers')}")
             failed = True

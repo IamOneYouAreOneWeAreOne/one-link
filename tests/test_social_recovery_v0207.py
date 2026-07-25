@@ -32,7 +32,6 @@ These tests pin:
 from __future__ import annotations
 
 import os
-from typing import Iterable
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -40,7 +39,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from one_link import social_recovery as sr
-from one_link import threshold
 
 
 def _gen_ed25519():

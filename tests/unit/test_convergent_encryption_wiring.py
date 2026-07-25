@@ -12,7 +12,6 @@ the right policy for each content type.
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 

@@ -17,7 +17,11 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 /// Python-visible hybrid public key.
-#[pyclass(name = "HybridPublicKey", module = "one_link_native.pqkem")]
+#[pyclass(
+    from_py_object,
+    name = "HybridPublicKey",
+    module = "one_link_native.pqkem"
+)]
 #[derive(Debug, Clone)]
 pub struct PyHybridPublicKey {
     inner: HybridPublicKey,
@@ -30,16 +34,17 @@ impl PyHybridPublicKey {
     fn from_bytes(bytes: &[u8]) -> PyResult<Self> {
         HybridPublicKey::from_bytes(bytes)
             .map(|inner| Self { inner })
-            .map_err(pqkem_err_to_py)
+            .map_err(|err| pqkem_err_to_py(&err))
     }
 
     /// Serialize to wire bytes.
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.to_bytes())
+        PyBytes::new(py, &self.inner.to_bytes())
     }
 
     fn __repr__(&self) -> String {
-        format!("HybridPublicKey({} bytes)", HYBRID_PUBLIC_KEY_LEN)
+        let _ = &self.inner;
+        format!("HybridPublicKey({HYBRID_PUBLIC_KEY_LEN} bytes)")
     }
 }
 
@@ -65,23 +70,28 @@ impl PyHybridSecretKey {
     fn from_bytes(bytes: &[u8]) -> PyResult<Self> {
         HybridSecretKey::from_bytes(bytes)
             .map(|inner| Self { inner })
-            .map_err(pqkem_err_to_py)
+            .map_err(|err| pqkem_err_to_py(&err))
     }
 
     /// Serialize to wire bytes. Caller is responsible for storing
     /// these securely + clearing the returned bytes when done.
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         let buf = self.inner.to_bytes();
-        PyBytes::new_bound(py, &buf[..])
+        PyBytes::new(py, &buf[..])
     }
 
-    fn __repr__(&self) -> &str {
+    fn __repr__(&self) -> &'static str {
+        let _ = &self.inner;
         "HybridSecretKey(<redacted>)"
     }
 }
 
 /// Python-visible hybrid ciphertext.
-#[pyclass(name = "HybridCiphertext", module = "one_link_native.pqkem")]
+#[pyclass(
+    from_py_object,
+    name = "HybridCiphertext",
+    module = "one_link_native.pqkem"
+)]
 #[derive(Debug, Clone)]
 pub struct PyHybridCiphertext {
     inner: HybridCiphertext,
@@ -94,22 +104,23 @@ impl PyHybridCiphertext {
     fn from_bytes(bytes: &[u8]) -> PyResult<Self> {
         HybridCiphertext::from_bytes(bytes)
             .map(|inner| Self { inner })
-            .map_err(pqkem_err_to_py)
+            .map_err(|err| pqkem_err_to_py(&err))
     }
 
     /// Serialize to wire bytes.
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.to_bytes())
+        PyBytes::new(py, &self.inner.to_bytes())
     }
 
     fn __repr__(&self) -> String {
-        format!("HybridCiphertext({} bytes)", HYBRID_CIPHERTEXT_LEN)
+        let _ = &self.inner;
+        format!("HybridCiphertext({HYBRID_CIPHERTEXT_LEN} bytes)")
     }
 }
 
 /// Generate a fresh hybrid keypair via the OS RNG.
 #[pyfunction]
-fn keypair<'py>(py: Python<'py>) -> (PyHybridPublicKey, PyHybridSecretKey) {
+fn keypair(py: Python<'_>) -> (PyHybridPublicKey, PyHybridSecretKey) {
     let _ = py;
     let mut rng = rand_core_06::OsRng;
     let (pk, sk) = rust_keypair(&mut rng);
@@ -128,9 +139,9 @@ fn encapsulate<'py>(
     pk: &PyHybridPublicKey,
 ) -> PyResult<(PyHybridCiphertext, Bound<'py, PyBytes>)> {
     let mut rng = rand_core_06::OsRng;
-    let (ct, ss) = rust_encapsulate(&pk.inner, &mut rng).map_err(pqkem_err_to_py)?;
+    let (ct, ss) = rust_encapsulate(&pk.inner, &mut rng).map_err(|err| pqkem_err_to_py(&err))?;
     let py_ct = PyHybridCiphertext { inner: ct };
-    let ss_bytes = PyBytes::new_bound(py, &ss[..]);
+    let ss_bytes = PyBytes::new(py, &ss[..]);
     Ok((py_ct, ss_bytes))
 }
 
@@ -145,11 +156,11 @@ fn decapsulate<'py>(
     sk: &PyHybridSecretKey,
     ct: &PyHybridCiphertext,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let ss = rust_decapsulate(&sk.inner, &ct.inner).map_err(pqkem_err_to_py)?;
-    Ok(PyBytes::new_bound(py, &ss[..]))
+    let ss = rust_decapsulate(&sk.inner, &ct.inner).map_err(|err| pqkem_err_to_py(&err))?;
+    Ok(PyBytes::new(py, &ss[..]))
 }
 
-fn pqkem_err_to_py(err: ol_pqkem::PqKemError) -> PyErr {
+fn pqkem_err_to_py(err: &ol_pqkem::PqKemError) -> PyErr {
     crate::errors::OlPqKemError::new_err(err.to_string())
 }
 

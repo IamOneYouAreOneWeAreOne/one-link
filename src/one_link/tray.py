@@ -16,13 +16,14 @@ headlessly. Install with `pip install one_link[tray]`.
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import threading
-import webbrowser
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from typing import TYPE_CHECKING, Callable, Optional
+
+from one_link.fault_observability import report_best_effort_failure
+from one_link.process_security import launch_loopback_url, launch_system_opener
 
 if TYPE_CHECKING:
     import pystray
@@ -38,6 +39,21 @@ def _display_url(url: str) -> str:
         return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
     except Exception:
         return (url or "").split("?", 1)[0].rstrip("/") or url
+
+
+def _local_ui_url(url: str) -> str:
+    """Map a LAN-display URL back to loopback before opening locally."""
+
+    parts = urlsplit(url)
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("tray URL has an invalid port") from exc
+    if parts.scheme != "http" or port is None:
+        raise ValueError("tray URL must be HTTP with an explicit port")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("tray URL must not contain authority credentials")
+    return urlunsplit(("http", f"127.0.0.1:{port}", parts.path or "/", parts.query, ""))
 
 
 def _icon_image():
@@ -116,8 +132,13 @@ class TrayIcon:
             # 2026-05-22 UX: refresh the hover title too.
             try:
                 self._icon.title = f"One Link - {_display_url(url)}"
-            except Exception:
-                pass
+            except Exception as exc:
+                report_best_effort_failure(
+                    log,
+                    "tray_title_refresh",
+                    exc,
+                    level=logging.DEBUG,
+                )
 
     def set_inbox_path(self, path: Path) -> None:
         self._inbox_path = path
@@ -180,8 +201,8 @@ class TrayIcon:
 
     def _on_open(self, icon, item) -> None:
         try:
-            webbrowser.open(self._url)
-        except Exception as e:
+            launch_loopback_url(_local_ui_url(self._url), platform_name=sys.platform)
+        except (OSError, ValueError) as e:
             log.warning("tray: failed to open browser: %s", e)
 
     def _on_connect_device(self, icon, item) -> None:
@@ -191,30 +212,28 @@ class TrayIcon:
         try:
             separator = "&" if "?" in self._url else "?"
             target = f"{self._url}{separator}setup=add-device"
-            webbrowser.open(target)
-        except Exception as e:
+            launch_loopback_url(_local_ui_url(target), platform_name=sys.platform)
+        except (OSError, ValueError) as e:
             log.warning("tray: failed to open connect-device flow: %s", e)
 
     def _on_open_inbox(self, icon, item) -> None:
         if self._inbox_path is None:
             return
         try:
-            if sys.platform == "win32":
-                os.startfile(str(self._inbox_path))  # noqa: S606
-            elif sys.platform == "darwin":
-                import subprocess
-                subprocess.Popen(["open", str(self._inbox_path)])
-            else:
-                import subprocess
-                subprocess.Popen(["xdg-open", str(self._inbox_path)])
-        except Exception as e:
+            launch_system_opener(self._inbox_path, platform_name=sys.platform)
+        except (OSError, ValueError) as e:
             log.warning("tray: failed to open inbox: %s", e)
 
     def _on_quit_clicked(self, icon, item) -> None:
         try:
             icon.stop()
-        except Exception:
-            pass
+        except Exception as exc:
+            report_best_effort_failure(
+                log,
+                "tray_quit_icon_stop",
+                exc,
+                level=logging.DEBUG,
+            )
         try:
             self._on_quit()
         except Exception as e:
@@ -244,8 +263,13 @@ class TrayIcon:
             title = "One Link"
             try:
                 title = f"One Link - {_display_url(self._url)}"
-            except Exception:
-                pass
+            except Exception as exc:
+                report_best_effort_failure(
+                    log,
+                    "tray_initial_title",
+                    exc,
+                    level=logging.DEBUG,
+                )
             self._icon = Icon(
                 "one_link",
                 icon=base_icon,
@@ -275,6 +299,11 @@ class TrayIcon:
         if self._icon is not None:
             try:
                 self._icon.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                report_best_effort_failure(
+                    log,
+                    "tray_icon_stop",
+                    exc,
+                    level=logging.DEBUG,
+                )
         self._icon = None

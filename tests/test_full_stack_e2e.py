@@ -53,8 +53,6 @@ from one_link.call_immune import (
     ImmuneSystem,
 )
 from one_link.call_session import (
-    CallSession,
-    Intensity,
     ParticipantState,
     Rung,
 )

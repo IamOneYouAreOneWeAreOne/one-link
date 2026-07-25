@@ -1,10 +1,11 @@
 [project]
 name = "one_link"
 version = "0.21.0-alpha"
-description = "Peer-to-peer LAN chat + file sync built on the Coherence Language ecosystem."
+description = "Direct-first encrypted chat, calls, resilient file transfer, and sync with optional discovery and relay."
 requires-python = ">=3.11"
 authors = [{ name = "One Link contributors", email = "weareone@oneunity.earth" }]
-license = { text = "AGPL-3.0-or-later" }
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE", "LICENSE.AGPL-3.0", "NOTICE"]
 
 dependencies = [
   # cryptography >= 44 was the first release that ships pre-built
@@ -22,6 +23,9 @@ dependencies = [
   "click>=8.1",
   "blake3>=0.4",
   "platformdirs>=4",
+  # Daemon PID ownership, listener recovery, resource budgets, and production
+  # health gates use psutil on every supported desktop platform.
+  "psutil>=7.2.2,<8",
   # aiohttp >=3.14.1 clears 11 CVEs (CVE-2026-34993 .. 54280) in the
   # 3.13.x line that the daemon's HTTP UI server is exposed to.
   "aiohttp>=3.14.1",
@@ -50,11 +54,20 @@ dependencies = [
   # sqlcipher3 wraps SQLCipher (sqlite3 + AES-256 page encryption);
   # keyring abstracts Windows Credential Manager / macOS Keychain /
   # Linux Secret Service so the encryption key is auto-generated +
-  # stored without prompting the user. Both are graceful-fallback:
-  # if either fails to import at runtime, state.db falls back to
-  # plaintext (legacy) mode + a WARNING log line.
+  # stored without prompting the user. If the OS keychain is unavailable,
+  # One Link uses a permission-hardened local key file and keeps SQLCipher
+  # enabled. Missing SQLCipher/key material fails closed unless an operator
+  # explicitly opts into legacy plaintext mode for recovery/testing.
   "sqlcipher3>=0.6",
   "keyring>=24",
+  # Authenticated standalone-update planning verifies signed metadata,
+  # checksums, SBOM, and the selected complete archive against the exact
+  # tag-bound GitHub Actions identity. Explicit owner-confirmed handoff to the
+  # external transactional helper is available only from a completely validated
+  # frozen standalone bundle; unattended/background installation stays disabled.
+  "sigstore>=4.4,<5",
+  # Standards-correct release ordering (not lexical rc2/rc10 comparison).
+  "packaging>=26.2,<27",
 ]
 
 [project.optional-dependencies]
@@ -67,7 +80,7 @@ dependencies = [
 #
 # Or download the OS+arch-matching wheel from the release page and
 # `pip install <wheel.whl>`. Source builds via `cd native && maturin build --release`.
-native = ["one_link_native>=0.21,<1.0"]
+native = ["one_link_native>=0.21.0a0,<1.0"]
 window = ["pywebview>=5.0"]  # optional native-window wrapper (Tier 2)
 # v0.10.5 system tray icon. Lets the daemon live in the OS tray
 # instead of always-needing-a-browser-tab. Optional — fresh
@@ -82,6 +95,14 @@ tor = ["aiohttp-socks>=0.10"]
 dev = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
+  "pytest-timeout>=2.4,<3",
+  # Parse every workflow with duplicate-key rejection in the supply-chain
+  # regression suite before GitHub ever attempts to schedule it.
+  "PyYAML>=6.0.3,<7",
+  # Distribution-contract tests build from an isolated source snapshot using
+  # the reviewed backend rather than resolving mutable build tools at runtime.
+  "setuptools>=83,<84",
+  "wheel>=0.47,<0.48",
   # v0.21.x property-based testing for invariants that span
   # huge input spaces (e.g. 'every BIP-39 seed round-trips';
   # 'every random message body is findable by every prefix
@@ -91,6 +112,10 @@ dev = [
   # that happens to be 256 bytes long' that example-based tests
   # systematically miss because the author didn't think of it.
   "hypothesis>=6.100",
+  # Static quality gates are part of the committed universal lock so CI
+  # never downloads an unreviewed "latest" linter at execution time.
+  "ruff>=0.15.22,<0.16",
+  "mypy>=2.3,<2.4",
 ]
 # v0.21.x browser-driven E2E harness. Catches UI bugs that no
 # amount of unit testing can: pixel overlap, iframe security
@@ -100,49 +125,125 @@ dev = [
 # the source, not the rendered pixels.
 #
 # Install: `pip install -e .[e2e]` THEN `playwright install
-# chromium` once (fetches ~150 MB browser binaries). The CI
-# job does this automatically.
+# chromium firefox` once. The full UI suite runs in Chromium and the
+# host-only signed peer transport, identity-possession path, and owner-call
+# numeric ICE fallback also run in Firefox. The CI job does this automatically.
 e2e = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
   "playwright>=1.50",
   "pytest-playwright>=0.7",
+  # Browser smoke tests also make direct authenticated and unauthenticated
+  # HTTP probes against the live daemon. Keep that explicit so a clean
+  # `.[e2e]` install never fails during collection based on unrelated extras.
+  "requests>=2.34.2,<3",
+]
+# Engineering-only runtime for the vendored semantic-codec research substrate.
+# Stable artifacts do not install or bundle this extra because no browser
+# capture -> negotiated wire -> receiver playout path consumes it yet.
+preview-ml = [
+  "numpy>=2.2,<3",
+  "onnxruntime>=1.27,<1.28",
+  "scipy>=1.15,<2",
+]
+# Reproducible build/release tooling. Keeping this separate avoids pulling
+# packagers and signing clients into normal developer/test environments while
+# still pinning every release-bound executable in uv.lock.
+release = [
+  "build>=1.5,<2",
+  "maturin>=1.14.1,<2",
+  "pyinstaller>=6.21,<7",
+  "setuptools>=83,<84",
+  "sigstore>=4.4,<5",
+  "wheel>=0.47,<0.48",
 ]
 # v0.7.2 supply-chain gates (audit finding C):
 #   - pip-audit: scans the lockfile against the OSV vulnerability DB
 #   - bandit: SAST for common Python issues (subprocess shell=True, etc)
 #   - cyclonedx-bom: SBOM generator (CycloneDX JSON)
-#   - pip-tools: reproducible lockfile regeneration via `pip-compile`
+#   - uv: universal, hash-pinned dependency locking/export
+#   - zizmor: GitHub Actions workflow and Dependabot security linting
 security = [
   "pip-audit>=2.7",
   "bandit>=1.7",
   "cyclonedx-bom>=4.4",
-  "pip-tools>=7.4",
+  "uv>=0.11.31,<0.12",
+  "zizmor>=1.27,<2",
+]
+
+[dependency-groups]
+# Non-distributed build/signing environment for jobs that do not need One
+# Link's runtime graph. `--only-group release-tools` avoids compiling or
+# downloading application dependencies merely to build a wheel or sign files.
+release-tools = [
+  "blake3>=1.0,<2",
+  "build>=1.5,<2",
+  # Tagged releases generate the complete frozen Python/Cargo/artifact
+  # CycloneDX document after every platform artifact is assembled and before
+  # the checksum/signing boundary, so the SBOM is a first-class release asset.
+  "cyclonedx-bom>=4.4",
+  "maturin>=1.14.1,<2",
+  # Parse wheel/sdist filenames and normalize the PEP 440 project version in
+  # the independent distribution contract gate.
+  "packaging>=26.2,<27",
+  "setuptools>=83,<84",
+  "sigstore>=4.4,<5",
+  "wheel>=0.47,<0.48",
 ]
 
 [project.scripts]
 one-link = "one_link.cli:main"
 
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=83,<84", "wheel>=0.47,<0.48"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# Only the explicit package-data contract below enters the universal Python
+# wheel. Native CDC libraries are derived platform artifacts: standalone
+# builds stage fresh copies, and normal installs compile or use the identical
+# pure-Python fallback when the separate Rust wheel is unavailable.
+include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
 one_link = [
-  "native/*/ol_native_cdc.dll",
-  "native/*/ol_native_cdc.so",
-  "native/*/ol_native_cdc.dylib",
-  "native/*/ol_native_cdc.dll.sha256",
   # v0.20.7 master-seed: BIP-39 English wordlist for the
   # 24-word recovery phrase encoding.
   "data/bip39-english.txt",
+  # Offline OUI vendor classification used by LAN discovery. The feature
+  # degrades silently when this compressed table is missing, so archive tests
+  # must treat it as runtime data rather than optional documentation.
+  "data/oui_prefixes.txt.gz",
   # v0.20.7 (audit H7): JS Double Ratchet for browser-as-peer +
   # the in-browser self-test harness.
   "web/dr.js",
   "web/dr_test.html",
+  # Runtime-served browser entry points and offline-install assets. Keep these
+  # explicit: omitting one produces a valid-looking wheel/sdist whose installed
+  # daemon cannot serve the corresponding UI route.
+  "web/index.html",
+  "web/peer.html",
+  "web/manifest.json",
+  "web/sw.js",
+  # Runtime-served PWA, favicon, splash, and tray artwork. These live in a
+  # nested directory, so listing only the HTML/manifest files silently drops
+  # them from otherwise-valid wheels and sdists.
+  "web/assets/one-glyph-128.png",
+  "web/assets/one-glyph-256.png",
+  "web/assets/one-glyph-512.png",
+  "web/assets/one-glyph-app.png",
+  "web/assets/one-glyph.ico",
+  "web/assets/one-glyph.png",
+  "web/assets/one-link-app.ico",
+  "web/assets/one-link-black.ico",
+  # First-party, integrity-pinned Argon2id browser identity KDF. These must
+  # ship as an exact worker/WASM pair; dedicated no-store routes serve them.
+  "web/assets/argon2id-v1.wasm",
+  "web/assets/argon2id-worker.js",
+  "web/assets/ed25519-v1.wasm",
 ]
 
 [tool.pytest.ini_options]
@@ -159,20 +260,13 @@ markers = [
 ]
 
 # Phase C-3 (ADR-0008): mypy resolves `one_link_native` types from the
-# PEP 561 stub-only package shipped under `stubs/one_link_native-stubs/`.
+# canonical PEP 561 inline package under `native/one_link_native/`.
 #
-# Mypy's stub-only package discovery looks for ``<name>-stubs`` next to
-# the runtime ``<name>`` on ``sys.path`` (i.e. site-packages of the
-# active interpreter). In-tree stubs on ``mypy_path`` are visible to
-# the type checker but mypy still emits ``import-untyped`` on the
-# runtime side because the ``py.typed`` marker has to live in the
-# RUNTIME package (which is a compiled .pyd, no way to add a marker
-# without rebuilding the wheel). The override below tells mypy to
-# trust the stub package and skip the marker check.
-#
-# Single-file stubs that ARE on mypy_path (e.g. ``stubs/pystray.pyi``)
-# resolve cleanly without an override — those don't run into the
-# marker requirement.
+# The Rust crate directory is also a valid type-check-only Python package:
+# ``__init__.pyi`` and the module stubs resolve from ``mypy_path`` even when a
+# developer has not built the extension. Maturin installs those same files and
+# ``py.typed`` into the runtime package, so CI cannot accidentally validate a
+# stale duplicate or degrade native calls to ``Any``.
 [tool.ruff]
 # 2026-06-16 (external-audit remediation). The audit reported ruff
 # "fails hard" with no enforced config. We adopt a FOCUSED, enforceable
@@ -197,7 +291,7 @@ select = ["E9", "F"]
 ignore = ["F841"]
 
 [tool.mypy]
-mypy_path = "stubs:src"
+mypy_path = "native:stubs:src"
 explicit_package_bases = true
 namespace_packages = true
 # Strict-ish defaults: every function body gets type-checked, even
@@ -205,9 +299,12 @@ namespace_packages = true
 # silently hides errors" pattern from creeping back in.
 check_untyped_defs = true
 
-[[tool.mypy.overrides]]
-module = ["one_link_native", "one_link_native.*"]
-ignore_missing_imports = true
+# Universal, cross-platform dependency resolution.  The native wheel is built
+# from this repository for development/CI and replaced by release wheels for
+# distribution; declaring the source lets uv lock every optional dependency
+# instead of failing on the intentionally unpublished alpha package.
+[tool.uv.sources]
+one_link_native = { path = "native" }
 
 # Third-party C-extension libraries that ship no type stubs / py.typed
 # marker. Nothing to gain from analyzing them; silence the spurious
@@ -240,9 +337,10 @@ ignore_missing_imports = true
 # v0.7.2 bandit config (audit finding C). We exclude tests because
 # fake-data + pytest harness use patterns bandit flags but are safe
 # in a test context (e.g. assert in tests, hardcoded keys for
-# fixtures). Production code is fully scanned.
+# fixtures). Production code and repository automation scripts are fully
+# scanned; release/build scripts are executable supply-chain inputs.
 [tool.bandit]
-exclude_dirs = ["tests", "scripts", ".venv", "build", "dist"]
+exclude_dirs = ["tests", ".venv", "build", "dist"]
 # Skips: B101 (assert) is fine in production checks here; B404 (subprocess
 # import) is unavoidable for the reveal-in-folder feature; B603 (subprocess
 # without shell=True) is what we want, not what we avoid.

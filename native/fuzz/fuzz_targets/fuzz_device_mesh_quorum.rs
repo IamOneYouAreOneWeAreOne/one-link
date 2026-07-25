@@ -3,12 +3,8 @@
 //! Must never panic; verify always returns a typed error or Ok.
 
 use libfuzzer_sys::fuzz_target;
-use ol_device_mesh::quorum::{
-    mint_policy, propose_operation, sign_approval, QuorumCertificate,
-};
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, MasterIdentity,
-};
+use ol_device_mesh::quorum::{mint_policy, propose_operation, sign_approval, QuorumCertificate};
+use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
@@ -18,19 +14,13 @@ fuzz_target!(|data: &[u8]| {
     let id1 = [0x11u8; 16];
     let id2 = [0x22u8; 16];
     let id3 = [0x33u8; 16];
-    let (sk1, a1) =
-        mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
-    let (sk2, a2) =
-        mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
-    let (sk3, a3) =
-        mint_subkey(&master, DeviceClass::Desktop, id3, 0, 365).unwrap();
-    let policy =
-        mint_policy(&master, [0x42; 16], b"fuzz", 2, vec![id1, id2, id3]).unwrap();
+    let (sk1, a1) = mint_subkey(&master, DeviceClass::Phone, id1, 0, 365).unwrap();
+    let (sk2, a2) = mint_subkey(&master, DeviceClass::Laptop, id2, 0, 365).unwrap();
+    let (sk3, a3) = mint_subkey(&master, DeviceClass::Desktop, id3, 0, 365).unwrap();
+    let policy = mint_policy(&master, [0x42; 16], b"fuzz", 2, vec![id1, id2, id3]).unwrap();
     let now: u64 = 1_700_000_000;
-    let proposal = propose_operation(
-        &sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600,
-    )
-    .unwrap();
+    let proposal =
+        propose_operation(&sk1, &policy, [0xEE; 32], [0xDA; 16], now, now + 3600).unwrap();
     let ap2 = sign_approval(&sk2, &proposal, now + 1).unwrap();
     let ap3 = sign_approval(&sk3, &proposal, now + 2).unwrap();
     let mut cert = QuorumCertificate {

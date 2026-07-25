@@ -11,12 +11,11 @@ spawn).
 
 from __future__ import annotations
 
-import hashlib
 import time
 
 import pytest
 
-from tests.harness import daemon_pair, inbox_files, request
+from tests.harness import daemon_pair, request
 
 
 pytestmark = [pytest.mark.timeout(120), pytest.mark.soak]
@@ -65,7 +64,7 @@ def test_file_offer_batch_receiver_processes_all_offers() -> None:
     ]
     expected_blobs = {o["blob"] for o in offers}
 
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         # Warm the channel so send_to has a session.
         warm = request(p.a.control_port, cmd="send",
                        peer=p.b.short_id, body="warmup")
@@ -111,7 +110,7 @@ def test_file_offer_batch_rejects_empty() -> None:
     reason in the error. That IS the expected behaviour for a
     bad batch — we assert on the specific rejection token.
     """
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         request(p.a.control_port, cmd="send",
                 peer=p.b.short_id, body="warmup")
         res = request(
@@ -147,7 +146,7 @@ def test_file_offer_batch_rejects_oversize() -> None:
     # 1-byte payload + 64-char chunk_hash so per-offer overhead
     # is small.
     offers = [_stream_offer(f"f{i}.bin", bytes([i % 256])) for i in range(257)]
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         request(p.a.control_port, cmd="send",
                 peer=p.b.short_id, body="warmup")
         res = request(

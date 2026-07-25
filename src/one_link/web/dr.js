@@ -1,17 +1,14 @@
 // Signal-style Double Ratchet — pure WebCrypto port of one_link.double_ratchet
 //
-// v0.20.7 (security audit H7): the desktop daemon's Python ratchet ships
-// forward secrecy + post-compromise security on the channel transport.
-// The browser-as-peer (DataChannel) transport rode plain DTLS with no
-// app-layer key rotation, so a single private-key compromise (e.g. the
-// browser's IndexedDB-stored Ed25519 priv) decrypted every captured DC
-// frame retroactively. SECURITY.md §T3 claimed "Double Ratchet on top of
-// DTLS-SRTP for defense in depth"; on the daemon path that was true,
-// on the browser-as-peer path it was aspirational.
+// The desktop daemon's Python ratchet ships forward secrecy + post-compromise
+// security when current daemon peers mutually negotiate it. This JavaScript
+// file is a standalone primitive and self-test dependency: neither peer.html
+// nor index.html imports it, so browser-as-peer DataChannels do NOT inherit
+// the daemon Double Ratchet claim. Browser traffic currently relies on its
+// signed peer ceremony, WebRTC DTLS, and the active envelope protections.
 //
-// This module closes that gap. It mirrors the Python double_ratchet.py
-// algorithm exactly, with two intentional substitutions for the
-// browser primitive surface:
+// The module mirrors the Python double_ratchet.py algorithm for integration
+// work, with two intentional substitutions for the browser primitive surface:
 //
 //   - **AEAD: AES-GCM-256** instead of ChaCha20-Poly1305. WebCrypto
 //     (Chrome / Safari / Firefox baseline) does not expose ChaCha20-
@@ -21,10 +18,11 @@
 //     adapter for the JS-DR transport uses the matching AES-GCM
 //     variant; both ends stay in lock-step.
 //
-//   - **DH: WebCrypto X25519** (Chrome 124+, Safari 17+, Firefox 130+).
-//     Same curve, same RFC 7748 cofactor handling. Small-order points
-//     produce a 32-zero shared output which we explicitly reject —
-//     same defense as the Python `x25519_dh`.
+//   - **DH: WebCrypto X25519**, guarded by runtime capability/error handling;
+//     repository presence is not a WebKit or release-browser qualification.
+//     Same curve, same RFC 7748 cofactor handling. Small-order points produce
+//     a 32-zero shared output which we explicitly reject — same defense as the
+//     Python `x25519_dh`.
 //
 // Header wire format is identical to Python (42 bytes, big-endian):
 //

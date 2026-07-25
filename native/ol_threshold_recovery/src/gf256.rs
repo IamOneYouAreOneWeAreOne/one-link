@@ -3,10 +3,12 @@
 //!
 //! Direct port of `OneField/onefield/privacy/sharding.cl` SECTION 1.
 //! Identical bit-pattern outputs so encoded shares interoperate with
-//! the OneField mesh nodes byte-for-byte.
+//! the `OneField` mesh nodes byte-for-byte.
+
+use subtle::{Choice, ConditionallySelectable};
 
 /// GF(2^8) primitive polynomial (AES standard). Low byte 0x1B is what
-/// gets XORed during the reduce step after a left-shift overflow.
+/// gets `XORed` during the reduce step after a left-shift overflow.
 pub const GF_PRIMITIVE: u32 = 0x11B;
 
 /// GF(2^8) addition is XOR (characteristic 2).
@@ -24,35 +26,39 @@ pub const fn gf_sub(a: u32, b: u32) -> u32 {
 }
 
 /// GF(2^8) multiplication via Russian-peasant shift-and-reduce.
-/// Constant-time wrt operand values: branch-free, fixed 8 iterations,
-/// uses masked XOR instead of `if y_lsb { ... }`.
+/// Constant-time wrt operand values: operand-independent control flow, fixed
+/// 8 iterations, and optimization-barrier-protected conditional selection
+/// instead of secret-dependent branches.
+///
+/// The [`Choice`] barriers are security-critical.  Plain arithmetic masks are
+/// source-level branchless, but LLVM can recognize them as booleans and turn
+/// them back into conditional jumps.  `Choice::from` deliberately hides that
+/// boolean refinement before [`ConditionallySelectable`] constructs the mask.
 #[inline]
 #[must_use]
-pub const fn gf_mul(a: u32, b: u32) -> u32 {
-    let mut x: u32 = a & 0xFF;
-    let mut y: u32 = b & 0xFF;
-    let mut r: u32 = 0;
-    let mut i: u32 = 0;
-    while i < 8 {
-        let y_lsb = y & 1;
-        // Mask is 0 or 0xFFFFFFFF; constant-time conditional XOR.
-        let mask = 0u32.wrapping_sub(y_lsb);
-        r ^= x & mask;
-        let x_msb = x & 0x80;
-        x = (x << 1) & 0xFF;
-        let reduce_mask = 0u32.wrapping_sub(x_msb >> 7);
-        x ^= reduce_mask & 0x1B;
-        y >>= 1;
-        i += 1;
+pub fn gf_mul(multiplicand: u32, multiplier: u32) -> u32 {
+    let mut shifted_multiplicand: u32 = multiplicand & 0xFF;
+    let mut shifted_multiplier: u32 = multiplier & 0xFF;
+    let mut product: u32 = 0;
+    let mut round: u32 = 0;
+    while round < 8 {
+        let add_multiplicand = Choice::from((shifted_multiplier & 1) as u8);
+        product ^= u32::conditional_select(&0, &shifted_multiplicand, add_multiplicand);
+
+        let reduce = Choice::from(((shifted_multiplicand >> 7) & 1) as u8);
+        shifted_multiplicand = (shifted_multiplicand << 1) & 0xFF;
+        shifted_multiplicand ^= u32::conditional_select(&0, &0x1B, reduce);
+        shifted_multiplier >>= 1;
+        round += 1;
     }
-    r & 0xFF
+    product & 0xFF
 }
 
 /// GF(2^8) power: a^e via square-and-multiply. Not constant-time wrt e
 /// (e is typically the public exponent 254 in [`gf_inv`] so this is fine).
 #[inline]
 #[must_use]
-pub const fn gf_pow(base: u32, exp: u32) -> u32 {
+pub fn gf_pow(base: u32, exp: u32) -> u32 {
     let mut b = base & 0xFF;
     let mut e = exp;
     let mut r: u32 = 1;
@@ -70,8 +76,8 @@ pub const fn gf_pow(base: u32, exp: u32) -> u32 {
 /// Returns 0 for input 0 (undefined; caller must avoid by construction).
 #[inline]
 #[must_use]
-pub const fn gf_inv(a: u32) -> u32 {
-    if (a & 0xFF) == 0 {
+pub fn gf_inv(a: u32) -> u32 {
+    if a as u8 == 0 {
         0
     } else {
         gf_pow(a, 254)
@@ -81,8 +87,8 @@ pub const fn gf_inv(a: u32) -> u32 {
 /// GF(2^8) division a / b = a * b^{-1}. Returns 0 when b == 0.
 #[inline]
 #[must_use]
-pub const fn gf_div(a: u32, b: u32) -> u32 {
-    if (b & 0xFF) == 0 {
+pub fn gf_div(a: u32, b: u32) -> u32 {
+    if b as u8 == 0 {
         0
     } else {
         gf_mul(a, gf_inv(b))
@@ -91,7 +97,7 @@ pub const fn gf_div(a: u32, b: u32) -> u32 {
 
 // ── Optimized table-based multiplication ────────────────────────────
 //
-// The constant-time `gf_mul` above runs an 8-iter masked loop per
+// The constant-time `gf_mul` above runs an 8-iter protected loop per
 // multiply. For NON-SECURITY-CRITICAL paths (e.g., Lagrange basis
 // evaluation, where operand values are derived from public share
 // x-coordinates), a 64KB precomputed table gives ~5-10x speedup with
@@ -108,11 +114,11 @@ pub const fn gf_div(a: u32, b: u32) -> u32 {
 /// Precomputed 256x256 GF(2^8) multiplication table. ~64KB of static
 /// memory; built at first access via `OnceLock` so non-fast callers
 /// pay no cost.
-fn gf_mul_table() -> &'static [[u8; 256]; 256] {
+fn gf_mul_table() -> &'static [[u8; 256]] {
     use std::sync::OnceLock;
-    static TABLE: OnceLock<Box<[[u8; 256]; 256]>> = OnceLock::new();
+    static TABLE: OnceLock<Box<[[u8; 256]]>> = OnceLock::new();
     TABLE.get_or_init(|| {
-        let mut table = Box::new([[0u8; 256]; 256]);
+        let mut table = vec![[0u8; 256]; 256].into_boxed_slice();
         for a in 0..256usize {
             for b in 0..256usize {
                 table[a][b] = gf_mul(a as u32, b as u32) as u8;

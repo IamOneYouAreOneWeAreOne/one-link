@@ -188,8 +188,8 @@ fn adversarial_reverse_op_order_still_converges() {
                 &sk,
                 b"x".to_vec(),
                 Delta::MapPut {
-                    key: vec![i as u8],
-                    value: vec![i as u8],
+                    key: vec![u8::try_from(i).expect("the test sequence is bounded at ten")],
+                    value: vec![u8::try_from(i).expect("the test sequence is bounded at ten")],
                     ts: i,
                 },
                 i,

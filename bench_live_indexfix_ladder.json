@@ -1,0 +1,36 @@
+{
+  "ctrl": 63542,
+  "quic_ping": {
+    "ok": 10,
+    "total": 10,
+    "p50_ms": 4.3965
+  },
+  "chat": {
+    "ok": 20,
+    "total": 20,
+    "p50_ms": 130.7
+  },
+  "files": {
+    "512KiB": {
+      "ok": 5,
+      "total": 5,
+      "errors": [],
+      "median_ms": 261.2,
+      "median_mib_s": 1.91
+    },
+    "16MiB": {
+      "ok": 3,
+      "total": 3,
+      "errors": [],
+      "median_ms": 593.1,
+      "median_mib_s": 26.98
+    },
+    "64MiB": {
+      "ok": 2,
+      "total": 2,
+      "errors": [],
+      "median_ms": 1402.8,
+      "median_mib_s": 45.62
+    }
+  }
+}

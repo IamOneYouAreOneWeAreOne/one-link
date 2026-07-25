@@ -5,9 +5,10 @@ The launcher spawns the daemon with stderr redirected to a file
 truncated on abrupt exit. ``crash_log`` mirrors every uncaught
 exception to ``data_dir()/crashes/<utc>-<reason>.txt`` with an fsync,
 so a forensic record survives the buffering trap. The daemon also
-writes a heartbeat every 5s; on the NEXT startup, a heartbeat newer
-than HEARTBEAT_DEAD_WINDOW_S means the previous run died abruptly —
-log it loudly so we know the daemon DIED rather than was stopped.
+writes a heartbeat every 5s. On the NEXT startup, a recent heartbeat
+without an exact durable clean-shutdown marker means the previous run
+may have died abruptly; a marker tied to the preceding random lifecycle
+identity suppresses the warning for an intentional restart.
 """
 from __future__ import annotations
 
@@ -15,7 +16,6 @@ import logging
 import sys
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
@@ -113,6 +113,10 @@ def test_install_excepthooks_is_idempotent(monkeypatch):
 
 def test_thread_excepthook_writes_crash_file(isolated_data_dir, monkeypatch):
     monkeypatch.setattr(crash_log, "_INSTALLED", False)
+    # This test owns the deliberately crashing thread.  Keep pytest's global
+    # thread-exception collector from reporting the expected exception as a
+    # suite warning; chaining behavior is covered independently below.
+    monkeypatch.setattr(threading, "excepthook", lambda _args: None)
     crash_log.install_excepthooks()
 
     def boom():
@@ -187,6 +191,42 @@ def test_install_loop_hook_dumps_task_exceptions(isolated_data_dir):
 
 # ─── heartbeat-based silent-death detection ─────────────────────────────
 
+
+def _lifecycle_identity(
+    daemon_mod,
+    *,
+    run_id: str = "ab" * 16,
+    pid: int = 4242,
+    started_ns: int | None = None,
+) -> dict[str, int | str]:
+    return {
+        "schema": daemon_mod.LIFECYCLE_SCHEMA_VERSION,
+        "run_id": run_id,
+        "pid": pid,
+        "started_ns": started_ns or time.time_ns() - 60_000_000_000,
+    }
+
+
+def _write_lifecycle_proof(
+    daemon_mod,
+    identity: dict[str, int | str],
+    *,
+    heartbeat: float,
+    shutdown_at: float | None = None,
+) -> None:
+    daemon_mod._atomic_write_lifecycle_record(
+        daemon_mod._lifecycle_path(), identity,
+    )
+    daemon_mod._atomic_write_lifecycle_record(
+        daemon_mod._clean_shutdown_path(),
+        {
+            **identity,
+            "last_heartbeat": heartbeat,
+            "shutdown_at": shutdown_at or heartbeat + 0.5,
+        },
+    )
+
+
 def test_check_previous_heartbeat_logs_when_recent(isolated_data_dir, caplog):
     from one_link import daemon as daemon_mod
     hb = isolated_data_dir / daemon_mod.HEARTBEAT_FILE
@@ -196,6 +236,142 @@ def test_check_previous_heartbeat_logs_when_recent(isolated_data_dir, caplog):
     assert any("died abruptly" in r.message for r in caplog.records), (
         "recent heartbeat at startup must log a CRITICAL silent-death warning"
     )
+
+
+def test_check_previous_heartbeat_accepts_exact_clean_restart(
+    isolated_data_dir, caplog
+):
+    from one_link import daemon as daemon_mod
+
+    heartbeat = float(f"{time.time() - 2.0:.3f}")
+    (isolated_data_dir / daemon_mod.HEARTBEAT_FILE).write_text(
+        f"{heartbeat:.3f}\n", encoding="utf-8",
+    )
+    identity = _lifecycle_identity(daemon_mod)
+    _write_lifecycle_proof(
+        daemon_mod,
+        identity,
+        heartbeat=heartbeat,
+        shutdown_at=time.time() - 1.0,
+    )
+
+    with caplog.at_level(logging.INFO, logger="one_link.daemon"):
+        daemon_mod._check_previous_heartbeat()
+
+    assert not any("died abruptly" in r.message for r in caplog.records)
+    assert any("durable lifecycle marker verified" in r.message for r in caplog.records)
+
+
+def test_check_previous_heartbeat_rejects_stale_marker(
+    isolated_data_dir, caplog
+):
+    from one_link import daemon as daemon_mod
+
+    heartbeat = float(f"{time.time() - 2.0:.3f}")
+    (isolated_data_dir / daemon_mod.HEARTBEAT_FILE).write_text(
+        f"{heartbeat:.3f}\n", encoding="utf-8",
+    )
+    identity = _lifecycle_identity(daemon_mod)
+    _write_lifecycle_proof(
+        daemon_mod,
+        identity,
+        heartbeat=heartbeat - 10.0,
+        shutdown_at=time.time() - 1.0,
+    )
+
+    with caplog.at_level(logging.CRITICAL, logger="one_link.daemon"):
+        daemon_mod._check_previous_heartbeat()
+
+    assert any("died abruptly" in r.message for r in caplog.records)
+
+
+def test_check_previous_heartbeat_rejects_pid_reuse_marker(
+    isolated_data_dir, caplog
+):
+    """A recycled PID cannot authenticate a marker from an older run."""
+
+    from one_link import daemon as daemon_mod
+
+    heartbeat = float(f"{time.time() - 2.0:.3f}")
+    (isolated_data_dir / daemon_mod.HEARTBEAT_FILE).write_text(
+        f"{heartbeat:.3f}\n", encoding="utf-8",
+    )
+    active = _lifecycle_identity(
+        daemon_mod,
+        run_id="aa" * 16,
+        pid=7777,
+        started_ns=time.time_ns() - 30_000_000_000,
+    )
+    stale = _lifecycle_identity(
+        daemon_mod,
+        run_id="bb" * 16,
+        pid=7777,
+        started_ns=time.time_ns() - 120_000_000_000,
+    )
+    daemon_mod._atomic_write_lifecycle_record(
+        daemon_mod._lifecycle_path(), active,
+    )
+    daemon_mod._atomic_write_lifecycle_record(
+        daemon_mod._clean_shutdown_path(),
+        {
+            **stale,
+            "last_heartbeat": heartbeat,
+            "shutdown_at": time.time() - 1.0,
+        },
+    )
+
+    with caplog.at_level(logging.CRITICAL, logger="one_link.daemon"):
+        daemon_mod._check_previous_heartbeat()
+
+    assert any("died abruptly" in r.message for r in caplog.records)
+
+
+def test_check_previous_heartbeat_rejects_garbage_clean_marker(
+    isolated_data_dir, caplog
+):
+    from one_link import daemon as daemon_mod
+
+    heartbeat = float(f"{time.time() - 2.0:.3f}")
+    (isolated_data_dir / daemon_mod.HEARTBEAT_FILE).write_text(
+        f"{heartbeat:.3f}\n", encoding="utf-8",
+    )
+    daemon_mod._atomic_write_lifecycle_record(
+        daemon_mod._lifecycle_path(), _lifecycle_identity(daemon_mod),
+    )
+    (isolated_data_dir / daemon_mod.CLEAN_SHUTDOWN_FILE).write_text(
+        "{not-json", encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="one_link.daemon"):
+        daemon_mod._check_previous_heartbeat()
+
+    assert any("unreadable daemon lifecycle" in r.message for r in caplog.records)
+    assert any("died abruptly" in r.message for r in caplog.records)
+
+
+def test_clean_shutdown_record_round_trip_and_next_run_consumes_it(
+    isolated_data_dir,
+):
+    from one_link import daemon as daemon_mod
+
+    identity = daemon_mod._begin_runtime_lifecycle()
+    heartbeat = float(f"{time.time() - 0.5:.3f}")
+    (isolated_data_dir / daemon_mod.HEARTBEAT_FILE).write_text(
+        f"{heartbeat:.3f}\n", encoding="utf-8",
+    )
+
+    assert daemon_mod._record_clean_shutdown(identity) is True
+    assert daemon_mod._clean_shutdown_matches(heartbeat) is True
+    assert not list(isolated_data_dir.glob(".daemon.clean-shutdown.json.*.tmp"))
+
+    next_identity = daemon_mod._begin_runtime_lifecycle()
+    assert next_identity["run_id"] != identity["run_id"]
+    assert not (isolated_data_dir / daemon_mod.CLEAN_SHUTDOWN_FILE).exists()
+    assert daemon_mod._validated_lifecycle_identity(
+        daemon_mod._read_lifecycle_record(
+            isolated_data_dir / daemon_mod.LIFECYCLE_FILE
+        )
+    ) == next_identity
 
 
 def test_check_previous_heartbeat_silent_when_old(isolated_data_dir, caplog):

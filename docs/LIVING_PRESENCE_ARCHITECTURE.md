@@ -1,9 +1,14 @@
 # Living Presence — One Link Voice + Video Architecture
 
-> **Status:** Design specification. No code shipped yet on this surface.
-> Substrate dependencies (39 native crates, transport stack, identity,
-> attestation, capabilities, CRDT, linked-mesh) are shipped through
-> One Link v0.21.0-alpha. Open audit findings C1, C2, C5 are blockers.
+> **Status:** partial implementation plus future design specification. The
+> alpha source has 1:1 voice/video call lifecycle, signed browser signaling,
+> consent controls, real Chromium media/identity tests, Firefox direct
+> transport/identity/ICE tests, and network-degradation harnesses. It is not a
+> verified production release. WebKit/iOS, a physical multi-machine NAT/TURN
+> matrix, long calls, and the semantic/provenance/ambient engines below remain
+> open. Native daemon channels can use ML-KEM-768, but call/browser identity is
+> still Ed25519 and no post-quantum browser-call or onion-anonymity claim is
+> made.
 
 > **Audience:** Any engineer joining the project. This document is
 > exhaustive on purpose. Read Part 0 first; everything else is
@@ -64,6 +69,8 @@ The user never sees one of them.
 - [ONE_LINK_VALIDATION_GATES.md](ONE_LINK_VALIDATION_GATES.md) — the
   acceptance ladder this product must climb
 - [ARCHITECTURE.md](ARCHITECTURE.md) — the existing daemon architecture
+- [CAPSULE_DURABILITY.md](CAPSULE_DURABILITY.md) — implemented encrypted
+  async-capsule persistence, replay, retry, and durable-receipt contract
 - [../../../OneField Mesh/docs/VOICE_VIDEO_ALIEN_TECH.md](../../../OneField%20Mesh/docs/VOICE_VIDEO_ALIEN_TECH.md)
   — the OneField voice/video math + capabilities
 
@@ -114,11 +121,14 @@ no shipping counterpart.
 
 ### Why now
 
-The substrate to build on is shipped:
+The repository contains substantial substrate, with different activation
+boundaries:
 
-- One Link v0.21.0-alpha: 39 native crates, hybrid WebRTC + QUIC
-  transport, post-quantum identity, hardware attestation, onion
-  routing, macaroon capabilities, CRDT state, linked-mesh.
+- One Link v0.21.0-alpha: native primitives plus live WebRTC and conditional
+  identity-bound QUIC paths, ML-KEM-768 daemon-session establishment,
+  capability and CRDT state, and personal-device-mesh functions. Hardware
+  attestation, post-quantum identity signatures, onion message routing, and
+  linked-mesh call handoff are not universal live product capabilities.
 - OneField: voice.cl (1616 LOC) and video.cl (1107 LOC) define the
   math, wire format, predicates, and tests for the alien-tier
   semantic channel.
@@ -1220,7 +1230,8 @@ class PredictiveContinuity:
 
 `confirm_ratio = confirm_count / (confirm_count + correct_count)`. When
 this exceeds 0.98, the receiver is effectively rendering ahead of the
-sender — predictive negative latency in production.
+sender. This remains a research graduation target until real browser samples
+are synthesized, inserted into playout, and physically qualified end to end.
 
 #### Integration with Reality Engine
 
@@ -1312,16 +1323,22 @@ mid-call, the chain breaks; the Immune System rekeys.
 
 | What | Status |
 |---|---|
-| Math, wire format, predicates, tests | Shipped in voice.cl / video.cl |
-| Trained articulatory model (voice) | Does not exist |
-| Trained scene-graph model (video) | Does not exist |
+| Math, Python codec substrate, predicates, tests | Present; research-only |
+| Trained predictor checkpoints (voice + scene) | Vendored ONNX/PT research checkpoints |
+| Browser capture -> semantic wire -> receiver playout | Not implemented |
 | Encoder/decoder ported to Rust crate | Not started |
+| Model-pack identity in negotiated CAPS | Not implemented |
 | Model-pack signing infrastructure | Not started |
+| Human intelligibility/MOS and physical two-device qualification | Not completed |
 
-Cannot ship Tier ζ+ without these. Path: train voice model first
-(smaller, faster iteration), port via `ol_codegen` to `ol_semantic`
-Rust crate using the existing 1M-iter byte-equivalence gate, then
-video.
+The predictor/codec research substrate is not the user feature. Tier ζ+
+cannot be advertised until browser capture, negotiated wire transport,
+receiver reconstruction/playout, model-pack identity/signing, and physical
+two-device quality gates all close. The stable capability registry therefore
+keeps ζ/η/θ in `PREVIEW_CAPABILITIES`, outside `LOCAL_CAPABILITIES`.
+Stable release artifacts also exclude the model/runtime payload. An explicit
+`build_binary.py --include-preview-ml` engineering build packages the validated
+research substrate without enabling or advertising those capabilities.
 
 #### Graduation modes
 
@@ -1578,26 +1595,23 @@ Within 10-minute window, network recovers. Either side taps "Resume":
 
 ### 7.1 Identity at call layer
 
-**Prerequisites — must close before voice/video ships:**
+**Historical prerequisites and current source status:**
 
-- **Audit finding C1** ([SECURITY.md](SECURITY.md):119–124) — Browser
-  SDP attestation binding. Currently `/api/v1/peer-rtc` accepts
-  unsigned SDP. Must require Ed25519 signature over
-  `canonical(SDP || master_vk || call_id || nonce)`. Receiver
-  cross-checks against pinned `master_vk`.
-- **Audit finding C2** ([SECURITY.md](SECURITY.md):134–136 +
-  159) — Master VK TOFU rotation. Currently a peer's master_vk can
-  silently rotate post-TOFU. Must require either (a) signature from
-  prior key, or (b) explicit re-verify SAS challenge before any
-  capability or call proceeds.
+- **Audit finding C1** — unsigned browser SDP was a historical blocker.
+  Current browser signaling envelopes are signed and identity-bound, with live
+  Chromium/Firefox direct probes. Physical route/browser qualification remains
+  separate evidence.
+- **Audit finding C2** — silent key replacement was a historical blocker.
+  Current source has pinned identity-possession, revocation, key-change, and
+  transactional rotation controls; an immutable-release and physical
+  cross-device re-verification audit is still required.
 - **Audit finding C5** ([SECURITY.md](SECURITY.md):225) — At-rest
   encryption for chat bodies and group chain keys. Tier A
   (browser PWA) shipping; Tier B (daemon) required before any
   recording feature.
 
-**No voice/video tier ships past Tier α-prereqs until C1 + C2 are
-closed.** Reality Engine over an attestation gap is a doctrine
-violation.
+The baseline Tier α source path exists, but no tier is production-qualified
+until these controls pass the immutable release and physical-device gates.
 
 ### 7.2 Recording consent
 
@@ -1614,8 +1628,9 @@ violation.
 - Recordings are encrypted at rest using a per-recording key derived
   from the call's macaroon chain. Sharing a recording requires
   granting a derived capability.
-- **No silent recording.** Ever. No "for quality" recording. No
-  cloud-side recording (it's P2P; there is no cloud).
+- **No silent recording.** No "for quality" recording. One Link has no central
+  recording service; optional rendezvous/relay infrastructure may still carry
+  encrypted traffic and observe connection metadata.
 
 ### 7.3 Conversation-as-object capabilities
 
@@ -1810,7 +1825,7 @@ native/
 | [src/one_link/state.py](../src/one_link/state.py) | Add call history persistence; voice-note conversion. |
 | [src/one_link/courier_bundle.py](../src/one_link/courier_bundle.py) | Add async-capsule format. |
 | [src/one_link/web/index.html](../src/one_link/web/index.html) | Add Call surface, Reality dot, intensity dial, identity SAS pane. |
-| [stubs/one_link_native-stubs/](../stubs/) | Type stubs for ol_provenance, ol_semantic. |
+| [native/one_link_native/](../native/one_link_native/) | Canonical inline PEP 561 stubs for every exported `one_link_native` runtime submodule. |
 
 ### 9.4 Test surface additions
 
@@ -2191,9 +2206,9 @@ The user's identity (master_vk) is theirs. Not the platform's.
 
 - The Compiler ladder degrades to handle low-end hardware naturally
   (a 2GB-RAM Android phone defaults to audio-only).
-- Semantic Engine model packs available in size tiers (10 MB voice,
-  50 MB voice, 200 MB video). User device selects largest pack that
-  fits.
+- Graduated Semantic Engine model packs should eventually use size tiers
+  (for example 10 MB voice, 50 MB voice, 200 MB video), with the device
+  selecting the largest signed pack that fits. Those tiers do not exist yet.
 - OneField R&D path is the long-term answer to bandwidth poverty:
   3 kbps voice on a $20 mesh-radio module reaches every village.
 
@@ -2205,20 +2220,20 @@ The user's identity (master_vk) is theirs. Not the platform's.
 
 | Finding | Severity | Status | Blocks |
 |---|---|---|---|
-| C1 — Browser SDP attestation unsigned | CRITICAL | In flight | Tier α |
-| C2 — Master VK silent rotation post-TOFU | CRITICAL | In flight | Tier α |
-| C5 — At-rest chat/group encryption | CRITICAL | Partial (Tier A only) | Tier β recording feature |
+| C1 — Browser SDP attestation unsigned | CRITICAL | Source mitigation landed: signed identity-bound signaling + browser tests; physical/release proof open | Tier α release qualification |
+| C2 — Master VK silent rotation post-TOFU | CRITICAL | Source pin/revoke/rotation controls landed; physical cross-device re-verification audit open | Tier α release qualification |
+| C5 — At-rest chat/group encryption | CRITICAL | Desktop SQLCipher/LockBox controls partial; browser/blob/runtime coverage open | Tier β recording feature |
 | H7-H15 | HIGH | Open per May-14 audit | Various, not call-blocking |
 
-Voice/video MUST NOT ship past Tier α-pre until C1 + C2 are closed
-and regression-tested.
+Voice/video remains alpha source functionality, not a production-qualified
+claim, until the remaining release and physical gates above are archived.
 
 ### 14.2 Research-grade dependencies
 
 | Dependency | Status | Tier blocked |
 |---|---|---|
-| Articulatory voice model weights | Does not exist | ζ |
-| Scene-graph video model weights | Does not exist | θ |
+| Articulatory voice predictor weights | Vendored research ONNX/PT checkpoint; unsigned and not media-wired | ζ |
+| Scene-feature predictor weights | Vendored research ONNX/PT checkpoint; unsigned and not media-wired | θ |
 | PINN waveform synth weights | Does not exist | OneField R&D |
 | HackRF Pro hardware | Not yet acquired | OneField R&D |
 
@@ -2237,8 +2252,9 @@ of them; the alien tier requires them.
 
 ### 14.4 Network constraints
 
-- **NAT traversal**: Existing ICE infrastructure handles 80%+ of
-  cases. Symmetric NAT requires relay (federated, free).
+- **NAT traversal**: direct ICE works only where gathered routes permit.
+  Symmetric/restrictive NAT may require operator-configured TURN; no success
+  percentage or universal fallback is claimed without the physical matrix.
 - **Firewalls**: QUIC over UDP/443 is the most-portable transport.
   Fallback to TLS-over-TCP/443 for restrictive networks.
 
@@ -2312,9 +2328,9 @@ Engine ships externally.
 
 | File | Role |
 |---|---|
-| [src/one_link/peer_rtc.py](../src/one_link/peer_rtc.py) | WebRTC DataChannel signaling; will gain audio/video SDP. |
+| [src/one_link/peer_rtc.py](../src/one_link/peer_rtc.py) | WebRTC browser-peer signaling and DataChannel lifecycle; owner-call media also uses the signed call API/UI path. |
 | [src/one_link/peer_transport.py](../src/one_link/peer_transport.py) | Transport selection (WebRTC vs QUIC). |
-| [src/one_link/daemon.py](../src/one_link/daemon.py) | Main daemon; will gain call lifecycle. |
+| [src/one_link/daemon.py](../src/one_link/daemon.py) | Main daemon with baseline call lifecycle plus the future engine integration points specified here. |
 | [src/one_link/wire.py](../src/one_link/wire.py) | Wire message types. |
 | [src/one_link/capabilities.py](../src/one_link/capabilities.py) | Capability set. |
 | [src/one_link/crdt.py](../src/one_link/crdt.py) | Vector clock + LWW + OR-set. |

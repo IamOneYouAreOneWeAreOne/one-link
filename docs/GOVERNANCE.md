@@ -1,11 +1,11 @@
 # Governance — project structure as security primitive
 
-Status: living document. Companion to
+Status: living governance target. Companion to
 [`PRINCIPLES.md`](./PRINCIPLES.md),
 [`SOVEREIGNTY.md`](./SOVEREIGNTY.md), and
 [`SECURITY.md`](./SECURITY.md).
 
-Last updated: 2026-05-08.
+Last governance-truth audit: 2026-07-24.
 
 > Engineering alone doesn't keep a project free of corporations;
 > structure does. A perfectly-engineered codebase still falls if
@@ -14,9 +14,32 @@ Last updated: 2026-05-08.
 > a closed-source corporate fork.
 
 This document is the project-structure complement to the engineering
-controls in `SOVEREIGNTY.md`. It specifies the legal, procedural,
-and ceremonial commitments that prevent corporate capture by
-structure rather than by code.
+controls in `SOVEREIGNTY.md`. It records the intended legal, procedural,
+and ceremonial structure. It is not evidence that an organization, key
+ceremony, signer quorum, or recurring governance process already exists.
+
+## Evidence boundary
+
+At the audit date, the multi-maintainer controls described below are
+**governance targets, not current release properties**:
+
+- no enforced 2-of-N release authorization or threshold signature exists;
+- no project release-key registry exists, and there is no
+  `docs/maintainer_keys.md` file in the repository;
+- no HSM custody ceremony or independently verified maintainer-key inventory
+  has been completed;
+- no signed maintainer covenants are committed; and
+- no canonical, threshold-signed monthly warrant canary is published.
+
+The proposed release workflow currently uses short-lived GitHub OIDC identity
+for Sigstore. It has not produced a verified production-tag release, and that
+workflow identity is not the threshold/HSM scheme below. This accounting
+matches the current-state boundary in
+[`SECURITY.md`](./SECURITY.md#t6--compromised-maintainer-key).
+
+Each target becomes a current control only after its enforcement mechanism,
+public artifacts, responsible maintainers, and recurring audit evidence are
+all present. Policy text by itself is not implementation evidence.
 
 ---
 
@@ -85,12 +108,14 @@ non-profit upon incorporation.
 
 ---
 
-## Release signing — multi-maintainer threshold
+## Release signing — multi-maintainer threshold (target)
 
-**Scheme:** Ed25519 signatures. Releases require **≥2-of-N**
-maintainer signatures to be valid. N starts at 3 (founding
-maintainers). Quorum can grow as the project grows; a single
-maintainer signing alone is never sufficient.
+**Status:** planned, not implemented or enforced.
+
+**Target scheme:** Ed25519 signatures. Production releases would require
+**≥2-of-N** maintainer signatures to be valid. N would start at 3 (founding
+maintainers). Quorum could grow as the project grows; under this target model,
+a single maintainer signature would never be sufficient.
 
 **Why threshold:**
 - Single-maintainer signing means a single key compromise =
@@ -100,19 +125,20 @@ maintainer signing alone is never sufficient.
   a backdoored release alone. The other maintainers serve as
   attestation that the release wasn't compelled.
 
-**Key custody:**
-- Each maintainer's release-signing key lives on a hardware
+**Target key custody:**
+- Each maintainer's release-signing key would live on a hardware
   security module (YubiKey 5C / similar) that the maintainer
   physically possesses.
-- Air-gapped key generation. Public keys published in source
-  (`docs/maintainer_keys.md`).
-- Rotation: every 2 years, or on suspected compromise. Rotation
-  ceremony requires the existing quorum to sign the new keys.
+- Key generation would be air-gapped. Public keys, identities, key status,
+  and ceremony evidence would be published in a future authenticated
+  maintainer-key registry. No such registry is present today.
+- Rotation would occur every 2 years, or on suspected compromise. A rotation
+  ceremony would require the existing quorum to sign the new keys.
 
-**Service Worker enforcement:**
-- The SW (per `SECURITY.md`) verifies every update against the
-  pinned multi-key threshold. A release signed by 1-of-N is
-  rejected. A release signed by ≥2-of-N proceeds.
+**Target Service Worker enforcement:**
+- The SW (per `SECURITY.md`) would verify every update against the
+  pinned multi-key threshold. A release signed by 1-of-N would be
+  rejected; a release signed by ≥2-of-N would proceed.
 
 ---
 
@@ -169,11 +195,13 @@ We never accept money to ship a feature corporate sponsors want.
 
 ---
 
-## Maintainer covenant
+## Maintainer covenant (target)
 
-Every maintainer signs a published covenant (as a Git-committed
-text file with a maintainer's signature) before being added to
-the threshold quorum. The covenant binds:
+**Status:** planned. No signed maintainer covenant is committed today.
+
+Before a future threshold quorum is activated, every maintainer would sign a
+published covenant (as a Git-committed text file with the maintainer's
+signature). The target covenant binds:
 
 1. Custody of one's signing key on personal HSM.
 2. Refusal to sign any release the maintainer hasn't reviewed.
@@ -186,20 +214,24 @@ the threshold quorum. The covenant binds:
 5. Two-week notice on resignation, with secure handoff of public
    responsibilities.
 
-A maintainer who breaches the covenant is removed from the
-quorum by the remaining maintainers. Their signing key is
-revoked; outstanding releases re-signed.
+Under the target model, a maintainer who breaches the covenant would be
+removed from the quorum by the remaining maintainers. Their signing key would
+be revoked and affected release trust metadata would be superseded without
+deleting or rewriting immutable prior release evidence.
 
 ---
 
-## Warrant canary
+## Warrant canary (target)
 
-**The mechanism:**
+**Status:** planned. No canonical signed warrant canary or monthly canary
+history is currently published.
 
-A canary statement is published at a known canonical URL
-(`/canary.txt` on the project's primary domain, plus mirrored
-elsewhere) and updated on a fixed cadence (monthly, on the 1st).
-The statement reads, in part:
+**Target mechanism:**
+
+A future canary statement would be published at a known canonical URL
+(`/canary.txt` on the project's primary domain, plus mirrored elsewhere) and
+updated on a fixed cadence (monthly, on the 1st). The target statement would
+read, in part:
 
 ```
 One Link Warrant Canary — <month> <year>
@@ -216,14 +248,14 @@ contact graphs, or any per-user identifying information beyond
 what's in the public release commit log. We have no user data to
 disclose.
 
-Signed by ≥2-of-N maintainers, the keys for which are pinned in
-docs/maintainer_keys.md.
+Signed by ≥2-of-N maintainers whose keys and status are published in
+the future authenticated maintainer-key registry.
 
   -- Maintainer A: <signature>
   -- Maintainer B: <signature>
 ```
 
-**The signal:**
+**Target signal, once deployed:**
 - A **fresh canary** signed monthly = no compelled access has been
   received.
 - A **stale canary** (more than ~6 weeks old) = something happened.
@@ -232,26 +264,26 @@ docs/maintainer_keys.md.
 - The absence is the message. Users monitoring the canary URL
   see staleness automatically.
 
-**Limitations (named honestly):**
-- Some legal regimes can compel a fake canary. We mitigate by
-  threshold-signing: it's harder to compel ≥2 of N maintainers in
+**Limitations of the target (named honestly):**
+- Some legal regimes can compel a fake canary. The target mitigates this by
+  threshold-signing: it would be harder to compel ≥2 of N maintainers in
   different jurisdictions to lie.
-- We commit to maintainers across multiple jurisdictions to avoid
+- The target calls for maintainers across multiple jurisdictions to reduce
   single-jurisdiction compulsion risk.
 
 ---
 
-## Maintainer geographic distribution
+## Maintainer geographic distribution (target)
 
-The threshold quorum is designed to be **multi-jurisdictional**.
-At least 2 of the N maintainers must reside in different
-jurisdictions. This makes a single-government compulsion order
-insufficient to forge a release or fake the canary.
+The future threshold quorum is intended to be **multi-jurisdictional**.
+At least 2 of the N maintainers would reside in different jurisdictions. If
+implemented and independently verified, this would make a single-government
+compulsion order insufficient to satisfy the target release quorum.
 
-This is documented in `docs/maintainer_keys.md` as
+The future authenticated maintainer-key registry would publish
 non-identifying jurisdiction tags (e.g., "EU - non-Schengen,"
-"North America - non-US," "South America"). Specific identities
-are public; specific addresses are not.
+"North America - non-US," "South America"). No such registry or verified
+multi-jurisdiction maintainer roster is present today.
 
 ---
 
@@ -296,9 +328,10 @@ point: the cost prevents shortcuts.
 
 ---
 
-## Audit cadence
+## Audit cadence (target)
 
-Per `PRINCIPLES.md`, every quarter:
+Once the corresponding governance mechanisms exist, the proposed quarterly
+cadence is:
 
 1. **Verify the canary chain.** Each signed canary cross-checks
    against the prior month's; gaps trigger investigation.
@@ -311,13 +344,17 @@ Per `PRINCIPLES.md`, every quarter:
    accessible to its maintainer; each HSM still functional.
 5. **Re-publish the warrant canary** (per the monthly cadence).
 
-A governance document that doesn't get audited becomes
-decoration. The audit cadence is the difference between a
-charter and a charter that holds.
+A governance document that does not get audited becomes decoration. Until the
+artifacts named in the evidence boundary exist, this cadence is a requirement
+for future operation rather than evidence of audits already performed.
 
 ---
 
-## What this collectively prevents
+## What the target model is intended to prevent
+
+The table describes intended protections after the relevant controls are
+implemented and evidenced. It must not be read as a statement that threshold
+signing, HSM custody, covenants, or the canary are active today.
 
 | Capture vector | Prevention |
 |---|---|

@@ -142,7 +142,8 @@ def simulate_never_lose_transfer(
     corruption_rate: float = 0.01,
     max_rounds: int = 50_000,
 ) -> TortureReport:
-    rng = random.Random(seed)
+    # Reproducible fault simulation; no generated value crosses into protocol.
+    rng = random.Random(seed)  # nosec B311
     manifest = synthetic_manifest(size=size, chunk_size=chunk_size)
     sim_sources = tuple(sources) if sources is not None else _default_sources(manifest)
     by_hash = {c.hash: c for c in manifest.chunks}

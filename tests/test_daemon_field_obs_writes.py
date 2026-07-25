@@ -13,7 +13,6 @@ from __future__ import annotations
 import math
 from unittest.mock import MagicMock
 
-import pytest
 
 from one_link import daemon as daemon_module
 from one_link.daemon import _tau_for_transfer_status

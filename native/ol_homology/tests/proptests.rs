@@ -12,7 +12,7 @@ fn small_graph() -> impl Strategy<Value = (Vec<String>, Vec<(String, String)>)> 
         proptest::collection::vec((0usize..8, 0usize..8), 0..16),
     )
         .prop_map(|(n_nodes, edge_seeds)| {
-            let nodes: Vec<String> = (0..n_nodes).map(|i| format!("n{}", i)).collect();
+            let nodes: Vec<String> = (0..n_nodes).map(|i| format!("n{i}")).collect();
             let edges: Vec<(String, String)> = edge_seeds
                 .into_iter()
                 .filter(|(a, b)| a != b && *a < n_nodes && *b < n_nodes)

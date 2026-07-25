@@ -287,6 +287,42 @@ def test_adaptive_scheduler_closes_window_on_slow_ack():
     assert any(e["event"] == "window_down" for e in snap["timeline"])
 
 
+def test_adaptive_scheduler_high_rtt_grows_to_byte_cap_then_halves_on_loss():
+    """Clean 596 ms ACKs fill BDP without exceeding the 24 MiB budget."""
+
+    scheduler = AdaptiveTransferScheduler({
+        "chunk_size": 250_000,
+        "window_chunks": 16,
+        "window_bytes": 4_000_000,
+        "nominal_chunk_size": 1024 * 1024,
+        "growth_step_bytes": 1024 * 1024,
+        "route_latency_ms": 596.0,
+        "reason": "fresh_content_warm_start",
+    }, max_window_chunks=384, max_window_bytes=24 * 1024 * 1024)
+
+    for _ in range(1_300):
+        scheduler.observe_ack(
+            ack_ms=596.0,
+            raw_bytes=250_000,
+            wire_bytes=250_000,
+            in_flight_chunks=max(0, scheduler.window_chunks - 1),
+        )
+
+    clean = scheduler.snapshot()
+    assert clean["target_ack_ms"] == 1490.0
+    assert clean["growth_step_chunks"] == 4
+    assert clean["window_chunks"] == 100
+    assert clean["window_bytes"] == 25_000_000
+    assert clean["max_window_bytes"] == 25_000_000
+    assert clean["window_bytes"] <= 24 * 1024 * 1024
+
+    scheduler.observe_retry(reason="simulated_loss", in_flight_chunks=100)
+    backed_off = scheduler.snapshot()
+    assert backed_off["window_chunks"] == 50
+    assert backed_off["window_bytes"] == 12_500_000
+    assert backed_off["timeline"][-1]["event"] == "retry_or_reopen"
+
+
 def test_adaptive_scheduler_records_retry_or_reopen():
     scheduler = AdaptiveTransferScheduler({
         "chunk_size": 1024,

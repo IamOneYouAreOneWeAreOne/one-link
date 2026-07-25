@@ -1,6 +1,7 @@
 /target
 **/target/
-Cargo.lock
+# This workspace builds the shipped native wheel and security CI audits this
+# exact dependency graph. Keep Cargo.lock committed for reproducibility.
 *.pdb
 *.dll
 *.so

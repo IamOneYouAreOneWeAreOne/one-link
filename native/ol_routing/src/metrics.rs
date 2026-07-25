@@ -2,7 +2,7 @@
 
 /// Edge weight for a link with stability proxy `tau_c_s` (seconds) and
 /// logical distance `dist_m` (meters or network-equivalent units).
-/// Higher τ_c lowers cost — stable links are cheaper than fragile ones.
+/// Higher `τ_c` lowers cost — stable links are cheaper than fragile ones.
 ///
 /// ```text
 /// weight = dist_m / (c * tau_c_s)
@@ -10,9 +10,9 @@
 ///
 /// `c` is the speed of light (299,792,458 m/s). In network contexts
 /// the constant is arbitrary — what matters is monotonicity in
-/// (dist_m / tau_c_s). Keeping the physical constant lets RF + network
+/// (`dist_m` / `tau_c_s`). Keeping the physical constant lets RF + network
 /// graphs share a single cost surface when the daemon is meshed with
-/// OneField RF nodes.
+/// `OneField` RF nodes.
 ///
 /// Units: dimensionless. Closer + more-stable → smaller weight.
 #[must_use]

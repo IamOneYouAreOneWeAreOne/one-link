@@ -1,4 +1,4 @@
-//! Phase C acceptance gate for `ol_capability` (FILE_ENGINE_V2_PLAN.md:289):
+//! Phase C acceptance gate for `ol_capability` (`FILE_ENGINE_V2_PLAN.md:289)`:
 //!
 //!     "Macaroon attenuation: property test that no derived cap exceeds
 //!      parent rights across ≥1M random delegation chains."
@@ -13,7 +13,7 @@
 //! accepted contexts.
 //!
 //! Iteration count is configurable via `OL_CAPABILITY_GATE_ITERS`
-//! (default 10_000 for CI; gate run sets it to 1_000_000).
+//! (default `10_000` for CI; gate run sets it to `1_000_000`).
 
 use ol_capability::{Capability, Caveat, Context, CAP_ID_LEN, ROOT_KEY_LEN};
 use zeroize::Zeroizing;
@@ -38,12 +38,12 @@ fn random_bytes<const N: usize>(state: &mut u64) -> [u8; N] {
 }
 
 fn random_string(state: &mut u64, max_len: usize) -> String {
-    let len = (next_rng(state) as usize) % max_len.max(1);
+    let len = random_below_usize(state, max_len.max(1));
     (0..len)
         .map(|_| {
             // ASCII letter range so caveats render and parse cleanly.
-            let v = (next_rng(state) % 26) as u8;
-            (b'a' + v) as char
+            let value = u8::try_from(next_rng(state) % 26).expect("letter offset fits in u8");
+            char::from(b'a' + value)
         })
         .collect()
 }
@@ -54,7 +54,7 @@ fn random_caveat(state: &mut u64) -> Caveat {
         1 => Caveat::PeerFingerprint(random_bytes::<32>(state)),
         2 => Caveat::PathPrefix(format!("/{}", random_string(state, 8))),
         3 => {
-            let n = (next_rng(state) as usize) % 4 + 1;
+            let n = random_below_usize(state, 4) + 1;
             let ops: Vec<String> = (0..n)
                 .map(|_| match next_rng(state) % 4 {
                     0 => "read".to_string(),
@@ -69,28 +69,37 @@ fn random_caveat(state: &mut u64) -> Caveat {
     }
 }
 
+fn random_below_usize(state: &mut u64, upper: usize) -> usize {
+    debug_assert!(upper > 0);
+    let upper_u64 = u64::try_from(upper).unwrap_or(u64::MAX);
+    usize::try_from(next_rng(state) % upper_u64)
+        .expect("a value reduced below a usize-derived bound fits in usize")
+}
+
 fn random_context(state: &mut u64) -> OwnedContext {
     OwnedContext {
-        now_unix_ms: if !next_rng(state).is_multiple_of(4) {
+        now_unix_ms: if next_rng(state).is_multiple_of(4) {
+            None
+        } else {
             Some(next_rng(state) % 2_000_000_000)
-        } else {
-            None
         },
-        peer: if !next_rng(state).is_multiple_of(3) {
+        peer: if next_rng(state).is_multiple_of(3) {
+            None
+        } else {
             Some(random_bytes::<32>(state))
-        } else {
-            None
         },
-        path: if !next_rng(state).is_multiple_of(3) {
+        path: if next_rng(state).is_multiple_of(3) {
+            None
+        } else {
             Some(format!(
                 "/{}/{}",
                 random_string(state, 8),
                 random_string(state, 8),
             ))
-        } else {
-            None
         },
-        operation: if !next_rng(state).is_multiple_of(3) {
+        operation: if next_rng(state).is_multiple_of(3) {
+            None
+        } else {
             Some(
                 match next_rng(state) % 5 {
                     0 => "read",
@@ -101,8 +110,6 @@ fn random_context(state: &mut u64) -> OwnedContext {
                 }
                 .to_string(),
             )
-        } else {
-            None
         },
     }
 }
@@ -118,7 +125,7 @@ struct OwnedContext {
 }
 
 impl OwnedContext {
-    fn as_ctx<'a>(&'a self) -> Context<'a> {
+    fn as_ctx(&self) -> Context<'_> {
         let mut c = Context::new();
         if let Some(ms) = self.now_unix_ms {
             c = c.with_now(ms);
@@ -155,17 +162,17 @@ fn child_never_exceeds_parent_rights() {
         let id: [u8; CAP_ID_LEN] = random_bytes::<CAP_ID_LEN>(&mut state);
 
         // Parent: 0–5 random initial caveats.
-        let parent_caveats = (next_rng(&mut state) as usize) % 6;
+        let parent_caveats = random_below_usize(&mut state, 6);
         let mut parent = Capability::root(id, &root);
         for _ in 0..parent_caveats {
-            parent = parent.attenuate(random_caveat(&mut state));
+            parent = parent.attenuate(random_caveat(&mut state)).unwrap();
         }
 
         // Child: parent + 0–10 additional caveats (strict attenuation).
-        let extra_caveats = (next_rng(&mut state) as usize) % 11;
+        let extra_caveats = random_below_usize(&mut state, 11);
         let mut child = parent.clone();
         for _ in 0..extra_caveats {
-            child = child.attenuate(random_caveat(&mut state));
+            child = child.attenuate(random_caveat(&mut state)).unwrap();
         }
 
         // Random context.
@@ -216,7 +223,7 @@ fn appending_caveat_can_only_shrink_acceptance() {
         let id: [u8; CAP_ID_LEN] = random_bytes::<CAP_ID_LEN>(&mut state);
 
         let cap = Capability::root(id, &root);
-        let attenuated = cap.attenuate(random_caveat(&mut state));
+        let attenuated = cap.attenuate(random_caveat(&mut state)).unwrap();
 
         let ctx_owned = random_context(&mut state);
         let ctx = ctx_owned.as_ctx();

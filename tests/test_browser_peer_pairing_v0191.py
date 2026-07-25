@@ -3,7 +3,7 @@
 Two browser-peers come up with WebRTC (v0.18.0). The control
 DataChannel opens. Both sides automatically exchange `pair_hello`
 frames carrying their pubkey + a fresh 16-byte nonce, derive an
-identical 6-digit SAS + 6-cell visual art grid from the
+identical five-word SAS + compatibility code + visual art grid from the
 canonicalized join of both contributions, display to the user,
 and require BOTH sides to confirm a face-to-face match before
 persisting the peer to OPFS.
@@ -11,7 +11,7 @@ persisting the peer to OPFS.
   Reach:  two browsers can pair without a signaling server,
           without a daemon, and without trusting any third party
           beyond the user's own face-to-face verification.
-  Hide:   the SAS digits + visual art are derived from BOTH
+  Hide:   the SAS phrase + compatibility art are derived from BOTH
           pubkeys + BOTH nonces — a man-in-the-middle attacker
           who controls signaling can't forge matching SAS on both
           sides without breaking Ed25519. Mismatch on either side
@@ -58,6 +58,8 @@ def test_pair_protocol_constants_pinned(peer_html: str):
     assert 'PAIR_PROTOCOL_VERSION = "OL-PAIR-1"' in peer_html
     assert "PAIR_NONCE_BYTES = 16" in peer_html
     assert "PAIR_HELLO_TIMEOUT_MS = 30_000" in peer_html
+    assert "PAIR_SAS_WORD_COUNT = 5" in peer_html
+    assert "PAIR_SAS_BITS = 30" in peer_html
 
 
 # ───────── OPFS peers store ─────────────────────────────────────────
@@ -76,7 +78,7 @@ def test_peer_filename_uses_hex_prefix(peer_html: str):
     snippet = _snippet(peer_html, "function _peerFileName", 800)
     # The function strips the algo prefix and slices a short hex.
     assert ".split(\":\")" in snippet
-    assert ".slice(0, 24)" in snippet
+    assert ".slice(0, PEER_FILE_PREFIX_HEX_CHARS)" in snippet
     assert ".json" in snippet
 
 
@@ -85,7 +87,10 @@ def test_list_peers_helper_present(peer_html: str):
     roster + send-to-peer pickers."""
     assert "async function listPeers()" in peer_html
     snippet = _snippet(peer_html, "async function listPeers()", 1500)
-    assert "for await" in snippet
+    assert "_readAllPeerEntries(dir)" in snippet
+    assert "for await" in _snippet(
+        peer_html, "async function _readAllPeerEntries", 1800,
+    )
     # Sort newest-paired first so the most-recent peer is at top.
     assert "paired_ms" in snippet
 
@@ -94,8 +99,10 @@ def test_save_peer_validates_required_fields(peer_html: str):
     """A peer record without fingerprint or pubkey is meaningless;
     surface the error rather than silently writing junk."""
     snippet = _snippet(peer_html, "async function savePeer", 1500)
-    assert "if (!rec || !rec.fingerprint || !rec.public_key_b64u)" in snippet
-    assert "createWritable" in snippet
+    assert "await _validatePeerRecord(rec)" in snippet
+    assert '_withPeersLock("exclusive"' in snippet
+    assert "sameFingerprint.record.public_key_b64u" in snippet
+    assert "_writePeerEntry" in snippet
 
 
 def test_delete_peer_helper_present(peer_html: str):
@@ -127,12 +134,22 @@ def test_sas_sorts_pubkeys_and_nonces(peer_html: str):
 
 
 def test_sas_uses_sha256_first_four_bytes(peer_html: str):
-    """First 4 bytes of SHA-256 → 32-bit unsigned int → mod 10^6 →
-    zero-padded 6 digits. Standard SAS derivation."""
+    """SHA-256 is the browser-portable transcript hash. The decimal mapping
+    remains pinned strictly for interoperability with older clients."""
     snippet = _snippet(peer_html, "async function _computeSas", 2200)
     assert '"SHA-256"' in snippet
     assert "% 1_000_000" in snippet
     assert 'padStart(6, "0")' in snippet
+
+
+def test_sas_derives_five_curated_words_from_30_bits(peer_html: str):
+    snippet = _snippet(peer_html, "function _sasWordsFromDigest", 1100)
+    assert "PAIR_SAS_BITS" in snippet
+    assert "PAIR_SAS_WORD_COUNT" in snippet
+    assert "PAIR_SAS_WORDS[(rawBits >>> shift) & 0x3f]" in snippet
+    compute = _snippet(peer_html, "async function _computeSas", 1800)
+    assert "_sasWordsFromDigest(digest)" in compute
+    assert 'phrase: words.join(" ")' in compute
 
 
 def test_sas_visual_art_uses_six_cells(peer_html: str):
@@ -180,8 +197,11 @@ def test_on_pair_hello_validates_envelope(peer_html: str):
     """Bad version, missing fields, wrong nonce length all abort
     the pairing instead of computing a misleading SAS."""
     snippet = _snippet(peer_html, "async function _onPairHello(envelope)", 2500)
-    assert "envelope.v !== PAIR_PROTOCOL_VERSION" in snippet
-    assert "remoteNonce.byteLength !== PAIR_NONCE_BYTES" in snippet
+    assert "await _validatePairHello(envelope)" in snippet
+    validator = _snippet(peer_html, "async function _validatePairHello", 2600)
+    assert "envelope.v !== PAIR_PROTOCOL_VERSION" in validator
+    assert "PAIR_NONCE_BYTES" in validator
+    assert "_validatePeerBinding" in validator
     assert "_abortPairing(" in snippet
 
 
@@ -189,6 +209,7 @@ def test_on_pair_hello_renders_sas(peer_html: str):
     snippet = _snippet(peer_html, "async function _onPairHello(envelope)", 2500)
     assert "_computeSas(" in snippet
     assert "_renderSasArt(" in snippet
+    assert "#pair-sas-words" in snippet
     assert "#pair-sas-digits" in snippet
 
 
@@ -218,13 +239,15 @@ def test_finalize_requires_both_confirms(peer_html: str):
 
 
 def test_finalize_fingerprint_comes_from_remote_hello(peer_html: str):
-    """The fingerprint we persist is the one the REMOTE claimed in
-    hello — not what we computed locally about ourselves. The SAS
-    verification is what gives us confidence the remote claim is
-    real."""
+    """Finalization persists the validated remote binding. The hello handler
+    first derives the fingerprint and binds the key to the verified signaling
+    signer; a self-asserted fingerprint alone is never authority."""
     snippet = _snippet(peer_html, "async function _maybeFinalizePairing()", 2200)
     assert "p.remote_hello.fingerprint" in snippet
     assert "p.remote_hello.pubkey" in snippet
+    hello = _snippet(peer_html, "async function _onPairHello(envelope)", 2600)
+    assert "remote_signal_signer_pubkey_b64u" in hello
+    assert "remote_signal_signer_fingerprint" in hello
 
 
 def test_route_control_message_only_dispatches_pair_protocol(peer_html: str):
@@ -241,6 +264,7 @@ def test_route_control_message_only_dispatches_pair_protocol(peer_html: str):
 
 def test_pair_card_present(peer_html: str):
     assert 'id="pair-card"' in peer_html
+    assert 'id="pair-sas-words"' in peer_html
     assert 'id="pair-sas-digits"' in peer_html
     assert 'id="pair-sas-art"' in peer_html
     assert 'id="btn-pair-match"' in peer_html
@@ -272,10 +296,13 @@ def test_control_open_triggers_on_control_channel_open(peer_html: str):
 
 def test_control_open_handler_starts_timeout(peer_html: str):
     """If the other side never sends hello, abort after 30s instead
-    of leaving a half-open pair card forever."""
-    snippet = _snippet(peer_html, "async function _onControlChannelOpen", 1500)
+    of leaving a half-open pair card forever. The callback is bound to the
+    exact session so an older timer cannot abort its replacement."""
+    snippet = _snippet(peer_html, "async function _onControlChannelOpen", 2200)
     assert "PAIR_HELLO_TIMEOUT_MS" in snippet
     assert "_abortPairing(" in snippet
+    assert "clearTimeout(previous.timeout)" in snippet
+    assert "state.pairing === pairing" in snippet
 
 
 # ───────── peers card hydration ─────────────────────────────────────
@@ -319,6 +346,8 @@ def test_test_surface_exposes_pairing_helpers(peer_html: str):
         "savePeer",
         "deletePeer",
         "_computeSas",
+        "_deriveSetupSas",
+        "_validateSetupClaim",
         "_renderSasArt",
         "_newPairing",
         "_onPairHello",
@@ -332,12 +361,11 @@ def test_test_surface_exposes_pairing_helpers(peer_html: str):
 
 def test_sas_derivation_python_parity():
     """Compute SAS in Python using the same algorithm peer.html does
-    and confirm the digits formula is sound. We don't run the JS
+    and confirm both word and compatibility mappings. We don't run the JS
     here, but if the algorithm spec drifts between this test +
     peer.html, signatures + handshakes don't match across browsers
     in different release ages."""
     import hashlib
-    import json
 
     local_pub = "AAAA"
     remote_pub = "BBBB"
@@ -357,6 +385,14 @@ def test_sas_derivation_python_parity():
     digest = hashlib.sha256(canonical).digest()
     big = int.from_bytes(digest[:4], "big")
     six = str(big % 1_000_000).zfill(6)
+    from one_link.pairing import PAIR_SAS_WORDS
+
+    raw_bits = big & ((1 << 30) - 1)
+    words = tuple(
+        PAIR_SAS_WORDS[(raw_bits >> (30 - 6 * (index + 1))) & 0x3F]
+        for index in range(5)
+    )
+    assert words == ("motor", "eagle", "blaze", "jolly", "ocean")
     # Sanity: 6 digits, leading zeros preserved, no negative.
     assert len(six) == 6
     assert six.isdigit()

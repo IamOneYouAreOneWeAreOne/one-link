@@ -1,25 +1,25 @@
 //! The Gaussian alignment kernel A(x, t) = exp(-(x^2 + t^2) / L).
 //!
-//! Per the Equation of ONE: alignment energy E_alignment governs large-
+//! Per the Equation of ONE: alignment energy `E_alignment` governs large-
 //! scale spatial-temporal coherence via this exact functional form (with
-//! L the characteristic scale). For One Link, x = hop_distance and
+//! L the characteristic scale). For One Link, x = `hop_distance` and
 //! t = staleness in days; L depends on relationship tier.
 
 use crate::error::AlignError;
 
-/// Default L_session for `Paired` peers, in days.
+/// Default `L_session` for `Paired` peers, in days.
 ///
 /// Paired peers have a long established session. Trust decays slowly —
 /// a paired peer untouched for a month is still meaningfully trusted.
 pub const DEFAULT_L_PAIRED: f32 = 100.0;
 
-/// Default L_session for `Known` peers, in days.
+/// Default `L_session` for `Known` peers, in days.
 ///
 /// Known peers (introduced via a trusted intermediary, not directly paired)
 /// have a medium session. ~30 days of inactivity nearly fully decays trust.
 pub const DEFAULT_L_KNOWN: f32 = 30.0;
 
-/// Default L_session for `Stranger` peers, in days.
+/// Default `L_session` for `Stranger` peers, in days.
 ///
 /// Strangers have no established session. Trust evaporates within days
 /// of inactivity. New contacts must continually demonstrate alignment.
@@ -42,7 +42,7 @@ pub enum Relationship {
 }
 
 impl Relationship {
-    /// Default L_session for this relationship tier (days).
+    /// Default `L_session` for this relationship tier (days).
     #[must_use]
     pub fn default_l_session(self) -> f32 {
         match self {

@@ -60,9 +60,15 @@ keeping CDC for the cases where it is currently worth it.
 
 v0.11.3 adds the next speed layer: the fast stream lane is pipelined. Instead
 of sending one chunk and waiting for one ACK, it keeps a bounded window of
-encrypted chunks in flight. Chunk size scales with file size up to `4 MiB`, and
-the in-flight window is capped at `24 MiB` / `16` chunks so One Link can push
-hard on Wi-Fi/Ethernet without unbounded RAM growth.
+encrypted chunks in flight. Chunk size scales with file size up to `4 MiB`.
+The normal stream planner is capped at `24 MiB` / `16` chunks. CDC manifests
+can publish much smaller cadence chunks, so the live scheduler converts that
+limit into a byte budget: it may account for up to 384 small chunks while still
+holding the same immutable `24 MiB` memory ceiling. Fresh content starts at a
+conservative `4 MiB`; clean RTT observations grow the window in nominal
+stream-sized steps, while retries and loss halve it. This avoids collapsing a
+healthy high-latency path to a few hundred kilobytes in flight without making
+memory usage depend on file size.
 
 v0.11.6 adds the first binary stream lane. Peers that advertise
 `file_binary_frame` still use the same authenticated encrypted channel, but
@@ -73,12 +79,17 @@ splitting security into a second transport.
 
 ## Current Important Result
 
-The current Python CDC implementation is about `8 MiB/s` on the local Windows
-dev machine. The new fast identity lanes measured:
+The 2026-07-21 Windows audit measured the current native-backed pipeline at:
 
-- hash-only manifest: about `1.6 GiB/s`;
-- fixed-size manifest: about `1.2 GiB/s`;
-- CDC manifest: about `8 MiB/s`.
+- base-content chunking: about `112.6 MiB/s`;
+- changed-content chunking: about `397.1 MiB/s` with `98.1%` deduplication;
+- 385 MiB ingest indexing: about `2.08 GiB/s`;
+- 385 MiB durable ingest: about `0.29 GiB/s`;
+- isolated 385 MiB end-to-end cold transfer: `15.47 s` (`24.9 MiB/s`).
+
+These are reproducible development-machine measurements, not WAN claims. The
+reported 596 ms two-device route still requires a fresh physical cross-device
+run before a remote throughput number can be published.
 
 That means One Link must be selective:
 
@@ -88,25 +99,28 @@ That means One Link must be selective:
   once CDC indexing is fast enough to beat plain streaming;
 - degraded route -> simpler protocol + automatic route/session repair.
 
-## Next Build Steps
+## Remaining Production Proof
 
-1. Feed real transfer observations into `AdaptiveTransferBrain` from the daemon.
-2. Persist per-peer route stats in SQLite.
-3. Add prior-hit-rate estimates from chunk cache before choosing CDC.
-4. Add fixed-manifest wire negotiation for aligned media blocks.
-5. Add swarm CDC fetch execution, not just planning.
-6. Add perf gates so a change cannot silently make transfer planning slower.
-7. Measure binary-frame LAN throughput on two upgraded devices and use the
-   result to tune the adaptive stream window.
+The daemon now feeds live observations into the adaptive brain, persists route
+memory, estimates cache hit rate, negotiates fixed manifests, executes swarm
+pulls, and gates performance regressions. Remaining release evidence is:
+
+1. run a 385 MiB transfer between two upgraded physical devices over the
+   reported 596 ms route, including forced response loss and restart/resume;
+2. retain the authenticated receiver `FILE_COMMIT` receipt and verify exactly
+   one receiver path and one sender intent after each fault injection;
+3. use that physical result to tune the bounded adaptive window, then repeat
+   the signed packaged-build gates on every supported operating system.
 
 ## Critical Finding
 
-The transfer brain does not blindly choose CDC. With today's Python CDC speed,
-a huge file on a fast LAN can still be faster as `hash_stream` even when the
-receiver has most of the bytes already. That is not a failure of the planner;
-it is evidence that the next breakthrough is a native CDC engine. Once CDC
-rises from ~`8 MiB/s` to native-class throughput, the same planner flips
-high-prior large files to CDC/swarm and sends only the missing pieces.
+The transfer brain does not blindly choose CDC. Native CDC is available in the
+audited build, but planning, hashing, durable staging, encryption, transport,
+and receiver commit are separate costs. A new file on a fast LAN can still be
+faster as `hash_stream`; a related file with a high cache-hit estimate can be
+far cheaper as CDC/swarm. The planner chooses from measured route and content
+evidence rather than treating native availability as proof that CDC always
+wins.
 
 The goal is not to look advanced. The goal is to make the advanced path
 disappear behind "send anything and it arrives."

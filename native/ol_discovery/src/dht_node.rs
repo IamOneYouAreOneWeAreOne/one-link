@@ -29,22 +29,37 @@
 //! the embedded tokio runtime. Background tasks (receiver,
 //! maintenance) run on the same runtime, outlive any single call.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::runtime::Runtime;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::lookup::{Lookup, LookupError, LookupResult};
 use crate::node_id::NodeId;
 use crate::record::SignedRecord;
 use crate::routing::RoutingTable;
-use crate::rpc::{FindValueOutcome, Header, Nonce, Request, Response, RpcEnvelope, StoreOutcome};
+use crate::rpc::{FindValueOutcome, Request, Response, RpcEnvelope, StoreOutcome};
 use crate::udp_transport::{EndpointResolver, RequestHandler, UdpTransport};
+
+/// Maximum signed records retained in memory by one node.
+pub const MAX_STORED_RECORDS: usize = 4_096;
+/// Maximum configured seed endpoints.
+pub const MAX_SEED_PEERS: usize = 4_096;
+/// Maximum amount a publisher timestamp may lead the local clock.
+pub const MAX_RECORD_FUTURE_SKEW_SECS: u64 = 300;
+/// Maximum records selected for one maintenance tick.
+pub const MAX_REPUBLISH_RECORDS_PER_TICK: usize = 256;
+/// Maximum total peer STORE requests emitted by one maintenance tick.
+pub const MAX_REPUBLISH_REQUESTS_PER_TICK: usize = 4_096;
+/// Bounded concurrent STORE exchanges during maintenance.
+pub const MAX_REPUBLISH_IN_FLIGHT: usize = 32;
 
 /// Default record TTL for outbound republish (24h). Republish cadence
 /// is 1 hour by default, well below TTL.
@@ -53,7 +68,7 @@ pub const DEFAULT_REPUBLISH_INTERVAL_SECS: u64 = 60 * 60;
 /// Default bucket-refresh cadence (1 hour).
 pub const DEFAULT_BUCKET_REFRESH_INTERVAL_SECS: u64 = 60 * 60;
 
-/// Errors at the DhtNode level.
+/// Errors at the `DhtNode` level.
 #[derive(Debug, Error)]
 pub enum DhtError {
     /// Failed to bind the UDP socket.
@@ -65,6 +80,22 @@ pub enum DhtError {
     /// Lookup driver returned an error.
     #[error("lookup error: {0}")]
     Lookup(LookupError),
+
+    /// A bounded in-memory registry is full or an input list is excessive.
+    #[error("resource limit exceeded: {0}")]
+    ResourceLimit(&'static str),
+
+    /// A signed record failed validation.
+    #[error("invalid signed record: {0}")]
+    InvalidRecord(String),
+
+    /// A self-record does not identify this DHT node.
+    #[error("self-record publisher does not match node id")]
+    SelfRecordIdentityMismatch,
+
+    /// A concrete UDP request failed.
+    #[error("UDP request failed: {0}")]
+    Request(String),
 }
 
 impl From<LookupError> for DhtError {
@@ -73,11 +104,16 @@ impl From<LookupError> for DhtError {
     }
 }
 
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Shared inner state — held by the receiver, maintenance, and
 /// query paths via `Arc`.
 struct Inner {
     own_id: NodeId,
-    socket: Arc<UdpSocket>,
     transport: Arc<UdpTransport>,
     routing: Mutex<RoutingTable>,
     records: Mutex<HashMap<NodeId, SignedRecord>>,
@@ -89,8 +125,7 @@ impl Inner {
     fn now_unix() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
+            .map_or(0, |duration| duration.as_secs())
     }
 }
 
@@ -104,12 +139,12 @@ struct WeakResolver {
 impl EndpointResolver for WeakResolver {
     fn resolve(&self, peer: NodeId) -> Option<SocketAddr> {
         let inner = self.weak.upgrade()?;
-        let seeds = inner.seeds.lock().unwrap();
+        let seeds = lock_unpoisoned(&inner.seeds);
         if let Some(addr) = seeds.get(&peer).copied() {
             return Some(addr);
         }
         drop(seeds);
-        let records = inner.records.lock().unwrap();
+        let records = lock_unpoisoned(&inner.records);
         if let Some(rec) = records.get(&peer) {
             for ep in &rec.record.endpoints {
                 if let Some(s) = parse_udp_endpoint(ep) {
@@ -121,7 +156,7 @@ impl EndpointResolver for WeakResolver {
     }
 }
 
-/// RequestHandler that closes over `Inner`.
+/// `RequestHandler` that closes over `Inner`.
 struct InnerHandler {
     inner: Arc<Inner>,
 }
@@ -132,29 +167,43 @@ impl RequestHandler for InnerHandler {
         env: RpcEnvelope<Request>,
     ) -> Pin<Box<dyn Future<Output = Response> + Send + 'a>> {
         Box::pin(async move {
-            // Touch sender in our routing table (LRS replacement).
-            // Bucket-full → ignore for now (proper handling would
-            // PING the head); records get refreshed on every recv.
-            {
-                let mut routing = self.inner.routing.lock().unwrap();
-                let _ = routing.insert(env.header.sender, Inner::now_unix());
-            }
+            // The wire header's sender id is not signed.  Never admit it to
+            // the routing table merely because a datagram arrived: doing so
+            // lets one spoofed UDP packet poison routing state.  STORE is the
+            // only request carrying an identity proof, so admission happens
+            // below after its record signature has been verified.
             match env.body {
                 Request::Ping => Response::Pong,
-                Request::Store(rec) => match rec.verify() {
-                    Err(_) => Response::StoreResult(StoreOutcome::BadSignature),
-                    Ok(()) => {
-                        if !rec.record.is_fresh(Inner::now_unix()) {
-                            Response::StoreResult(StoreOutcome::Expired)
+                Request::Store(rec) => {
+                    if rec.verify().is_ok() {
+                        let now = Inner::now_unix();
+                        if rec.record.is_fresh(now) {
+                            if rec.record.publish_time_unix
+                                > now.saturating_add(MAX_RECORD_FUTURE_SKEW_SECS)
+                            {
+                                return Response::StoreResult(StoreOutcome::Expired);
+                            }
+                            let mut recs = lock_unpoisoned(&self.inner.records);
+                            recs.retain(|_, stored| stored.record.is_fresh(now));
+                            let id = rec.node_id();
+                            if recs.len() >= MAX_STORED_RECORDS && !recs.contains_key(&id) {
+                                Response::StoreResult(StoreOutcome::RateLimited)
+                            } else {
+                                recs.insert(id, rec);
+                                drop(recs);
+                                let mut routing = lock_unpoisoned(&self.inner.routing);
+                                let _ = routing.insert(id, now);
+                                Response::StoreResult(StoreOutcome::Accepted)
+                            }
                         } else {
-                            let mut recs = self.inner.records.lock().unwrap();
-                            recs.insert(rec.node_id(), rec);
-                            Response::StoreResult(StoreOutcome::Accepted)
+                            Response::StoreResult(StoreOutcome::Expired)
                         }
+                    } else {
+                        Response::StoreResult(StoreOutcome::BadSignature)
                     }
-                },
+                }
                 Request::FindNode { target } => {
-                    let routing = self.inner.routing.lock().unwrap();
+                    let routing = lock_unpoisoned(&self.inner.routing);
                     let closest = routing
                         .closest_to(&target)
                         .into_iter()
@@ -163,13 +212,20 @@ impl RequestHandler for InnerHandler {
                     Response::FindNodeResult { closest }
                 }
                 Request::FindValue { target } => {
-                    let records = self.inner.records.lock().unwrap();
-                    if let Some(rec) = records.get(&target).cloned() {
+                    let now = Inner::now_unix();
+                    let mut records = lock_unpoisoned(&self.inner.records);
+                    let found = records.get(&target).cloned().filter(|rec| {
+                        rec.record.is_fresh(now)
+                            && rec.record.publish_time_unix
+                                <= now.saturating_add(MAX_RECORD_FUTURE_SKEW_SECS)
+                    });
+                    if let Some(rec) = found {
                         drop(records);
                         Response::FindValueResult(FindValueOutcome::Found(rec))
                     } else {
+                        records.remove(&target);
                         drop(records);
-                        let routing = self.inner.routing.lock().unwrap();
+                        let routing = lock_unpoisoned(&self.inner.routing);
                         let closer = routing
                             .closest_to(&target)
                             .into_iter()
@@ -189,7 +245,7 @@ pub struct DhtNode {
     runtime: Runtime,
     inner: Arc<Inner>,
     bound_addr: SocketAddr,
-    _bg_handles: Vec<tokio::task::JoinHandle<()>>,
+    bg_handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl DhtNode {
@@ -204,6 +260,9 @@ impl DhtNode {
         own_id: NodeId,
         seed_peers: Vec<(NodeId, SocketAddr)>,
     ) -> Result<Self, DhtError> {
+        if seed_peers.len() > MAX_SEED_PEERS {
+            return Err(DhtError::ResourceLimit("seed peer count exceeds maximum"));
+        }
         let runtime = Runtime::new().map_err(|e| DhtError::Runtime(e.to_string()))?;
         let socket = runtime.block_on(async { UdpSocket::bind(bind_addr).await })?;
         let bound_addr = socket.local_addr()?;
@@ -222,7 +281,6 @@ impl DhtNode {
             let transport = Arc::new(UdpTransport::new(socket.clone(), own_id, resolver));
             Inner {
                 own_id,
-                socket: socket.clone(),
                 transport,
                 routing: Mutex::new(routing),
                 records: Mutex::new(HashMap::new()),
@@ -232,8 +290,8 @@ impl DhtNode {
         });
         // Seed the routing table with the bootstrap peers' NodeIds.
         {
-            let mut routing = inner.routing.lock().unwrap();
-            let seeds = inner.seeds.lock().unwrap();
+            let mut routing = lock_unpoisoned(&inner.routing);
+            let seeds = lock_unpoisoned(&inner.seeds);
             for &peer_id in seeds.keys() {
                 let _ = routing.insert(peer_id, Inner::now_unix());
             }
@@ -246,7 +304,7 @@ impl DhtNode {
         // `spawn_receiver` is synchronous but calls `tokio::spawn`
         // internally, so it needs a runtime context. Enter the runtime
         // (rather than block_on) and KEEP the returned JoinHandle alive
-        // in `_bg_handles` — we must not await it (that would block on
+        // in `bg_handles` — we must not await it (that would block on
         // the receiver loop ending).
         let recv_handle = {
             let _rt_guard = runtime.enter();
@@ -256,7 +314,7 @@ impl DhtNode {
             runtime,
             inner,
             bound_addr,
-            _bg_handles: vec![recv_handle],
+            bg_handles: vec![recv_handle],
         })
     }
 
@@ -266,7 +324,7 @@ impl DhtNode {
         self.bound_addr
     }
 
-    /// The node's own NodeId.
+    /// The node's own `NodeId`.
     #[must_use]
     pub fn own_id(&self) -> NodeId {
         self.inner.own_id
@@ -275,35 +333,70 @@ impl DhtNode {
     /// Publish this node's own self-record. The record gets stored
     /// locally + (in production) republished periodically by the
     /// maintenance loop. For the minimal MVP we just stash it.
-    pub fn publish_self_record(&self, record: SignedRecord) {
+    pub fn publish_self_record(&self, record: SignedRecord) -> Result<(), DhtError> {
+        record
+            .verify()
+            .map_err(|error| DhtError::InvalidRecord(error.to_string()))?;
+        if record.node_id() != self.inner.own_id {
+            return Err(DhtError::SelfRecordIdentityMismatch);
+        }
+        let now = Inner::now_unix();
+        if !record.record.is_fresh(now)
+            || record.record.publish_time_unix > now.saturating_add(MAX_RECORD_FUTURE_SKEW_SECS)
+        {
+            return Err(DhtError::InvalidRecord(
+                "self-record is expired or future-dated".to_string(),
+            ));
+        }
         self.runtime.block_on(async {
             let nid = record.node_id();
-            let mut rec_lock = self.inner.records.lock().unwrap();
+            let mut rec_lock = lock_unpoisoned(&self.inner.records);
             rec_lock.insert(nid, record.clone());
             drop(rec_lock);
-            let mut own = self.inner.own_record.lock().unwrap();
+            let mut own = lock_unpoisoned(&self.inner.own_record);
             *own = Some(record);
         });
+        Ok(())
     }
 
-    /// Register a new seed peer (NodeId + address). Updates the
+    /// Cache a signature-valid record learned through a trusted recovery or
+    /// migration path.  Expired records may be loaded so maintenance can
+    /// prune them, but lookup paths never serve them.
+    pub fn cache_verified_record(&self, record: SignedRecord) -> Result<(), DhtError> {
+        record
+            .verify()
+            .map_err(|error| DhtError::InvalidRecord(error.to_string()))?;
+        let mut records = lock_unpoisoned(&self.inner.records);
+        let id = record.node_id();
+        if records.len() >= MAX_STORED_RECORDS && !records.contains_key(&id) {
+            return Err(DhtError::ResourceLimit("record store is full"));
+        }
+        records.insert(id, record);
+        Ok(())
+    }
+
+    /// Register a new seed peer (`NodeId` + address). Updates the
     /// resolver so the transport can dial.
-    pub fn add_seed_peer(&self, id: NodeId, addr: SocketAddr) {
+    pub fn add_seed_peer(&self, id: NodeId, addr: SocketAddr) -> Result<(), DhtError> {
         self.runtime.block_on(async {
-            let mut seeds = self.inner.seeds.lock().unwrap();
+            let mut seeds = lock_unpoisoned(&self.inner.seeds);
+            if seeds.len() >= MAX_SEED_PEERS && !seeds.contains_key(&id) {
+                return Err(DhtError::ResourceLimit("seed peer registry is full"));
+            }
             seeds.insert(id, addr);
-            let mut routing = self.inner.routing.lock().unwrap();
+            let mut routing = lock_unpoisoned(&self.inner.routing);
             let _ = routing.insert(id, Inner::now_unix());
-        });
+            Ok(())
+        })
     }
 
-    /// Iterative FIND_NODE lookup. Returns the K closest peers the
+    /// Iterative `FIND_NODE` lookup. Returns the K closest peers the
     /// network knows for `target`. Blocking from the caller's POV.
     pub fn lookup(&self, target: NodeId) -> Result<Vec<NodeId>, DhtError> {
         let inner = self.inner.clone();
         let result = self.runtime.block_on(async move {
             let bootstrap = {
-                let routing = inner.routing.lock().unwrap();
+                let routing = lock_unpoisoned(&inner.routing);
                 routing
                     .closest_to(&target)
                     .into_iter()
@@ -325,20 +418,31 @@ impl DhtNode {
         }
     }
 
-    /// Iterative FIND_VALUE lookup. Returns the record if found;
+    /// Iterative `FIND_VALUE` lookup. Returns the record if found;
     /// `None` if convergence didn't find it.
     pub fn lookup_record(&self, target: NodeId) -> Result<Option<SignedRecord>, DhtError> {
         // Try local first.
-        if let Some(rec) = self
-            .runtime
-            .block_on(async { self.inner.records.lock().unwrap().get(&target).cloned() })
-        {
+        let now = Inner::now_unix();
+        let local = self.runtime.block_on(async {
+            let mut records = lock_unpoisoned(&self.inner.records);
+            let found = records.get(&target).cloned().filter(|rec| {
+                rec.record.is_fresh(now)
+                    && rec.record.publish_time_unix
+                        <= now.saturating_add(MAX_RECORD_FUTURE_SKEW_SECS)
+                    && rec.verify().is_ok()
+            });
+            if found.is_none() {
+                records.remove(&target);
+            }
+            found
+        });
+        if let Some(rec) = local {
             return Ok(Some(rec));
         }
         let inner = self.inner.clone();
         let result = self.runtime.block_on(async move {
             let bootstrap = {
-                let routing = inner.routing.lock().unwrap();
+                let routing = lock_unpoisoned(&inner.routing);
                 routing
                     .closest_to(&target)
                     .into_iter()
@@ -359,56 +463,20 @@ impl DhtNode {
     }
 
     /// Send a STORE to a specific peer (synchronous). The peer's
-    /// response (Accepted / BadSignature / ...) is returned.
+    /// response (`Accepted` / `BadSignature` / ...) is returned.
     pub fn store_at(&self, peer: NodeId, record: SignedRecord) -> Result<StoreOutcome, DhtError> {
-        use crate::wire::encode_request;
+        record
+            .verify()
+            .map_err(|error| DhtError::InvalidRecord(error.to_string()))?;
         let inner = self.inner.clone();
         self.runtime.block_on(async move {
-            // Use the inner seeds + records directly to resolve.
-            let addr_opt = {
-                let seeds = inner.seeds.lock().unwrap();
-                if let Some(a) = seeds.get(&peer).copied() {
-                    Some(a)
-                } else {
-                    drop(seeds);
-                    let records = inner.records.lock().unwrap();
-                    records.get(&peer).and_then(|rec| {
-                        rec.record
-                            .endpoints
-                            .iter()
-                            .find_map(|ep| parse_udp_endpoint(ep))
-                    })
-                }
-            };
-            let addr = addr_opt.ok_or(DhtError::Lookup(LookupError::NoBootstrap))?;
-            let mut nonce: Nonce = [0u8; 16];
-            let ns = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
-            nonce[8..16].copy_from_slice(&ns.to_be_bytes());
-            let env = RpcEnvelope {
-                header: Header::new(inner.own_id, nonce, Inner::now_unix()),
-                body: Request::Store(record),
-            };
-            let bytes =
-                encode_request(&env).map_err(|_| DhtError::Lookup(LookupError::NoBootstrap))?;
-            inner
-                .socket
-                .send_to(&bytes, addr)
-                .await
-                .map_err(DhtError::Bind)?;
-            // Wait briefly for the response. Receiver task routes
-            // it via the wire decode; we listen on a private recv
-            // by spawning a one-off socket... actually that's
-            // complex. For MVP, just fire-and-forget and return
-            // Accepted optimistically; the network ACK isn't
-            // strictly required for the store to succeed at the
-            // peer.
-            // FUTURE: proper one-shot channel routed through the
-            // receiver task. Tracked.
-            let _ = bytes;
-            Ok(StoreOutcome::Accepted)
+            match inner.transport.request(peer, Request::Store(record)).await {
+                Ok(Response::StoreResult(outcome)) => Ok(outcome),
+                Ok(_) => Err(DhtError::Request(
+                    "peer returned a non-STORE response".to_string(),
+                )),
+                Err(error) => Err(DhtError::Request(error.to_string())),
+            }
         })
     }
 
@@ -416,10 +484,10 @@ impl DhtNode {
     #[must_use]
     pub fn routing_table_len(&self) -> usize {
         self.runtime
-            .block_on(async { self.inner.routing.lock().unwrap().len() })
+            .block_on(async { lock_unpoisoned(&self.inner.routing).len() })
     }
 
-    /// Row 3 maintenance: issue a FIND_NODE refresh lookup for every
+    /// Row 3 maintenance: issue a `FIND_NODE` refresh lookup for every
     /// bucket whose `last_refresh_unix` is older than `max_age_secs`.
     ///
     /// Without this, idle buckets accumulate stale peer info and
@@ -428,7 +496,7 @@ impl DhtNode {
     /// Returns the number of buckets refreshed.
     pub fn refresh_stale_buckets(&self, now_unix: u64, max_age_secs: u64) -> usize {
         let stale_indices: Vec<usize> = {
-            let routing = self.inner.routing.lock().unwrap();
+            let routing = lock_unpoisoned(&self.inner.routing);
             routing.stale_buckets(now_unix, max_age_secs)
         };
         if stale_indices.is_empty() {
@@ -437,7 +505,7 @@ impl DhtNode {
         let mut refreshed = 0;
         for idx in stale_indices {
             let target_opt = {
-                let routing = self.inner.routing.lock().unwrap();
+                let routing = lock_unpoisoned(&self.inner.routing);
                 routing.synthetic_id_for_bucket(idx)
             };
             let Some(target) = target_opt else {
@@ -448,7 +516,7 @@ impl DhtNode {
             // bucket refreshed regardless so we don't busy-loop.
             let _ = self.lookup(target);
             {
-                let mut routing = self.inner.routing.lock().unwrap();
+                let mut routing = lock_unpoisoned(&self.inner.routing);
                 routing.mark_bucket_refreshed(idx, now_unix);
             }
             refreshed += 1;
@@ -461,24 +529,31 @@ impl DhtNode {
     /// K closest peers per record so they don't expire under the
     /// default record TTL.
     ///
-    /// Returns the number of records republished.
+    /// Returns the number of distinct records acknowledged as accepted by at
+    /// least one peer. Work is bounded and peer requests run concurrently.
     pub fn republish_records(&self, now_unix: u64, max_age_secs: u64) -> usize {
         let threshold_unix = now_unix.saturating_sub(max_age_secs);
         // Snapshot eligible records under lock so we don't hold the
         // mutex during the network calls.
         let to_republish: Vec<(NodeId, SignedRecord)> = {
-            let records = self.inner.records.lock().unwrap();
+            let mut records = lock_unpoisoned(&self.inner.records);
+            records.retain(|_, record| record.record.is_fresh(now_unix));
             records
                 .iter()
-                .filter(|(_id, rec)| rec.record.publish_time_unix <= threshold_unix)
+                .filter(|(_id, rec)| {
+                    rec.record.publish_time_unix <= threshold_unix
+                        && rec.record.publish_time_unix
+                            <= now_unix.saturating_add(MAX_RECORD_FUTURE_SKEW_SECS)
+                })
+                .take(MAX_REPUBLISH_RECORDS_PER_TICK)
                 .map(|(id, rec)| (*id, rec.clone()))
                 .collect()
         };
-        let mut count = 0;
+        let mut jobs = Vec::new();
         for (rec_id, signed) in to_republish {
             // K closest known peers for this record's id.
             let closest: Vec<NodeId> = {
-                let routing = self.inner.routing.lock().unwrap();
+                let routing = lock_unpoisoned(&self.inner.routing);
                 routing
                     .closest_to(&rec_id)
                     .into_iter()
@@ -486,11 +561,39 @@ impl DhtNode {
                     .collect()
             };
             for peer in closest {
-                let _ = self.store_at(peer, signed.clone());
+                if jobs.len() >= MAX_REPUBLISH_REQUESTS_PER_TICK {
+                    break;
+                }
+                jobs.push((rec_id, peer, signed.clone()));
             }
-            count += 1;
         }
-        count
+        let transport = self.inner.transport.clone();
+        self.runtime.block_on(async move {
+            let semaphore = Arc::new(Semaphore::new(MAX_REPUBLISH_IN_FLIGHT));
+            let mut tasks = JoinSet::new();
+            for (record_id, peer, record) in jobs {
+                let transport = transport.clone();
+                let semaphore = semaphore.clone();
+                tasks.spawn(async move {
+                    let Ok(permit) = semaphore.acquire_owned().await else {
+                        return (record_id, false);
+                    };
+                    let _permit = permit;
+                    let accepted = matches!(
+                        transport.request(peer, Request::Store(record)).await,
+                        Ok(Response::StoreResult(StoreOutcome::Accepted))
+                    );
+                    (record_id, accepted)
+                });
+            }
+            let mut accepted = HashSet::new();
+            while let Some(result) = tasks.join_next().await {
+                if let Ok((record_id, true)) = result {
+                    accepted.insert(record_id);
+                }
+            }
+            accepted.len()
+        })
     }
 
     /// Row 3 maintenance: single-call wrapper that runs BOTH
@@ -513,14 +616,14 @@ impl DhtNode {
     #[must_use]
     pub fn records_len(&self) -> usize {
         self.runtime
-            .block_on(async { self.inner.records.lock().unwrap().len() })
+            .block_on(async { lock_unpoisoned(&self.inner.records).len() })
     }
 
     /// Graceful shutdown. Cancels background tasks; runtime drops
     /// at end of the function.
     pub fn shutdown(self) {
-        for h in self._bg_handles {
-            h.abort();
+        for handle in self.bg_handles {
+            handle.abort();
         }
         // Runtime drops here.
     }

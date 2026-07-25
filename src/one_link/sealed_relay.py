@@ -2,8 +2,8 @@
 capability-bearing relay frames.
 
 When peer A sends to peer B via the One Link relay (NAT-traversed
-flow), the relay sees both pubkeys today. Bundle 39 shipped the
-sealed-sender primitive (relay can't see WHO sent); Bundle 44
+flow), the v2 relay route carries a rotating pairwise tag rather than either
+identity public key. Bundle 39 shipped the sealed-sender primitive; Bundle 44
 shipped signed capability grants (peer authorizes specific actions
 with auto-expiry). Bundle 52 ships the integration: a relay frame
 that carries
@@ -120,6 +120,7 @@ def seal_for_relay(
         sender_ed_priv_seed=sender_ed_priv_seed,
         sender_ed_pub=sender_ed_pub,
         recipient_ed_pub=recipient_ed_pub,
+        aad_context=RELAY_AAD,
     )
     return (
         struct.pack(">H", len(grant_blob)) + grant_blob
@@ -182,6 +183,7 @@ def unseal_from_relay(
         paired_ed_pubs=paired_ed_pubs,
         freshness_window_ms=freshness_window_ms,
         now_ms=now_ms,
+        aad_context=RELAY_AAD,
     )
     grant_nonce, payload = _decode_inner_body(msg.body)
 

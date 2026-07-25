@@ -11,7 +11,8 @@ threshold-of-N device cluster ship plan:
 
   - User has 3 devices (laptop + phone + tablet). N=3 shares,
     threshold M=2. Each device holds one share locally; the
-    full secret never persists on any single device.
+    no device stores the reconstructed secret as part of the share set. A
+    recovery operation necessarily materializes it on the recovering endpoint.
   - Adding a 4th device: existing devices each transmit their
     share to the new device over an authenticated P2P channel
     (the One Link channel itself, post-pair). The new device
@@ -37,26 +38,26 @@ Why pure Python?
 
   - No new dependency. cryptography>=42 is already the trust
     anchor; an SSS impl in 250 lines doesn't need a pip install.
-  - The primitive is well-known and the tests in
-    test_threshold_v0207.py pin every property (zero-knowledge
-    below threshold, perfect reconstruction at threshold,
-    deterministic vs random sharing modes, share-byte alignment
-    on multi-byte secrets).
+  - The primitive is well-known, but repository tests exercise finite vectors
+    and algebraic properties; they are not a formal zero-knowledge proof or an
+    independent cryptographic audit.
 
 Cryptographic posture:
 
   - The polynomial coefficients are drawn from os.urandom (CSPRNG
     in cryptography's hazmat layer). Each byte is independent —
     no MITM-leakable correlation across share bytes.
-  - Reconstruction is constant-time within the field operations:
-    the GF(256) arithmetic uses table lookups whose access pattern
-    is deterministic. Each share-byte is processed independently.
+  - This pure-Python implementation is not constant-time. GF(256) table indexes
+    and interpreter/runtime behavior depend on share values. Do not treat it as
+    protection from a local side-channel adversary.
   - There is no secret information in the share INDICES (the
     "x-coordinate"). Indices 1..255 are the standard set;
     SHARE_ZERO is the secret itself, never transmitted.
-  - The threshold property is information-theoretic, not
-    computational: even an attacker with unlimited compute who
-    holds <M shares learns nothing about the secret.
+  - The mathematical threshold property is information-theoretic when
+    coefficients are independent uniform CSPRNG bytes and the adversary has
+    only fewer than M shares. Metadata, endpoint compromise, biased/caller-
+    supplied randomness, side channels, weak secret priors, or authenticated-
+    protocol failures are outside that statement.
 
 What this module does NOT do:
 
@@ -271,11 +272,11 @@ def split(
 def combine(shares: Iterable[Share]) -> bytes:
     """Reconstruct the secret from at least ``threshold`` shares.
 
-    Raises ValueError if shares are inconsistent (different lengths,
-    duplicate indices, or fewer-than-threshold shares present and
-    the polynomial has high enough degree to require more — which
-    we don't check here, the caller is responsible for providing
-    enough).
+    Raises ValueError for structural inconsistencies such as different lengths
+    or duplicate indexes. A share does not encode its threshold, so this
+    function cannot detect too few otherwise well-formed shares; the caller
+    must enforce the authenticated ceremony's threshold and verify the
+    reconstructed authority before use.
     """
     share_list = list(shares)
     if len(share_list) < 2:

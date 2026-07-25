@@ -6,13 +6,13 @@ desktop UI fetches /api/connect-info + /api/connect-info/qr.svg
 and renders both in the About pane. Only renders when the daemon
 is LAN-bound; loopback URLs are useless on a phone.
 
-  Reach:  user opens settings, scans QR, phone loads One Link.
-          No URL typing, no token paste-fumbling.
+  Reach:  the legacy endpoint remains inspectable, but LAN callers are
+          directed to the short-lived setup-device invite flow.
   Hide:   the section short-circuits to a "pass --lan" hint when
           the daemon's bound to 127.0.0.1. Don't tell users to
           scan a code that won't work.
-  Async:  endpoints are auth-gated — they expose the token, only
-          the already-authenticated UI sees them.
+  Async:  endpoints are auth-gated. The owner token is never exported into
+          a LAN HTTP URL or QR; only loopback compatibility may return it.
   Depth:  the SVG endpoint sets Cache-Control: no-store so a
           token rotation propagates immediately (browsers cache
           aggressively on Service-Worker-controlled origins).
@@ -82,7 +82,7 @@ async def http_loopback(tmp_path: Path, monkeypatch):
 @pytest_asyncio.fixture
 async def http_lan(tmp_path: Path, monkeypatch):
     """Daemon "bound" to 0.0.0.0 — connect-info should return
-    `lan_bound: true` and the QR endpoint should serve SVG."""
+    `lan_bound: true` and require a short-lived invite."""
     monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
     monkeypatch.setenv("ONE_LINK_BIND_HOST", "0.0.0.0")
     me = _identity()
@@ -115,8 +115,7 @@ def index_html() -> str:
 
 @pytest.mark.asyncio
 async def test_connect_info_requires_auth(http_lan):
-    """The endpoint MUST 401 without the token. It exposes the URL
-    + token, so unauthenticated callers must not see it."""
+    """The compatibility endpoint remains owner-authenticated."""
     client, _ = http_lan
     resp = await client.get("/api/connect-info")
     assert resp.status == 401
@@ -153,9 +152,11 @@ async def test_connect_info_lan_shape(http_lan):
     ):
         assert key in body, f"missing {key} in connect-info payload"
     assert body["bind_host"] == "0.0.0.0"
-    assert body["token"] == server.token
+    assert body["token"] is None
+    assert body["requires_short_lived_invite"] is True
     assert body["lan_url"].startswith("http://")
-    assert f":{server.port}/?t={server.token}" in body["lan_url"]
+    assert body["lan_url"].endswith(f":{server.port}/connect")
+    assert server.token not in body["lan_url"]
 
 
 @pytest.mark.asyncio
@@ -172,6 +173,8 @@ async def test_connect_info_loopback_shape(http_loopback):
     body = await resp.json()
     assert body["bind_host"] == "127.0.0.1"
     assert body["lan_bound"] is False
+    assert body["requires_short_lived_invite"] is False
+    assert body["token"] == server.token
     # The URL still uses 127.0.0.1 — never accidentally leak a LAN
     # IP when the daemon is loopback.
     assert "127.0.0.1" in body["lan_url"]
@@ -180,30 +183,22 @@ async def test_connect_info_loopback_shape(http_loopback):
 # ───────── SVG rendering ────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_connect_qr_returns_svg(http_lan):
-    """LAN-bound: the QR endpoint MUST return a real SVG with
-    image/svg+xml content type — not a placeholder, not JSON."""
+async def test_connect_qr_requires_short_lived_invite(http_lan):
+    """The legacy QR must never encode the long-lived owner bearer on LAN."""
     client, server = http_lan
     resp = await client.get(
         "/api/connect-info/qr.svg",
         headers={"Authorization": f"Bearer {server.token}"},
     )
-    assert resp.status == 200
-    ct = resp.headers.get("Content-Type", "")
-    assert "svg" in ct
-    body = await resp.text()
-    # Real QR SVG starts with the XML preamble + an <svg ...> root.
-    assert body.startswith("<?xml")
-    assert "<svg" in body
-    # And contains <path ...> data, the QR module rendering.
-    assert "<path" in body
+    assert resp.status == 409
+    body = await resp.json()
+    assert body["error"] == "short_lived_invite_required"
+    assert "short-lived" in body["hint"]
 
 
 @pytest.mark.asyncio
 async def test_connect_qr_no_store_cache(http_lan):
-    """Token rotations MUST propagate immediately. Cache-Control
-    no-store prevents browsers + intermediates from serving a
-    stale QR encoding the previous token."""
+    """The migration response must never be cached as usable QR data."""
     client, server = http_lan
     resp = await client.get(
         "/api/connect-info/qr.svg",

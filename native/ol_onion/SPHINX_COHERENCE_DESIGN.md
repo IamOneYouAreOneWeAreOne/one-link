@@ -1,26 +1,32 @@
 # Sphinx Coherence — onion routing beyond the textbook
 
-Status: design-of-record for F3.5. Tier 1 ships in this branch;
-Tier 2 items are tracked with their own acceptance gates.
+Status: research design-of-record for F3.5. The branch contains packet-level
+Tier 1 primitives and tests; it does **not** contain a live One Link
+message/file onion route, an independently operated mix-net, or evidence for
+sender anonymity or traffic-analysis resistance. Tier 2 items are design
+targets with separate acceptance gates.
 
 This document supersedes `SPHINX_DESIGN.md` (which captured the
 correct standard Sphinx algorithm; that becomes the floor of this
 design).
 
-## Threat model — what's defeated
+## Threat model — target versus current evidence
 
-| Adversary class | Standard Sphinx | Sphinx Coherence |
+No row in this table is a product claim. Packet construction tests establish
+only the narrow properties named in the final column.
+
+| Adversary class | Design target | Current evidence and limit |
 |---|---|---|
-| Per-relay passive observer | Defeated | Defeated |
-| Global passive observer (sees every relay) | Defeated by alpha blinding | Defeated by alpha blinding |
-| Quantum adversary recording today, decrypting in 2035 | NOT defeated | **Defeated** by PQ-hybrid blinding |
-| Quantum adversary with future X25519 + ML-KEM break | NOT defeated | **Defeated** by field-bound blinding (needs historical EM environment) |
-| Compromised relay revealing prev/next hop | Inherent limit | Inherent limit (mitigated by Reed-Solomon multi-path) |
-| Circuit-shortening attack (relay reroutes mid-circuit) | NOT defeated | **Defeated** by Schnorr signature aggregation |
-| Timing correlation across relays | NOT defeated | **Defeated** by active-inference cover traffic (when shipped) |
-| Single-circuit failure / observation | NOT defeated | **Defeated** by Reed-Solomon K-of-N multi-path |
+| Per-relay passive observer | Hide the end-to-end route and content from one honest-but-curious relay | Nested encryption and alpha evolution are tested. A relay still sees its adjacent sockets, direction, timing, packet count, and fixed packet size. |
+| Global passive observer (sees every relay) | Make cross-relay linkage difficult | **Not defeated.** Alpha blinding changes visible group elements, but a global observer can still correlate timing, direction, volume, and topology. |
+| Record-now/decrypt-later adversary | Retain confidentiality if at least one hybrid component remains secure | The entry-hop KDF combines X25519 and ML-KEM-768 outputs and tests input binding. This is conditional on the underlying schemes, protocol composition, and correct deployment; it is not a cryptanalytic proof or live-route evidence. |
+| Future break of both X25519 and ML-KEM | Add independent secret material | **Not defeated by a published field digest.** The present Sphinx field API mixes caller-supplied context; public or low-entropy context is not a replacement cryptographic key. |
+| Compromised relay revealing previous/next hop | Limit information to adjacent hops | Inherent limit. Reed-Solomon multi-path is a deferred availability target, not a current anonymity mitigation. |
+| Circuit shortening or rerouting | Authenticate an intended path transcript | **Not defeated.** Schnorr sign/batch-verify primitives exist, but there is no proved, live end-to-end path-authorization protocol. |
+| Timing correlation across relays | Shape real and dummy traffic into a measured anonymity system | **Not defeated.** Cover packet and rate-control primitives do not provide mixing, delay, a deployment-wide schedule, or an anonymity proof. |
+| Single-circuit failure | Recover payload from independent paths | Reed-Solomon multi-path is deferred and not wired into a product onion route. |
 
-## Tier 1 — engineering-grade (this ship)
+## Tier 1 — implemented packet primitives (not a product route)
 
 ### T1.1 Correct Sphinx core
 
@@ -62,9 +68,11 @@ Downstream hops i >= 1:
   b_i = derive_blind(s_i, alpha_i, field_witness_i)
 ```
 
-Result: a quantum adversary recording today's traffic cannot derive
-`b_0` without breaking ML-KEM-768. Without `b_0`, they can't derive
-`alpha_1`, so the chain breaks at the first hop.
+Conditional security intent: if ML-KEM-768 remains secure and the hybrid
+composition is correct, recovering only the classical component does not
+reproduce the KDF input used for `b_0`. Current tests prove that changing or
+omitting the PQ input changes derived bytes; they do not simulate a quantum
+adversary or prove the protocol's cryptographic security.
 
 ### T1.3 Field-bound blinding
 
@@ -86,16 +94,14 @@ field state. If the relay's state has drifted between when the
 sender observed it and when the packet arrives, the derived b_i
 differs and the next hop's MAC fails.
 
-**Consequence:** a future cryptanalytic break of X25519 + ML-KEM-768
-still cannot decrypt historical onion traffic without **recreating
-the physical RF environment at every relay's location**. This is
-the alien-tech core — physically-bound onion routing.
-
-**Honest scope:** the field witness has ~32 bits of unpredictability
-per circuit construction. It's NOT a substitute for the
-cryptographic randomness; it's an additional binding layer. Useful
-against passive recorders who don't have a presence at circuit-
-setup time.
+**Current consequence:** changing the supplied witness changes the derived
+keys and causes the packet check to fail. Because the design says relays
+publish the digest, that digest is context, not secret entropy; a recorder can
+record it too. No evidence establishes 32 bits of unpredictability, proves
+that an RF environment is represented by the digest, or shows that the value
+cannot be reconstructed. A future security design may mix a separately stored,
+CSPRNG-grade secret from another trust domain, but that would be a new key-
+management protocol and must be reviewed as such.
 
 ### T1.4 Coherence-field hop selection
 
@@ -126,9 +132,9 @@ independent signers needs per-signer R values on the wire. Use
 `batch_verify` for the production verifier-side win in the
 meantime.
 
-Acceptance signal: 271 ol_onion tests pass at 1M iters
-(properties), KAT vectors pinned, 12 adversarial vectors,
-clippy-clean on the new module.
+Historical development notes recorded broad unit/property/KAT coverage. Test
+counts and iteration counts are not security proofs and must be regenerated by
+the release gate rather than treated as permanent evidence.
 
 ## Tier 2 — research-grade alien tech (deferred per-item)
 
@@ -148,9 +154,11 @@ Implementation:
   through trusted relays; they look indistinguishable from real
   packets on the wire.
 
-Result: even a global passive adversary with perfect timing
-correlation tooling sees a posterior over "who's talking to whom"
-that's no better than uniform random.
+Target: reduce an explicitly modelled observer's inference accuracy. A
+Poisson sampler or rate equalizer alone does not imply a uniform posterior.
+That result would require a defined observation model, real-traffic shaping,
+mixing/delay, deployment-wide measurements, and independent analysis; none is
+current product evidence.
 
 ### T2.2 Reed-Solomon multi-path onion (item 8)
 
@@ -159,21 +167,22 @@ Each user payload is encoded with a (K, N) Reed-Solomon code via
 each wrapped in their own Sphinx packet and dispatched along
 **N parallel circuits** (each with different hop sets).
 
-Any K of N fragments at the destination reconstructs the message.
-Defeats single-circuit failure + makes traffic-analysis harder
-(no single circuit carries the full message).
+Any K of N fragments at the destination would reconstruct the message. This
+is an availability and path-diversity target. Fragmentation can also add
+correlation signals, so it is not treated as a traffic-analysis defense
+without a measured complete protocol.
 
 ### T2.3 ZK proof of valid peel (item 10, research-grade)
 
-Each relay emits a Bulletproof / Groth16 proof that it performed a
-valid peel without revealing what it decrypted. Useful for
-accountable but anonymous routing in adversarial conditions
-(e.g., proving rate-limit compliance without revealing identity).
+The target asks each relay to emit a zero-knowledge proof that it performed a
+valid peel without revealing what it decrypted. Whether a future construction
+supports accountable, privacy-preserving routing depends on its statement,
+witness, setup, metadata, and deployment; no such product protocol exists.
 
 This is its own multi-week effort. Tracked but not in any current
 ship plan.
 
-## Wire packet (Tier 1)
+## Target wire packet (Tier 1 research format)
 
 ```text
 version            : u8                    (= 3)
@@ -197,7 +206,7 @@ appearance.
 
 ## Implementation strategy
 
-The ship lands in 5 commits:
+The research implementation was decomposed into five work items:
 
 1. **T1.1 + Ristretto255** — `sphinx/core.rs` with correct filler-
    byte construction. KAT vectors cross-checked against Nymtech.
@@ -213,16 +222,16 @@ Each commit ships KAT + property + adversarial tests for its layer.
 
 ## Acceptance gates
 
-| Property | How verified |
+| Property | Required evidence before promotion |
 |---|---|
-| Standard Sphinx correctness | KAT vectors match Nymtech reference outputs |
-| PQ-hybrid blinding | Recording-attack simulator: quantum adversary can't recover s_0 without ML-KEM secret |
-| Field-bound blinding | KAT vector with non-trivial field_witness; flipping any bit fails the next hop's MAC |
-| Coherence-field hop selection | Path through ol_routing has minimum-τ_c ≥ random-baseline (over 1k circuits) |
-| Schnorr aggregation | Removing any hop's contribution causes verify to fail |
-| Hop blindness | GPA simulator: same-circuit packets correlate at random chance (within ε) |
-| Constant packet size | Every layer's wire packet is exactly TOTAL bytes |
-| Per-hop MAC integrity | Every-byte-flip rejected (already in current adversarial suite, extend) |
+| Sphinx construction interoperability | Independently maintained reference vectors plus parser/peel differential tests for the exact wire version |
+| PQ-hybrid input binding | Standardized-algorithm KATs, explicit combiner analysis, downgrade tests, implementation review, and cross-platform runtime evidence |
+| Field-context binding | KAT showing changed context changes derived keys; no confidentiality claim unless a separate high-entropy secret and lifecycle are specified and reviewed |
+| Coherence-field hop selection | Reproducible route-quality experiment with baseline, distribution, confidence interval, and failure cases |
+| Schnorr verification | Exact signed transcript/protocol specification, rogue-key defenses, negative vectors, and independent review |
+| Hop unlinkability/anonymity | Defined adversary and observation model, multi-vantage deployed traces, timing/volume classifiers, and a stated measured bound; alpha bytes alone are insufficient |
+| Constant packet size | Encoded-length tests for every supported route length and message class; size equality is not timing/volume anonymity |
+| Per-hop integrity | Mutation/fuzz/KAT coverage plus implementation review; test coverage is not a proof against every attack |
 
 ## Why this matters
 
@@ -238,7 +247,8 @@ Nym) implement variants but none combine:
 - Reed-Solomon multi-path (research only)
 - Active-inference cover traffic (research only; no implementation)
 
-The end-to-end stack defeats every known onion-routing attack class
-that doesn't compromise both endpoints. This is the "alien tech"
-the user asked for — not because any single primitive is exotic, but
-because **the combination is unique to One Link's substrate**.
+The value of this design is the set of composable experiments it makes
+possible. Novel combinations also create novel failure modes; uniqueness is
+not security evidence. One Link must not claim that this stack defeats every
+known onion-routing attack, provides anonymity, or protects a live route until
+the complete deployed protocol passes the gates above.

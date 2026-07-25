@@ -20,8 +20,10 @@ Design:
   - Decryption requires the device's master seed AND knowledge of
     the call_id; a peer-leaked capsule cannot be decrypted on its
     own.
-  - Stream the capsule via :func:`seal_to_path` / :func:`open_from_path`
-    so the daemon doesn't hold the whole audio blob in memory at once.
+  - Bound the complete sealed plaintext before AEAD.  ``ChaCha20Poly1305`` is
+    a one-shot API, so this format intentionally caps memory instead of making
+    a false streaming claim.  The capsule schema's 16 MiB audio ceiling plus
+    bounded metadata keeps the worst case finite.
 
 Pure module: no daemon imports. The daemon's capsule store calls
 :func:`seal_to_path` on finalization + :func:`open_from_path` on
@@ -35,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+import stat
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +52,12 @@ SEAL_VERSION = 1
 NONCE_LEN = 12
 TAG_LEN = 16
 KEY_LEN = 32
+HEADER_LEN = len(MAGIC) + 1 + NONCE_LEN + 8
+# Audio is capped at 16 MiB by async_capsule.  Leave another 16 MiB for the
+# (also bounded) provenance JSON and scalar header, while refusing forged file
+# lengths before allocating them.
+MAX_SEALED_PLAINTEXT_BYTES = 32 * 1024 * 1024
+MAX_SEALED_CIPHERTEXT_BYTES = MAX_SEALED_PLAINTEXT_BYTES + TAG_LEN
 
 
 # ---------------------------------------------------------------------------
@@ -72,8 +81,19 @@ def derive_capsule_key(
     """
     if not isinstance(master_seed, (bytes, bytearray)) or len(master_seed) < 32:
         raise ValueError("master_seed must be >= 32 bytes")
-    if not isinstance(call_id, str) or not call_id:
+    if (
+        not isinstance(call_id, str)
+        or not call_id
+        or len(call_id) > 128
+        or any(ord(ch) < 0x20 for ch in call_id)
+    ):
         raise ValueError("call_id required")
+    if (
+        isinstance(finalized_at_ms, bool)
+        or not isinstance(finalized_at_ms, int)
+        or not (0 <= finalized_at_ms <= 2**63 - 1)
+    ):
+        raise ValueError("finalized_at_ms must be a non-negative 63-bit integer")
     info = b"one-link-capsule-at-rest-v1|" + call_id.encode("utf-8") + b"|"
     info += finalized_at_ms.to_bytes(8, "big", signed=False)
     # Simple HKDF-Extract + first-block-Expand (RFC 5869). For 32 bytes
@@ -103,6 +123,41 @@ class SealedHeader:
     ciphertext_len: int
 
 
+def _fsync_parent(path: Path) -> None:
+    """Durably publish a rename where the platform exposes directory fsync."""
+
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0))
+    fd = os.open(str(path.parent), flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    written = 0
+    while written < len(view):
+        count = os.write(fd, view[written:])
+        if count <= 0:
+            raise OSError("short write while sealing capsule")
+        written += count
+
+
+def _validate_regular_path(path: Path) -> os.stat_result:
+    """Reject links, Windows reparse points, and special files."""
+
+    st = path.lstat()
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    attributes = int(getattr(st, "st_file_attributes", 0))
+    is_reparse = os.name == "nt" and bool(attributes & reparse_flag)
+    if stat.S_ISLNK(st.st_mode) or is_reparse or not stat.S_ISREG(st.st_mode):
+        raise ValueError("sealed capsule path is not a regular file")
+    return st
+
+
 def seal_to_path(
     *,
     plaintext: bytes,
@@ -118,6 +173,10 @@ def seal_to_path(
     written first then atomically renamed to ``out_path`` so a crash
     mid-write never leaves a half-sealed file.
     """
+    if not isinstance(plaintext, (bytes, bytearray)):
+        raise TypeError("plaintext must be bytes")
+    if len(plaintext) > MAX_SEALED_PLAINTEXT_BYTES:
+        raise ValueError("sealed capsule plaintext exceeds size limit")
     if nonce is None:
         nonce = secrets.token_bytes(NONCE_LEN)
     elif len(nonce) != NONCE_LEN:
@@ -139,12 +198,51 @@ def seal_to_path(
         + nonce
         + struct.pack("!Q", len(ciphertext_with_tag))
     )
-    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with tmp.open("wb") as f:
-        f.write(header)
-        f.write(ciphertext_with_tag)
-    os.replace(tmp, out_path)
+    if out_path.exists() or out_path.is_symlink():
+        existing = out_path.lstat()
+        reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+        attributes = int(getattr(existing, "st_file_attributes", 0))
+        is_reparse = os.name == "nt" and bool(attributes & reparse_flag)
+        if (
+            stat.S_ISLNK(existing.st_mode)
+            or is_reparse
+            or not stat.S_ISREG(existing.st_mode)
+        ):
+            raise ValueError("sealed capsule destination is not a regular file")
+    tmp = out_path.with_name(
+        f".{out_path.name}.tmp.{os.getpid()}.{secrets.token_hex(8)}"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= int(getattr(os, "O_BINARY", 0))
+    fd = os.open(str(tmp), flags, 0o600)
+    try:
+        _write_all(fd, header)
+        _write_all(fd, ciphertext_with_tag)
+        os.fsync(fd)
+    except BaseException:
+        try:
+            os.close(fd)
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
+    else:
+        os.close(fd)
+    try:
+        os.replace(tmp, out_path)
+        if os.name != "nt":
+            os.chmod(out_path, 0o600)
+        _fsync_parent(out_path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def open_from_path(
@@ -159,9 +257,28 @@ def open_from_path(
       - version unknown
       - AEAD tag verification failure (tampered or wrong key)
     """
-    with sealed_path.open("rb") as f:
-        header_fixed = f.read(len(MAGIC) + 1 + NONCE_LEN + 8)
-        if len(header_fixed) < len(MAGIC) + 1 + NONCE_LEN + 8:
+    sealed_path = Path(sealed_path)
+    path_stat = _validate_regular_path(sealed_path)
+    if path_stat.st_size < HEADER_LEN:
+        raise ValueError("sealed capsule truncated header")
+    if path_stat.st_size > HEADER_LEN + MAX_SEALED_CIPHERTEXT_BYTES:
+        raise ValueError("sealed capsule exceeds size limit")
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(str(sealed_path), flags)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError("sealed capsule path is not a regular file")
+        if (
+            int(opened.st_size) != int(path_stat.st_size)
+            or int(getattr(opened, "st_dev", 0)) != int(getattr(path_stat, "st_dev", 0))
+            or int(getattr(opened, "st_ino", 0)) != int(getattr(path_stat, "st_ino", 0))
+        ):
+            raise ValueError("sealed capsule changed while opening")
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            header_fixed = f.read(HEADER_LEN)
+        if len(header_fixed) < HEADER_LEN:
             raise ValueError("sealed capsule truncated header")
         if header_fixed[:len(MAGIC)] != MAGIC:
             raise ValueError("not a sealed capsule (bad magic)")
@@ -174,9 +291,29 @@ def open_from_path(
         (ciphertext_len,) = struct.unpack(
             "!Q", header_fixed[len(MAGIC) + 1 + NONCE_LEN:],
         )
-        ciphertext = f.read(ciphertext_len)
+        if not (TAG_LEN <= ciphertext_len <= MAX_SEALED_CIPHERTEXT_BYTES):
+            raise ValueError("sealed capsule ciphertext length outside limit")
+        expected_file_size = HEADER_LEN + ciphertext_len
+        if int(opened.st_size) < expected_file_size:
+            raise ValueError("sealed capsule truncated body")
+        if int(opened.st_size) > expected_file_size:
+            raise ValueError("sealed capsule has trailing bytes")
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            f.seek(HEADER_LEN)
+            ciphertext = f.read(ciphertext_len)
         if len(ciphertext) != ciphertext_len:
             raise ValueError("sealed capsule truncated body")
+        after = os.fstat(fd)
+        if (
+            int(after.st_size) != int(opened.st_size)
+            or int(getattr(after, "st_mtime_ns", 0))
+            != int(getattr(opened, "st_mtime_ns", 0))
+            or int(getattr(after, "st_ctime_ns", 0))
+            != int(getattr(opened, "st_ctime_ns", 0))
+        ):
+            raise ValueError("sealed capsule changed while reading")
+    finally:
+        os.close(fd)
     key = derive_capsule_key(
         master_seed=master_seed,
         call_id=call_id,
@@ -195,15 +332,51 @@ def inspect_header(sealed_path: Path) -> SealedHeader:
     """Read the unencrypted header without attempting decryption.
     Used by the daemon's capsule UI to display "sealed capsule"
     metadata in the chat list."""
-    with sealed_path.open("rb") as f:
-        buf = f.read(len(MAGIC) + 1 + NONCE_LEN + 8)
-    if len(buf) < len(MAGIC) + 1 + NONCE_LEN + 8:
+    sealed_path = Path(sealed_path)
+    path_stat = _validate_regular_path(sealed_path)
+    if path_stat.st_size > HEADER_LEN + MAX_SEALED_CIPHERTEXT_BYTES:
+        raise ValueError("sealed capsule exceeds size limit")
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(str(sealed_path), flags)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError("sealed capsule path is not a regular file")
+        if (
+            int(opened.st_size) != int(path_stat.st_size)
+            or int(getattr(opened, "st_dev", 0))
+            != int(getattr(path_stat, "st_dev", 0))
+            or int(getattr(opened, "st_ino", 0))
+            != int(getattr(path_stat, "st_ino", 0))
+        ):
+            raise ValueError("sealed capsule changed while opening")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            buf = handle.read(HEADER_LEN)
+        after = os.fstat(fd)
+        if (
+            int(after.st_size) != int(opened.st_size)
+            or int(getattr(after, "st_mtime_ns", 0))
+            != int(getattr(opened, "st_mtime_ns", 0))
+            or int(getattr(after, "st_ctime_ns", 0))
+            != int(getattr(opened, "st_ctime_ns", 0))
+        ):
+            raise ValueError("sealed capsule changed while reading")
+    finally:
+        os.close(fd)
+    if len(buf) < HEADER_LEN:
         raise ValueError("truncated header")
     if buf[:len(MAGIC)] != MAGIC:
         raise ValueError("not a sealed capsule")
     version = buf[len(MAGIC)]
+    if version != SEAL_VERSION:
+        raise ValueError(f"unsupported sealed capsule version {version}")
     nonce = buf[len(MAGIC) + 1: len(MAGIC) + 1 + NONCE_LEN]
     (ciphertext_len,) = struct.unpack("!Q", buf[len(MAGIC) + 1 + NONCE_LEN:])
+    if not (TAG_LEN <= ciphertext_len <= MAX_SEALED_CIPHERTEXT_BYTES):
+        raise ValueError("sealed capsule ciphertext length outside limit")
+    if int(opened.st_size) != HEADER_LEN + ciphertext_len:
+        raise ValueError("sealed capsule length mismatch")
     return SealedHeader(
         magic=MAGIC, version=version,
         nonce=nonce, ciphertext_len=ciphertext_len,

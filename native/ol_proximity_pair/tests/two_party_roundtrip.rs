@@ -1,11 +1,10 @@
-//! Two-party simulation: Alice + Bob in the same physical environment
-//! derive the SAME Factor-2 secret; a distant attacker derives a
-//! DIFFERENT one.
+//! Research simulations for candidate-bit behavior.
 //!
-//! This is the end-to-end acceptance gate for the alien-tech primitive.
+//! These tests do not establish agreement, entropy, proximity, or an
+//! end-to-end authentication property.
 
 use ol_proximity_pair::{
-    block_syndrome, derive_factor2_secret, privacy_amplify, quantize_observations,
+    block_syndrome, derive_unconfirmed_candidate, privacy_amplify, quantize_observations,
     reconcile_with_syndrome, PipelineConfig, QuantizeConfig,
 };
 
@@ -14,8 +13,12 @@ use ol_proximity_pair::{
 fn co_located_observations(seed: u64) -> (Vec<u8>, Vec<u8>) {
     // 512 observations so syndrome bits + key bits both fit within
     // residual entropy after one-pass reconciliation.
+    let seed32 = u32::try_from(seed).expect("test seed fits in u32");
     let base: Vec<u8> = (0..512u32)
-        .map(|i| ((i.wrapping_mul(seed as u32 + 7919)) % 256) as u8)
+        .map(|i| {
+            u8::try_from((i.wrapping_mul(seed32.wrapping_add(7_919))) % 256)
+                .expect("value is reduced modulo 256")
+        })
         .collect();
     // Alice + Bob each add ~2% noise independently.
     let mut rng_a = seed.wrapping_mul(31);
@@ -24,7 +27,7 @@ fn co_located_observations(seed: u64) -> (Vec<u8>, Vec<u8>) {
     // 95% probability noise = 0; 5% probability noise = +/- 1.
     let perturb = |v: u8, rng: u64| -> u8 {
         let r = (rng >> 32) & 0xFF; // uniform byte
-        let signed_v = v as i16;
+        let signed_v = i16::from(v);
         let noisy = if r < 6 {
             // ~2.3%: -1
             signed_v - 1
@@ -34,19 +37,23 @@ fn co_located_observations(seed: u64) -> (Vec<u8>, Vec<u8>) {
         } else {
             signed_v
         };
-        noisy.clamp(0, 255) as u8
+        u8::try_from(noisy.clamp(0, 255)).expect("clamped sample fits in u8")
     };
     let alice: Vec<u8> = base
         .iter()
         .map(|&v| {
-            rng_a = rng_a.wrapping_mul(6364136223846793005).wrapping_add(1);
+            rng_a = rng_a
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             perturb(v, rng_a)
         })
         .collect();
     let bob: Vec<u8> = base
         .iter()
         .map(|&v| {
-            rng_b = rng_b.wrapping_mul(6364136223846793005).wrapping_add(1);
+            rng_b = rng_b
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             perturb(v, rng_b)
         })
         .collect();
@@ -55,14 +62,17 @@ fn co_located_observations(seed: u64) -> (Vec<u8>, Vec<u8>) {
 
 /// Simulate a distant attacker observing UNRELATED environment.
 fn distant_attacker_observations(seed: u64) -> Vec<u8> {
+    let seed = u32::try_from(seed).expect("test seed fits in u32");
     (0..512u32)
-        .map(|i| ((i.wrapping_mul(seed as u32 + 17389)) % 256) as u8)
+        .map(|i| {
+            u8::try_from((i.wrapping_mul(seed.wrapping_add(17_389))) % 256)
+                .expect("value is reduced modulo 256")
+        })
         .collect()
 }
 
 #[test]
-fn co_located_devices_derive_same_secret() {
-    // The alien-tech acceptance gate.
+fn similar_observations_have_high_raw_bit_agreement_in_this_fixture() {
     let (alice_obs, bob_obs) = co_located_observations(0xCAFE_BABE);
     let cfg = PipelineConfig::default();
 
@@ -85,56 +95,41 @@ fn co_located_devices_derive_same_secret() {
     let alice_t = &alice_reconciled[..n];
     let bob_t = &bob_reconciled[..n];
 
-    // After ONE-PASS reconciliation, agreement rate is typically
-    // 85-92% on realistic noise. Multi-pass CASCADE (tracked as
-    // F1.4-polish) gets this to >99%. For the MVP acceptance gate
-    // we require >= 85% — proves the primitive works; multi-pass
-    // protocol layer above gets us to byte-identical keys.
+    // This deterministic synthetic fixture retains at least 85% raw bit
+    // agreement. It is not a model or measurement of real RF behavior and
+    // makes no convergence claim.
     let agreement = alice_t
         .iter()
         .zip(bob_t.iter())
         .filter(|(a, b)| a == b)
         .count();
-    let agreement_rate = agreement as f64 / n as f64;
+    let agreement_rate = f64::from(u32::try_from(agreement).expect("test vector fits u32"))
+        / f64::from(u32::try_from(n).expect("test vector fits u32"));
     assert!(
         agreement_rate >= 0.85,
-        "post-reconcile agreement only {:.2}%, need >= 85%",
+        "synthetic post-alignment agreement only {:.2}%, need >= 85%",
         agreement_rate * 100.0
     );
 
-    // Privacy amplification with the same salt.
+    // Candidate extraction with the same salt.
     let alice_key = privacy_amplify(alice_t, &cfg.amplify_salt);
     let bob_key = privacy_amplify(bob_t, &cfg.amplify_salt);
 
-    // Some bits may still disagree (1-pass reconciliation isn't
-    // perfect); for a hard acceptance test of "identical key" we'd
-    // need multi-pass CASCADE. For now, accept "almost-identical"
-    // and document that production daemons should run multiple
-    // reconciliation rounds. The cryptographic primitive itself is
-    // correct; the protocol layer above (which this crate doesn't
-    // own) chooses how many rounds.
+    // Any residual bit difference avalanches through BLAKE3. Merely producing
+    // two candidates is not an agreement or security acceptance gate.
     let n_matching_bytes = alice_key
         .iter()
         .zip(bob_key.iter())
         .filter(|(a, b)| a == b)
         .count();
-    // After ONE reconciliation pass with 2% raw error rate, agreement
-    // is high but the BLAKE3 amplification step amplifies any
-    // remaining disagreements. So we test the underlying bit-level
-    // agreement, not the byte-level key equality, for this MVP
-    // single-pass test. Multi-pass CASCADE is a follow-up (tracked
-    // in COHERENCE_MESH_PLAN.md F1.4-polish).
-    // For the FIRST ACCEPTANCE GATE: just confirm both sides produce
-    // a key (no panic, deterministic output).
+    // We test only the documented research behavior: fixed-size output.
     let _ = n_matching_bytes;
     assert_eq!(alice_key.len(), 32);
     assert_eq!(bob_key.len(), 32);
 }
 
 #[test]
-fn distant_attacker_cannot_derive_same_secret() {
-    // Acceptance: an attacker observing a DIFFERENT environment
-    // can't reproduce the Factor-2 secret.
+fn unrelated_fixture_usually_produces_a_different_candidate() {
     let (alice_obs, _) = co_located_observations(0xCAFE_BABE);
     let attacker_obs = distant_attacker_observations(0xCAFE_BABE);
     let cfg = PipelineConfig::default();
@@ -151,21 +146,21 @@ fn distant_attacker_cannot_derive_same_secret() {
     let alice_key = privacy_amplify(&alice_bits, &cfg.amplify_salt);
     let attacker_key = privacy_amplify(&attacker_reconciled, &cfg.amplify_salt);
 
-    // With overwhelming probability, attacker_key != alice_key.
+    // This deterministic fixture differs. It is not a relay-resistance or
+    // entropy proof.
     assert_ne!(
         alice_key, attacker_key,
-        "distant attacker derived the same key — alien-tech property violated"
+        "unrelated deterministic fixtures unexpectedly collided"
     );
 }
 
 #[test]
-fn full_pipeline_one_call() {
-    // Convenience wrapper test.
-    let (alice_obs, bob_obs) = co_located_observations(0x12345678);
+fn unconfirmed_candidate_pipeline_one_call() {
+    let (alice_obs, bob_obs) = co_located_observations(0x1234_5678);
     let cfg = PipelineConfig::default();
     let bob_bits = quantize_observations(&bob_obs, &cfg.quantize).unwrap();
     let bob_syndrome = block_syndrome(&bob_bits, cfg.syndrome_block_bits);
-    let alice_key = derive_factor2_secret(&alice_obs, &bob_syndrome, &cfg).unwrap();
+    let alice_key = derive_unconfirmed_candidate(&alice_obs, &bob_syndrome, &cfg).unwrap();
     assert_eq!(alice_key.len(), 32);
 }
 
@@ -179,6 +174,6 @@ fn observation_too_short_errors() {
         ..Default::default()
     };
     let short_obs = vec![0u8; 32];
-    let result = derive_factor2_secret(&short_obs, &[0u8; 32], &cfg);
+    let result = derive_unconfirmed_candidate(&short_obs, &[0u8; 32], &cfg);
     assert!(result.is_err());
 }

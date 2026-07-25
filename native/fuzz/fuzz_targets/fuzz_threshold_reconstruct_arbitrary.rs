@@ -15,17 +15,25 @@ fn take_byte(input: &mut &[u8]) -> Option<u8> {
 
 fuzz_target!(|data: &[u8]| {
     let mut input = data;
-    let Some(k_raw) = take_byte(&mut input) else { return };
+    let Some(k_raw) = take_byte(&mut input) else {
+        return;
+    };
     let k = (k_raw % 16).saturating_add(1) as u32;
-    let Some(n_streams) = take_byte(&mut input) else { return };
+    let Some(n_streams) = take_byte(&mut input) else {
+        return;
+    };
     let n_streams = (n_streams % 16) as usize + 1;
-    let Some(stream_len) = take_byte(&mut input) else { return };
+    let Some(stream_len) = take_byte(&mut input) else {
+        return;
+    };
     let stream_len = stream_len as usize;
 
     // Build x-values: arbitrary bytes 0..255 (may include 0 -> error).
     let mut xs: Vec<u8> = Vec::with_capacity(n_streams);
     for _ in 0..n_streams {
-        let Some(x) = take_byte(&mut input) else { return };
+        let Some(x) = take_byte(&mut input) else {
+            return;
+        };
         xs.push(x);
     }
 

@@ -29,10 +29,11 @@ use pyo3::prelude::*;
 #[pyfunction]
 #[pyo3(signature = (hop_distance, staleness_seconds, l_session))]
 fn trust_score(hop_distance: f32, staleness_seconds: f32, l_session: f32) -> PyResult<f32> {
-    native_trust_score(hop_distance, staleness_seconds, l_session).map_err(align_err_to_py)
+    native_trust_score(hop_distance, staleness_seconds, l_session)
+        .map_err(|error| align_err_to_py(&error))
 }
 
-/// Trust-score using the relationship tier as the L_session default.
+/// Trust-score using the relationship tier as the `L_session` default.
 ///
 /// `relationship` accepts `"paired"`, `"known"`, or `"stranger"`
 /// (case-insensitive). Maps directly to `PeerRecord.trust` in the daemon:
@@ -43,22 +44,22 @@ fn trust_score(hop_distance: f32, staleness_seconds: f32, l_session: f32) -> PyR
 fn trust_for(relationship: &str, hop_distance: f32, staleness_seconds: f32) -> PyResult<f32> {
     let rel = parse_relationship(relationship)?;
     native_trust_score(hop_distance, staleness_seconds, rel.default_l_session())
-        .map_err(align_err_to_py)
+        .map_err(|error| align_err_to_py(&error))
 }
 
-/// Default L_session (days) for paired peers.
+/// Default `L_session` (days) for paired peers.
 #[pyfunction]
 fn l_paired() -> f32 {
     ol_align::DEFAULT_L_PAIRED
 }
 
-/// Default L_session (days) for known peers.
+/// Default `L_session` (days) for known peers.
 #[pyfunction]
 fn l_known() -> f32 {
     ol_align::DEFAULT_L_KNOWN
 }
 
-/// Default L_session (days) for stranger peers.
+/// Default `L_session` (days) for stranger peers.
 #[pyfunction]
 fn l_stranger() -> f32 {
     ol_align::DEFAULT_L_STRANGER
@@ -75,7 +76,7 @@ fn parse_relationship(s: &str) -> PyResult<Relationship> {
     }
 }
 
-fn align_err_to_py(err: AlignError) -> PyErr {
+fn align_err_to_py(err: &AlignError) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 

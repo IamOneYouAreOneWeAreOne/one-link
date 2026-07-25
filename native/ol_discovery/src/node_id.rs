@@ -1,18 +1,18 @@
-//! 256-bit NodeId derived from a peer's Ed25519 master pubkey, plus
+//! 256-bit `NodeId` derived from a peer's Ed25519 master pubkey, plus
 //! XOR distance metric and bit-prefix utilities.
 //!
-//! The NodeId is BLAKE3(ed25519_pubkey), so:
-//!   - Two peers cannot collide on NodeId without colliding on BLAKE3.
+//! The `NodeId` is `BLAKE3(ed25519_pubkey)`, so:
+//!   - Two peers cannot collide on `NodeId` without colliding on BLAKE3.
 //!   - An attacker targeting a specific prefix must keygen until a
 //!     pubkey hashes to that prefix — Ed25519 keygen is CPU-bound
 //!     (no GPU shortcut), so this is a real cost for Sybil attacks.
 
 use core::cmp::Ordering;
 
-/// NodeId length in bytes. Matches BLAKE3 output (32 bytes = 256 bits).
+/// `NodeId` length in bytes. Matches BLAKE3 output (32 bytes = 256 bits).
 pub const NODE_ID_BYTES: usize = 32;
 
-/// NodeId length in bits. Equals `NODE_ID_BYTES * 8`.
+/// `NodeId` length in bits. Equals `NODE_ID_BYTES * 8`.
 pub const NODE_ID_BITS: usize = NODE_ID_BYTES * 8;
 
 /// A 256-bit Kademlia node identifier.
@@ -31,7 +31,7 @@ impl NodeId {
         Self(b)
     }
 
-    /// Derive a NodeId from an Ed25519 master pubkey (32 bytes).
+    /// Derive a `NodeId` from an Ed25519 master pubkey (32 bytes).
     /// `NodeId = BLAKE3(pubkey)`. Pure, deterministic, collision-
     /// resistant under BLAKE3.
     #[must_use]

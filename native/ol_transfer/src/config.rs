@@ -2,6 +2,9 @@
 
 use ol_bloom::DEFAULT_TARGET_FP_RATE;
 
+/// Hard concurrency ceiling protecting Tokio's semaphore/task scheduler.
+pub const MAX_INFLIGHT_PER_PEER: usize = 1_024;
+
 /// Configuration for [`crate::TransferEngine`].
 ///
 /// Defaults are chosen per [ADR-0013](../../../docs/decisions/0013-transfer-engine.md).
@@ -38,5 +41,35 @@ impl Default for TransferConfig {
             connection_idle_ms: 30_000,
             bloom_target_fp: DEFAULT_TARGET_FP_RATE,
         }
+    }
+}
+
+impl TransferConfig {
+    pub(crate) fn normalized(mut self) -> Self {
+        self.max_inflight_per_peer = self.max_inflight_per_peer.clamp(1, MAX_INFLIGHT_PER_PEER);
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrency_is_never_zero_or_above_hard_ceiling() {
+        let config = TransferConfig {
+            max_inflight_per_peer: 0,
+            ..TransferConfig::default()
+        };
+        assert_eq!(config.normalized().max_inflight_per_peer, 1);
+
+        let config = TransferConfig {
+            max_inflight_per_peer: usize::MAX,
+            ..TransferConfig::default()
+        };
+        assert_eq!(
+            config.normalized().max_inflight_per_peer,
+            MAX_INFLIGHT_PER_PEER
+        );
     }
 }

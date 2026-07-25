@@ -37,6 +37,9 @@ pub mod sparse_solver;
 
 use thiserror::Error;
 
+#[cfg(not(target_arch = "wasm32"))]
+use rayon::prelude::*;
+
 pub use f32_solver::{CgConfigF32, CgWorkspaceF32, HelmholtzSolverF32, SolveResultF32};
 pub use helmholtz_reduction::{solve_helmholtz, HelmholtzSolver};
 pub use reaction_diffusion::solve_reaction_diffusion_steady;
@@ -229,7 +232,7 @@ impl GraphLaplacian {
 
     /// Internal: get the CSR view, building it on first access.
     /// Zero-cost on the hot path after first use (a single
-    /// load-acquire on the OnceLock).
+    /// load-acquire on the `OnceLock`).
     fn csr_view(&self) -> &CsrView {
         self.csr.get_or_init(|| {
             let n = self.n;
@@ -310,7 +313,6 @@ impl GraphLaplacian {
             return;
         }
         let csr = self.csr_view();
-        use rayon::prelude::*;
         let degrees = &self.degrees;
         let row_ptr = &csr.row_ptr;
         let col_idx = &csr.col_idx;

@@ -1,8 +1,9 @@
 //! `ol_onion` — nested-AEAD onion circuits.
 //!
-//! Phase F3 / row 5 of the Coherence Mesh plan. Multi-hop privacy
-//! preserving message routing where each hop only knows its
-//! predecessor and successor.
+//! Phase F3 / row 5 packet-construction primitives. The crate can build
+//! and peel a multi-hop nested packet. It does not by itself deploy a
+//! relay network, wire a One Link message/file route, or establish
+//! sender anonymity.
 //!
 //! ## Design
 //!
@@ -17,31 +18,32 @@
 //! - Each relay is potentially malicious and curious.
 //! - Network attacker can drop, reorder, modify, inject packets.
 //! - Adversary cannot break X25519, BLAKE3, or ChaCha20-Poly1305.
-//! - Global passive adversary (sees all packet sizes + timing) is
-//!   addressed by:
-//!   1. Fixed-size packets — every onion packet is exactly
-//!      [`ONION_PACKET_SIZE`] bytes, so hop count does not leak.
-//!   2. Cover traffic (Phase F4 / row 6) — out of scope here.
+//! - A global passive adversary sees endpoints, direction, timing,
+//!   volume, and topology. This crate does not defeat that adversary.
+//!   Fixed encoded size removes one direct length field only; cover
+//!   packet primitives do not by themselves provide traffic shaping.
 //!
 //! ## What this layer provides
 //!
-//! - **Layer confidentiality**: relay R_i cannot decrypt layers
+//! - **Layer confidentiality**: relay `R_i` cannot decrypt layers
 //!   intended for any other relay.
 //! - **Layer integrity**: any in-flight tamper is detected at the
 //!   next relay's AEAD verify step.
-//! - **Forward secrecy**: each circuit uses fresh ephemeral X25519
-//!   keys; compromise of a relay's long-term key reveals no past
-//!   traffic (the ephemeral material is zeroized after the relay
-//!   peels its layer).
-//! - **Hop blindness**: a relay cannot determine its position in
-//!   the circuit from packet contents (all layers look identical
-//!   on the wire after decryption + AEAD verification).
+//! - **Per-circuit key separation**: construction uses fresh sender
+//!   ephemeral X25519 keys. This is **not forward secrecy against later
+//!   relay-static-key compromise**: an attacker holding a recorded
+//!   ephemeral public key and the relay's static secret can recompute
+//!   that layer's ECDH secret.
+//! - **Bounded packet-content disclosure**: before peeling, layers share
+//!   a common encoding. A relay necessarily learns whether its peel is a
+//!   forward or delivery outcome and observes adjacent-hop metadata; no
+//!   blanket hop-position blindness or anonymity claim follows.
 //!
 //! ## What this layer does NOT provide
 //!
-//! - Timing-correlation resistance (the global passive adversary
-//!   can correlate ingress + egress timing). Cover traffic in row
-//!   6 addresses this.
+//! - Timing-correlation resistance. A global passive adversary can
+//!   correlate ingress and egress; the row-6 cover primitives do not
+//!   close that gap without a complete shaping/mixing system.
 //! - Reply circuits — sender includes a return-path of its own
 //!   construction if a reply is expected. This crate is one-way
 //!   per packet; bidirectional flows wrap responses in their own

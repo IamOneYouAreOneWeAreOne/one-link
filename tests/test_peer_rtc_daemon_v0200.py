@@ -5,10 +5,9 @@ WebRTC DataChannel connections from browser-as-peer pages
 (/peer). Same daemon process, new transport layer.
 
   Reach:  a browser opening /peer can connect to the daemon
-          directly over WebRTC. Sub-second LAN handshake via
-          DTLS-SRTP + ICE; multi-vendor STUN list for cross-
-          network. The phone-as-peer ARC starts working as one
-          experience.
+          directly over WebRTC. ICE uses the active preset's
+          disclosed STUN configuration; this structural suite does
+          not establish a latency SLA or cross-network browser matrix.
   Hide:   no manual signaling — the browser opens a WebSocket
           to /api/v1/peer-rtc, sends a signed offer envelope,
           gets a signed answer, DataChannel comes up. ICE
@@ -32,8 +31,9 @@ pong + listener fan-out, route registration + mint endpoint.
 from __future__ import annotations
 
 import json
-import time
+import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -63,6 +63,7 @@ from one_link.peer_rtc import (
     _now_ms,
 )
 from one_link.server import MAX_SIGNALING_ATTEMPTS, UIServer
+from one_link.self_mesh_enrollment import MeshRoot, mint_device_cert
 from one_link.state import State
 
 
@@ -82,6 +83,28 @@ async def http(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
     me = _identity()
     state = State(db_path=tmp_path / "state.db")
+    root = MeshRoot.create()
+    state.upsert_self_mesh_root(
+        root_pub=root.root_pub,
+        root_seed=root.root_seed,
+        label="RTC browser root",
+    )
+    browser_private = Ed25519PrivateKey.generate()
+    browser_pub = browser_private.public_key().public_bytes_raw()
+    browser_kind = "phone-browser"
+    browser_cert = mint_device_cert(
+        root_seed=root.root_seed,
+        root_pub=root.root_pub,
+        device_pub=browser_pub,
+        device_kind=browser_kind,
+    )
+    state.upsert_self_mesh_device(
+        root_pub=root.root_pub,
+        device_pub=browser_pub,
+        cert=browser_cert,
+        device_kind=browser_kind,
+        trusted=True,
+    )
     daemon = Daemon(me)
     daemon.state = state
     daemon.discovery = None
@@ -89,6 +112,9 @@ async def http(tmp_path: Path, monkeypatch):
     daemon._inbound_regime = {}
     daemon.folder_engine = None
     server = UIServer(daemon)
+    server._test_browser_private = browser_private
+    server._test_browser_pub = browser_pub
+    server._test_browser_root = root
     test_server = TestServer(server.app)
     client = TestClient(test_server)
     await client.start_server()
@@ -100,12 +126,61 @@ async def http(tmp_path: Path, monkeypatch):
 
 
 @pytest.fixture
-def manager(tmp_path):
+def manager(tmp_path, monkeypatch):
     """Bare BrowserPeerManager for in-memory tests that don't need
     a full UIServer."""
-    class StubDaemon:
-        pass
-    return BrowserPeerManager(StubDaemon())
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    state = State(db_path=tmp_path / "manager-state.db")
+    root = MeshRoot.create()
+    state.upsert_self_mesh_root(root_pub=root.root_pub, root_seed=root.root_seed)
+    private = Ed25519PrivateKey.generate()
+    device_pub = private.public_key().public_bytes_raw()
+    device_kind = "phone-browser"
+    cert = mint_device_cert(
+        root_seed=root.root_seed,
+        root_pub=root.root_pub,
+        device_pub=device_pub,
+        device_kind=device_kind,
+    )
+    row = state.upsert_self_mesh_device(
+        root_pub=root.root_pub,
+        device_pub=device_pub,
+        cert=cert,
+        device_kind=device_kind,
+        trusted=True,
+    )
+    daemon = SimpleNamespace(
+        state=state,
+        require_browser_identity_possession=False,
+        require_attested_peers=False,
+        _gate_drop_count=0,
+    )
+    result = BrowserPeerManager(daemon)
+    result._test_device_pub = device_pub
+    result._test_root_pub = root.root_pub
+    result._test_guardian_epoch = int(row.get("guardian_epoch") or 0)
+    try:
+        yield result
+    finally:
+        state.close()
+
+
+def _manager_fingerprint(manager: BrowserPeerManager) -> str:
+    return "sha256:" + hashlib.sha256(manager._test_device_pub).hexdigest()
+
+
+def _mint(manager: BrowserPeerManager):
+    return manager.mint_pairing_token(device_pub=manager._test_device_pub)
+
+
+def _authorized_peer(manager: BrowserPeerManager) -> BrowserPeer:
+    return BrowserPeer(
+        fingerprint=_manager_fingerprint(manager),
+        pubkey_bytes=manager._test_device_pub,
+        authorized_root_pub=manager._test_root_pub,
+        authorized_device_pub=manager._test_device_pub,
+        authorized_guardian_epoch=manager._test_guardian_epoch,
+    )
 
 
 # ───────── protocol constants ───────────────────────────────────────
@@ -129,11 +204,10 @@ def test_dc_labels_distinct_from_browser_to_browser():
 
 def test_token_constants_at_industry_floor():
     """32 bytes (256 bits) = standard high-entropy single-use token.
-    5-minute TTL gives users time to scan + a couple network hops
-    of slack without leaving an attacker minutes to grab a leaked
-    token."""
+    A 90-second TTL leaves time to scan without leaving a leaked QR
+    usable for several minutes."""
     assert PAIRING_TOKEN_BYTES == 32
-    assert PAIRING_TOKEN_TTL_MS == 5 * 60 * 1000
+    assert PAIRING_TOKEN_TTL_MS == 90 * 1000
 
 
 def test_offer_replay_window_is_60s():
@@ -178,7 +252,7 @@ def test_b64u_no_padding():
 # ───────── pairing-token store ─────────────────────────────────────
 
 def test_mint_pairing_token_returns_fresh_token(manager: BrowserPeerManager):
-    pp = manager.mint_pairing_token()
+    pp = _mint(manager)
     assert isinstance(pp, PendingPair)
     assert pp.token
     assert len(pp.token) >= 40  # 32-byte b64u with no padding ≈ 43 chars
@@ -189,15 +263,104 @@ def test_mint_pairing_token_returns_fresh_token(manager: BrowserPeerManager):
 def test_mint_tokens_are_unique(manager: BrowserPeerManager):
     """A real-world deployment mints many concurrent tokens; never
     collide. Rely on `secrets.token_bytes(32)` for the entropy."""
-    tokens = {manager.mint_pairing_token().token for _ in range(64)}
+    tokens = {_mint(manager).token for _ in range(64)}
     assert len(tokens) == 64
 
 
 def test_redeem_consumes_token(manager: BrowserPeerManager):
-    pp = manager.mint_pairing_token()
-    assert manager.redeem_pairing_token(pp.token) is not None
+    pp = _mint(manager)
+    assert manager.redeem_pairing_token(
+        pp.token,
+        fingerprint=_manager_fingerprint(manager),
+    ) is not None
     # Second redemption returns None — single-use.
-    assert manager.redeem_pairing_token(pp.token) is None
+    assert manager.redeem_pairing_token(
+        pp.token,
+        fingerprint=_manager_fingerprint(manager),
+    ) is None
+
+
+def test_bound_pairing_token_only_redeems_for_expected_fingerprint(
+    manager: BrowserPeerManager,
+):
+    expected = _manager_fingerprint(manager)
+    attacker = "sha256:" + "02" * 32
+    pp = manager.mint_pairing_token(
+        device_pub=manager._test_device_pub,
+        fp_hint=expected,
+    )
+
+    # A copied bearer cannot enroll a different signed-offer key and does not
+    # burn the legitimate device's one-time handoff.
+    assert manager.redeem_pairing_token(
+        pp.token,
+        fingerprint=attacker,
+    ) is None
+    assert pp.token in manager._pending_pairings
+    assert manager.redeem_pairing_token(
+        pp.token,
+        fingerprint=expected,
+    ) is pp
+    assert pp.token not in manager._pending_pairings
+
+
+def test_bound_pairing_token_redemption_is_atomic(manager: BrowserPeerManager):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    expected = _manager_fingerprint(manager)
+    pp = manager.mint_pairing_token(
+        device_pub=manager._test_device_pub,
+        fp_hint=expected,
+    )
+    barrier = threading.Barrier(24)
+
+    def redeem() -> bool:
+        barrier.wait()
+        return manager.redeem_pairing_token(
+            pp.token,
+            fingerprint=expected,
+        ) is pp
+
+    with ThreadPoolExecutor(max_workers=24) as executor:
+        results = list(executor.map(lambda _index: redeem(), range(24)))
+    assert results.count(True) == 1
+    assert results.count(False) == 23
+
+
+@pytest.mark.parametrize(
+    "fingerprint",
+    [
+        "",
+        "sha256:abcd",
+        "sha256:" + "AA" * 32,
+        "blake3:" + "00" * 32,
+        "sha256:" + "gg" * 32,
+    ],
+)
+def test_mint_rejects_noncanonical_pairing_fingerprint_hint(
+    manager: BrowserPeerManager,
+    fingerprint: str,
+):
+    with pytest.raises(ValueError, match="match the enrolled"):
+        manager.mint_pairing_token(
+            device_pub=manager._test_device_pub,
+            fp_hint=fingerprint,
+        )
+
+
+def test_unbound_pairing_token_is_not_an_owner_credential(
+    manager: BrowserPeerManager,
+):
+    with pytest.raises(TypeError):
+        manager.mint_pairing_token()  # type: ignore[call-arg]
+
+
+def test_redeem_rejects_non_string_and_oversized_token_without_raising(
+    manager: BrowserPeerManager,
+):
+    assert manager.redeem_pairing_token({"unhashable": True}) is None
+    assert manager.redeem_pairing_token("A" * 10_000) is None
 
 
 def test_redeem_unknown_returns_none(manager: BrowserPeerManager):
@@ -206,7 +369,7 @@ def test_redeem_unknown_returns_none(manager: BrowserPeerManager):
 
 
 def test_expired_token_not_redeemable(manager: BrowserPeerManager):
-    pp = manager.mint_pairing_token()
+    pp = _mint(manager)
     # Force expiry by rewinding created_ms past the TTL.
     pp.created_ms = _now_ms() - (PAIRING_TOKEN_TTL_MS + 1000)
     # Re-store under the same token key (manager pop'd a fresh PP).
@@ -214,12 +377,18 @@ def test_expired_token_not_redeemable(manager: BrowserPeerManager):
     assert manager.redeem_pairing_token(pp.token) is None
 
 
+def test_pending_pair_expires_at_exact_deadline():
+    pending = PendingPair(token="A" * 43, created_ms=1_000, ttl_ms=500)
+    assert pending.expired(1_499) is False
+    assert pending.expired(1_500) is True
+
+
 def test_sweep_removes_expired_tokens(manager: BrowserPeerManager):
-    pp = manager.mint_pairing_token()
+    pp = _mint(manager)
     pp.created_ms = _now_ms() - (PAIRING_TOKEN_TTL_MS + 1000)
     manager._pending_pairings[pp.token] = pp
     # Mint another to trigger a sweep.
-    fresh = manager.mint_pairing_token()
+    fresh = _mint(manager)
     # The expired one is gone, the fresh one remains.
     assert pp.token not in manager._pending_pairings
     assert fresh.token in manager._pending_pairings
@@ -231,32 +400,41 @@ def test_pending_pairing_tokens_are_bounded(manager: BrowserPeerManager):
     """A local page or extension should not be able to mint unbounded
     pending pairing slots and grow daemon memory forever."""
     for _ in range(MAX_PENDING_PAIRING_TOKENS + 10):
-        manager.mint_pairing_token()
+        _mint(manager)
     assert len(manager._pending_pairings) == MAX_PENDING_PAIRING_TOKENS
 
 
 def test_register_peer_stores_by_fingerprint(manager: BrowserPeerManager):
-    peer = BrowserPeer(fingerprint="sha256:abc", pubkey_bytes=b"\x00" * 32)
+    peer = _authorized_peer(manager)
     manager.register_peer(peer)
-    assert manager.get_peer("sha256:abc") is peer
+    assert manager.get_peer(peer.fingerprint) is peer
     assert peer in manager.list_peers()
 
 
 def test_register_replaces_existing_for_same_fp(manager: BrowserPeerManager):
     """Newest connection for a given fingerprint wins — most-recent-
     activity wins. Old connection is closed."""
-    p1 = BrowserPeer(fingerprint="sha256:abc", pubkey_bytes=b"\x01" * 32)
-    p2 = BrowserPeer(fingerprint="sha256:abc", pubkey_bytes=b"\x01" * 32)
+    p1 = _authorized_peer(manager)
+    p2 = _authorized_peer(manager)
     manager.register_peer(p1)
     manager.register_peer(p2)
-    assert manager.get_peer("sha256:abc") is p2
+    assert manager.get_peer(p2.fingerprint) is p2
     assert p1.closed is True
 
 
-def test_mark_paired_persists_in_roster(manager: BrowserPeerManager):
-    assert not manager.is_paired("sha256:abc")
-    manager.mark_paired("sha256:abc")
-    assert manager.is_paired("sha256:abc")
+def test_is_paired_is_derived_from_live_roster(manager: BrowserPeerManager):
+    assert manager.is_paired(
+        _manager_fingerprint(manager),
+        pubkey_bytes=manager._test_device_pub,
+    )
+    manager.daemon.state.revoke_self_mesh_device(
+        root_pub=manager._test_root_pub,
+        device_pub=manager._test_device_pub,
+    )
+    assert not manager.is_paired(
+        _manager_fingerprint(manager),
+        pubkey_bytes=manager._test_device_pub,
+    )
 
 
 # ───────── offer envelope verification ─────────────────────────────
@@ -264,7 +442,7 @@ def test_mark_paired_persists_in_roster(manager: BrowserPeerManager):
 def _signed_offer(
     sk: Ed25519PrivateKey,
     *,
-    sdp: str = "v=0\\r\\n",
+    sdp: str = "v=0\r\n",
     pair_token: str = "",
     ts_offset_ms: int = 0,
     tamper_signature: bool = False,
@@ -302,6 +480,42 @@ def test_verify_offer_envelope_accepts_good_offer():
     assert fp.startswith("sha256:")
 
 
+def test_verified_offer_signature_is_single_use(manager: BrowserPeerManager):
+    sk = Ed25519PrivateKey.generate()
+    envelope = _signed_offer(sk)
+    BrowserPeerManager.verify_offer_envelope(envelope)
+    assert manager.accept_verified_offer_once(envelope) is True
+    assert manager.accept_verified_offer_once(envelope) is False
+
+
+def test_verified_offer_replay_check_is_atomic(manager: BrowserPeerManager):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    envelope = _signed_offer(Ed25519PrivateKey.generate())
+    BrowserPeerManager.verify_offer_envelope(envelope)
+    barrier = threading.Barrier(32)
+
+    def attempt() -> bool:
+        barrier.wait()
+        return manager.accept_verified_offer_once(envelope)
+
+    with ThreadPoolExecutor(max_workers=32) as pool:
+        results = list(pool.map(lambda _index: attempt(), range(32)))
+    assert results.count(True) == 1
+    assert results.count(False) == 31
+
+
+def test_distinct_verified_offers_remain_acceptable(manager: BrowserPeerManager):
+    sk = Ed25519PrivateKey.generate()
+    first = _signed_offer(sk, sdp="v=0\r\na=x-first\r\n")
+    second = _signed_offer(sk, sdp="v=0\r\na=x-second\r\n")
+    BrowserPeerManager.verify_offer_envelope(first)
+    BrowserPeerManager.verify_offer_envelope(second)
+    assert manager.accept_verified_offer_once(first) is True
+    assert manager.accept_verified_offer_once(second) is True
+
+
 def test_verify_rejects_wrong_version():
     sk = Ed25519PrivateKey.generate()
     envelope = _signed_offer(sk)
@@ -337,6 +551,25 @@ def test_verify_rejects_fingerprint_pubkey_mismatch():
     while signing with their own key."""
     sk = Ed25519PrivateKey.generate()
     envelope = _signed_offer(sk, tamper_fingerprint=True)
+    with pytest.raises(ValueError, match="fingerprint"):
+        BrowserPeerManager.verify_offer_envelope(envelope)
+
+
+@pytest.mark.parametrize(
+    "fingerprint",
+    [
+        "blake3:" + "00" * 32,
+        "sha1:" + "00" * 20,
+        "sha256:" + "AA" * 32,
+        "sha256:abcd",
+    ],
+)
+def test_verify_rejects_unimplemented_or_noncanonical_fingerprint(fingerprint):
+    sk = Ed25519PrivateKey.generate()
+    envelope = _signed_offer(sk)
+    envelope["fingerprint"] = fingerprint
+    envelope.pop("signature")
+    envelope["signature"] = _b64u(sk.sign(_canonical(envelope)))
     with pytest.raises(ValueError, match="fingerprint"):
         BrowserPeerManager.verify_offer_envelope(envelope)
 
@@ -399,12 +632,52 @@ def test_verify_offer_malformed_envelope_corpus_rejected_cleanly():
             BrowserPeerManager.verify_offer_envelope(envelope)
 
 
+def test_verify_offer_rejects_unknown_fields_and_boolean_timestamp():
+    sk = Ed25519PrivateKey.generate()
+    envelope = _signed_offer(sk)
+    envelope["ignored"] = "signed-parser-confusion"
+    with pytest.raises(ValueError, match="fields invalid"):
+        BrowserPeerManager.verify_offer_envelope(envelope)
+
+    envelope = _signed_offer(sk)
+    envelope["ts"] = True
+    envelope.pop("signature")
+    envelope["signature"] = _b64u(sk.sign(_canonical(envelope)))
+    with pytest.raises(ValueError, match="ts"):
+        BrowserPeerManager.verify_offer_envelope(envelope)
+
+
+def test_verify_offer_rejects_noncanonical_base64url_and_sdp():
+    sk = Ed25519PrivateKey.generate()
+    envelope = _signed_offer(sk)
+    envelope["pubkey_b64u"] += "="
+    with pytest.raises(ValueError, match="base64url"):
+        BrowserPeerManager.verify_offer_envelope(envelope)
+
+    envelope = _signed_offer(sk)
+    envelope["signature"] += "="
+    with pytest.raises(ValueError, match="signature"):
+        BrowserPeerManager.verify_offer_envelope(envelope)
+
+    for malformed_sdp in ("v=0\\r\\n", "v=0\r\n\x00a=x\r\n", "not-sdp"):
+        envelope = _signed_offer(sk, sdp=malformed_sdp)
+        with pytest.raises(ValueError, match="sdp"):
+            BrowserPeerManager.verify_offer_envelope(envelope)
+
+
+def test_verify_offer_rejects_noncanonical_pair_token():
+    sk = Ed25519PrivateKey.generate()
+    envelope = _signed_offer(sk, pair_token=_b64u(b"p" * 32) + "=")
+    with pytest.raises(ValueError, match="base64url"):
+        BrowserPeerManager.verify_offer_envelope(envelope)
+
+
 @pytest.mark.asyncio
 async def test_dispatch_ping_replies_pong(manager: BrowserPeerManager):
     """Ping is built into the manager — always replies pong with
     the original ts echoed for round-trip latency tests."""
     sent: list[dict] = []
-    peer = BrowserPeer(fingerprint="sha256:abc", pubkey_bytes=b"\x00" * 32)
+    peer = _authorized_peer(manager)
 
     class _StubChannel:
         def send(self, data: str) -> None:
@@ -427,7 +700,7 @@ async def test_dispatch_ping_replies_pong(manager: BrowserPeerManager):
 
 @pytest.mark.asyncio
 async def test_dispatch_ignores_wrong_version(manager: BrowserPeerManager):
-    peer = BrowserPeer(fingerprint="sha256:abc", pubkey_bytes=b"\x00" * 32)
+    peer = _authorized_peer(manager)
 
     class _StubChannel:
         def __init__(self):
@@ -446,7 +719,7 @@ async def test_dispatch_ignores_wrong_version(manager: BrowserPeerManager):
 
 @pytest.mark.asyncio
 async def test_dispatch_fans_out_to_listeners(manager: BrowserPeerManager):
-    peer = BrowserPeer(fingerprint="sha256:abc", pubkey_bytes=b"\x00" * 32)
+    peer = _authorized_peer(manager)
     received: list[tuple] = []
 
     async def listener(p, kind, t, env):
@@ -462,12 +735,12 @@ async def test_dispatch_fans_out_to_listeners(manager: BrowserPeerManager):
             "greeting": "hi",
         }),
     )
-    assert received == [("sha256:abc", "control", "hello", "hi")]
+    assert received == [(peer.fingerprint, "control", "hello", "hi")]
 
 
 @pytest.mark.asyncio
 async def test_dispatch_listener_exception_doesnt_break_others(manager: BrowserPeerManager):
-    peer = BrowserPeer(fingerprint="sha256:abc", pubkey_bytes=b"\x00" * 32)
+    peer = _authorized_peer(manager)
     log_seen: list[bool] = []
 
     async def bad(p, kind, t, env):
@@ -494,7 +767,7 @@ async def test_dispatch_listener_exception_doesnt_break_others(manager: BrowserP
 
 @pytest.mark.asyncio
 async def test_dispatch_drops_oversized_datachannel_frame(manager: BrowserPeerManager):
-    peer = BrowserPeer(fingerprint="sha256:abc", pubkey_bytes=b"\x00" * 32)
+    peer = _authorized_peer(manager)
     received: list[tuple] = []
 
     async def listener(p, kind, t, env):
@@ -516,11 +789,24 @@ async def test_mint_pairing_endpoint_requires_auth(http):
 
 
 @pytest.mark.asyncio
+async def test_mint_pairing_endpoint_refuses_unbound_owner_bearer(http):
+    client, server = http
+    resp = await client.post(
+        "/api/v1/peer-rtc/mint-pairing",
+        headers={"Authorization": f"Bearer {server.token}"},
+        json={},
+    )
+    assert resp.status == 409
+    assert (await resp.json())["error"] == "rostered_device_required"
+
+
+@pytest.mark.asyncio
 async def test_mint_pairing_returns_full_pairing_payload(http):
     client, server = http
     resp = await client.post(
         "/api/v1/peer-rtc/mint-pairing",
         headers={"Authorization": f"Bearer {server.token}"},
+        json={"device_pub_b64": _b64u(server._test_browser_pub)},
     )
     assert resp.status == 200
     body = await resp.json()
@@ -597,6 +883,34 @@ async def test_signaling_rejects_unknown_pubkey_without_token(http):
             assert payload["code"] == "no_trust"
 
 
+@pytest.mark.asyncio
+async def test_signaling_cannot_redeem_device_bound_token_with_other_offer_key(http):
+    """The WS trust boundary must pass the verified offer fingerprint into
+    token redemption; testing the token store alone would not catch a route
+    that accidentally omitted that binding."""
+    import aiohttp
+    client, server = http
+    legitimate_pub = server._test_browser_pub
+    legitimate_fp = "sha256:" + hashlib.sha256(legitimate_pub).hexdigest()
+    pending = server.peer_rtc.mint_pairing_token(
+        device_pub=legitimate_pub,
+        fp_hint=legitimate_fp,
+    )
+
+    attacker_key = Ed25519PrivateKey.generate()
+    envelope = _signed_offer(attacker_key, pair_token=pending.token)
+    async with client.ws_connect("/api/v1/peer-rtc") as ws:
+        await ws.send_json(envelope)
+        msg = await ws.receive(timeout=2.0)
+        assert msg.type == aiohttp.WSMsgType.TEXT
+        payload = json.loads(msg.data)
+        assert payload["t"] == "error"
+        assert payload["code"] == "no_trust"
+
+    # A mismatch cannot burn the legitimate device's short-lived handoff.
+    assert pending.token in server.peer_rtc._pending_pairings
+
+
 # ───────── version pin ─────────────────────────────────────────────
 
 
@@ -608,10 +922,17 @@ async def test_signaling_rejects_oversized_text_frame(http):
     async with client.ws_connect("/api/v1/peer-rtc") as ws:
         await ws.send_str('{"x":"' + ("a" * (MAX_SIGNALING_TEXT_BYTES + 1)) + '"}')
         msg = await ws.receive(timeout=2.0)
-        assert msg.type == aiohttp.WSMsgType.TEXT
-        payload = json.loads(msg.data)
-        assert payload["t"] == "error"
-        assert payload["code"] == "frame_too_large"
+        if msg.type == aiohttp.WSMsgType.TEXT:
+            payload = json.loads(msg.data)
+            assert payload["t"] == "error"
+            assert payload["code"] == "frame_too_large"
+        else:
+            # Newer aiohttp releases enforce WebSocketResponse.max_msg_size
+            # in the parser and close with RFC 6455 code 1009 before the
+            # application can emit its structured error frame. Both paths
+            # reject before JSON parsing or signature verification.
+            assert msg.type == aiohttp.WSMsgType.CLOSE
+            assert msg.data == 1009
 
 
 @pytest.mark.asyncio

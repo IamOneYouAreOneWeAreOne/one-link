@@ -24,8 +24,6 @@ These tests pin:
 """
 from __future__ import annotations
 
-import hashlib
-import struct
 import time
 
 import pytest

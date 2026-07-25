@@ -41,8 +41,11 @@ def test_cert_generation_writes_files(tmp_path: Path):
     """generate_self_signed mints a cert + key and writes both
     to <base>/peer_https/. Both files exist + non-empty."""
     from one_link.peer_https import (
-        cert_path, generate_self_signed, https_dir, key_path,
+        cert_path,
+        generate_self_signed,
+        key_path,
     )
+
     cp, kp = generate_self_signed(tmp_path)
     assert cp == cert_path(tmp_path)
     assert kp == key_path(tmp_path)
@@ -60,6 +63,7 @@ def test_cert_uses_ecdsa_p256(tmp_path: Path):
     from cryptography import x509
     from cryptography.hazmat.primitives.asymmetric import ec
     from one_link.peer_https import generate_self_signed
+
     cp, _ = generate_self_signed(tmp_path)
     cert = x509.load_pem_x509_certificate(cp.read_bytes())
     pub = cert.public_key()
@@ -72,6 +76,7 @@ def test_cert_validity_is_one_year(tmp_path: Path):
     phones never hit a sudden invalid cert mid-session."""
     from cryptography import x509
     from one_link.peer_https import CERT_VALID_DAYS, generate_self_signed
+
     cp, _ = generate_self_signed(tmp_path)
     cert = x509.load_pem_x509_certificate(cp.read_bytes())
     expiry = getattr(cert, "not_valid_after_utc", None)
@@ -93,6 +98,7 @@ def test_cert_san_includes_localhost_and_lan(tmp_path: Path):
     the cert."""
     from cryptography import x509
     from one_link.peer_https import generate_self_signed
+
     cp, _ = generate_self_signed(tmp_path)
     cert = x509.load_pem_x509_certificate(cp.read_bytes())
     san = cert.extensions.get_extension_for_class(
@@ -112,6 +118,7 @@ def test_cert_ext_key_usage_server_auth(tmp_path: Path):
     from cryptography import x509
     from cryptography.x509.oid import ExtendedKeyUsageOID
     from one_link.peer_https import generate_self_signed
+
     cp, _ = generate_self_signed(tmp_path)
     cert = x509.load_pem_x509_certificate(cp.read_bytes())
     eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
@@ -132,6 +139,7 @@ def test_chain_is_two_cert_leaf_then_root(tmp_path: Path):
     """
     from cryptography import x509
     from one_link.peer_https import generate_self_signed
+
     cp, _ = generate_self_signed(tmp_path)
     certs = x509.load_pem_x509_certificates(cp.read_bytes())
     assert len(certs) == 2, "cert.pem must contain leaf + root"
@@ -157,6 +165,7 @@ def test_root_ca_has_required_ios_trust_flags(tmp_path: Path):
     """
     from cryptography import x509
     from one_link.peer_https import generate_self_signed, root_ca_path
+
     generate_self_signed(tmp_path)
     rcp = root_ca_path(tmp_path)
     root = x509.load_pem_x509_certificate(rcp.read_bytes())
@@ -191,6 +200,7 @@ def test_leaf_tls_cert_shape(tmp_path: Path):
     """
     from cryptography import x509
     from one_link.peer_https import generate_self_signed, root_ca_path
+
     cp, _ = generate_self_signed(tmp_path)
     rcp = root_ca_path(tmp_path)
     leaf = x509.load_pem_x509_certificate(cp.read_bytes())
@@ -227,6 +237,7 @@ def test_leaf_signature_verifies_under_root_pubkey(tmp_path: Path):
     from cryptography import x509
     from cryptography.hazmat.primitives.asymmetric import ec
     from one_link.peer_https import generate_self_signed, root_ca_path
+
     cp, _ = generate_self_signed(tmp_path)
     rcp = root_ca_path(tmp_path)
     leaf = x509.load_pem_x509_certificate(cp.read_bytes())
@@ -239,13 +250,201 @@ def test_leaf_signature_verifies_under_root_pubkey(tmp_path: Path):
     )
 
 
+def test_root_authority_is_lockbox_wrapped_and_contains_matching_pair(
+    tmp_path: Path,
+):
+    """The phone-wide signing key must never persist as cleartext PKCS#8.
+
+    Certificate + key are authenticated in one authority record so a crash
+    cannot silently pair one root projection with another private key.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from one_link.lockbox import acquire_lockbox, is_wrapped
+    from one_link.peer_https import (
+        _decode_root_authority,
+        generate_self_signed,
+        root_ca_key_path,
+    )
+
+    generate_self_signed(tmp_path)
+    blob = root_ca_key_path(tmp_path).read_bytes()
+    assert is_wrapped(blob)
+    assert b"PRIVATE KEY" not in blob
+    key, cert = _decode_root_authority(acquire_lockbox(tmp_path).unwrap(blob))
+    key_pub = key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    cert_pub = cert.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    assert key_pub == cert_pub
+
+
+def test_root_name_constraints_are_critical_and_endpoint_exact(tmp_path: Path):
+    """An installed One Link CA cannot authenticate arbitrary websites."""
+    import ipaddress
+
+    from cryptography import x509
+    from one_link.peer_https import generate_self_signed, root_ca_path
+
+    generate_self_signed(tmp_path)
+    root = x509.load_pem_x509_certificate(root_ca_path(tmp_path).read_bytes())
+    extension = root.extensions.get_extension_for_class(x509.NameConstraints)
+    assert extension.critical is True
+    permitted = extension.value.permitted_subtrees or []
+    dns = {entry.value for entry in permitted if isinstance(entry, x509.DNSName)}
+    assert {"localhost", "onelink.local"}.issubset(dns)
+    assert "example.com" not in dns
+    networks = [entry.value for entry in permitted if isinstance(entry, x509.IPAddress)]
+    assert ipaddress.ip_address("127.0.0.1") in networks[0] or any(
+        ipaddress.ip_address("127.0.0.1") in network for network in networks
+    )
+    assert all(network.prefixlen == network.max_prefixlen for network in networks)
+    assert not any(ipaddress.ip_address("8.8.8.8") in network for network in networks)
+
+
+def test_tampered_root_authority_fails_closed_without_rotation(tmp_path: Path):
+    from one_link.peer_https import (
+        build_ssl_context,
+        generate_self_signed,
+        root_ca_key_path,
+        root_ca_path,
+    )
+
+    generate_self_signed(tmp_path)
+    root_before = root_ca_path(tmp_path).read_bytes()
+    authority_path = root_ca_key_path(tmp_path)
+    tampered = bytearray(authority_path.read_bytes())
+    tampered[-1] ^= 0x01
+    authority_path.write_bytes(bytes(tampered))
+
+    assert build_ssl_context(tmp_path) is None
+    assert root_ca_path(tmp_path).read_bytes() == root_before
+    assert authority_path.read_bytes() == bytes(tampered)
+
+
+def test_mismatched_leaf_key_is_atomically_reminted_under_same_root(tmp_path: Path):
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from one_link.peer_https import (
+        cert_path,
+        ensure_cert,
+        generate_self_signed,
+        key_path,
+        root_ca_path,
+    )
+
+    generate_self_signed(tmp_path)
+    root_before = x509.load_pem_x509_certificate(root_ca_path(tmp_path).read_bytes()).fingerprint(
+        hashes.SHA256()
+    )
+    leaf_before = x509.load_pem_x509_certificate(cert_path(tmp_path).read_bytes()).fingerprint(
+        hashes.SHA256()
+    )
+    wrong_key = ec.generate_private_key(ec.SECP256R1())
+    key_path(tmp_path).write_bytes(
+        wrong_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+
+    ensure_cert(tmp_path)
+    root_after = x509.load_pem_x509_certificate(root_ca_path(tmp_path).read_bytes()).fingerprint(
+        hashes.SHA256()
+    )
+    leaf_after = x509.load_pem_x509_certificate(cert_path(tmp_path).read_bytes()).fingerprint(
+        hashes.SHA256()
+    )
+    assert root_after == root_before
+    assert leaf_after != leaf_before
+
+
+def test_non_regular_leaf_key_fails_closed_without_replacement(tmp_path: Path):
+    from one_link.key_material import KeyMaterialIntegrityError
+    from one_link.peer_https import ensure_cert, generate_self_signed, key_path
+
+    generate_self_signed(tmp_path)
+    key_path(tmp_path).unlink()
+    key_path(tmp_path).mkdir()
+    with pytest.raises(KeyMaterialIntegrityError, match="not a non-reparse regular file"):
+        ensure_cert(tmp_path)
+    assert key_path(tmp_path).is_dir()
+
+
+def test_authenticated_authority_repairs_missing_public_projection(tmp_path: Path):
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from one_link.peer_https import ensure_cert, generate_self_signed, root_ca_path
+
+    generate_self_signed(tmp_path)
+    root_before = x509.load_pem_x509_certificate(root_ca_path(tmp_path).read_bytes())
+    fingerprint = root_before.fingerprint(hashes.SHA256())
+    root_ca_path(tmp_path).unlink()
+
+    ensure_cert(tmp_path)
+    repaired = x509.load_pem_x509_certificate(root_ca_path(tmp_path).read_bytes())
+    assert repaired.fingerprint(hashes.SHA256()) == fingerprint
+
+
+def test_partial_root_projection_is_not_silently_replaced(tmp_path: Path):
+    from one_link.peer_https import (
+        TLSAuthorityError,
+        generate_self_signed,
+        root_ca_path,
+    )
+
+    root_ca_path(tmp_path).parent.mkdir(parents=True)
+    existing = b"existing phone trust anchor"
+    root_ca_path(tmp_path).write_bytes(existing)
+    with pytest.raises(TLSAuthorityError, match="without its signing authority"):
+        generate_self_signed(tmp_path)
+    assert root_ca_path(tmp_path).read_bytes() == existing
+
+
+def test_endpoint_scope_change_rotates_root_instead_of_widening_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from one_link import peer_https
+
+    monkeypatch.setattr(
+        peer_https,
+        "_detect_lan_addresses",
+        lambda: ["127.0.0.1", "::1"],
+    )
+    peer_https.generate_self_signed(tmp_path)
+    first = x509.load_pem_x509_certificate(
+        peer_https.root_ca_path(tmp_path).read_bytes()
+    ).fingerprint(hashes.SHA256())
+
+    monkeypatch.setattr(
+        peer_https,
+        "_detect_lan_addresses",
+        lambda: ["127.0.0.1", "::1", "192.0.2.7"],
+    )
+    peer_https.ensure_cert(tmp_path)
+    second = x509.load_pem_x509_certificate(
+        peer_https.root_ca_path(tmp_path).read_bytes()
+    ).fingerprint(hashes.SHA256())
+    assert second != first
+
+
 def test_needs_rotation_for_missing_file(tmp_path: Path):
     from one_link.peer_https import cert_path, needs_rotation
+
     assert needs_rotation(cert_path(tmp_path)) is True
 
 
 def test_needs_rotation_for_corrupt_file(tmp_path: Path):
     from one_link.peer_https import cert_path, https_dir, needs_rotation
+
     https_dir(tmp_path).mkdir(parents=True)
     cert_path(tmp_path).write_bytes(b"not a cert")
     assert needs_rotation(cert_path(tmp_path)) is True
@@ -253,6 +452,7 @@ def test_needs_rotation_for_corrupt_file(tmp_path: Path):
 
 def test_needs_rotation_false_for_fresh_cert(tmp_path: Path):
     from one_link.peer_https import cert_path, generate_self_signed, needs_rotation
+
     generate_self_signed(tmp_path)
     assert needs_rotation(cert_path(tmp_path)) is False
 
@@ -260,6 +460,7 @@ def test_needs_rotation_false_for_fresh_cert(tmp_path: Path):
 def test_needs_rotation_true_for_near_expiry_cert(tmp_path: Path):
     """A cert expiring within the rotation window MUST rotate."""
     from one_link.peer_https import cert_path, generate_self_signed, needs_rotation
+
     # 10-day cert + default 30-day rotation window → needs rotation.
     generate_self_signed(tmp_path, valid_days=10)
     assert needs_rotation(cert_path(tmp_path)) is True
@@ -269,6 +470,7 @@ def test_ensure_cert_idempotent(tmp_path: Path):
     """ensure_cert returns the same paths each call when the cert
     is fresh; doesn't re-mint."""
     from one_link.peer_https import ensure_cert
+
     cp1, kp1 = ensure_cert(tmp_path)
     cert_bytes_1 = cp1.read_bytes()
     cp2, kp2 = ensure_cert(tmp_path)
@@ -283,9 +485,48 @@ def test_build_ssl_context_returns_loadable_context(tmp_path: Path):
     """The context loaded from the self-signed material must be
     a usable server-side SSL context."""
     from one_link.peer_https import build_ssl_context
+
     ctx = build_ssl_context(tmp_path)
     assert ctx is not None
     assert ctx.minimum_version >= ssl.TLSVersion.TLSv1_2
+
+
+def test_constrained_chain_completes_a_verified_tls_handshake(tmp_path: Path):
+    """Exercise OpenSSL path validation, hostname checks, and constraints."""
+    import socket
+    import threading
+
+    from one_link.peer_https import build_ssl_context, root_ca_path
+
+    server_ctx = build_ssl_context(tmp_path)
+    assert server_ctx is not None
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    outcomes: list[str] = []
+
+    def _serve_once() -> None:
+        connection, _ = listener.accept()
+        try:
+            with server_ctx.wrap_socket(connection, server_side=True) as tls:
+                assert tls.recv(1) == b"x"
+                tls.sendall(b"y")
+                outcomes.append("verified")
+        finally:
+            listener.close()
+
+    thread = threading.Thread(target=_serve_once, daemon=True)
+    thread.start()
+    client_ctx = ssl.create_default_context(cafile=str(root_ca_path(tmp_path)))
+    client_ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    with socket.create_connection(("127.0.0.1", port), timeout=3) as raw:
+        with client_ctx.wrap_socket(raw, server_hostname="127.0.0.1") as tls:
+            assert tls.version() == "TLSv1.3"
+            tls.sendall(b"x")
+            assert tls.recv(1) == b"y"
+    thread.join(timeout=3)
+    assert outcomes == ["verified"]
 
 
 def test_build_ssl_context_does_not_advertise_h2(tmp_path: Path):
@@ -307,6 +548,7 @@ def test_build_ssl_context_does_not_advertise_h2(tmp_path: Path):
     import ssl as _ssl
     import threading
     from one_link.peer_https import build_ssl_context
+
     server_ctx = build_ssl_context(tmp_path)
     assert server_ctx is not None
 
@@ -349,8 +591,11 @@ def test_build_ssl_context_does_not_advertise_h2(tmp_path: Path):
 def test_cert_fingerprint_sha256(tmp_path: Path):
     """Fingerprint helper returns a 64-char lowercase hex string."""
     from one_link.peer_https import (
-        cert_fingerprint_sha256, cert_path, generate_self_signed,
+        cert_fingerprint_sha256,
+        cert_path,
+        generate_self_signed,
     )
+
     generate_self_signed(tmp_path)
     fp = cert_fingerprint_sha256(cert_path(tmp_path))
     assert fp is not None
@@ -361,6 +606,7 @@ def test_cert_fingerprint_sha256(tmp_path: Path):
 def test_cert_fingerprint_sha256_missing_file(tmp_path: Path):
     """Returns None for a missing cert. Don't raise."""
     from one_link.peer_https import cert_fingerprint_sha256, cert_path
+
     fp = cert_fingerprint_sha256(cert_path(tmp_path))
     assert fp is None
 
@@ -376,7 +622,7 @@ def peer_html() -> str:
 def _snippet(html: str, needle: str, size: int = 2400) -> str:
     idx = html.find(needle)
     assert idx >= 0, f"missing {needle!r}"
-    return html[idx:idx + size]
+    return html[idx : idx + size]
 
 
 def test_autopair_preflight_helper_present(peer_html: str):
@@ -461,7 +707,8 @@ def test_pair_url_uses_https_when_available():
     # test is the live daemon probe at the end of the ship.
     src = Path("src/one_link/server.py").read_text(encoding="utf-8")
     idx = src.find("async def api_mint_pairing")
-    snippet = src[idx:idx + 4000]
+    end = src.find("\n    async def ", idx + 1)
+    snippet = src[idx : end if end > idx else None]
     assert "if self.https_port:" in snippet
     assert 'f"https://{host}:{self.https_port}"' in snippet
     assert 'ws_scheme = "wss"' in snippet
@@ -473,7 +720,8 @@ def test_pair_url_fallback_to_http_when_no_https():
     just won't work without HTTPS, which is a separate concern."""
     src = Path("src/one_link/server.py").read_text(encoding="utf-8")
     idx = src.find("async def api_mint_pairing")
-    snippet = src[idx:idx + 4000]
+    end = src.find("\n    async def ", idx + 1)
+    snippet = src[idx : end if end > idx else None]
     # The fallback branch must exist.
     assert 'f"http://{host}:{self.port}"' in snippet
 
@@ -484,9 +732,10 @@ def test_pair_url_includes_cert_fingerprint_when_https():
     just emits it; v0.20.5+ can verify."""
     src = Path("src/one_link/server.py").read_text(encoding="utf-8")
     idx = src.find("async def api_mint_pairing")
-    snippet = src[idx:idx + 4000]
+    end = src.find("\n    async def ", idx + 1)
+    snippet = src[idx : end if end > idx else None]
     assert "self.https_cert_fp_sha256" in snippet
-    assert '&cert=' in snippet
+    assert "&cert=" in snippet
 
 
 # ───────── legacy QR removal ──────────────────────────────────────
@@ -536,7 +785,7 @@ def test_server_logs_https_listener_up():
     misbehaves."""
     src = Path("src/one_link/server.py").read_text(encoding="utf-8")
     idx = src.find("async def _start_https_listener")
-    snippet = src[idx:idx + 3000]
+    snippet = src[idx : idx + 3000]
     assert "UI server HTTPS up" in snippet
 
 
@@ -545,6 +794,7 @@ def test_server_logs_https_listener_up():
 
 def test_peer_version_at_or_above_v0204(peer_html: str):
     import re
+
     m = re.search(r"version:\s*['\"](\d+)\.(\d+)\.(\d+)(?:-[A-Za-z0-9.]+)?['\"]", peer_html)
     assert m
     parts = tuple(int(p) for p in m.groups())
@@ -553,5 +803,6 @@ def test_peer_version_at_or_above_v0204(peer_html: str):
 
 def test_page_version_matches_package():
     from one_link import __version__
+
     html = Path("src/one_link/web/index.html").read_text(encoding="utf-8")
     assert f'PAGE_BUILT_FOR = "{__version__}"' in html

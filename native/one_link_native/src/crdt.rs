@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
 /// Python-visible Folder CRDT.
-#[pyclass(name = "Folder", module = "one_link_native.crdt")]
+#[pyclass(from_py_object, name = "Folder", module = "one_link_native.crdt")]
 #[derive(Debug, Clone, Default)]
 pub struct PyFolder {
     inner: Folder,
@@ -64,12 +64,12 @@ impl PyFolder {
         self.inner.iter().count()
     }
 
-    /// List of currently-present (file_id, display_name, size, mtime) tuples.
+    /// List of currently-present (`file_id`, `display_name`, size, mtime) tuples.
     fn entries<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let out = PyList::empty_bound(py);
+        let out = PyList::empty(py);
         for (fid, entry) in self.inner.iter() {
             let item = (
-                PyBytes::new_bound(py, fid),
+                PyBytes::new(py, fid),
                 &entry.display_name.value,
                 entry.size_bytes.value,
                 entry.last_modified_ms.value,

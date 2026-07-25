@@ -13,12 +13,9 @@ Pin the security audit's finding A:
 """
 from __future__ import annotations
 
-import asyncio
 import json
-import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -34,7 +31,7 @@ from one_link.daemon import (
 )
 from one_link.identity import Identity, fingerprint_of
 from one_link.state import State
-from one_link.wire import decode_msg, encode_msg, make_msg
+from one_link.wire import decode_msg, make_msg
 
 
 def _new_identity() -> Identity:
@@ -227,6 +224,37 @@ def test_capability_allowed_legacy_none_policy_allows_everything(tmp_path: Path)
     assert daemon._capability_allowed(them.fingerprint, FILES) is True
     assert daemon._capability_allowed(them.fingerprint, FOLDER_SYNC) is True
     state.close()
+
+
+@pytest.mark.parametrize("trust", ["pending", "rejected"])
+def test_legacy_none_policy_never_authorizes_unpaired_peer(
+    tmp_path: Path, trust: str,
+):
+    me = _new_identity()
+    them = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    state.upsert_peer(
+        fingerprint=them.fingerprint,
+        short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    state.set_peer_trust(them.fingerprint, trust)
+
+    assert state.get_peer_capability_policy(them.fingerprint) is None
+    assert daemon._capability_allowed(them.fingerprint, CHAT) is False
+    assert daemon._capability_allowed(them.fingerprint, FILES) is False
+    state.close()
+
+
+def test_legacy_none_policy_never_authorizes_unknown_peer(tmp_path: Path):
+    daemon = Daemon(_new_identity())
+    daemon.state = State(db_path=tmp_path / "s.db")
+
+    assert daemon._capability_allowed("f" * 64, CHAT) is False
+    assert daemon._capability_allowed("f" * 64, FILES) is False
+    daemon.state.close()
 
 
 def test_capability_allowed_strict_policy_after_pair_when_setting_off(

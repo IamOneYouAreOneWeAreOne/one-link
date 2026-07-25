@@ -21,6 +21,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use quinn::{ClientConfig, Endpoint as QuinnEndpoint, ServerConfig, TransportConfig, VarInt};
 
 use crate::error::QuicError;
@@ -74,27 +75,42 @@ impl Default for EndpointConfig {
 }
 
 impl EndpointConfig {
-    fn to_transport_config(&self) -> TransportConfig {
+    fn into_transport_config(self) -> Result<TransportConfig, QuicError> {
         let mut t = TransportConfig::default();
-        t.max_idle_timeout(Some(
-            quinn::IdleTimeout::try_from(std::time::Duration::from_millis(self.idle_timeout_ms))
-                .expect("idle_timeout fits"),
-        ));
-        t.keep_alive_interval(Some(std::time::Duration::from_millis(
-            self.keepalive_interval_ms,
-        )));
+        let idle_timeout = if self.idle_timeout_ms == 0 {
+            None
+        } else {
+            Some(
+                quinn::IdleTimeout::try_from(std::time::Duration::from_millis(
+                    self.idle_timeout_ms,
+                ))
+                .map_err(|_| QuicError::InvalidConfig {
+                    field: "idle_timeout_ms",
+                    reason: "duration exceeds QUIC varint range",
+                })?,
+            )
+        };
+        t.max_idle_timeout(idle_timeout);
+        t.keep_alive_interval(
+            (self.keepalive_interval_ms > 0)
+                .then(|| std::time::Duration::from_millis(self.keepalive_interval_ms)),
+        );
         t.max_concurrent_bidi_streams(VarInt::from_u32(self.max_concurrent_bidi_streams));
         if self.stream_receive_window_bytes > 0 {
-            t.stream_receive_window(
-                VarInt::from_u64(self.stream_receive_window_bytes).expect("window fits varint"),
-            );
+            let window = VarInt::from_u64(self.stream_receive_window_bytes).map_err(|_| {
+                QuicError::InvalidConfig {
+                    field: "stream_receive_window_bytes",
+                    reason: "window exceeds QUIC varint range",
+                }
+            })?;
+            t.stream_receive_window(window);
         }
         if self.send_window_bytes > 0 {
             t.send_window(self.send_window_bytes);
         }
         t.send_fairness(self.send_fairness);
         // Connection migration is on by default in quinn 0.11.
-        t
+        Ok(t)
     }
 }
 
@@ -116,7 +132,9 @@ impl std::fmt::Debug for Endpoint {
                 "identity_fingerprint",
                 &hex_lower(&self.identity.fingerprint()),
             )
-            .finish()
+            // The concrete Quinn transport configuration has no useful
+            // stable Debug representation, so disclose its omission.
+            .finish_non_exhaustive()
     }
 }
 
@@ -134,10 +152,11 @@ impl Endpoint {
         let server_quic = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
             .map_err(|e| QuicError::Tls(rustls::Error::General(e.to_string())))?;
         let mut server_config = ServerConfig::with_crypto(Arc::new(server_quic));
-        let transport = Arc::new(config.to_transport_config());
+        let bind = config.bind;
+        let transport = Arc::new(config.into_transport_config()?);
         server_config.transport_config(transport.clone());
 
-        let mut endpoint = QuinnEndpoint::server(server_config, config.bind)?;
+        let mut endpoint = QuinnEndpoint::server(server_config, bind)?;
         // Also configure the dial-side (clients can come from us too).
         let client_crypto = build_dialer_crypto_no_specific_peer(&identity)?;
         let client_quic = quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)
@@ -164,10 +183,11 @@ impl Endpoint {
         let client_quic = quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)
             .map_err(|e| QuicError::Tls(rustls::Error::General(e.to_string())))?;
         let mut client_cfg = ClientConfig::new(Arc::new(client_quic));
-        let transport = Arc::new(config.to_transport_config());
+        let bind = config.bind;
+        let transport = Arc::new(config.into_transport_config()?);
         client_cfg.transport_config(transport.clone());
 
-        let mut endpoint = QuinnEndpoint::client(config.bind)?;
+        let mut endpoint = QuinnEndpoint::client(bind)?;
         endpoint.set_default_client_config(client_cfg);
         Ok(Self {
             inner: endpoint,
@@ -296,7 +316,7 @@ impl Connection {
     /// `BloomFilter`/`MissingChunks`, etc.
     pub async fn send_frame_request_response(&self, request: Frame) -> Result<Frame, QuicError> {
         let (mut send, mut recv) = self.inner.open_bi().await?;
-        write_frame(&mut send, &request).await?;
+        write_owned_frame(&mut send, request).await?;
         send.finish()?;
         let response = read_frame(&mut recv).await?;
         Ok(response)
@@ -337,10 +357,43 @@ impl Connection {
 /// Write a frame to a `quinn::SendStream`. Caller is responsible for
 /// closing the stream (e.g. via `send.finish()`).
 pub async fn write_frame(send: &mut quinn::SendStream, frame: &Frame) -> Result<(), QuicError> {
-    let bytes = frame.encode();
-    send.write_all(&bytes)
+    let (header, header_len) = frame.validated_wire_header()?;
+    send.write_all(&header[..header_len])
         .await
         .map_err(QuicError::StreamWrite)?;
+    if !frame.payload.is_empty() {
+        send.write_all(&frame.payload)
+            .await
+            .map_err(QuicError::StreamWrite)?;
+    }
+    Ok(())
+}
+
+/// Write an owned frame without copying its payload into Quinn's send buffer.
+///
+/// Quinn accepts owned [`Bytes`] chunks directly. Converting the frame's
+/// `Vec<u8>` payload into `Bytes` transfers the allocation instead of copying
+/// it; a small independently owned header is submitted in the same vectored
+/// write. Prefer this path whenever the caller no longer needs the frame.
+/// [`write_frame`] remains available for borrowed/reusable frames and avoids a
+/// separate full-frame staging buffer, but Quinn must copy that borrowed
+/// payload into its owned transmit queue.
+pub async fn write_owned_frame(
+    send: &mut quinn::SendStream,
+    frame: Frame,
+) -> Result<(), QuicError> {
+    let (header, header_len) = frame.validated_wire_header()?;
+    let header = Bytes::copy_from_slice(&header[..header_len]);
+    if frame.payload.is_empty() {
+        send.write_chunk(header)
+            .await
+            .map_err(QuicError::StreamWrite)?;
+    } else {
+        let payload = Bytes::from(frame.payload);
+        send.write_all_chunks(&mut [header, payload])
+            .await
+            .map_err(QuicError::StreamWrite)?;
+    }
     Ok(())
 }
 
@@ -358,22 +411,32 @@ pub async fn read_frame(recv: &mut quinn::RecvStream) -> Result<Frame, QuicError
     })?;
 
     // Varint length: read 1 byte at a time until high bit clears.
-    let mut varint_buf = Vec::with_capacity(9);
+    // A u64 LEB128 is at most ten bytes. Keep the tiny parser state on the
+    // stack: allocating it for every 1 MiB chunk was visible in the serial
+    // request/response hot path.
+    let mut varint_buf = [0u8; 10];
+    let mut varint_len = 0usize;
     loop {
-        let mut b = [0u8; 1];
-        read_exact(recv, &mut b).await?;
-        varint_buf.push(b[0]);
-        if b[0] & 0x80 == 0 {
+        if varint_len == varint_buf.len() {
+            return Err(QuicError::MalformedFrame {
+                offset: varint_len as u64,
+                reason: "varint overflow",
+            });
+        }
+        read_exact(recv, &mut varint_buf[varint_len..=varint_len]).await?;
+        let byte = varint_buf[varint_len];
+        varint_len += 1;
+        if byte & 0x80 == 0 {
             break;
         }
-        if varint_buf.len() > 9 {
+        if varint_len == varint_buf.len() {
             return Err(QuicError::MalformedFrame {
-                offset: varint_buf.len() as u64,
+                offset: varint_len as u64,
                 reason: "varint overflow",
             });
         }
     }
-    let (length, _consumed) = decode_varint(&varint_buf, 0)?;
+    let (length, _consumed) = decode_varint(&varint_buf[..varint_len], 0)?;
     let max = kind.max_payload_bytes();
     if length > max {
         return Err(QuicError::FrameTooLarge {
@@ -382,7 +445,11 @@ pub async fn read_frame(recv: &mut quinn::RecvStream) -> Result<Frame, QuicError
             max,
         });
     }
-    let mut payload = vec![0u8; length as usize];
+    let payload_len = usize::try_from(length).map_err(|_| QuicError::MalformedFrame {
+        offset: u64::try_from(varint_len).unwrap_or(u64::MAX),
+        reason: "payload length does not fit this platform's address space",
+    })?;
+    let mut payload = vec![0u8; payload_len];
     if length > 0 {
         read_exact(recv, &mut payload).await?;
     }
@@ -468,4 +535,46 @@ fn hex_lower(bytes: &[u8]) -> String {
         out.push(HEX[(b & 0x0F) as usize] as char);
     }
     out
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_transport_values_return_errors_instead_of_panicking() {
+        let idle = EndpointConfig {
+            idle_timeout_ms: u64::MAX,
+            ..EndpointConfig::default()
+        };
+        assert!(matches!(
+            idle.into_transport_config(),
+            Err(QuicError::InvalidConfig {
+                field: "idle_timeout_ms",
+                ..
+            })
+        ));
+
+        let receive_window = EndpointConfig {
+            stream_receive_window_bytes: u64::MAX,
+            ..EndpointConfig::default()
+        };
+        assert!(matches!(
+            receive_window.into_transport_config(),
+            Err(QuicError::InvalidConfig {
+                field: "stream_receive_window_bytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn zero_timeouts_disable_optional_timers() {
+        let config = EndpointConfig {
+            idle_timeout_ms: 0,
+            keepalive_interval_ms: 0,
+            ..EndpointConfig::default()
+        };
+        assert!(config.into_transport_config().is_ok());
+    }
 }

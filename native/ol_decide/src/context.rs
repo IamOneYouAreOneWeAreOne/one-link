@@ -10,7 +10,7 @@ use crate::error::DecideError;
 ///   - `FILE_OFFER` / `FILE_CHUNK` -> `File`
 ///   - `ACK` -> `Sync`
 ///   - `PING` / `PONG` -> `Heartbeat`
-///   - pair-by-QR flow -> `Pair` (handled separately by ol_pair_qr)
+///   - pair-by-QR flow -> `Pair` (handled separately by `ol_pair_qr`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventKind {
     /// Chat / text message.
@@ -193,7 +193,7 @@ pub struct Context {
     pub urgency: Urgency,
     /// Current radio power state.
     pub radio_state: RadioState,
-    /// Active network type (WiFi / cellular / metered).
+    /// Active network type (`WiFi` / cellular / metered).
     pub network: NetworkType,
     /// User-declared operating mode.
     pub user_mode: UserMode,
@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(ctx.network, NetworkType::Wifi);
         assert_eq!(ctx.radio_state, RadioState::Active);
         assert_eq!(ctx.urgency, Urgency::Foreground);
-        assert_eq!(ctx.observed_loss, 0.0);
-        assert_eq!(ctx.pattern_strength, 0.0);
+        assert!(ctx.observed_loss.abs() < f32::EPSILON);
+        assert!(ctx.pattern_strength.abs() < f32::EPSILON);
     }
 }

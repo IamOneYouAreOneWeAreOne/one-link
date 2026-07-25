@@ -101,9 +101,10 @@ the influence.
 For each layer, we ship at least one engineering mitigation that
 makes using that substrate against our users prohibitively
 expensive: multi-vendor diversity, signed updates, encrypted
-payloads, IPFS distribution, optional-not-default opt-ins for
-anything that calls home. The default tier is convenient. The
-hardened tier is real and tested. The air-gap tier exists.
+payloads, IPFS distribution, and an explicit, inspectable outbound policy.
+The convenient tier may use narrowly disclosed public infrastructure; the
+hardened tier disables it, and the air-gap tier exists. No tier may describe
+an external request as local-only or silently bypass its selected policy.
 
 Every ship spec answers: **"What corporate substrate does this
 feature touch, and what mitigation are we shipping to neutralize

@@ -25,19 +25,31 @@ fn take_u32(input: &mut &[u8]) -> Option<u32> {
 
 fuzz_target!(|data: &[u8]| {
     let mut input = data;
-    let Some(n_edges) = take_byte(&mut input) else { return };
+    let Some(n_edges) = take_byte(&mut input) else {
+        return;
+    };
     let mut g = AdjacencyGraph::new();
     for _ in 0..(n_edges.min(64)) {
-        let Some(from_byte) = take_byte(&mut input) else { break };
-        let Some(to_byte) = take_byte(&mut input) else { break };
-        let Some(cost_bits) = take_u32(&mut input) else { break };
+        let Some(from_byte) = take_byte(&mut input) else {
+            break;
+        };
+        let Some(to_byte) = take_byte(&mut input) else {
+            break;
+        };
+        let Some(cost_bits) = take_u32(&mut input) else {
+            break;
+        };
         let cost = (cost_bits as f64) / (u32::MAX as f64) * 1000.0;
         let from_id = format!("n{}", from_byte);
         let to_id = format!("n{}", to_byte);
         g.add_edge(from_id, to_id, cost);
     }
-    let Some(start_byte) = take_byte(&mut input) else { return };
-    let Some(goal_byte) = take_byte(&mut input) else { return };
+    let Some(start_byte) = take_byte(&mut input) else {
+        return;
+    };
+    let Some(goal_byte) = take_byte(&mut input) else {
+        return;
+    };
     let start = format!("n{}", start_byte);
     let goal = format!("n{}", goal_byte);
 

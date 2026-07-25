@@ -28,8 +28,8 @@ pub const RECORD_TRAILER_LEN: usize = 4;
 /// Maximum payload length. Records larger than this must be split by
 /// the higher-level crates (`ol_chunk_store`) into multiple records.
 ///
-/// 1 MiB is generous for a WAL record; the chunk_log will use up to
-/// 256 KiB chunk + 84-byte header and a manifest_log record will
+/// 1 MiB is generous for a WAL record; the `chunk_log` will use up to
+/// 256 KiB chunk + 84-byte header and a `manifest_log` record will
 /// usually be well under 16 KiB.
 pub const MAX_PAYLOAD_LEN: usize = 1024 * 1024;
 
@@ -84,7 +84,8 @@ impl Record {
         buf.push(self.kind);
         buf.push(self.flags);
         buf.extend_from_slice(&[0u8, 0u8]); // reserved
-        let length = self.payload.len() as u32;
+        let length =
+            u32::try_from(self.payload.len()).expect("MAX_PAYLOAD_LEN is representable as a u32");
         buf.extend_from_slice(&length.to_le_bytes());
         buf.extend_from_slice(&self.payload);
         // CRC32C over header (8 bytes) + payload (`length` bytes).
@@ -110,7 +111,13 @@ pub fn parse_header(
     if header[2] != 0 || header[3] != 0 {
         return Err(WalError::InvalidRecordReserved { offset });
     }
-    let length = u32::from_le_bytes(header[4..8].try_into().expect("4 bytes"));
+    let length = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+    if length as usize > MAX_PAYLOAD_LEN {
+        return Err(WalError::PayloadTooLarge {
+            got: length as usize,
+            max: MAX_PAYLOAD_LEN,
+        });
+    }
     Ok(RecordHeader {
         kind,
         flags,
@@ -130,7 +137,7 @@ pub fn crc_valid(record_bytes: &[u8]) -> bool {
     let trailer_offset = record_bytes.len() - RECORD_TRAILER_LEN;
     let body = &record_bytes[..trailer_offset];
     let trailer = &record_bytes[trailer_offset..];
-    let expected = u32::from_le_bytes(trailer.try_into().expect("4 bytes"));
+    let expected = u32::from_le_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
     let computed = crc32c::crc32c(body);
     expected == computed
 }
@@ -152,6 +159,16 @@ mod tests {
         let r = rec(0x01, 0x05, b"hello");
         let bytes = r.encode().unwrap();
         assert!(crc_valid(&bytes));
+    }
+
+    #[test]
+    fn parsed_length_is_bounded_before_replay_allocation() {
+        let mut header = [0u8; RECORD_HEADER_LEN];
+        header[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            parse_header(&header, 0),
+            Err(WalError::PayloadTooLarge { .. })
+        ));
     }
 
     #[test]

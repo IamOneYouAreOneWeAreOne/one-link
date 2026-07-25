@@ -2,7 +2,7 @@
 name = "ol_fuse"
 version = "0.21.0-alpha.0"
 edition = "2021"
-description = "One Link file engine: FUSE filesystem surface scaffold (Phase B, ADR pending)."
+description = "One Link file engine: filesystem backend with a real Linux FUSE mount adapter."
 license = "AGPL-3.0-or-later"
 publish = false
 
@@ -19,13 +19,14 @@ blake3    = { workspace = true }
 # only target-cfg block below. Non-Linux platforms get a stub mount()
 # returning ``MountError::UnsupportedPlatform``.
 [target.'cfg(target_os = "linux")'.dependencies]
-fuser     = { version = "0.15", optional = true }
+fuser     = { version = "0.16", optional = true }
 libc      = { version = "0.2", optional = true }
 
 [features]
-# Default: scaffold only. Enabling `linux-mount` pulls in fuser + libc
-# and switches `mount()` to the real `fuser::mount2` path. Daemon
-# consumers opt in once the Linux distro packages libfuse3.
+# The portable library default keeps kernel integration disabled. Enabling
+# `linux-mount` pulls in fuser + libc and switches `mount()` to the real
+# `fuser::mount2` path. Published Linux Python wheels enable this feature;
+# non-Linux targets retain explicit unsupported-platform results.
 default = []
 linux-mount = ["dep:fuser", "dep:libc"]
 

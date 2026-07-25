@@ -28,6 +28,7 @@ contracts, fingerprint algorithm pin.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -130,6 +131,79 @@ async def test_peer_route_csp_locks_third_party_scripts(http):
     # have to relax CSP from scratch.
     assert "connect-src" in csp
     assert "wss:" in csp
+    assert "worker-src 'self'" in csp
+    script_directive = next(
+        directive.strip()
+        for directive in csp.split(";")
+        if directive.strip().startswith("script-src ")
+    )
+    assert "'wasm-unsafe-eval'" in script_directive.split()
+    assert "'unsafe-eval'" not in script_directive.split()
+    assert "object-src 'none'" in csp
+    assert "base-uri 'none'" in csp
+
+
+@pytest.mark.asyncio
+async def test_peer_route_revalidation_repeats_security_policy(http):
+    first = await http.get("/peer")
+    assert first.status == 200
+    etag = first.headers["ETag"]
+    expected_csp = first.headers["Content-Security-Policy"]
+    await first.read()
+    second = await http.get("/peer", headers={"If-None-Match": etag})
+    assert second.status == 304
+    assert second.headers["Content-Security-Policy"] == expected_csp
+
+
+@pytest.mark.asyncio
+async def test_clean_owner_ui_reload_is_compressed(http):
+    response = await http.get("/", headers={"Accept-Encoding": "gzip"})
+    assert response.status == 200
+    assert response.headers["Content-Encoding"] == "gzip"
+    assert response.headers["Cache-Control"] == "no-cache, must-revalidate"
+    assert "One Link" in await response.text()
+
+
+@pytest.mark.asyncio
+async def test_browser_argon_worker_and_wasm_are_exact_no_store_assets(http):
+    worker_response = await http.get("/browser-crypto/argon2id-worker.js")
+    assert worker_response.status == 200
+    assert worker_response.headers["Content-Type"].startswith(
+        "application/javascript"
+    )
+    assert worker_response.headers["Cache-Control"] == "no-store, max-age=0"
+    assert worker_response.headers["X-Content-Type-Options"] == "nosniff"
+    assert worker_response.headers["Cross-Origin-Resource-Policy"] == "same-origin"
+    worker = await worker_response.text()
+
+    wasm_response = await http.get("/browser-crypto/argon2id-v1.wasm")
+    assert wasm_response.status == 200
+    assert wasm_response.headers["Content-Type"].startswith("application/wasm")
+    assert wasm_response.headers["Cache-Control"] == "no-store, max-age=0"
+    assert wasm_response.headers["X-Content-Type-Options"] == "nosniff"
+    wasm = await wasm_response.read()
+    assert wasm.startswith(b"\x00asm")
+    assert 8 <= len(wasm) <= 128 * 1024
+    digest = hashlib.sha256(wasm).hexdigest()
+    assert digest == "8fac36bd917280333cd7ca4bcc262b1733ed120035507008b09c0c3f1f172505"
+    assert digest in worker
+
+
+@pytest.mark.asyncio
+async def test_browser_ed25519_wasm_is_exact_no_store_asset(http):
+    response = await http.get("/browser-crypto/ed25519-v1.wasm")
+    assert response.status == 200
+    assert response.headers["Content-Type"].startswith("application/wasm")
+    assert response.headers["Cache-Control"] == "no-store, max-age=0"
+    assert response.headers["Pragma"] == "no-cache"
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["Cross-Origin-Resource-Policy"] == "same-origin"
+    blob = await response.read()
+    assert blob.startswith(b"\x00asm")
+    assert 8 <= len(blob) <= 256 * 1024
+    assert hashlib.sha256(blob).hexdigest() == (
+        "99792408d50e1b920e99ab9e85095cf0f77f9933a30bcb81b63f7556b34f6cc0"
+    )
 
 
 # ───────── markup contract ──────────────────────────────────────────
@@ -225,6 +299,60 @@ def test_js_persists_to_opfs(peer_html: str):
     assert "createWritable" in peer_html
 
 
+def test_identity_read_distinguishes_absence_from_corruption(peer_html: str):
+    """Only a real NotFoundError may authorize first-install key generation."""
+    assert 'error.name === "NotFoundError"' in peer_html
+    assert "class IdentityCorruptionError" in peer_html
+    assert "keypair.json is not valid JSON" not in peer_html  # filename is dynamic
+    read_idx = peer_html.find("async function _readIdentityUnlocked()")
+    boot_idx = peer_html.find("async function _loadOrCreateIdentity()")
+    assert read_idx >= 0 and boot_idx > read_idx
+    read_snippet = peer_html[read_idx:boot_idx]
+    assert 'current.status === "corrupt"' in read_snippet
+    assert "throw current.error" in read_snippet
+
+
+def test_identity_authority_is_crypto_validated_before_use(peer_html: str):
+    """Schema presence alone cannot authorize a stored Ed25519 identity."""
+    public_idx = peer_html.find("async function _validatePublicIdentityFields")
+    idx = peer_html.find("async function validatePlainIdentityRecord(rec)")
+    assert 0 <= public_idx < idx
+    snippet = peer_html[public_idx:idx + 5000]
+    assert "fingerprintOf(publicBytes)" in snippet
+    assert 'crypto.subtle.importKey(\n          "jwk"' in snippet
+    assert "crypto.subtle.sign" in snippet
+    assert "crypto.subtle.verify" in snippet
+    assert "_wasmEd25519PublicFromSeed(privateSeed)" in snippet
+    assert "_wasmEd25519Sign(privateSeed, probe)" in snippet
+    assert "_wasmEd25519Verify(publicBytes, signature, probe)" in snippet
+    assert "private key does not match the stored public key" in snippet
+
+
+def test_identity_writes_are_locked_staged_and_read_back(peer_html: str):
+    """Cross-tab races and partial writes may not silently roll authority."""
+    assert 'ID_PENDING_FILE = "keypair.pending.json"' in peer_html
+    assert 'ID_LOCK_NAME = "one-link.browser-identity.v1"' in peer_html
+    assert "navigator.locks.request" in peer_html
+    idx = peer_html.find("async function _writeIdentityUnlocked(rec)")
+    assert idx >= 0
+    snippet = peer_html[idx:idx + 1200]
+    assert "validateIdentityObject(rec)" in snippet
+    assert "_writeIdentityFile(dir, ID_PENDING_FILE, serialized)" in snippet
+    assert "_writeIdentityFile(dir, ID_FILE, serialized)" in snippet
+    assert "_removePendingIdentity(dir)" in snippet
+    assert "failed exact read-back verification" in peer_html
+
+
+def test_corrupt_primary_never_auto_promotes_staged_key(peer_html: str):
+    idx = peer_html.find("async function _readIdentityUnlocked()")
+    assert idx >= 0
+    snippet = peer_html[idx:idx + 2200]
+    corrupt_idx = snippet.find('current.status === "corrupt"')
+    recover_idx = snippet.find("_recoverPendingIdentity")
+    assert 0 <= corrupt_idx < recover_idx
+    assert "throw current.error" in snippet[corrupt_idx:recover_idx]
+
+
 def test_js_identity_layout_pinned(peer_html: str):
     """The OPFS layout `identity/v1/keypair.json` is the wire
     contract for any ship that reads/writes identity. Pin it so
@@ -260,7 +388,8 @@ def test_js_clear_quickfail_for_missing_features(peer_html: str):
 def test_js_reset_confirms_destructive_action(peer_html: str):
     """The reset path MUST require explicit confirmation. Identity
     loss is unrecoverable; a stray click can't blow it up."""
-    idx = peer_html.find('"#btn-reset"')
+    idx = peer_html.find('$("#btn-reset")?.addEventListener')
+    assert idx >= 0
     snippet = peer_html[idx:idx + 800]
     assert "confirm(" in snippet
     assert "Reset" in snippet
@@ -272,7 +401,8 @@ def test_js_export_writes_json_blob(peer_html: str):
     to-clipboard or DOM render. Identity backups are sensitive;
     they belong in a file the user can store in their own backup
     flow, not in clipboard history."""
-    idx = peer_html.find('"#btn-export"')
+    idx = peer_html.find('$("#btn-export")?.addEventListener')
+    assert idx >= 0
     snippet = peer_html[idx:idx + 1200]
     assert "Blob([" in snippet or "new Blob" in snippet
     assert "application/json" in snippet

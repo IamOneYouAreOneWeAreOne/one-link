@@ -16,8 +16,10 @@
 //!
 //! - Every node in the graph is signed by the master via a Layer-1
 //!   `SubkeyAttestation`. There are no untrusted intermediates.
-//! - Cover traffic + onion routing are SKIPPED on self-traffic (you
-//!   talking to yourself; no metadata to hide).
+//! - Cover traffic + onion routing are skipped by this self-routing
+//!   primitive. That is a routing policy choice, not a claim that self-
+//!   traffic has no metadata: network observers can still see device
+//!   addresses, timing, size, and topology unless another layer protects it.
 //! - Multi-path racing for critical messages is cheap because the
 //!   max fan-out is bounded by your device count.
 //!

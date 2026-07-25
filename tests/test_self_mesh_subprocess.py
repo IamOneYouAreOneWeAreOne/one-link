@@ -100,7 +100,7 @@ def _wait_self_mesh_event(
 
 
 def test_self_mesh_remote_send_crosses_real_daemon_transport(tmp_path: Path):
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         # Warm the encrypted channel and ensure both daemons have peer rows.
         peer_a = _wait_api_peer(p.b.home, p.a.short_id)
         peer_b = _wait_api_peer(p.a.home, p.b.short_id)

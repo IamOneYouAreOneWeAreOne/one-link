@@ -1,4 +1,4 @@
-//! `ol_ratchet` — per-chunk forward-secret symmetric ratchet for One
+//! `ol_ratchet` — per-chunk one-way symmetric key chain for One
 //! Link's chunk-AEAD pipeline per ADR-0020.
 //!
 //! Phase C item #6 (per-chunk forward-secret ratchet). The shipping
@@ -8,13 +8,18 @@
 //!
 //! ## Threat model
 //!
-//! - **Compromise of one chunk's key** reveals exactly that chunk;
-//!   subsequent chunks remain confidential (forward secrecy).
+//! - **Compromise of one derived chunk/message key** does not directly
+//!   expose the chain key in this API. Confidentiality still depends on
+//!   caller erasure, key separation, the KDF assumption, and correct AEAD
+//!   integration; this crate does not prove that only one plaintext is
+//!   exposed in a complete runtime.
 //! - **Compromise of the current chain key** reveals all FUTURE chunks
-//!   until the next root-key ratchet step. Past chunks still safe.
-//! - **Replay attacks**: each chunk gets a unique nonce derived from
-//!   the chain key + chunk index; replays decrypt as garbage (AEAD
-//!   tag fails).
+//!   until an independent root-key ratchet step. Prior chain states are not
+//!   derivable through this API under the KDF one-wayness and erasure
+//!   assumptions.
+//! - **Replay is out of scope**: replaying a previously valid AEAD frame can
+//!   authenticate again under the same key/nonce. Callers must persist and
+//!   enforce transfer/chunk sequence or receipt state.
 //!
 //! ## Algorithm — symmetric chain
 //!

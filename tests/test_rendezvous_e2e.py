@@ -26,13 +26,11 @@ import pytest
 import pytest_asyncio
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from one_link import channel as ch
 from one_link.daemon import Daemon
 from one_link.identity import Identity, fingerprint_of
 from one_link.rendezvous_proto import Endpoint
 from one_link.rendezvous_server import RendezvousApp, ServerConfig
 from one_link.state import State
-from one_link.wire import decode_msg, encode_msg, make_msg
 
 
 def _new_identity(hostname: str = "test") -> Identity:

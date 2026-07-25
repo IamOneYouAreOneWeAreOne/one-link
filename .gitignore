@@ -9,6 +9,10 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.formal-results/
+
+# Browser review captures and Playwright traces are CI artifacts, never source.
+/test-results/
 
 # Virtual envs
 .venv/
@@ -64,4 +68,9 @@ htmlcov/
 _exe_test.log
 *.log
 _wsl_linux_report.json
+# Root-level test-sweep console dumps (_sweep_full.txt, _coreclean.txt, ...)
+# are session scratch, never source.
+/_*.txt
 requirements.lock
+# This generated lock is a reviewed container build input, not local scratch.
+!deploy/rendezvous/requirements.lock

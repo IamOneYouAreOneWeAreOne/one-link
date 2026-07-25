@@ -1,5 +1,5 @@
 //! Cross-validation against canonical AES test vectors + exhaustive
-//! edge cases. Catches any drift in gf_mul / gf_inv / share format.
+//! edge cases. Catches any drift in `gf_mul` / `gf_inv` / share format.
 
 use ol_threshold_recovery::gf256::{gf_inv, gf_mul, gf_pow};
 use ol_threshold_recovery::prng::PrngState;
@@ -8,6 +8,41 @@ use ol_threshold_recovery::shamir::{
 };
 
 // ── AES test vectors (FIPS 197 GF(2^8) multiplication) ────────────
+
+fn reference_gf_mul(multiplicand: u8, multiplier: u8) -> u8 {
+    // Deliberately straightforward and branchy: this is an independent
+    // correctness oracle used only by tests, not a side-channel-safe path.
+    let mut shifted_multiplicand = multiplicand;
+    let mut shifted_multiplier = multiplier;
+    let mut product = 0u8;
+    for _ in 0..8 {
+        if shifted_multiplier & 1 != 0 {
+            product ^= shifted_multiplicand;
+        }
+        let carry = shifted_multiplicand & 0x80 != 0;
+        shifted_multiplicand <<= 1;
+        if carry {
+            shifted_multiplicand ^= 0x1B;
+        }
+        shifted_multiplier >>= 1;
+    }
+    product
+}
+
+#[test]
+fn multiplication_matches_independent_reference_for_every_operand_pair() {
+    for multiplicand in u8::MIN..=u8::MAX {
+        for multiplier in u8::MIN..=u8::MAX {
+            let expected = reference_gf_mul(multiplicand, multiplier);
+            let actual = gf_mul(u32::from(multiplicand), u32::from(multiplier));
+            assert_eq!(
+                actual,
+                u32::from(expected),
+                "mismatch for 0x{multiplicand:02X} * 0x{multiplier:02X}"
+            );
+        }
+    }
+}
 
 #[test]
 fn aes_mul_classic_vectors() {
@@ -146,7 +181,8 @@ fn n_equals_max_participants_255() {
     let streams = share_bytes(secret, k, n, &mut st).unwrap();
     assert_eq!(streams.len(), n as usize);
     // Pick K random-ish shares and reconstruct.
-    let xs: Vec<u8> = (1..=k as u8).collect();
+    let k_u8 = u8::try_from(k).expect("test threshold fits in u8");
+    let xs: Vec<u8> = (1..=k_u8).collect();
     let refs: Vec<&[u8]> = streams[..k as usize].iter().map(Vec::as_slice).collect();
     let recovered = reconstruct_bytes(&xs, &refs, k).unwrap();
     assert_eq!(recovered, secret);
@@ -194,7 +230,10 @@ fn share_x_values_sequential_1_to_n() {
     let mut st = PrngState::new(0);
     let shares = share_byte(0xAA, 3, 7, &mut st).unwrap();
     for (i, sh) in shares.iter().enumerate() {
-        assert_eq!(sh.x, (i + 1) as u8);
+        assert_eq!(
+            sh.x,
+            u8::try_from(i + 1).expect("test share index fits in u8")
+        );
     }
 }
 

@@ -1,10 +1,25 @@
 # One Link — The Road to Flawless
 
-**Last updated:** 2026-05-24
+**Last truth review:** 2026-07-24
 
 > The engineering-deep roadmap lives at [`docs/ROADMAP.md`](docs/ROADMAP.md).
 > This document is the user-facing one: what "done" looks like, how we
 > know when we've gotten there, and what's standing between us and that.
+
+> **Capability boundary:** this is a target roadmap, not release evidence. One
+> Link is still alpha and has no verified public production release. The May
+> capability table below is retained as a historical source-tree snapshot; a
+> check mark does not prove packaged-platform or physical-network
+> qualification. Current native daemon channels have a signed X25519 +
+> ML-KEM-768 session handshake when the verified ABI is available, but identity
+> signatures and browser/WebRTC are not post-quantum. The optional v2 relay
+> blinds route identifiers and seals identity-bearing first flights, but it
+> still exposes endpoint/timing/size/count metadata and is not sender
+> anonymity. No live message/file path uses onion or mix-net routing. Explicit
+> owner-confirmed one-click transactional installation is dynamically available
+> only to a locally proven frozen standalone bundle; unattended/background
+> automatic installation remains disabled, and no verified public stable tag
+> exists.
 
 ## The vision
 
@@ -48,7 +63,7 @@ network in any language, we're done.
 
 ---
 
-## Where we are right now (2026-05-24)
+## Historical source snapshot (2026-05-24; not current release evidence)
 
 | Capability | Desktop | iOS Safari | Android | Notes |
 |---|---|---|---|---|
@@ -78,8 +93,10 @@ network in any language, we're done.
 | Works through symmetric NAT | partial | partial | untested | TURN relay not always reliable |
 | Works in censorship-heavy regions | ⚠️ obfs transport code exists, not wired | ❌ | ❌ | |
 
-Bottom line: **desktop is largely there. Phone is ~70%. Network resilience
-and accessibility need work. Recovery story is missing.**
+Historical bottom line recorded on that date: **desktop was largely there;
+phone was estimated at ~70%; network resilience, accessibility, and recovery
+still needed work.** Percentages in this snapshot were planning estimates, not
+measured release qualification.
 
 ---
 
@@ -87,6 +104,10 @@ and accessibility need work. Recovery story is missing.**
 
 Each phase has a concrete "done when" gate. Not "implement feature X" —
 "a user can do Y end-to-end."
+
+Checked annotations below record source work present at the time of the
+roadmap entry. A phase remains open until its complete end-to-end, packaged,
+physical-device gate passes.
 
 ### Phase A — Foundation rock-solid
 
@@ -237,7 +258,8 @@ One Link is, what it does, what's safe about it, and how to use it.
 - [ ] One-page "I lost my devices" recovery guide.
 - [ ] A "Why should I trust this?" page that doesn't say "trust us" —
   shows the verifiable evidence (signed releases, audit trail, open
-  source, no central server).
+  source, no mandatory central message service, and every optional
+  discovery/relay boundary).
 - [ ] All translated.
 
 ### Phase I — Permanence (cannot be captured)

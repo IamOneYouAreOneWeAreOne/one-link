@@ -69,7 +69,7 @@ proptest! {
         n_nodes in 3usize..8,
     ) {
         let mut g = AdjacencyGraph::new();
-        let nodes: Vec<String> = (0..n_nodes).map(|i| format!("n{}", i)).collect();
+        let nodes: Vec<String> = (0..n_nodes).map(|i| format!("n{i}")).collect();
         for i in 0..n_nodes {
             for j in 0..n_nodes {
                 if i != j {

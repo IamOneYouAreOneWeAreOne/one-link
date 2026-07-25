@@ -5,8 +5,8 @@ Ship-spec from `docs/PHONE_TIER.md` testing-on-real-device path:
   Reach:  users running `one-link app --lan` get the UI served on
           0.0.0.0:7117 instead of 127.0.0.1:7117 so a phone on
           the same Wi-Fi can reach it. The launcher prints the
-          LAN URL with the existing token so the user can tap or
-          paste it on their phone.
+          non-secret pairing landing URL; the owner token is never printed
+          into a LAN URL.
   Hide:   default behavior is unchanged. Without --lan or the env
           var, the daemon binds loopback-only — historical safe
           default. Existing users see no change.
@@ -14,8 +14,7 @@ Ship-spec from `docs/PHONE_TIER.md` testing-on-real-device path:
   Depth:  the launcher detects whether an already-running daemon
           is loopback-bound and replaces it when --lan is passed.
           A LAN-mode warning is printed loud and yellow because
-          the trust boundary changed: the URL+token now reaches
-          anyone on the same network.
+           the trust boundary changed, while owner auth stays local/HTTPS.
 
 Tests cover the env-var bind change, default loopback, --lan
 flag wiring through CLI to env var, LAN-IP detection, and the
@@ -27,7 +26,6 @@ from __future__ import annotations
 import os
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
@@ -100,7 +98,7 @@ async def server_lan(tmp_path: Path, monkeypatch):
 async def test_default_binds_loopback(server_default):
     """No env var → 127.0.0.1 (the historical safe default).
     `bind_host` reflects what was actually bound."""
-    assert server_default.bind_host == "0.0.0.0"
+    assert server_default.bind_host == "127.0.0.1"
 
 
 @pytest.mark.asyncio
@@ -164,9 +162,8 @@ def test_cli_lan_flag_exists():
     assert "Wi-Fi" in result.output or "LAN" in result.output
 
 
-def test_cli_app_defaults_to_lan_for_phone_pairing(monkeypatch):
-    """Desktop app launch should be phone-ready by default; users can
-    still opt out with --loopback-only."""
+def test_cli_app_defaults_to_loopback_and_lan_is_explicit(monkeypatch):
+    """Desktop owner UI is local by default; --lan is an explicit opt-in."""
     from click.testing import CliRunner
     from one_link.cli import cli
 
@@ -179,11 +176,11 @@ def test_cli_app_defaults_to_lan_for_phone_pairing(monkeypatch):
     monkeypatch.setattr("one_link.app.run_app", fake_run_app)
     result = CliRunner().invoke(cli, ["app", "--no-browser"])
     assert result.exit_code == 0
-    assert calls[-1]["lan"] is True
-
-    result = CliRunner().invoke(cli, ["app", "--no-browser", "--loopback-only"])
-    assert result.exit_code == 0
     assert calls[-1]["lan"] is False
+
+    result = CliRunner().invoke(cli, ["app", "--no-browser", "--lan"])
+    assert result.exit_code == 0
+    assert calls[-1]["lan"] is True
 
 
 def test_run_app_sets_env_var_when_lan_passed(monkeypatch):
@@ -213,6 +210,7 @@ def test_run_app_sets_env_var_when_lan_passed(monkeypatch):
         raise RuntimeError("test-bail")
 
     monkeypatch.setattr(app_mod, "_resolve_running_daemon", fake_resolve)
+    monkeypatch.setattr(app_mod, "_stop_verified_legacy_daemon", lambda: None)
     monkeypatch.setattr(app_mod, "_spawn_daemon", fake_spawn)
     try:
         with pytest.raises(RuntimeError, match="test-bail"):
@@ -222,10 +220,8 @@ def test_run_app_sets_env_var_when_lan_passed(monkeypatch):
         os.environ.pop("ONE_LINK_BIND_HOST", None)
 
 
-def test_run_app_does_not_set_env_var_without_lan(monkeypatch):
-    """Default run (no --lan) MUST NOT touch ONE_LINK_BIND_HOST.
-    Otherwise an unrelated env var leak between flag-on and flag-off
-    invocations of run_app would auto-LAN-bind."""
+def test_run_app_forces_loopback_without_lan(monkeypatch):
+    """Default launch overwrites a stale ambient LAN bind fail-closed."""
     from one_link import app as app_mod
 
     monkeypatch.delenv("ONE_LINK_BIND_HOST", raising=False)
@@ -237,10 +233,11 @@ def test_run_app_does_not_set_env_var_without_lan(monkeypatch):
         raise RuntimeError("test-bail")
 
     monkeypatch.setattr(app_mod, "_resolve_running_daemon", fake_resolve)
+    monkeypatch.setattr(app_mod, "_stop_verified_legacy_daemon", lambda: None)
     monkeypatch.setattr(app_mod, "_spawn_daemon", fake_spawn)
     with pytest.raises(RuntimeError, match="test-bail"):
         app_mod.run_app(no_browser=True, lan=False)
-    assert "ONE_LINK_BIND_HOST" not in os.environ
+    assert os.environ["ONE_LINK_BIND_HOST"] == "127.0.0.1"
 
 
 # ───────── LAN-IP detection ─────────────────────────────────────────
@@ -283,19 +280,19 @@ def test_detect_lan_ip_falls_back_when_socket_fails(monkeypatch):
 # ───────── LAN warning print ────────────────────────────────────────
 
 def test_print_lan_warning_via_capsys(capsys):
-    """capsys-based assertion of the warning print — verifies the
-    URL, token, and the actual security copy are all in stdout."""
+    """LAN warning prints pairing reachability but no owner credential."""
     from one_link.app import _print_lan_warning
 
-    _print_lan_warning("192.168.1.42", 7117, "test-token-abc")
+    _print_lan_warning("192.168.1.42", 7117)
     captured = capsys.readouterr()
     assert "192.168.1.42" in captured.out
     assert "7117" in captured.out
-    assert "?t=test-token-abc" in captured.out
+    assert "test-token-abc" not in captured.out
+    assert "/connect" in captured.out
     # Pin the security copy so a refactor can't quietly soften it.
     assert "LAN MODE" in captured.out
-    assert "Anyone" in captured.out
-    assert "password" in captured.out
+    assert "plain LAN HTTP" in captured.out
+    assert "short-lived invite" in captured.out
 
 
 def test_print_lan_warning_is_ascii_only():
@@ -315,7 +312,7 @@ def test_print_lan_warning_is_ascii_only():
     buf = io.BytesIO()
     text_buf = io.TextIOWrapper(buf, encoding="cp1252", newline="")
     with contextlib.redirect_stdout(text_buf):
-        _print_lan_warning("192.168.1.42", 7117, "test-token-abc")
+        _print_lan_warning("192.168.1.42", 7117)
         text_buf.flush()
     encoded = buf.getvalue()
     # Sanity: the URL still made it through.
@@ -335,7 +332,7 @@ def test_print_lan_warning_ignores_invalid_gui_stdout(monkeypatch):
 
     monkeypatch.setattr(app_mod.click, "echo", bad_echo)
     monkeypatch.setattr(app_mod.click, "secho", bad_echo)
-    app_mod._print_lan_warning("192.168.1.42", 7117, "test-token-abc")
+    app_mod._print_lan_warning("192.168.1.42", 7117)
 
 
 def test_page_version_matches_package():

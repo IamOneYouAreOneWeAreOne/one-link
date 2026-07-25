@@ -1,9 +1,9 @@
-//! Constant-time validation for ol_onion comparison surfaces.
+//! Constant-time validation for `ol_onion` comparison surfaces.
 //!
 //! Same pattern as F1.1 / F2: measure wall-clock variance across
 //! buckets; gate at 5% relative stddev.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[path = "../../test_support/timing_gate.rs"]
 mod timing_gate;
@@ -14,18 +14,18 @@ use ol_onion::{HopId, HOP_ID_LEN};
 const SAMPLES_PER_BUCKET: usize = 50_000;
 
 fn relative_stddev(samples: &[f64]) -> f64 {
-    let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
-    let variance: f64 =
-        samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+    let sample_count = f64::from(u32::try_from(samples.len()).unwrap());
+    let mean: f64 = samples.iter().sum::<f64>() / sample_count;
+    let variance: f64 = samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / sample_count;
     variance.sqrt() / mean
 }
 
-fn measure<F: FnMut()>(mut work: F, iterations: usize) -> u128 {
+fn measure<F: FnMut()>(mut work: F, iterations: usize) -> Duration {
     let start = Instant::now();
     for _ in 0..iterations {
         work();
     }
-    start.elapsed().as_nanos()
+    start.elapsed()
 }
 
 #[test]
@@ -65,7 +65,9 @@ fn hop_id_eq_constant_time() {
                 std::hint::black_box(base == *std::hint::black_box(c));
             },
             SAMPLES_PER_BUCKET,
-        ) as f64;
+        )
+        .as_secs_f64()
+            * 1_000_000_000.0;
         totals.push(ns);
     }
     let rel = relative_stddev(&totals);
@@ -114,7 +116,9 @@ fn layer_key_eq_constant_time() {
                 std::hint::black_box(base == *std::hint::black_box(c));
             },
             SAMPLES_PER_BUCKET,
-        ) as f64;
+        )
+        .as_secs_f64()
+            * 1_000_000_000.0;
         totals.push(ns);
     }
     let rel = relative_stddev(&totals);

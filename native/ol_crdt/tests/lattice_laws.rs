@@ -1,4 +1,4 @@
-//! Phase C acceptance gate for `ol_crdt` (FILE_ENGINE_V2_PLAN.md line 289):
+//! Phase C acceptance gate for `ol_crdt` (`FILE_ENGINE_V2_PLAN.md` line 289):
 //!
 //!     "lattice merge laws" property tests.
 //!
@@ -9,10 +9,10 @@
 //! 1. Pure adds.
 //! 2. Adds + removes.
 //! 3. Adds + concurrent re-adds (add-wins regression coverage).
-//! 4. LWW-attribute battles (concurrent renames of the same FileId).
+//! 4. LWW-attribute battles (concurrent renames of the same `FileId`).
 //!
 //! Iteration count is configurable via `OL_CRDT_GATE_ITERS` env var
-//! (default: 10_000 for CI; the acceptance gate run sets it to 1_000_000).
+//! (default: `10_000` for CI; the acceptance gate run sets it to `1_000_000`).
 //! At default iter count this test runs in ≤500 ms; at gate count it
 //! runs in ≤45 s on a tuned x86 host.
 
@@ -31,6 +31,13 @@ fn next_rng(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
+fn random_index(state: &mut u64, len: usize) -> usize {
+    debug_assert!(len > 0);
+    let len_u64 = u64::try_from(len).expect("supported Rust pointer widths fit in u64");
+    usize::try_from(next_rng(state) % len_u64)
+        .expect("a value reduced below a usize-derived bound fits in usize")
+}
+
 fn random_id(state: &mut u64, namespace: u8) -> [u8; 32] {
     let mut bytes = [0u8; 32];
     for chunk in bytes.chunks_mut(8) {
@@ -43,15 +50,13 @@ fn random_id(state: &mut u64, namespace: u8) -> [u8; 32] {
 
 fn random_folder(state: &mut u64, bucket: u8) -> Folder {
     let mut f = Folder::new();
-    let replicas: Vec<ReplicaId> = (0..3)
-        .map(|i| ReplicaId(random_id(state, i as u8)))
-        .collect();
-    let file_ids: Vec<[u8; 32]> = (0..6).map(|i| random_id(state, 0x80 | i as u8)).collect();
+    let replicas: Vec<ReplicaId> = (0u8..3).map(|i| ReplicaId(random_id(state, i))).collect();
+    let file_ids: Vec<[u8; 32]> = (0u8..6).map(|i| random_id(state, 0x80u8 | i)).collect();
 
     let n_ops = (next_rng(state) % 8) + 1;
     for _ in 0..n_ops {
-        let r = &replicas[(next_rng(state) as usize) % replicas.len()];
-        let fid = file_ids[(next_rng(state) as usize) % file_ids.len()];
+        let r = &replicas[random_index(state, replicas.len())];
+        let fid = file_ids[random_index(state, file_ids.len())];
         let action = match bucket {
             0 => 0,                   // pure adds
             1 => next_rng(state) % 2, // add or remove
@@ -142,7 +147,7 @@ fn folder_merge_laws() {
     let mut idem_fail = 0u64;
 
     for i in 0..iters {
-        let bucket = (i % 4) as u8;
+        let bucket = u8::try_from(i % 4).expect("a residue modulo four fits in u8");
         let a = random_folder(&mut state, bucket);
         let b = random_folder(&mut state, bucket);
         let c = random_folder(&mut state, bucket);

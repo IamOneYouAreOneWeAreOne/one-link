@@ -180,7 +180,11 @@ fn signing_payload(
     //            || nonce || ephem_pk
     let mut w = Writer::with_capacity(RESPONSE_SIG_DOMAIN.len() + transcript_bind.len() + 96);
     w.write_fixed(RESPONSE_SIG_DOMAIN);
-    w.write_u32(transcript_bind.len() as u32);
+    let transcript_len = match u32::try_from(transcript_bind.len()) {
+        Ok(len) => len,
+        Err(error) => panic!("pairing transcript length must fit its u32 wire prefix: {error}"),
+    };
+    w.write_u32(transcript_len);
     w.write_fixed(transcript_bind);
     w.write_fixed(nonce);
     w.write_fixed(ephem_pk);

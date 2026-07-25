@@ -1,6 +1,6 @@
 //! Phase E acceptance gate: **linear-source no-go regression test.**
 //!
-//! The S_One galaxy chain proves a sharp no-go: if the source is
+//! The `S_One` galaxy chain proves a sharp no-go: if the source is
 //! linear in density (`S_b ∝ ρ_b`), the coherence flux collapses to
 //! `g_coh ∝ g_bar`. Translated to graphs: if the source is just
 //! `S = α · ρ`, then the Helmholtz solution `δτ_c` is a linear scaling
@@ -37,7 +37,9 @@ fn linear_source_response_scales_linearly() {
     g.add_edge(0, 5, 0.5).unwrap();
     g.add_edge(2, 7, 0.5).unwrap();
 
-    let rho: Vec<f64> = (0..n).map(|i| (i as f64 + 1.0).sqrt()).collect();
+    let rho: Vec<f64> = (0..n)
+        .map(|i| (f64::from(u32::try_from(i).expect("the fixture index fits u32")) + 1.0).sqrt())
+        .collect();
     let s1 = linear_source(&rho, 1.0).unwrap();
     let s2 = linear_source(&rho, 2.0).unwrap();
 
@@ -69,7 +71,14 @@ fn no_information_beyond_rho_in_linear_case() {
     for i in 0..n - 1 {
         g.add_edge(i, i + 1, 1.0).unwrap();
     }
-    let rho: Vec<f64> = (0..n).map(|i| (i as f64).sin().abs() + 0.5).collect();
+    let rho: Vec<f64> = (0..n)
+        .map(|i| {
+            f64::from(u32::try_from(i).expect("the fixture index fits u32"))
+                .sin()
+                .abs()
+                + 0.5
+        })
+        .collect();
     let rho_offset: Vec<f64> = rho.iter().map(|&r| r + 10.0).collect();
     let s = linear_source(&rho, 1.0).unwrap();
     let s_off = linear_source(&rho_offset, 1.0).unwrap();
@@ -84,7 +93,8 @@ fn no_information_beyond_rho_in_linear_case() {
         .zip(r.field.iter())
         .map(|(a, b)| a - b)
         .collect();
-    let mean_diff = diff.iter().sum::<f64>() / (n as f64);
+    let sample_count = diff.iter().fold(0.0_f64, |count, _| count + 1.0);
+    let mean_diff = diff.iter().sum::<f64>() / sample_count;
     let max_dev = diff
         .iter()
         .map(|d| (d - mean_diff).abs())

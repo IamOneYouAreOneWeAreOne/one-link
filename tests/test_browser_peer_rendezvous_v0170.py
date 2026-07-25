@@ -234,8 +234,12 @@ def test_build_signed_register_default_capabilities(peer_html: str):
     bump."""
     idx = peer_html.find("async function _buildSignedRegister")
     snippet = peer_html[idx:idx + 3000]
-    assert '"browser_peer"' in snippet
-    assert '"webrtc_v1"' in snippet
+    assert "opts.capabilities || browserTransportCapabilities()" in snippet
+    caps_idx = peer_html.find("function browserTransportCapabilities")
+    caps = peer_html[caps_idx:caps_idx + 700]
+    assert '"browser_peer"' in caps
+    assert '"webrtc_v1"' in caps
+    assert '"manual_signal_v1"' in caps
 
 
 # ───────── client helpers ───────────────────────────────────────────
@@ -279,7 +283,7 @@ def test_lookup_returns_null_on_404(peer_html: str):
     haven't met yet."""
     idx = peer_html.find("async function lookupAt")
     snippet = peer_html[idx:idx + 1500]
-    assert "resp.status === 404" in snippet
+    assert "result.response.status === 404" in snippet
     assert "return null" in snippet
 
 
@@ -301,15 +305,19 @@ def test_normalize_rdz_url_defaults_to_https(peer_html: str):
     idx = peer_html.find("function _normalizeRdzUrl")
     snippet = peer_html[idx:idx + 700]
     assert '"https://"' in snippet
-    assert "/^https?:" in snippet
+    assert 'parsed.protocol !== "https:"' in snippet
+    assert "browser CSP forbids insecure cross-origin HTTP" in snippet
 
 
-def test_normalize_strips_trailing_slash(peer_html: str):
+def test_normalize_returns_an_origin_without_path_or_credentials(peer_html: str):
     """User pasting `https://rdz.example.com/` shouldn't end up
     POSTing to `//api/v1/register`."""
     idx = peer_html.find("function _normalizeRdzUrl")
-    snippet = peer_html[idx:idx + 700]
-    assert "/\\/+$/" in snippet or "replace(/\\/+$" in snippet
+    snippet = peer_html[idx:idx + 1200]
+    assert 'parsed.pathname !== "/"' in snippet
+    assert "parsed.username" in snippet
+    assert "parsed.password" in snippet
+    assert "parsed.origin" in snippet
 
 
 # ───────── UI wiring ────────────────────────────────────────────────
@@ -365,8 +373,7 @@ def test_rdz_button_disabled_during_request(peer_html: str):
 
 def test_rdz_auto_refresh_scheduled(peer_html: str):
     """After a successful register, the client MUST auto-refresh
-    before the TTL expires. Otherwise the listing drops out and
-    other peers can't find this device."""
+    before the TTL expires. Otherwise the signed presence listing expires."""
     assert "_scheduleRdzRefresh" in peer_html
     idx = peer_html.find("function _scheduleRdzRefresh")
     snippet = peer_html[idx:idx + 1500]
@@ -382,15 +389,46 @@ def test_rdz_auto_refresh_clears_old_timer(peer_html: str):
     assert "clearTimeout(_rdzRefreshTimer)" in snippet
 
 
-def test_rdz_observed_endpoint_surfaced(peer_html: str):
-    """The server's RegisterAck includes the IP:port it observed.
-    Surface that to the user — tells them "this is the address
-    other peers will try to reach you on" which helps debug NAT."""
+def test_rdz_refresh_retries_and_uses_validated_ack_lifetime(peer_html: str):
+    idx = peer_html.find("function _scheduleRdzRefresh")
+    snippet = peer_html[idx:idx + 3600]
+    assert "current.retryAttempt" in snippet
+    assert "Math.min(60_000" in snippet
+    assert "ack.expires_at_ms - ack.server_time_ms" in snippet
+    assert "_scheduleRdzRefresh();" in snippet
+
+
+def test_rdz_responses_are_bounded_timed_and_schema_validated(peer_html: str):
+    assert "RDZ_FETCH_TIMEOUT_MS" in peer_html
+    assert "RDZ_RESPONSE_MAX_BYTES" in peer_html
+    fetch_idx = peer_html.find("async function _rdzFetch")
+    fetch_snippet = peer_html[fetch_idx:fetch_idx + 2500]
+    assert "AbortController" in fetch_snippet
+    assert 'credentials: "omit"' in fetch_snippet
+    assert "_readRdzResponseText" in fetch_snippet
+    assert "rendezvous success response is not JSON" in fetch_snippet
+    register_idx = peer_html.find("function _parseRdzRegisterAck")
+    register_snippet = peer_html[register_idx:register_idx + 1700]
+    assert "RDZ_REGISTER_ACK_KEYS" in register_snippet
+    assert "RDZ_MAX_TTL_MS" in register_snippet
+    lookup_idx = peer_html.find("function _parseRdzLookupAck")
+    lookup_snippet = peer_html[lookup_idx:lookup_idx + 3300]
+    assert "RDZ_LOOKUP_ACK_KEYS" in lookup_snippet
+    assert "lookup_ack identity does not match request" in lookup_snippet
+    assert "RDZ_MAX_TTL_MS" in lookup_snippet
+
+
+def test_rdz_observed_http_source_is_diagnostic_not_dialable(peer_html: str):
+    """Render the exact flat RegisterAck fields without promising a route."""
     assert 'id="rdz-ack-endpoint"' in peer_html
     idx = peer_html.find('"#btn-rdz-register"')
     handler_idx = peer_html.find("addEventListener", idx)
     snippet = peer_html[handler_idx:handler_idx + 2500]
-    assert "observed_endpoint" in snippet
+    assert "ack.observed_host" in snippet
+    assert "ack.observed_port" in snippet
+    assert "ack.observed_endpoint" not in snippet
+    assert "not a dialable browser endpoint" in peer_html
+    assert "Manual signaling is still required" in peer_html
 
 
 # ───────── compat with daemon's signing ─────────────────────────────
@@ -446,6 +484,27 @@ def test_signing_round_trip_against_daemon_lib():
     parsed.verify()  # raises ValueError on mismatch
 
 
+def test_browser_register_builder_stays_inside_exact_ol_rdz_1_schema(
+    peer_html: str,
+):
+    """The shipped JS builder must not emit fields rejected by OL-RDZ-1.
+
+    The Python round-trip above proves the shared signing algorithm.  This
+    source-bound assertion closes the complementary gap where the browser
+    builder once added an unsigned/unversioned ``transport_caps`` property
+    that the server's fail-closed exact-key parser correctly rejected.
+    """
+    start = peer_html.index("async function _buildSignedRegister")
+    end = peer_html.index("function _normalizeRdzUrl", start)
+    builder = peer_html[start:end]
+    assert "opts.capabilities || browserTransportCapabilities()" in builder
+    signing_start = builder.index("const signing = {")
+    signing_end = builder.index("const canonical", signing_start)
+    signing_object = builder[signing_start:signing_end]
+    assert "capabilities: capabilities.slice()" in signing_object
+    assert "transport_caps:" not in signing_object
+
+
 def test_canonical_json_python_js_parity():
     """The peer.html _canonicalJson algorithm and Python's
     json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=
@@ -465,7 +524,6 @@ def test_canonical_json_python_js_parity():
         # This proves the documented algorithm matches Python's
         # actual output. If a future ship changes either side,
         # this test fails loudly.
-        import json
         js_equiv = json.dumps(
             s, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
         )

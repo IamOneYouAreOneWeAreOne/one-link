@@ -4,6 +4,7 @@ These spin up a real aiohttp app on a localhost port, hit the actual
 HTTP endpoints, and verify behaviour against the wire protocol.
 Concurrency, rate limits, replay rejection, signature failure paths
 are all covered."""
+
 from __future__ import annotations
 
 import asyncio
@@ -20,8 +21,6 @@ from one_link.rendezvous_proto import (
     LookupAck,
     REPLAY_WINDOW_MS,
     RegisterAck,
-    RegisterReq,
-    RevokeReq,
     sign_register,
     sign_revoke,
 )
@@ -33,13 +32,14 @@ pytestmark = pytest.mark.asyncio
 
 # ─── fixtures ────────────────────────────────────────────────────────
 
+
 @pytest_asyncio.fixture
 async def server() -> AsyncIterator[tuple[str, RendezvousApp]]:
     """Start a rendezvous on a random localhost port. Yield (base_url, app)."""
     config = ServerConfig(
         host="127.0.0.1",
         port=0,
-        rate_per_ip_per_min=10_000,        # generous — let tests run
+        rate_per_ip_per_min=10_000,  # generous — let tests run
         rate_register_per_pubkey_per_min=10_000,
         eviction_interval_s=0.2,
     )
@@ -67,11 +67,14 @@ def _new_key() -> tuple[Ed25519PrivateKey, bytes]:
 
 # ─── happy paths ─────────────────────────────────────────────────────
 
+
 async def test_register_then_lookup_returns_advertised_endpoints(server):
     base, _rdz = server
     sk, pk = _new_key()
     req = sign_register(
-        private_key=sk, pubkey=pk, ttl_s=300,
+        private_key=sk,
+        pubkey=pk,
+        ttl_s=300,
         advertised_endpoints=[Endpoint("192.168.1.10", 51234)],
         nat_type="restricted",
         capabilities=["chat", "files"],
@@ -85,6 +88,7 @@ async def test_register_then_lookup_returns_advertised_endpoints(server):
         assert ack.expires_at_ms > ack.server_time_ms
 
         from one_link.rendezvous_proto import _b64  # type: ignore
+
         async with s.get(f"{base}/api/v1/lookup/{_b64(pk)}") as r:
             assert r.status == 200, await r.text()
             lookup = LookupAck.from_wire(await r.json())
@@ -120,7 +124,9 @@ async def test_revoke_removes_registration(server):
     base, _rdz = server
     sk, pk = _new_key()
     req = sign_register(
-        private_key=sk, pubkey=pk, ttl_s=300,
+        private_key=sk,
+        pubkey=pk,
+        ttl_s=300,
         advertised_endpoints=[Endpoint("h", 1)],
     )
     async with aiohttp.ClientSession() as s:
@@ -132,6 +138,7 @@ async def test_revoke_removes_registration(server):
             assert r.status == 200, await r.text()
 
         from one_link.rendezvous_proto import _b64  # type: ignore
+
         async with s.get(f"{base}/api/v1/lookup/{_b64(pk)}") as r:
             assert r.status == 404
 
@@ -140,6 +147,7 @@ async def test_lookup_unknown_returns_404(server):
     base, _rdz = server
     _, pk = _new_key()
     from one_link.rendezvous_proto import _b64  # type: ignore
+
     async with aiohttp.ClientSession() as s:
         async with s.get(f"{base}/api/v1/lookup/{_b64(pk)}") as r:
             assert r.status == 404
@@ -151,13 +159,16 @@ async def test_register_overwrites_previous_for_same_pubkey(server):
     async with aiohttp.ClientSession() as s:
         for endpoint in (Endpoint("a", 1), Endpoint("b", 2), Endpoint("c", 3)):
             req = sign_register(
-                private_key=sk, pubkey=pk, ttl_s=300,
+                private_key=sk,
+                pubkey=pk,
+                ttl_s=300,
                 advertised_endpoints=[endpoint],
             )
             async with s.post(f"{base}/api/v1/register", json=req.to_wire()) as r:
                 assert r.status == 200
         assert len(rdz.registry) == 1
         from one_link.rendezvous_proto import _b64  # type: ignore
+
         async with s.get(f"{base}/api/v1/lookup/{_b64(pk)}") as r:
             lookup = LookupAck.from_wire(await r.json())
         assert [e.host for e in lookup.advertised_endpoints] == ["c"]
@@ -165,13 +176,16 @@ async def test_register_overwrites_previous_for_same_pubkey(server):
 
 # ─── security: replay window ────────────────────────────────────────
 
+
 async def test_register_rejects_stale_timestamp(server):
     base, _rdz = server
     sk, pk = _new_key()
     # Sign with a timestamp well outside the replay window.
     stale_ts = 1
     req = sign_register(
-        private_key=sk, pubkey=pk, ttl_s=300,
+        private_key=sk,
+        pubkey=pk,
+        ttl_s=300,
         advertised_endpoints=[Endpoint("h", 1)],
         timestamp_ms=stale_ts,
     )
@@ -186,9 +200,12 @@ async def test_register_rejects_future_timestamp(server):
     base, _rdz = server
     sk, pk = _new_key()
     from one_link.rendezvous_proto import now_ms
+
     future_ts = now_ms() + REPLAY_WINDOW_MS + 5_000
     req = sign_register(
-        private_key=sk, pubkey=pk, ttl_s=300,
+        private_key=sk,
+        pubkey=pk,
+        ttl_s=300,
         advertised_endpoints=[Endpoint("h", 1)],
         timestamp_ms=future_ts,
     )
@@ -198,6 +215,7 @@ async def test_register_rejects_future_timestamp(server):
 
 
 # ─── security: signature ────────────────────────────────────────────
+
 
 async def test_register_rejects_exact_signed_replay(server):
     base, _rdz = server
@@ -241,7 +259,9 @@ async def test_register_rejects_bad_signature(server):
     base, _rdz = server
     sk, pk = _new_key()
     req = sign_register(
-        private_key=sk, pubkey=pk, ttl_s=300,
+        private_key=sk,
+        pubkey=pk,
+        ttl_s=300,
         advertised_endpoints=[Endpoint("h", 1)],
     )
     wire = req.to_wire()
@@ -254,15 +274,21 @@ async def test_register_rejects_bad_signature(server):
 
 async def test_register_rejects_wrong_pubkey_signing(server):
     base, _rdz = server
-    sk1, _pk1 = _new_key()
-    _,  pk2  = _new_key()
-    # sk1 signs on behalf of pk2 — must fail.
+    sk1, pk1 = _new_key()
+    _, pk2 = _new_key()
+    # Create a valid signature, then substitute another claimed key on wire.
     req = sign_register(
-        private_key=sk1, pubkey=pk2, ttl_s=300,
+        private_key=sk1,
+        pubkey=pk1,
+        ttl_s=300,
         advertised_endpoints=[Endpoint("h", 1)],
     )
+    from one_link.rendezvous_proto import _b64  # type: ignore
+
+    wire = req.to_wire()
+    wire["pubkey_b64"] = _b64(pk2)
     async with aiohttp.ClientSession() as s:
-        async with s.post(f"{base}/api/v1/register", json=req.to_wire()) as r:
+        async with s.post(f"{base}/api/v1/register", json=wire) as r:
             assert r.status == 401, await r.text()
 
 
@@ -271,7 +297,9 @@ async def test_revoke_rejects_bad_signature(server):
     sk, pk = _new_key()
     # Register first.
     reg = sign_register(
-        private_key=sk, pubkey=pk, ttl_s=300,
+        private_key=sk,
+        pubkey=pk,
+        ttl_s=300,
         advertised_endpoints=[Endpoint("h", 1)],
     )
     async with aiohttp.ClientSession() as s:
@@ -279,13 +307,18 @@ async def test_revoke_rejects_bad_signature(server):
             assert r.status == 200
 
         # Forge revoke with someone else's key.
-        sk_evil, _ = _new_key()
-        rev = sign_revoke(private_key=sk_evil, pubkey=pk)  # wrong signer for pk
-        async with s.post(f"{base}/api/v1/revoke", json=rev.to_wire()) as r:
+        sk_evil, pk_evil = _new_key()
+        rev = sign_revoke(private_key=sk_evil, pubkey=pk_evil)
+        from one_link.rendezvous_proto import _b64  # type: ignore
+
+        wire = rev.to_wire()
+        wire["pubkey_b64"] = _b64(pk)
+        async with s.post(f"{base}/api/v1/revoke", json=wire) as r:
             assert r.status == 401
 
 
 # ─── security: malformed input ──────────────────────────────────────
+
 
 async def test_register_rejects_non_json_body(server):
     base, _rdz = server
@@ -323,9 +356,11 @@ async def test_lookup_rejects_pubkey_wrong_length(server):
 
 # ─── security: rate limiting ────────────────────────────────────────
 
+
 async def test_per_ip_rate_limit_kicks_in():
     config = ServerConfig(
-        host="127.0.0.1", port=0,
+        host="127.0.0.1",
+        port=0,
         rate_per_ip_per_min=5,
         rate_register_per_pubkey_per_min=10_000,
         eviction_interval_s=10.0,
@@ -345,7 +380,9 @@ async def test_per_ip_rate_limit_kicks_in():
             for _ in range(8):
                 # Lookup-of-unknown is the cheapest endpoint that still
                 # counts against the IP rate limit.
-                async with s.get(f"{base}/api/v1/lookup/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") as r:
+                async with s.get(
+                    f"{base}/api/v1/lookup/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                ) as r:
                     statuses.append(r.status)
             # First 5 within the window should pass (404 since no such key);
             # the rest should hit 429.
@@ -356,9 +393,11 @@ async def test_per_ip_rate_limit_kicks_in():
 
 # ─── eviction loop ──────────────────────────────────────────────────
 
+
 async def test_expired_registrations_are_evicted_by_loop():
     config = ServerConfig(
-        host="127.0.0.1", port=0,
+        host="127.0.0.1",
+        port=0,
         rate_per_ip_per_min=10_000,
         rate_register_per_pubkey_per_min=10_000,
         eviction_interval_s=0.05,  # fast for the test
@@ -375,7 +414,9 @@ async def test_expired_registrations_are_evicted_by_loop():
     try:
         sk, pk = _new_key()
         req = sign_register(
-            private_key=sk, pubkey=pk, ttl_s=1,
+            private_key=sk,
+            pubkey=pk,
+            ttl_s=1,
             advertised_endpoints=[Endpoint("h", 1)],
         )
         async with aiohttp.ClientSession() as s:
@@ -386,6 +427,7 @@ async def test_expired_registrations_are_evicted_by_loop():
             await asyncio.sleep(1.4)
 
             from one_link.rendezvous_proto import _b64  # type: ignore
+
             async with s.get(f"{base}/api/v1/lookup/{_b64(pk)}") as r:
                 assert r.status == 404
         assert len(rdz.registry) == 0
@@ -395,28 +437,30 @@ async def test_expired_registrations_are_evicted_by_loop():
 
 # ─── health + metrics ───────────────────────────────────────────────
 
+
 async def test_health_endpoint(server):
     base, _rdz = server
     async with aiohttp.ClientSession() as s:
         async with s.get(f"{base}/health") as r:
             assert r.status == 200
             j = await r.json()
-        assert j["ok"] is True
-        assert "uptime_ms" in j
-        assert j["registrations"] == 0
+        assert j == {"ok": True}
 
 
 async def test_metrics_increments(server):
     base, _rdz = server
     sk, pk = _new_key()
     req = sign_register(
-        private_key=sk, pubkey=pk, ttl_s=60,
+        private_key=sk,
+        pubkey=pk,
+        ttl_s=60,
         advertised_endpoints=[Endpoint("h", 1)],
     )
     async with aiohttp.ClientSession() as s:
         async with s.post(f"{base}/api/v1/register", json=req.to_wire()) as r:
             assert r.status == 200
         from one_link.rendezvous_proto import _b64  # type: ignore
+
         async with s.get(f"{base}/api/v1/lookup/{_b64(pk)}") as r:
             assert r.status == 200
         async with s.get(f"{base}/metrics") as r:

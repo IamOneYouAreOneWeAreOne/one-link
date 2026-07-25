@@ -96,11 +96,12 @@ def negotiate(
 ) -> CompatibilityResult:
     """Decide how two One Link builds should talk.
 
-    Core principle (2026-06-04): **different versions ALWAYS work as
-    long as they share a baseline capability.** Compatibility is driven
-    by shared CAPABILITIES, never by a version number alone. A version
-    difference can only DOWNGRADE the negotiated mode (disable advanced
-    framing), never sever the connection outright.
+    Compatibility is selected from the advertised shared capabilities, with a
+    conservative wire-major downgrade. A shared capability name is useful
+    negotiation input, not proof that arbitrary historical/future builds encode
+    it identically; end-to-end interoperability still requires a genuinely
+    compatible baseline wire implementation. Missing required capabilities can
+    reject the negotiation, and later protocol validation can still fail.
 
     The "major boundary" check that gates advanced modes prefers the
     WIRE protocol version (``local_wire_version`` / ``peer_wire_version``,
@@ -109,8 +110,9 @@ def negotiate(
     advertise a wire version. This decoupling means a routine app major
     bump (e.g. 0.x -> 1.0) with an UNCHANGED wire no longer breaks
     interop: same wire major -> full negotiation regardless of app
-    version. Only a genuine wire-major boundary conservatively drops
-    the pair to the universal CHAT/FILES baseline until both upgrade.
+    version. A genuine wire-major boundary conservatively drops the pair to an
+    advertised CHAT/FILES baseline when both sides offer it; that fallback is
+    not a universal cross-version interoperability guarantee.
     """
     local_v = Version.parse(local_version)
     peer_v = Version.parse(peer_version)
@@ -133,15 +135,11 @@ def negotiate(
         cross_major = False
 
     if cross_major:
-        # DEGRADE, do not refuse. Across a major boundary the advanced
-        # framing (CDC / swarm / resumable / compression) may have
-        # changed shape, so we trust ONLY the universal baseline
-        # (CHAT / FILES). Chat + basic file transfer keep working; the
-        # fancy modes re-enable once both sides share a major. This is
-        # what makes "different versions always work" true instead of
-        # aspirational. The previous code returned compatible=False
-        # here, which turned a marketing-version bump into a hard
-        # interop wall.
+        # Do not refuse solely because of the version number. Across a major
+        # boundary advanced framing may have changed shape, so retain only the
+        # advertised baseline (CHAT / FILES). This negotiation result permits a
+        # baseline attempt; it cannot prove that arbitrary builds implement the
+        # same wire encoding or that later protocol validation will succeed.
         reasons.append("major_version_boundary")
         common = tuple(c for c in common if c in BASELINE_CAPABILITIES)
         missing = tuple(c for c in required_caps if c not in common)

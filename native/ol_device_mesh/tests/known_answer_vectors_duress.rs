@@ -6,6 +6,7 @@ use ol_device_mesh::duress::{
     REQUIRED_PAIR_CHANNELS,
 };
 use ol_device_mesh::DEVICE_ID_LEN;
+use std::fmt::Write as _;
 
 fn check_regen<F: FnOnce()>(label: &str, dump: F) {
     if std::env::var("OL_DURESS_KAT_REGEN").as_deref() == Ok("1") {
@@ -15,7 +16,11 @@ fn check_regen<F: FnOnce()>(label: &str, dump: F) {
 }
 
 fn to_hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    let mut hex = String::with_capacity(b.len() * 2);
+    for byte in b {
+        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
 }
 
 #[test]
@@ -42,6 +47,13 @@ fn kat_pairing_channel_tags_pinned() {
 
 #[test]
 fn kat_duress_alert_canonical_transcript_pinned() {
+    const EXPECTED_HEX: &str = concat!(
+        "4f4c2d6d6573682d6475726573732d616c6572742d7631", // domain
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",               // device_id
+        "0000000000000007",                               // day_index
+        "000000006553f100",                               // triggered_unix
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",               // nonce
+    );
     let bytes =
         DuressAlert::canonical_transcript(&[0xAA; DEVICE_ID_LEN], 7, 1_700_000_000, &[0xBB; 16]);
     let hex = to_hex(&bytes);
@@ -50,13 +62,6 @@ fn kat_duress_alert_canonical_transcript_pinned() {
     check_regen("duress-alert canonical_transcript", || {
         eprintln!("    EXPECTED_HEX = \"{hex}\"");
     });
-    const EXPECTED_HEX: &str = concat!(
-        "4f4c2d6d6573682d6475726573732d616c6572742d7631", // domain
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",               // device_id
-        "0000000000000007",                               // day_index
-        "000000006553f100",                               // triggered_unix
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",               // nonce
-    );
     assert_eq!(hex, EXPECTED_HEX, "duress-alert transcript drift");
 }
 

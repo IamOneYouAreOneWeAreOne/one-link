@@ -23,7 +23,6 @@ These tests pin:
 """
 from __future__ import annotations
 
-import os
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey

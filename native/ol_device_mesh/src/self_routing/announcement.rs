@@ -260,9 +260,13 @@ mod tests {
     fn oversize_links_rejected_at_sign() {
         let (sk, _vk) = make();
         let mut links = Vec::new();
-        for i in 0..(MAX_LINKS_PER_ANNOUNCEMENT + 1) {
+        for i in 0..=MAX_LINKS_PER_ANNOUNCEMENT {
             let mut peer = [0u8; DEVICE_ID_LEN];
-            peer[..4].copy_from_slice(&(i as u32 + 1).to_be_bytes());
+            let index = u32::try_from(i)
+                .expect("the announcement link bound fits in u32")
+                .checked_add(1)
+                .expect("the announcement link index fits in u32");
+            peer[..4].copy_from_slice(&index.to_be_bytes());
             // Avoid the announcer's own id.
             if peer != *sk.device_id() {
                 links.push(PeerLink {

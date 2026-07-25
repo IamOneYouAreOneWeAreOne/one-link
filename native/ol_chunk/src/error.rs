@@ -19,7 +19,7 @@ pub enum ChunkError {
         min: usize,
     },
 
-    /// CDC parameters violate FastCDC invariants (min < avg < max,
+    /// CDC parameters violate `FastCDC` invariants (min < avg < max,
     /// all powers-of-two-aligned).
     #[error("invalid CDC parameters: {0}")]
     InvalidParameters(&'static str),

@@ -1,6 +1,6 @@
-//! Phase C acceptance gate for ADR-0019 (multi-armed bandit):
+//! Phase C primitive acceptance gate for ADR-0019:
 //!
-//!   > Bandit converges on known-optimum peer-pair within ≤200
+//!   > Bandit converges on a known-optimum synthetic arm within ≤200
 //!   > interactions in simulation.
 //!
 //! Simulation: 5-arm bandit where arm probabilities are
@@ -8,9 +8,17 @@
 //! We "interact" by selecting an arm and observing a Bernoulli(p)
 //! reward. After 200 interactions, the bandit's `best_arm()` MUST be
 //! arm 4. Repeat across 100 random seeds; require ≥95% convergence
-//! (some unlucky seeds may need a few more rounds).
+//! (some unlucky seeds may need a few more rounds). This verifies the
+//! policy-neutral sampler, not any deferred non-route control loop.
 
 use ol_bandit::{Bandit, BanditRng, BanditSeed};
+
+fn bounded_ratio(numerator: u64, denominator: u64) -> f64 {
+    assert!(denominator > 0, "ratio denominator must be non-zero");
+    let numerator = u32::try_from(numerator).expect("acceptance-test count fits u32");
+    let denominator = u32::try_from(denominator).expect("acceptance-test count fits u32");
+    f64::from(numerator) / f64::from(denominator)
+}
 
 #[test]
 fn adr0019_bandit_converges_within_200_interactions() {
@@ -49,9 +57,12 @@ fn adr0019_bandit_converges_within_200_interactions() {
         }
     }
 
-    let convergence_rate = converged as f64 / N_SEEDS as f64;
+    let convergence_rate = bounded_ratio(
+        u64::try_from(converged).expect("seed count fits u64"),
+        N_SEEDS,
+    );
     let optimal_pull_fraction =
-        total_optimal_pulls_in_last_half as f64 / total_pulls_in_last_half as f64;
+        bounded_ratio(total_optimal_pulls_in_last_half, total_pulls_in_last_half);
 
     eprintln!(
         "ADR-0019 bandit convergence: {converged}/{N_SEEDS} = {:.1}% of seeds picked the optimal arm by step {HORIZON}",
@@ -101,7 +112,10 @@ fn bandit_handles_small_arm_gap() {
             converged += 1;
         }
     }
-    let rate = converged as f64 / N_SEEDS as f64;
+    let rate = bounded_ratio(
+        u64::try_from(converged).expect("seed count fits u64"),
+        N_SEEDS,
+    );
     eprintln!(
         "small-gap bandit convergence at HORIZON={HORIZON}: {converged}/{N_SEEDS} = {:.1}%",
         rate * 100.0,

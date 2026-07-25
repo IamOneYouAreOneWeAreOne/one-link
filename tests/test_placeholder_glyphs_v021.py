@@ -94,8 +94,8 @@ def test_no_single_lowercase_letter_used_as_glyph_in_index(index_html):
     (▾ ✕ × ↻ etc) instead."""
     hits = _find_single_letter_elements(index_html)
     assert not hits, (
-        f"single-lowercase-letter glyphs found in index.html "
-        f"(the 'v as caret' bug class):\n"
+        "single-lowercase-letter glyphs found in index.html "
+        "(the 'v as caret' bug class):\n"
         + "\n".join(f"  line {ln}: {snippet!r}" for ln, snippet in hits[:10])
     )
 
@@ -104,7 +104,7 @@ def test_no_single_lowercase_letter_used_as_glyph_in_peer(peer_html):
     """Same gate for the phone UI."""
     hits = _find_single_letter_elements(peer_html)
     assert not hits, (
-        f"single-lowercase-letter glyphs found in peer.html:\n"
+        "single-lowercase-letter glyphs found in peer.html:\n"
         + "\n".join(f"  line {ln}: {snippet!r}" for ln, snippet in hits[:10])
     )
 

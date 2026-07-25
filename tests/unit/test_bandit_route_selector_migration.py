@@ -1,7 +1,7 @@
 """Phase C-3 daemon migration: transfer_brain.BanditRouteSelector.
 
-Verifies the bandit-backed route selector replacing the EMA route
-memory subsystem. Acceptance: bandit converges on a known-best route
+Verifies the bandit-backed route selector replacing EMA ranking on the
+route-choice axis. Acceptance: bandit converges on a known-best route
 within ~200 interactions (consistent with the Phase C acceptance gate
 for ol_bandit).
 """
@@ -92,7 +92,7 @@ def test_bandit_selector_requires_nonempty_routes():
 def test_decide_uses_bandit_route_when_initialized():
     """Once the brain has observed traffic and built its bandit, decide()
     must restrict candidate_routes to the bandit's Thompson-sampled
-    pick (per stress-test #3: bandit REPLACES EMA route memory)."""
+    pick (per stress-test #3: bandit replaces EMA route ranking)."""
     import os
 
     from one_link.transfer_brain import (

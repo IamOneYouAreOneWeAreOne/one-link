@@ -9,7 +9,8 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link import identity_dag as idag
-from one_link.state import State
+from one_link import state as state_module
+from one_link.state import MessageIdConflict, MessageQuotaExceeded, State
 
 
 @pytest.fixture
@@ -108,6 +109,119 @@ def test_record_message_idempotent(state: State):
     state.record_message(id="m1", ts_ms=1, direction="in", peer_fp="aa" * 32,
                          msg_type="TEXT", body="hi")
     assert len(state.recent_messages(limit=10)) == 1
+
+
+def test_record_message_rejects_same_id_with_different_payload(state: State):
+    kwargs = dict(
+        id="exact-conflict-1", ts_ms=1, direction="in",
+        peer_fp="aa" * 32, msg_type="TEXT", body="first",
+    )
+    assert state.record_message(**kwargs) is True
+    assert state.record_message(**kwargs) is False
+    with pytest.raises(MessageIdConflict, match="reused for different content"):
+        state.record_message(**{**kwargs, "body": "second"})
+
+
+def test_record_message_exact_replay_survives_edit_and_delete(state: State):
+    """Mutable presentation state cannot destroy immutable replay evidence."""
+    kwargs = dict(
+        id="exact-after-mutation-1", ts_ms=1, direction="in",
+        peer_fp="aa" * 32, msg_type="TEXT", body="original",
+    )
+    assert state.record_message(**kwargs) is True
+    assert state.edit_message(
+        id=kwargs["id"], new_body="edited", edited_at_ms=2,
+    ) is not None
+    assert state.record_message(**kwargs) is False
+    with pytest.raises(MessageIdConflict, match="reused for different content"):
+        state.record_message(**{**kwargs, "body": "conflicting"})
+
+    assert state.delete_message(id=kwargs["id"], deleted_at_ms=3) is not None
+    assert state.record_message(**kwargs) is False
+    with pytest.raises(MessageIdConflict, match="reused for different content"):
+        state.record_message(**{**kwargs, "body": "conflicting"})
+
+
+def test_text_quota_rejects_new_rows_but_allows_exact_replay(
+    state: State, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(state_module, "MAX_TEXT_MESSAGES_PER_PEER", 1)
+    first = dict(
+        id="quota-message-1", ts_ms=1, direction="in",
+        peer_fp="aa" * 32, msg_type="TEXT", body="first",
+    )
+    state.record_message(**first)
+    assert state.record_message(**first) is False
+    with pytest.raises(MessageQuotaExceeded, match="quota"):
+        state.record_message(
+            id="quota-message-2", ts_ms=2, direction="in",
+            peer_fp="aa" * 32, msg_type="TEXT", body="second",
+        )
+
+
+def test_text_quota_counts_immutable_body_retained_by_first_edit(
+    state: State, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(state_module, "MAX_TEXT_BODY_BYTES_PER_PEER", 8)
+    state.record_message(
+        id="quota-edit-1", ts_ms=1, direction="in",
+        peer_fp="aa" * 32, msg_type="TEXT", body="12345",
+    )
+    # A first edit stores both the five-byte immutable original and the new
+    # four-byte presentation body. It must not bypass the physical byte cap.
+    with pytest.raises(MessageQuotaExceeded, match="quota"):
+        state.edit_message(
+            id="quota-edit-1", new_body="6789", edited_at_ms=2,
+        )
+    rec = state.get_message("quota-edit-1")
+    assert rec is not None and rec.body == "12345"
+    assert rec.original_body is None
+
+
+def test_chat_quota_counts_control_message_metadata(
+    state: State, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(state_module, "MAX_TEXT_BODY_BYTES_PER_PEER", 40)
+    first = dict(
+        id="quota-control-1", ts_ms=1, direction="in",
+        peer_fp="aa" * 32, msg_type="EDIT_MSG", body=None,
+        metadata={"body": "1234567890"},
+    )
+    assert state.record_message(**first) is True
+    assert state.record_message(**first) is False
+    with pytest.raises(MessageQuotaExceeded, match="quota"):
+        state.record_message(**{**first, "id": "quota-control-2", "ts_ms": 2})
+
+
+def test_durable_transaction_rolls_back_message_and_outbox_together(state: State):
+    with pytest.raises(RuntimeError, match="inject rollback"):
+        with state.durable_write_transaction():
+            state.record_message(
+                id="atomic-message-1", ts_ms=1, direction="out",
+                peer_fp="aa" * 32, msg_type="TEXT", body="hello",
+            )
+            state.enqueue_outbox(
+                peer_fp="aa" * 32,
+                msg_id="atomic-message-1",
+                msg_body={"t": "TEXT", "id": "atomic-message-1", "body": "hello"},
+            )
+            raise RuntimeError("inject rollback")
+    assert state.get_message("atomic-message-1") is None
+    assert state.list_outbox(peer_fp="aa" * 32) == []
+
+
+def test_outbox_idempotency_rejects_payload_conflict(state: State):
+    kwargs = dict(
+        peer_fp="aa" * 32,
+        msg_id="outbox-exact-1",
+        msg_body={"t": "TEXT", "id": "outbox-exact-1", "body": "first"},
+    )
+    first_id = state.enqueue_outbox(**kwargs)
+    assert state.enqueue_outbox(**kwargs) == first_id
+    with pytest.raises(MessageIdConflict, match="reused for different content"):
+        state.enqueue_outbox(
+            **{**kwargs, "msg_body": {**kwargs["msg_body"], "body": "second"}},
+        )
 
 
 def test_outbox_at_least_once_receiver_dedups_t3h(state: State):
@@ -411,7 +525,7 @@ def test_self_mesh_device_presence_and_replay_persist(tmp_path: Path):
         assert stale["state"] == "awake"
 
         assert s1.mark_remote_instruction_seen(
-            command_id="cmd1",
+            command_id="a" * 64,
             expires_ms=9000,
             action="pull_file_manifest",
             controller_device_pub=phone_pub,
@@ -419,7 +533,7 @@ def test_self_mesh_device_presence_and_replay_persist(tmp_path: Path):
             now_ms=3000,
         ) is True
         assert s1.mark_remote_instruction_seen(
-            command_id="cmd1",
+            command_id="a" * 64,
             expires_ms=9000,
             now_ms=3001,
         ) is False
@@ -496,6 +610,155 @@ def test_self_mesh_root_revocation_and_audit_persist(tmp_path: Path):
         assert feed[0]["subkind"] == "device_revoked"
     finally:
         s2.close()
+
+
+def test_self_mesh_root_seed_wrap_marker_collision_is_cleartext(tmp_path: Path):
+    """A random 32-byte seed beginning 0x01 is not wrapped ciphertext."""
+    root_seed = b"\x01" + bytes(range(1, 32))
+    root_pub = Ed25519PrivateKey.from_private_bytes(
+        root_seed
+    ).public_key().public_bytes_raw()
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        state.upsert_self_mesh_root(
+            root_pub=root_pub,
+            root_seed=root_seed,
+            label="Marker collision",
+        )
+
+        stored = state._conn.execute(
+            "SELECT root_seed FROM self_mesh_roots WHERE root_pub = ?",
+            (root_pub,),
+        ).fetchone()["root_seed"]
+        assert bytes(stored) == root_seed
+        restored = state.get_self_mesh_root(root_pub, include_seed=True)
+        assert restored is not None
+        assert restored["root_seed"] == root_seed
+    finally:
+        state.close()
+
+
+def test_remote_instruction_replay_store_is_strict_bounded_and_fail_closed(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from one_link import state as state_module
+
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        with pytest.raises(ValueError, match="lowercase SHA-256"):
+            state.mark_remote_instruction_seen(
+                command_id="not-a-digest",
+                expires_ms=200,
+                now_ms=100,
+            )
+        with pytest.raises(ValueError, match="expires_ms must be an integer"):
+            state.mark_remote_instruction_seen(
+                command_id="a" * 64,
+                expires_ms=True,
+                now_ms=100,
+            )
+        with pytest.raises(ValueError, match="retention limit"):
+            state.mark_remote_instruction_seen(
+                command_id="a" * 64,
+                expires_ms=state_module.MAX_REMOTE_INSTRUCTION_REPLAY_RETENTION_MS + 101,
+                now_ms=100,
+            )
+
+        monkeypatch.setattr(state_module, "MAX_REMOTE_INSTRUCTION_SEEN_ROWS", 1)
+        assert state.mark_remote_instruction_seen(
+            command_id="a" * 64,
+            expires_ms=200,
+            action="pull_file_manifest",
+            now_ms=100,
+        )
+        assert not state.mark_remote_instruction_seen(
+            command_id="a" * 64,
+            expires_ms=200,
+            now_ms=101,
+        )
+        with pytest.raises(RuntimeError, match="replay cache is full"):
+            state.mark_remote_instruction_seen(
+                command_id="b" * 64,
+                expires_ms=200,
+                now_ms=101,
+            )
+
+        # Expired evidence may be pruned, making capacity available without
+        # ever evicting a still-live replay tombstone.
+        assert state.mark_remote_instruction_seen(
+            command_id="b" * 64,
+            expires_ms=300,
+            now_ms=201,
+        )
+        assert state._conn.execute(
+            "SELECT command_id FROM remote_instruction_seen"
+        ).fetchone()["command_id"] == "b" * 64
+    finally:
+        state.close()
+
+
+def test_remote_instruction_replay_store_survives_reopen(tmp_path: Path):
+    db = tmp_path / "state.db"
+    first = State(db_path=db)
+    try:
+        assert first.mark_remote_instruction_seen(
+            command_id="c" * 64,
+            expires_ms=10_000,
+            action="send_file_from_device",
+            now_ms=1_000,
+        )
+    finally:
+        first.close()
+
+    second = State(db_path=db)
+    try:
+        assert not second.mark_remote_instruction_seen(
+            command_id="c" * 64,
+            expires_ms=10_000,
+            action="send_file_from_device",
+            now_ms=1_001,
+        )
+    finally:
+        second.close()
+
+
+def test_self_mesh_root_rejects_mismatched_seed_and_public_key(tmp_path: Path):
+    root_seed, _ = _ed25519_pair()
+    _, unrelated_pub = _ed25519_pair()
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        with pytest.raises(ValueError, match="root_seed does not match root_pub"):
+            state.upsert_self_mesh_root(
+                root_pub=unrelated_pub,
+                root_seed=root_seed,
+                label="Corrupt root",
+            )
+    finally:
+        state.close()
+
+
+def test_self_mesh_root_rejects_invalid_storage_envelope_length(tmp_path: Path):
+    root_seed, root_pub = _ed25519_pair()
+    state = State(db_path=tmp_path / "state.db")
+    try:
+        state.upsert_self_mesh_root(
+            root_pub=root_pub,
+            root_seed=root_seed,
+            label="Corrupt envelope",
+        )
+        state._conn.execute(
+            "UPDATE self_mesh_roots SET root_seed = ? WHERE root_pub = ?",
+            (b"\x01" + b"x" * 32, root_pub),
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="invalid stored self-mesh root seed length",
+        ):
+            state.get_self_mesh_root(root_pub, include_seed=True)
+    finally:
+        state.close()
 
 
 def test_device_guardian_state_and_hash_chain_persist(tmp_path: Path):

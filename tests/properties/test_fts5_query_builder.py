@@ -9,6 +9,7 @@ invariants over 100s of generated inputs per run.
 from __future__ import annotations
 
 import re
+import sqlite3
 import string
 
 import pytest
@@ -46,14 +47,33 @@ def test_normalizer_output_is_safe_for_fts5_match(raw):
     # Pass-through case: a fully-quoted phrase. Accept as-is.
     if out.startswith('"') and out.endswith('"'):
         return
-    # Tokenized case: tokens separated by spaces, each ending in '*'.
+    # Tokenized case: quoted tokens separated by spaces, each ending in '*'.
     for tok in out.split():
-        # Strip trailing prefix-* if present.
-        bare = tok.rstrip("*")
-        # The bare token must be alphanumeric / underscore (\w).
+        assert tok.startswith('"') and tok.endswith('"*')
+        bare = tok[1:-2]
+        # The quoted token must be alphanumeric / underscore (\w).
         assert re.fullmatch(r"\w+", bare), (
             f"normalizer leaked a non-\\w token: {tok!r} from {raw!r}"
         )
+
+
+@given(st.text(max_size=256))
+@settings(max_examples=250, deadline=2000)
+def test_every_normalized_query_is_accepted_by_real_fts5(raw):
+    """Parser safety is a runtime property, not just a character whitelist."""
+
+    query = _normalize_user_query_to_fts5_prefix(raw)
+    if not query:
+        return
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.execute("CREATE VIRTUAL TABLE probe USING fts5(body)")
+        connection.execute("INSERT INTO probe(body) VALUES (?)", (raw,))
+        connection.execute(
+            "SELECT rowid FROM probe WHERE probe MATCH ?", (query,)
+        ).fetchall()
+    finally:
+        connection.close()
 
 
 @given(st.text(alphabet=_ALNUM, min_size=1, max_size=64))
@@ -62,7 +82,7 @@ def test_alnum_single_word_becomes_prefix_match(word):
     exactly that word with a trailing '*'. This is the contract
     the prefix-match feature depends on."""
     out = _normalize_user_query_to_fts5_prefix(word)
-    assert out == f"{word}*"
+    assert out == f'"{word}"*'
 
 
 @given(
@@ -76,8 +96,13 @@ def test_multi_word_query_is_implicit_and(words):
     (FTS5 implicit-AND). No commas, no quotes, no extra glue."""
     raw = " ".join(words)
     out = _normalize_user_query_to_fts5_prefix(raw)
-    expected = " ".join(f"{w}*" for w in words)
+    expected = " ".join(f'"{word}"*' for word in words)
     assert out == expected
+
+
+@pytest.mark.parametrize("operator", ["AND", "OR", "NOT", "NEAR"])
+def test_reserved_fts5_operators_are_quoted_prefix_terms(operator):
+    assert _normalize_user_query_to_fts5_prefix(operator) == f'"{operator}"*'
 
 
 @given(st.text(alphabet=" \t\n\r", max_size=20))

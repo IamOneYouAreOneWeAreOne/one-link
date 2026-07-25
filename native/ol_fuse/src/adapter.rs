@@ -132,7 +132,8 @@ impl<B: FilesystemBackend> FuserAdapter<B> {
             FsError::IsADirectory => libc::EISDIR,
             FsError::PermissionDenied => libc::EACCES,
             FsError::NoSpace => libc::ENOSPC,
-            FsError::Io(_) => libc::EIO,
+            FsError::InvalidInput(_) => libc::EINVAL,
+            FsError::StateUnavailable | FsError::Io(_) => libc::EIO,
         }
     }
 }
@@ -146,7 +147,13 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
                 return;
             }
         };
-        let mut table = self.table.lock().expect("inode-table poisoned");
+        let mut table = match self.table.lock() {
+            Ok(table) => table,
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
         let parent_path = match table.path_for(parent) {
             Some(p) => p.to_string(),
             None => {
@@ -176,7 +183,13 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
     }
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        let table = self.table.lock().expect("inode-table poisoned");
+        let table = match self.table.lock() {
+            Ok(table) => table,
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
         let path = match table.path_for(ino) {
             Some(p) => p.to_string(),
             None => {
@@ -210,7 +223,13 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
             reply.error(libc::EINVAL);
             return;
         }
-        let table = self.table.lock().expect("inode-table poisoned");
+        let table = match self.table.lock() {
+            Ok(table) => table,
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
         let path = match table.path_for(ino) {
             Some(p) => p.to_string(),
             None => {
@@ -249,7 +268,13 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
             reply.error(libc::EINVAL);
             return;
         }
-        let table = self.table.lock().expect("inode-table poisoned");
+        let table = match self.table.lock() {
+            Ok(table) => table,
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
         let path = match table.path_for(ino) {
             Some(p) => p.to_string(),
             None => {
@@ -272,7 +297,17 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let mut table = self.table.lock().expect("inode-table poisoned");
+        if offset < 0 {
+            reply.error(libc::EINVAL);
+            return;
+        }
+        let mut table = match self.table.lock() {
+            Ok(table) => table,
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
         let path = match table.path_for(ino) {
             Some(p) => p.to_string(),
             None => {
@@ -289,9 +324,19 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
             }
         };
         // Inject "." + ".." at offsets 0 + 1 per the FUSE contract.
+        let parent_ino = if path.is_empty() {
+            ROOT_INODE
+        } else {
+            let parent_path = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+            table
+                .by_path
+                .get(parent_path)
+                .copied()
+                .unwrap_or(ROOT_INODE)
+        };
         let synthetic = [
             (ino, FileType::Directory, "."),
-            (ino, FileType::Directory, ".."),
+            (parent_ino, FileType::Directory, ".."),
         ];
         let mut next_offset = offset;
         for (idx, (e_ino, kind, name)) in synthetic.iter().enumerate() {
@@ -315,7 +360,7 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
                 EntryKind::Directory => FileType::Directory,
             };
             let full = if path.is_empty() {
-                entry.name.clone()
+                format!("/{}", entry.name)
             } else {
                 format!("{}/{}", path, entry.name)
             };
@@ -338,7 +383,13 @@ impl<B: FilesystemBackend + 'static> Filesystem for FuserAdapter<B> {
                 return;
             }
         };
-        let table = self.table.lock().expect("inode-table poisoned");
+        let table = match self.table.lock() {
+            Ok(table) => table,
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
         let parent_path = match table.path_for(parent) {
             Some(p) => p.to_string(),
             None => {

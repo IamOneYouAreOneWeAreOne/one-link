@@ -1,8 +1,8 @@
 """v0.19.0 — browser adaptive transport selector.
 
-This is the first browser-side path brain: WebTransport when both
-peers support it, WebRTC when that is best, manual WebRTC when zero
-server automation is desired, with route memory persisted in IDB.
+These are experimental selector/storage helpers. The shipped browser peer uses
+WebRTC and must not advertise WebTransport until a real production call site,
+server endpoint, and live handoff proof exist.
 """
 
 from __future__ import annotations
@@ -36,14 +36,17 @@ def test_browser_transport_capabilities_advertise_paths(peer_html: str):
     assert "manual_signal_v1" in snippet
     assert "RTCPeerConnection" in snippet
     assert "webrtc_v1" in snippet
-    assert "WebTransport" in snippet
-    assert "webtransport_v1" in snippet
+    assert "webtransport_v1" not in snippet
 
 
-def test_register_includes_transport_caps(peer_html: str):
+def test_register_uses_signed_protocol_capabilities_without_schema_extension(
+    peer_html: str,
+):
     snippet = _snippet(peer_html, "async function _buildSignedRegister", 2600)
     assert "browserTransportCapabilities()" in snippet
-    assert "transport_caps" in snippet
+    signing_object = snippet[snippet.index("const signing = {"):snippet.index("const canonical")]
+    assert "capabilities: capabilities.slice()" in signing_object
+    assert "transport_caps:" not in signing_object
 
 
 def test_path_stats_idb_store_pinned(peer_html: str):

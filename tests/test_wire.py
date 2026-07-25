@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 
 import pytest
 
@@ -128,3 +129,39 @@ def test_encode_decode_empty_body():
     msg = wire.make_msg("TEXT", "abcdef12", body="")
     blob = wire.encode_msg(msg)
     assert wire.decode_msg(blob)["body"] == ""
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"t":"PING","t":"ACK"}',
+        b'{"outer":{"value":1,"value":2}}',
+        b'{"value":NaN}',
+        b'{"value":Infinity}',
+        b'{"value":-Infinity}',
+        b'{"value":1e9999}',
+    ],
+)
+def test_decode_rejects_ambiguous_or_non_finite_json(payload: bytes):
+    with pytest.raises(ValueError):
+        wire.decode_msg(payload)
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_encode_rejects_non_finite_json(value: float):
+    with pytest.raises(ValueError, match="finite JSON"):
+        wire.encode_msg({"t": "METRIC", "value": value})
+
+
+def test_decode_rejects_non_bytes_and_oversized_direct_calls():
+    with pytest.raises(ValueError, match="must be bytes"):
+        wire.decode_msg(bytearray(b"{}"))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="frame too large"):
+        wire.decode_msg(b" " * (wire.MAX_FRAME + 1))
+
+
+def test_encode_requires_object_and_rejects_oversized_message():
+    with pytest.raises(ValueError, match="JSON object"):
+        wire.encode_msg([])  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="encoded message too large"):
+        wire.encode_msg({"body": "x" * wire.MAX_FRAME})

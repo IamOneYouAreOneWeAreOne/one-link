@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
 import time
 from pathlib import Path
 
@@ -27,7 +26,7 @@ async def main() -> None:
 
     url = f"ws://127.0.0.1:{port}/api/events?token={token}"
     print(f"[monitor] connecting to {url} …")
-    print(f"[monitor] press the call button on Computer 2 now; will run 90s")
+    print("[monitor] press the call button on Computer 2 now; will run 90s")
     started = time.time()
     duration = float(os.environ.get("MONITOR_SECONDS", "90"))
 
@@ -74,7 +73,7 @@ async def main() -> None:
         print("[monitor] NO call_event ARRIVED — daemon isn't receiving CALL_INVITE")
         print("[monitor]   ⇒ Computer 2's daemon isn't sending it, OR the wire path is broken")
     else:
-        print(f"[monitor] daemon DID emit call_events — bug is browser-side (cache, JS)")
+        print("[monitor] daemon DID emit call_events — bug is browser-side (cache, JS)")
 
 
 if __name__ == "__main__":

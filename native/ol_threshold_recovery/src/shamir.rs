@@ -1,10 +1,12 @@
 //! Shamir (k, n) secret sharing over GF(2^8).
 //!
 //! Direct port of `OneField/onefield/privacy/sharding.cl` SECTIONS 3-5.
-//! Identical share format to OneField (each share is (x: u8, y: u8)) so
+//! Identical share format to `OneField` (each share is (x: u8, y: u8)) so
 //! shares produced by either implementation reconstruct under the other.
 
+use rand_core::{OsRng, RngCore};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 use crate::gf256::{gf_add, gf_div_fast, gf_mul, gf_mul_fast};
 use crate::prng::PrngState;
@@ -17,6 +19,13 @@ pub struct Share {
     /// Polynomial value at x.
     pub y: u8,
 }
+
+/// Maximum secret length accepted by the threshold-recovery primitive.
+///
+/// The scheme is designed for master keys and recovery tokens, not bulk
+/// files. At the maximum 255 participants this bounds aggregate share output
+/// to 16 MiB per call.
+pub const MAX_SECRET_BYTES: usize = 64 * 1024;
 
 impl Share {
     /// Construct a share.
@@ -51,6 +60,50 @@ pub enum ShareError {
     /// Share with x == 0 supplied; x == 0 is reserved for the secret.
     #[error("share x == 0 is reserved for the secret value")]
     InvalidShareX,
+
+    /// A secret/share stream exceeded the per-operation safety ceiling.
+    #[error("secret/share stream too large: {actual} bytes (max {max})")]
+    SecretTooLarge {
+        /// Actual byte length.
+        actual: usize,
+        /// Maximum accepted byte length.
+        max: usize,
+    },
+
+    /// The operating system CSPRNG was unavailable.
+    #[error("secure randomness unavailable: {0}")]
+    RandomnessUnavailable(String),
+
+    /// Supplied share streams had inconsistent lengths.
+    #[error("share stream {index} has {actual} bytes; expected {expected}")]
+    StreamLengthMismatch {
+        /// Stream index.
+        index: usize,
+        /// Reference stream length.
+        expected: usize,
+        /// Offending stream length.
+        actual: usize,
+    },
+
+    /// A share set did not contain the declared number of participants.
+    #[error("share count mismatch: expected {expected}, got {actual}")]
+    ShareCountMismatch {
+        /// Declared/required count.
+        expected: usize,
+        /// Actual count.
+        actual: usize,
+    },
+
+    /// Two refresh share sets were not aligned at an index.
+    #[error("share x mismatch at index {index}: {left} != {right}")]
+    ShareXMismatch {
+        /// Misaligned position.
+        index: usize,
+        /// Original x value.
+        left: u8,
+        /// Delta x value.
+        right: u8,
+    },
 }
 
 /// Max number of participants in a single-byte GF(2^8) scheme: 255
@@ -87,12 +140,8 @@ pub fn share_byte(s: u8, k: u32, n: u32, state: &mut PrngState) -> Result<Vec<Sh
     // degenerate draws.
     if k >= 2 {
         let last = (k - 1) as usize;
-        if coeffs[last] == 0 {
-            let mut v = u32::from(state.next_byte());
-            if v == 0 {
-                v = 1;
-            }
-            coeffs[last] = v;
+        while coeffs[last] == 0 {
+            coeffs[last] = u32::from(state.next_byte());
         }
     }
     // Evaluate p(j) for j = 1..=n. x == 0 is the secret, never a share.
@@ -118,14 +167,66 @@ pub fn share_bytes(
     n: u32,
     state: &mut PrngState,
 ) -> Result<Vec<Vec<u8>>, ShareError> {
+    share_bytes_with_next(secret, k, n, || Ok(state.next_byte()))
+}
+
+/// Split a multi-byte secret using fresh operating-system CSPRNG entropy.
+///
+/// This is the production API. [`share_bytes`] remains available only for
+/// reproducible vectors and migrations where deterministic output is an
+/// explicit requirement.
+pub fn share_bytes_secure(secret: &[u8], k: u32, n: u32) -> Result<Vec<Vec<u8>>, ShareError> {
+    let mut rng = OsRng;
+    share_bytes_with_next(secret, k, n, || {
+        let mut byte = [0u8; 1];
+        rng.try_fill_bytes(&mut byte)
+            .map_err(|error| ShareError::RandomnessUnavailable(error.to_string()))?;
+        Ok(byte[0])
+    })
+}
+
+fn share_bytes_with_next<F>(
+    secret: &[u8],
+    k: u32,
+    n: u32,
+    mut next_byte: F,
+) -> Result<Vec<Vec<u8>>, ShareError>
+where
+    F: FnMut() -> Result<u8, ShareError>,
+{
     if !params_valid(k, n) {
         return Err(ShareError::InvalidParams { k, n });
     }
+    if secret.len() > MAX_SECRET_BYTES {
+        return Err(ShareError::SecretTooLarge {
+            actual: secret.len(),
+            max: MAX_SECRET_BYTES,
+        });
+    }
+
     let mut streams: Vec<Vec<u8>> = (0..n).map(|_| Vec::with_capacity(secret.len())).collect();
-    for &s_byte in secret {
-        let shares = share_byte(s_byte, k, n, state)?;
-        for (i, sh) in shares.iter().enumerate() {
-            streams[i].push(sh.y);
+    let mut coeffs = Zeroizing::new(vec![0u8; k as usize]);
+    for &secret_byte in secret {
+        coeffs[0] = secret_byte;
+        for coefficient in &mut coeffs[1..] {
+            *coefficient = next_byte()?;
+        }
+        if k >= 2 {
+            let last = k as usize - 1;
+            while coeffs[last] == 0 {
+                coeffs[last] = next_byte()?;
+            }
+        }
+        for (index, stream) in streams.iter_mut().enumerate() {
+            let x = (index + 1) as u32;
+            let coeffs_u32 = coeffs.iter().map(|byte| u32::from(*byte));
+            // Horner directly over bytes avoids allocating N temporary Share
+            // objects for every byte of the secret.
+            let mut acc = 0u32;
+            for coefficient in coeffs_u32.rev() {
+                acc = gf_add(gf_mul(acc, x), coefficient);
+            }
+            stream.push((acc & 0xFF) as u8);
         }
     }
     Ok(streams)
@@ -134,21 +235,21 @@ pub fn share_bytes(
 /// Reconstruct one secret byte from at least `k` shares via Lagrange
 /// interpolation at x = 0.
 ///
-/// Implementation note: this function uses the TABLE-BASED gf256 fast
-/// path (`gf_mul_fast` / `gf_div_fast`). That path is NOT constant-
-/// time wrt cache state, BUT the operand values here are all derived
-/// from share **x-values** (the public component) — not from secret y
-/// bytes. Cache-timing leakage of x-values is safe; they're public.
-/// y-values flow through the same fast path but only via `gf_mul_fast`
-/// where the LUT lookup pattern reveals nothing about y bit positions
-/// (just operand magnitude, which the share format already commits to
-/// publicly via the wire-encoded byte).
+/// Implementation note: basis construction uses the table-based fast path
+/// only for public x-coordinates. The final `y * basis` operation uses the
+/// constant-time multiplier because share y-values are secret material.
 ///
 /// # Errors
 /// - [`ShareError::NotEnoughShares`] when `shares.len() < k`.
 /// - [`ShareError::DuplicateShareX`] when two shares share an x.
 /// - [`ShareError::InvalidShareX`] when any share has x == 0.
 pub fn reconstruct_byte(shares: &[Share], k: u32) -> Result<u8, ShareError> {
+    if k == 0 || k > max_participants() || shares.len() > max_participants() as usize {
+        return Err(ShareError::InvalidParams {
+            k,
+            n: u32::try_from(shares.len()).unwrap_or(u32::MAX),
+        });
+    }
     let kk = k as usize;
     if shares.len() < kk {
         return Err(ShareError::NotEnoughShares {
@@ -171,14 +272,14 @@ pub fn reconstruct_byte(shares: &[Share], k: u32) -> Result<u8, ShareError> {
     let basis = lagrange_basis_at_zero(&shares[..kk]);
     let mut acc: u32 = 0;
     for i in 0..kk {
-        acc = gf_add(acc, u32::from(gf_mul_fast(shares[i].y, basis[i])));
+        acc = gf_add(acc, gf_mul(u32::from(shares[i].y), u32::from(basis[i])));
     }
     Ok((acc & 0xFF) as u8)
 }
 
-/// Precompute Lagrange basis values L_i(0) for the given share
+/// Precompute Lagrange basis values `L_i(0)` for the given share
 /// x-coordinates. Returns a Vec the same length as `shares`. The
-/// caller then evaluates p(0) = sum_i y_i * basis[i] over GF(2^8).
+/// caller then evaluates `p(0) = sum_i y_i * basis[i]` over GF(2^8).
 ///
 /// Key optimization: when reconstructing a multi-byte secret, this
 /// computation is done ONCE per share-set (not once per byte) — the
@@ -228,13 +329,25 @@ pub fn reconstruct_bytes(xs: &[u8], streams: &[&[u8]], k: u32) -> Result<Vec<u8>
             need: k,
         });
     }
+    if k == 0 || k > max_participants() || xs.len() > max_participants() as usize {
+        return Err(ShareError::InvalidParams {
+            k,
+            n: u32::try_from(xs.len()).unwrap_or(u32::MAX),
+        });
+    }
     let n_bytes = streams[0].len();
-    for s in streams {
+    if n_bytes > MAX_SECRET_BYTES {
+        return Err(ShareError::SecretTooLarge {
+            actual: n_bytes,
+            max: MAX_SECRET_BYTES,
+        });
+    }
+    for (index, s) in streams.iter().enumerate() {
         if s.len() != n_bytes {
-            // Treat length mismatch as "not enough usable data".
-            return Err(ShareError::NotEnoughShares {
-                have: s.len(),
-                need: n_bytes as u32,
+            return Err(ShareError::StreamLengthMismatch {
+                index,
+                expected: n_bytes,
+                actual: s.len(),
             });
         }
     }
@@ -267,7 +380,7 @@ pub fn reconstruct_bytes(xs: &[u8], streams: &[&[u8]], k: u32) -> Result<Vec<u8>
     for b in 0..n_bytes {
         let mut acc: u32 = 0;
         for i in 0..kk {
-            acc = gf_add(acc, u32::from(gf_mul_fast(streams[i][b], basis[i])));
+            acc = gf_add(acc, gf_mul(u32::from(streams[i][b]), u32::from(basis[i])));
         }
         out.push((acc & 0xFF) as u8);
     }
@@ -397,5 +510,32 @@ mod tests {
             let sub: Vec<Share> = picks.iter().map(|&i| shares[i]).collect();
             assert_eq!(reconstruct_byte(&sub, 4).unwrap(), 0xAB);
         }
+    }
+
+    #[test]
+    fn secure_split_roundtrips_and_is_fresh() {
+        let secret = b"production recovery key material";
+        let first = share_bytes_secure(secret, 3, 5).unwrap();
+        let second = share_bytes_secure(secret, 3, 5).unwrap();
+        assert_ne!(first, second, "independent CSPRNG splits must be fresh");
+        let refs: Vec<&[u8]> = first[..3].iter().map(Vec::as_slice).collect();
+        assert_eq!(reconstruct_bytes(&[1, 2, 3], &refs, 3).unwrap(), secret);
+    }
+
+    #[test]
+    fn secret_length_and_zero_threshold_are_rejected_before_allocation() {
+        let mut state = PrngState::new(1);
+        assert!(matches!(
+            share_bytes(&vec![0u8; MAX_SECRET_BYTES + 1], 2, 3, &mut state),
+            Err(ShareError::SecretTooLarge { .. })
+        ));
+        assert!(matches!(
+            reconstruct_bytes(&[], &[], 0),
+            Err(ShareError::InvalidParams { k: 0, .. })
+        ));
+        assert!(matches!(
+            reconstruct_byte(&[], 0),
+            Err(ShareError::InvalidParams { k: 0, .. })
+        ));
     }
 }

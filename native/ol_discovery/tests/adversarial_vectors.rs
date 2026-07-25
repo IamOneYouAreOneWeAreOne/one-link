@@ -57,7 +57,7 @@ fn adversarial_bucket_flood_does_not_evict_responding_head() {
             x[1] = 0x10 + i;
             x
         });
-        let outcome = t.insert(attacker, 1000 + i as u64);
+        let outcome = t.insert(attacker, 1000 + u64::from(i));
         assert!(matches!(outcome, InsertOutcome::BucketFull { .. }));
     }
     // Both legit peers still in the table.
@@ -97,7 +97,7 @@ fn adversarial_forged_signature_rejected() {
     let signed = SignedRecord::sign(rec, &sk).unwrap();
     // Tamper the signature: flip every bit.
     let mut forged = signed.clone();
-    for b in forged.signature.iter_mut() {
+    for b in &mut forged.signature {
         *b ^= 0xFF;
     }
     assert_eq!(forged.verify().unwrap_err(), RecordError::BadSignature);
@@ -181,7 +181,7 @@ fn adversarial_oversized_find_node_result_rejected() {
     // and rejects to defeat amplification (small request -> huge response).
     let resp = Response::FindNodeResult {
         closest: (0..(MAX_FIND_RESULTS + 50))
-            .map(|i| NodeId([i as u8; 32]))
+            .map(|i| NodeId([u8::try_from(i).expect("adversarial result index fits in u8"); 32]))
             .collect(),
     };
     let err = validate_response_size(&resp).unwrap_err();
@@ -191,8 +191,8 @@ fn adversarial_oversized_find_node_result_rejected() {
 #[test]
 fn adversarial_oversized_find_value_closer_rejected() {
     let resp = Response::FindValueResult(FindValueOutcome::Closer(
-        (0..(MAX_FIND_RESULTS + 1))
-            .map(|i| NodeId([i as u8; 32]))
+        (0..=MAX_FIND_RESULTS)
+            .map(|i| NodeId([u8::try_from(i).expect("adversarial result index fits in u8"); 32]))
             .collect(),
     ));
     let err = validate_response_size(&resp).unwrap_err();

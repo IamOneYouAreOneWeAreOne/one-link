@@ -160,12 +160,14 @@ def test_factor2_mix_matches_when_both_supply_same_key():
     inviter.receive_response(response_bytes)
 
     f2 = b"\xA5" * 32
-    cb, k_i = inviter.confirm_with_factor2(f2)
-    k_s = scanner.receive_confirm_with_factor2(cb, f2)
+    cb = inviter.confirm_with_factor2(f2)
+    assert "AwaitingFactor2Ack" in inviter.state()
+    ack, k_s = scanner.receive_confirm_with_factor2(cb, f2)
+    k_i = inviter.receive_factor2_ack(ack)
     assert k_i == k_s
 
 
-def test_factor2_mix_diverges_when_keys_differ():
+def test_factor2_mix_rejects_different_keys_without_returning_a_key():
     from one_link import pair_qr_native as pq
 
     inviter = pq.Inviter(_seed(), _future_expiry())
@@ -179,9 +181,11 @@ def test_factor2_mix_diverges_when_keys_differ():
 
     f2a = b"\xA5" * 32
     f2b = b"\xA6" + b"\xA5" * 31
-    cb, k_i = inviter.confirm_with_factor2(f2a)
-    k_s = scanner.receive_confirm_with_factor2(cb, f2b)
-    assert k_i != k_s
+    cb = inviter.confirm_with_factor2(f2a)
+    with pytest.raises(ValueError, match="confirmation"):
+        scanner.receive_confirm_with_factor2(cb, f2b)
+    assert "AwaitingConfirm" in scanner.state()
+    assert "AwaitingFactor2Ack" in inviter.state()
 
 
 def test_inviter_confirm_with_factor2_validates_key_length():
@@ -190,6 +194,31 @@ def test_inviter_confirm_with_factor2_validates_key_length():
     inviter = pq.Inviter(_seed(), _future_expiry())
     with pytest.raises(ValueError, match="32 bytes"):
         inviter.confirm_with_factor2(b"too short")
+
+
+def test_factor2_tampered_ack_does_not_release_inviter_key():
+    from one_link import pair_qr_native as pq
+
+    inviter = pq.Inviter(_seed(), _future_expiry())
+    scanner, response_bytes = pq.Scanner.scan(
+        _seed(), inviter.invite_bytes(), int(time.time())
+    )
+    inviter.receive_response(response_bytes)
+    f2 = b"\xA5" * 32
+    cb = inviter.confirm_with_factor2(f2)
+    ack, _scanner_key = scanner.receive_confirm_with_factor2(cb, f2)
+    tampered = bytes([ack[0] ^ 1]) + ack[1:]
+    with pytest.raises(ValueError, match="confirmation"):
+        inviter.receive_factor2_ack(tampered)
+    assert "AwaitingFactor2Ack" in inviter.state()
+
+
+def test_factor2_ack_length_validated_before_native_call():
+    from one_link import pair_qr_native as pq
+
+    inviter = pq.Inviter(_seed(), _future_expiry())
+    with pytest.raises(ValueError, match="acknowledgement"):
+        inviter.receive_factor2_ack(b"short")
 
 
 # ── Free functions ────────────────────────────────────────────────

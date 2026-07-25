@@ -5,7 +5,7 @@
 //! 64 KiB chunk encrypt + decrypt.
 //!
 //! Run:
-//!   cargo bench -p ol_aead --bench aead_bench
+//!   cargo bench -p `ol_aead` --bench `aead_bench`
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use ol_aead::{
@@ -19,7 +19,7 @@ fn fill_pseudo_random(buf: &mut [u8], mut state: u64) {
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
-        *byte = (state & 0xFF) as u8;
+        *byte = state.to_le_bytes()[0];
     }
 }
 
@@ -31,8 +31,13 @@ fn bench_chunk_encrypt(c: &mut Criterion) {
     for size_kib in [16usize, 64, 256] {
         let n = size_kib * 1024;
         let mut buf = vec![0u8; n];
-        fill_pseudo_random(&mut buf, 0xCAFE_BABE_u64.wrapping_add(size_kib as u64));
-        group.throughput(Throughput::Bytes(n as u64));
+        fill_pseudo_random(
+            &mut buf,
+            0xCAFE_BABE_u64.wrapping_add(u64::try_from(size_kib).expect("benchmark size fits u64")),
+        );
+        group.throughput(Throughput::Bytes(
+            u64::try_from(n).expect("benchmark buffer length fits u64"),
+        ));
         for kind in [AeadKind::AesGcm256, AeadKind::ChaCha20Poly1305] {
             let cipher = AeadCipher::with_kind(kind, &key);
             let label = match kind {
@@ -60,8 +65,13 @@ fn bench_chunk_decrypt(c: &mut Criterion) {
     for size_kib in [16usize, 64, 256] {
         let n = size_kib * 1024;
         let mut buf = vec![0u8; n];
-        fill_pseudo_random(&mut buf, 0xF00D_BABE_u64.wrapping_add(size_kib as u64));
-        group.throughput(Throughput::Bytes(n as u64));
+        fill_pseudo_random(
+            &mut buf,
+            0xF00D_BABE_u64.wrapping_add(u64::try_from(size_kib).expect("benchmark size fits u64")),
+        );
+        group.throughput(Throughput::Bytes(
+            u64::try_from(n).expect("benchmark buffer length fits u64"),
+        ));
         for kind in [AeadKind::AesGcm256, AeadKind::ChaCha20Poly1305] {
             let cipher = AeadCipher::with_kind(kind, &key);
             let ct = encrypt_chunk(&cipher, &chunk_id, &buf).expect("encrypt for decrypt bench");
@@ -100,13 +110,22 @@ fn bench_par_encrypt(c: &mut Criterion) {
         let mut bufs: Vec<Vec<u8>> = Vec::with_capacity(n_chunks);
         for i in 0..n_chunks {
             let mut id = [0u8; 32];
-            id[..4].copy_from_slice(&(i as u32).to_le_bytes());
+            let chunk_index = u32::try_from(i).expect("benchmark chunk index fits u32");
+            id[..4].copy_from_slice(&chunk_index.to_le_bytes());
             ids.push(id);
             let mut b = vec![0u8; chunk_size];
-            fill_pseudo_random(&mut b, 0x9E37_79B9_u64.wrapping_add(i as u64));
+            fill_pseudo_random(
+                &mut b,
+                0x9E37_79B9_u64.wrapping_add(u64::try_from(i).expect("benchmark index fits u64")),
+            );
             bufs.push(b);
         }
-        group.throughput(Throughput::Bytes((n_chunks * chunk_size) as u64));
+        let batch_bytes = n_chunks
+            .checked_mul(chunk_size)
+            .expect("benchmark batch length does not overflow usize");
+        group.throughput(Throughput::Bytes(
+            u64::try_from(batch_bytes).expect("benchmark batch length fits u64"),
+        ));
 
         // Sequential reference.
         group.bench_function(BenchmarkId::new("seq", n_chunks), |b| {
@@ -135,10 +154,17 @@ fn bench_par_encrypt(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_chunk_encrypt,
-    bench_chunk_decrypt,
-    bench_par_encrypt
-);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{bench_chunk_decrypt, bench_chunk_encrypt, bench_par_encrypt, criterion_group};
+
+    criterion_group!(
+        benches,
+        bench_chunk_encrypt,
+        bench_chunk_decrypt,
+        bench_par_encrypt
+    );
+}
+criterion_main!(criterion_benchmark_harness::benches);

@@ -61,11 +61,25 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
+import json
+import os
 import secrets
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
+
+from one_link.key_material import (
+    KeyMaterialError,
+    KeyMaterialIntegrityError,
+    KeyMaterialPersistenceError,
+    artifact_exists,
+    atomic_replace_bytes,
+    read_bytes_if_exists,
+    sync_existing_authority,
+)
 
 
 # ── settings keys (per-track state) ──────────────────────────────────
@@ -77,6 +91,527 @@ SETTING_SOCIAL_CONFIGURED_AT_MS = "one_setup_recovery_social_configured_at_ms"
 SETTING_SOCIAL_GUARDIAN_COUNT = "one_setup_recovery_social_guardian_count"
 SETTING_SOCIAL_THRESHOLD_K = "one_setup_recovery_social_threshold_k"
 SETTING_LEGACY_CONFIGURED_AT_MS = "one_setup_recovery_configured_at_ms"
+
+
+# A live daemon cannot replace the key hierarchy or its open SQLite database
+# underneath itself.  Restore requests therefore publish a durable intent and
+# protected seed stage; daemon startup replays that intent before loading an
+# identity, DRK, or State.  The intent is removed only after exact read-back
+# proves that all derived authority converged on the recovered seed.
+RECOVERY_INTENT_FILENAME = "recovery-authority.intent.json"
+RECOVERY_SEED_STAGE_FILENAME = ".recovery-authority.seed.pending"
+RECOVERY_BUNDLE_STAGE_FILENAME = ".recovery-bundle.olbak.pending"
+RECOVERY_ROTATION_STAGE_FILENAME = ".recovery-rotation.json.pending"
+RECOVERY_LOCK_FILENAME = ".recovery-authority.lock"
+RECOVERY_INTENT_VERSION = 3
+_RECOVERY_INTENT_MAX_BYTES = 4096
+_RECOVERY_ROTATION_STAGE_VERSION = 1
+_RECOVERY_ROTATION_STAGE_MAX_BYTES = 8 * 1024 * 1024
+MAX_ROTATION_PEERS = 65536
+_RECOVERY_RESERVED_MEMBER_NAMES = frozenset(
+    {
+        RECOVERY_INTENT_FILENAME.casefold(),
+        RECOVERY_SEED_STAGE_FILENAME.casefold(),
+        RECOVERY_BUNDLE_STAGE_FILENAME.casefold(),
+        RECOVERY_ROTATION_STAGE_FILENAME.casefold(),
+        RECOVERY_LOCK_FILENAME.casefold(),
+        # The daemon owns an open lock on the inode at this path while replay
+        # runs.  Replacing its pathname from an archive would let a second
+        # process lock a new inode and violate single-instance safety.
+        "daemon.lock",
+        "control.port",
+        "peer.port",
+        "server.port",
+    }
+)
+
+
+class RecoveryTransactionError(RuntimeError):
+    """A durable recovery transaction is corrupt, conflicting, or incomplete."""
+
+
+class RecoveryInProgressError(RecoveryTransactionError):
+    """Another restore owns the cross-process recovery transaction lock."""
+
+
+@contextlib.contextmanager
+def _recovery_transaction_lock(data_dir: Path):
+    """Take a non-blocking cross-process lock for recovery publication."""
+    root = Path(data_dir)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = root / RECOVERY_LOCK_FILENAME
+    flags = os.O_RDWR | os.O_CREAT | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_CLOEXEC", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    try:
+        fd = os.open(str(path), flags, 0o600)
+    except OSError as exc:
+        raise RecoveryTransactionError("cannot open recovery transaction lock") from exc
+    locked = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\x00")
+                os.fsync(fd)
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise RecoveryInProgressError(
+                    "another recovery transaction is already in progress"
+                ) from exc
+        else:
+            import fcntl
+
+            flock = getattr(fcntl, "flock")
+            lock_ex = int(getattr(fcntl, "LOCK_EX"))
+            lock_nb = int(getattr(fcntl, "LOCK_NB"))
+            try:
+                flock(fd, lock_ex | lock_nb)
+            except OSError as exc:
+                raise RecoveryInProgressError(
+                    "another recovery transaction is already in progress"
+                ) from exc
+        locked = True
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+        yield
+    finally:
+        if locked:
+            with contextlib.suppress(OSError):
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    flock = getattr(fcntl, "flock")
+                    lock_un = int(getattr(fcntl, "LOCK_UN"))
+                    flock(fd, lock_un)
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def recovery_transaction_guard(data_dir: Path):
+    """Public fail-closed exclusion guard for other authority transitions.
+
+    Full-application activation and identity recovery both replace durable
+    authority.  Callers preparing an update handoff use this same lock so a
+    restore cannot be published between updater preflight and daemon exit.
+    """
+
+    with _recovery_transaction_lock(Path(data_dir)):
+        yield
+
+
+def _private_hardener(path: Path) -> None:
+    if os.name == "nt":
+        from one_link.identity import _restrict_windows_acl
+
+        _restrict_windows_acl(path)
+
+
+def _atomic_small_private_file(path: Path, payload: bytes, *, label: str) -> None:
+    expected = bytes(payload)
+
+    def _validate(actual: bytes) -> None:
+        if not secrets.compare_digest(actual, expected):
+            raise KeyMaterialIntegrityError(f"{label} read-back mismatch")
+
+    atomic_replace_bytes(
+        Path(path),
+        expected,
+        label=label,
+        validate=_validate,
+        harden_path=_private_hardener,
+    )
+
+
+def _hash_regular_file(path: Path, *, expected_size: int, label: str) -> bytes:
+    """Hash one stable regular non-link file with bounded streaming memory."""
+    candidate = Path(path)
+    try:
+        before = candidate.lstat()
+    except OSError as exc:
+        raise KeyMaterialPersistenceError(f"cannot inspect {label}") from exc
+    attrs = int(getattr(before, "st_file_attributes", 0) or 0)
+    reparse = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or bool(attrs & reparse)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size != expected_size
+    ):
+        raise KeyMaterialPersistenceError(f"{label} failed regular-file size proof")
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_CLOEXEC", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    try:
+        fd = os.open(str(candidate), flags)
+    except OSError as exc:
+        raise KeyMaterialPersistenceError(f"cannot open {label} for proof") from exc
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_size != expected_size
+            or (before.st_ino and opened.st_ino and before.st_ino != opened.st_ino)
+            or (before.st_dev and opened.st_dev and before.st_dev != opened.st_dev)
+        ):
+            raise KeyMaterialPersistenceError(f"{label} changed while opening")
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > expected_size:
+                raise KeyMaterialPersistenceError(f"{label} grew while hashing")
+            digest.update(chunk)
+        after = os.fstat(fd)
+        if (
+            total != expected_size
+            or after.st_size != opened.st_size
+            or after.st_mtime_ns != opened.st_mtime_ns
+        ):
+            raise KeyMaterialPersistenceError(f"{label} changed while hashing")
+        try:
+            named_after = candidate.lstat()
+        except OSError as exc:
+            raise KeyMaterialPersistenceError(
+                f"{label} changed while hashing"
+            ) from exc
+        if (
+            not stat.S_ISREG(named_after.st_mode)
+            or (opened.st_ino and named_after.st_ino and opened.st_ino != named_after.st_ino)
+            or (opened.st_dev and named_after.st_dev and opened.st_dev != named_after.st_dev)
+            or named_after.st_size != opened.st_size
+            or named_after.st_mtime_ns != opened.st_mtime_ns
+        ):
+            raise KeyMaterialPersistenceError(f"{label} changed while hashing")
+        return digest.digest()
+    finally:
+        os.close(fd)
+
+
+def _atomic_large_private_file(path: Path, payload: bytes, *, label: str) -> None:
+    """Durably replace a bounded large blob without the 1 MiB key helper cap."""
+    target = Path(path)
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.tmp.{secrets.token_hex(12)}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_CLOEXEC", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    try:
+        fd = os.open(str(tmp), flags, 0o600)
+    except OSError as exc:
+        raise KeyMaterialPersistenceError(f"cannot create temporary {label}") from exc
+    try:
+        view = memoryview(payload)
+        offset = 0
+        while offset < len(view):
+            try:
+                count = os.write(fd, view[offset:offset + (1 << 20)])
+            except OSError as exc:
+                raise KeyMaterialPersistenceError(f"cannot write {label}") from exc
+            if count <= 0:
+                raise KeyMaterialPersistenceError(f"short write while storing {label}")
+            offset += count
+        try:
+            os.fsync(fd)
+        except OSError as exc:
+            raise KeyMaterialPersistenceError(f"cannot durably flush {label}") from exc
+    except Exception:
+        os.close(fd)
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    else:
+        os.close(fd)
+    try:
+        if os.name != "nt":
+            os.chmod(tmp, 0o600)
+        _private_hardener(tmp)
+        before = tmp.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size != len(payload):
+            raise KeyMaterialPersistenceError(f"temporary {label} failed size proof")
+        expected_digest = hashlib.sha256(payload).digest()
+        if _hash_regular_file(
+            tmp,
+            expected_size=len(payload),
+            label=f"temporary {label}",
+        ) != expected_digest:
+            raise KeyMaterialPersistenceError(f"temporary {label} failed digest proof")
+        os.replace(tmp, target)
+        sync_existing_authority(target, label=label)
+        after = target.lstat()
+        if not stat.S_ISREG(after.st_mode) or after.st_size != len(payload):
+            raise KeyMaterialPersistenceError(f"published {label} failed size proof")
+        if _hash_regular_file(
+            target,
+            expected_size=len(payload),
+            label=f"published {label}",
+        ) != expected_digest:
+            raise KeyMaterialPersistenceError(f"published {label} failed digest proof")
+    except Exception:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def _intent_path(data_dir: Path) -> Path:
+    return Path(data_dir) / RECOVERY_INTENT_FILENAME
+
+
+def _seed_stage_path(data_dir: Path) -> Path:
+    return Path(data_dir) / RECOVERY_SEED_STAGE_FILENAME
+
+
+def _bundle_stage_path(data_dir: Path) -> Path:
+    return Path(data_dir) / RECOVERY_BUNDLE_STAGE_FILENAME
+
+
+def _rotation_stage_path(data_dir: Path) -> Path:
+    return Path(data_dir) / RECOVERY_ROTATION_STAGE_FILENAME
+
+
+def _canonical_intent_bytes(intent: dict[str, Any]) -> bytes:
+    return (json.dumps(intent, sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
+
+
+def _reject_reserved_recovery_members(names: list[str]) -> None:
+    for name in names:
+        first = str(name).replace("\\", "/").split("/", 1)[0].casefold()
+        if first in _RECOVERY_RESERVED_MEMBER_NAMES:
+            raise ValueError("backup archive targets recovery transaction metadata")
+
+
+def _parse_recovery_intent(blob: bytes) -> dict[str, Any]:
+    try:
+        raw = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RecoveryTransactionError("recovery intent is not canonical JSON") from exc
+    if not isinstance(raw, dict):
+        raise RecoveryTransactionError("recovery intent schema is invalid")
+    version = raw.get("version")
+    legacy_required = {
+        "version", "phase", "seed_sha256", "bundle_sha256", "created_ms",
+    }
+    v2_required = legacy_required | {"kind", "rotation_sha256"}
+    current_required = v2_required | {"overwrite_files"}
+    if version == 1:
+        required = legacy_required
+    elif version == 2:
+        required = v2_required
+    elif version == RECOVERY_INTENT_VERSION:
+        required = current_required
+    else:
+        raise RecoveryTransactionError("recovery intent version is unsupported")
+    if set(raw) != required:
+        raise RecoveryTransactionError("recovery intent schema is invalid")
+    kind = raw.get("kind", "restore")
+    if kind not in {"restore", "rotation"}:
+        raise RecoveryTransactionError("recovery intent kind is invalid")
+    allowed_phases = (
+        {"prepared", "applied", "finalized"}
+        if kind == "rotation"
+        else {"prepared", "applied"}
+    )
+    if raw.get("phase") not in allowed_phases:
+        raise RecoveryTransactionError("recovery intent phase is invalid")
+    seed_digest = raw.get("seed_sha256")
+    bundle_digest = raw.get("bundle_sha256")
+    if (
+        not isinstance(seed_digest, str)
+        or len(seed_digest) != 64
+        or any(ch not in "0123456789abcdef" for ch in seed_digest)
+    ):
+        raise RecoveryTransactionError("recovery intent seed digest is invalid")
+    if bundle_digest is not None and (
+        not isinstance(bundle_digest, str)
+        or len(bundle_digest) != 64
+        or any(ch not in "0123456789abcdef" for ch in bundle_digest)
+    ):
+        raise RecoveryTransactionError("recovery intent bundle digest is invalid")
+    rotation_digest = raw.get("rotation_sha256")
+    if rotation_digest is not None and (
+        not isinstance(rotation_digest, str)
+        or len(rotation_digest) != 64
+        or any(ch not in "0123456789abcdef" for ch in rotation_digest)
+    ):
+        raise RecoveryTransactionError("recovery intent rotation digest is invalid")
+    if kind == "restore" and rotation_digest is not None:
+        raise RecoveryTransactionError("restore intent carries rotation metadata")
+    if kind == "rotation" and (
+        rotation_digest is None or bundle_digest is not None
+    ):
+        raise RecoveryTransactionError("rotation intent commitments are invalid")
+    overwrite_files = raw.get("overwrite_files", kind != "rotation")
+    if type(overwrite_files) is not bool:
+        raise RecoveryTransactionError("recovery overwrite policy is invalid")
+    if kind == "rotation" and overwrite_files:
+        raise RecoveryTransactionError("rotation intent has an invalid overwrite policy")
+    created_ms = raw.get("created_ms")
+    if type(created_ms) is not int or created_ms < 0:
+        raise RecoveryTransactionError("recovery intent timestamp is invalid")
+    if _canonical_intent_bytes(raw) != blob:
+        raise RecoveryTransactionError("recovery intent encoding is not canonical")
+    return raw
+
+
+def _load_recovery_intent(data_dir: Path) -> Optional[dict[str, Any]]:
+    blob = read_bytes_if_exists(
+        _intent_path(data_dir),
+        label="recovery intent",
+        max_bytes=_RECOVERY_INTENT_MAX_BYTES,
+        harden_path=_private_hardener,
+    )
+    if blob is None:
+        return None
+    return _parse_recovery_intent(blob)
+
+
+def has_pending_recovery(data_dir: Path) -> bool:
+    """Return true for any durable restore intent; malformed intents raise."""
+    return _load_recovery_intent(Path(data_dir)) is not None
+
+
+def _stage_recovered_authority(
+    *,
+    data_dir: Path,
+    seed: bytes,
+    bundle_bytes: Optional[bytes] = None,
+    rotation_bytes: Optional[bytes] = None,
+    overwrite_files: bool = True,
+) -> dict[str, Any]:
+    """Publish protected recovery inputs, with the intent marker last."""
+    from one_link import master_seed
+
+    root = Path(data_dir)
+    candidate = bytes(seed)
+    if len(candidate) != master_seed.SEED_LEN_BYTES:
+        raise ValueError(f"seed must be {master_seed.SEED_LEN_BYTES} bytes")
+    seed_digest = hashlib.sha256(candidate).hexdigest()
+    bundle_digest = (
+        hashlib.sha256(bundle_bytes).hexdigest() if bundle_bytes is not None else None
+    )
+    rotation_digest = (
+        hashlib.sha256(rotation_bytes).hexdigest()
+        if rotation_bytes is not None
+        else None
+    )
+    if bundle_bytes is not None and rotation_bytes is not None:
+        raise ValueError("recovery transaction cannot stage a bundle and rotation")
+    kind = "rotation" if rotation_bytes is not None else "restore"
+    if type(overwrite_files) is not bool:
+        raise TypeError("overwrite_files must be bool")
+    if kind == "rotation" and overwrite_files:
+        raise ValueError("rotation recovery cannot overwrite archive files")
+    intent = {
+        "version": RECOVERY_INTENT_VERSION,
+        "kind": kind,
+        "phase": "prepared",
+        "seed_sha256": seed_digest,
+        "bundle_sha256": bundle_digest,
+        "rotation_sha256": rotation_digest,
+        "overwrite_files": overwrite_files,
+        "created_ms": int(time.time() * 1000),
+    }
+    with _recovery_transaction_lock(root):
+        current = _load_recovery_intent(root)
+        if current is not None:
+            if (
+                current["seed_sha256"] == seed_digest
+                and current["bundle_sha256"] == bundle_digest
+                and current.get("kind", "restore") == kind
+                and current.get("rotation_sha256") == rotation_digest
+                and current.get(
+                    "overwrite_files",
+                    current.get("kind", "restore") != "rotation",
+                ) == overwrite_files
+            ):
+                staged_seed = _load_staged_recovery_seed(root, current)
+                if not secrets.compare_digest(staged_seed, candidate):
+                    raise RecoveryTransactionError(
+                        "pending recovery seed does not match this retry"
+                    )
+                if bundle_bytes is not None and current["phase"] == "prepared":
+                    from one_link import backup_bundle
+
+                    staged_bundle = backup_bundle.read_bundle_file_bounded(
+                        _bundle_stage_path(root)
+                    )
+                    if not secrets.compare_digest(
+                        hashlib.sha256(staged_bundle).digest(),
+                        hashlib.sha256(bundle_bytes).digest(),
+                    ):
+                        raise RecoveryTransactionError(
+                            "pending recovery bundle does not match this retry"
+                        )
+                if rotation_bytes is not None and current["phase"] == "prepared":
+                    staged_rotation = read_bytes_if_exists(
+                        _rotation_stage_path(root),
+                        label="recovery rotation stage",
+                        max_bytes=_RECOVERY_ROTATION_STAGE_MAX_BYTES,
+                        harden_path=_private_hardener,
+                    )
+                    if staged_rotation is None or not secrets.compare_digest(
+                        hashlib.sha256(staged_rotation).digest(),
+                        hashlib.sha256(rotation_bytes).digest(),
+                    ):
+                        raise RecoveryTransactionError(
+                            "pending recovery rotation does not match this retry"
+                        )
+                return current
+            raise RecoveryTransactionError(
+                "a different recovery transaction is already pending restart"
+            )
+        encoded_seed = master_seed._encode_seed(candidate)
+
+        def _validate_seed_stage(blob: bytes) -> None:
+            decoded = master_seed._decode_seed_blob(blob)
+            if hashlib.sha256(decoded).hexdigest() != seed_digest:
+                raise KeyMaterialIntegrityError("recovery seed stage digest mismatch")
+
+        atomic_replace_bytes(
+            _seed_stage_path(root),
+            encoded_seed,
+            label="recovery seed stage",
+            validate=_validate_seed_stage,
+            harden_path=_private_hardener,
+        )
+        if bundle_bytes is not None:
+            _atomic_large_private_file(
+                _bundle_stage_path(root),
+                bytes(bundle_bytes),
+                label="recovery bundle stage",
+            )
+        else:
+            with contextlib.suppress(FileNotFoundError):
+                _bundle_stage_path(root).unlink()
+        if rotation_bytes is not None:
+            _atomic_large_private_file(
+                _rotation_stage_path(root),
+                bytes(rotation_bytes),
+                label="recovery rotation stage",
+            )
+        else:
+            with contextlib.suppress(FileNotFoundError):
+                _rotation_stage_path(root).unlink()
+        _atomic_small_private_file(
+            _intent_path(root),
+            _canonical_intent_bytes(intent),
+            label="recovery intent",
+        )
+    return intent
 
 
 # ── data classes ─────────────────────────────────────────────────────
@@ -137,8 +672,11 @@ def snapshot_status(state, data_dir: Path) -> RecoveryStatus:
     `ready` means the user has actually completed that track at
     least once.
     """
-    from one_link import master_seed
+    from one_link import lockbox, master_seed
     has_master_seed = master_seed.has_seed(Path(data_dir))
+    requires_passphrase_factor = lockbox.requires_legacy_passphrase_recovery(
+        Path(data_dir)
+    )
 
     phrase_verified = _setting_int(state, SETTING_PHRASE_VERIFIED_AT_MS)
     backup_at = _setting_int(state, SETTING_BACKUP_LAST_EXPORT_AT_MS)
@@ -152,20 +690,30 @@ def snapshot_status(state, data_dir: Path) -> RecoveryStatus:
     return RecoveryStatus(
         phrase=TrackState(
             track="phrase",
-            ready=phrase_verified > 0,
+            ready=phrase_verified > 0 and not requires_passphrase_factor,
             available=has_master_seed,
             last_action_at_ms=phrase_verified,
-            extra={"requires_master_seed": True},
+            extra={
+                "requires_master_seed": True,
+                "requires_lockbox_passphrase": requires_passphrase_factor,
+                "additional_recovery_factors": (
+                    ["ONE_LINK_PASSPHRASE"] if requires_passphrase_factor else []
+                ),
+            },
         ),
         social=TrackState(
             track="social",
-            ready=social_at > 0,
+            ready=social_at > 0 and not requires_passphrase_factor,
             available=has_master_seed and candidates >= 2,
             last_action_at_ms=social_at,
             extra={
                 "guardian_count": social_count,
                 "threshold_k": social_k,
                 "candidate_count": candidates,
+                "requires_lockbox_passphrase": requires_passphrase_factor,
+                "additional_recovery_factors": (
+                    ["ONE_LINK_PASSPHRASE"] if requires_passphrase_factor else []
+                ),
             },
         ),
         backup=TrackState(
@@ -267,7 +815,7 @@ def verify_phrase_positions(
 
 
 def test_bundle_against_phrase(
-    *, phrase: str, bundle_bytes: bytes,
+    *, phrase: str, bundle_bytes: bytes | bytearray | memoryview,
 ) -> dict[str, Any]:
     """Non-destructive 'will this backup decrypt with this phrase?'
     check. Decodes the phrase via mnemonic.decode (validates the
@@ -315,25 +863,19 @@ def test_bundle_against_phrase(
         del seed
     out["valid_bundle"] = True
     out["bundle_created_ms"] = int(header.created_ms)
-    # Count plaintext entries without writing to disk. The bundle's
-    # plaintext is a gzip-tar; iterate members so we can report the
-    # file count and skip the MANIFEST metadata row.
+    # Fully stream-validate the plaintext without writing to disk. This uses
+    # the same finite member/size/expansion/path policy as a real restore, so
+    # "verified" means the bundle is actually admissible, not merely that its
+    # AEAD tag and outer gzip header happen to be valid.
     try:
-        import gzip as _gzip
-        import tarfile as _tarfile
-        from io import BytesIO as _BytesIO
-        names: list[str] = []
-        with _gzip.GzipFile(fileobj=_BytesIO(plaintext), mode="rb") as gz:
-            with _tarfile.open(fileobj=gz, mode="r") as tf:
-                for ti in tf.getmembers():
-                    if ti.isfile() and ti.name != "MANIFEST":
-                        names.append(ti.name)
+        names = backup_bundle.inspect_bundle_archive(plaintext=plaintext)
         out["file_count"] = len(names)
-    except Exception:
-        # Bundle decrypted but the inner archive was malformed.
-        # Still count valid_bundle=True (the AEAD passed); the
-        # zero file_count signals the inner structure is broken.
-        pass
+    except (OSError, ValueError):
+        # AEAD validity alone is insufficient: a bundle whose authenticated
+        # plaintext is not a readable archive cannot restore anything. Do not
+        # present that partial success as a valid backup to the user.
+        out["valid_bundle"] = False
+        out["error"] = "bundle decrypted, but its archive is malformed"
     return out
 
 
@@ -351,23 +893,30 @@ def test_phrase_against_current_seed(
     Result shape:
       {
         "valid_checksum": True iff the phrase decodes cleanly,
-        "matches_current_identity": True iff bytes equal the
-          on-disk master.seed (only meaningful when checksum is
-          valid + a seed file exists),
-        "has_current_identity": True iff master.seed exists on
-          disk (False on a fresh install with no identity yet),
+        "matches_current_seed": True iff bytes equal master.seed,
+        "matches_current_identity": True iff the phrase matches the seed AND
+          the live Ed25519 identity and data root are derived from that seed,
+        "has_current_seed": True iff master.seed exists,
+        "has_current_identity": True iff identity.key exists,
         "error": short human-readable message on checksum failure,
       }
 
     Does NOT write any state. Does NOT touch identity.key or DRK.
     Safe to call any number of times.
     """
-    from one_link import master_seed, mnemonic
+    from one_link import lockbox, master_seed, mnemonic, paths
     import secrets as _secrets
     out: dict[str, Any] = {
         "valid_checksum": False,
+        "matches_current_seed": False,
         "matches_current_identity": False,
+        "matches_current_data_root": False,
+        "matches_current_authority": False,
+        "has_current_seed": False,
         "has_current_identity": False,
+        "has_current_identity_artifact": False,
+        "requires_lockbox_passphrase": False,
+        "additional_recovery_factors": [],
         "error": "",
     }
     try:
@@ -378,18 +927,68 @@ def test_phrase_against_current_seed(
     out["valid_checksum"] = True
     try:
         current = master_seed.load_seed(Path(data_dir))
-    except Exception:
-        current = None
-    if current is None:
+    except Exception as exc:
+        from one_link.key_material import KeyMaterialError
+
+        if not isinstance(exc, KeyMaterialError):
+            raise
+        out["has_current_seed"] = True
+        out["has_current_identity"] = True
+        out["has_current_identity_artifact"] = artifact_exists(
+            paths.key_path(), label="identity key"
+        )
+        out["error"] = "current_master_seed_unavailable"
+        candidate = b"\x00" * len(candidate)
+        del candidate
         return out
+    if current is None:
+        out["has_current_identity_artifact"] = artifact_exists(
+            paths.key_path(), label="identity key"
+        )
+        return out
+    out["has_current_seed"] = True
+    # Backward-compatible presence alias retained for v1 clients.  The new
+    # artifact field is the literal identity.key signal; green verification is
+    # governed by the strict all-authority match below.
     out["has_current_identity"] = True
+    out["has_current_identity_artifact"] = artifact_exists(
+        paths.key_path(), label="identity key"
+    )
     # secrets.compare_digest is constant-time-ish; the bytes
     # involved are 32 each, and Python's eq would short-circuit on
     # the first differing byte. compare_digest doesn't.
     try:
-        out["matches_current_identity"] = _secrets.compare_digest(
+        seed_matches = _secrets.compare_digest(
             bytes(current), bytes(candidate),
         )
+        out["matches_current_seed"] = seed_matches
+        try:
+            evidence = master_seed.inspect_derived_authority(
+                Path(data_dir),
+                identity_path=paths.key_path(),
+                seed=bytes(candidate),
+            )
+        except KeyMaterialError:
+            evidence = {"identity": False, "data_root": False}
+            out["error"] = "current_derived_authority_unavailable"
+        identity_matches = evidence["identity"] is True
+        data_root_matches = evidence["data_root"] is True
+        requires_passphrase = lockbox.requires_legacy_passphrase_recovery(
+            Path(data_dir)
+        )
+        out["requires_lockbox_passphrase"] = requires_passphrase
+        out["additional_recovery_factors"] = (
+            ["ONE_LINK_PASSPHRASE"] if requires_passphrase else []
+        )
+        if seed_matches and identity_matches and requires_passphrase:
+            out["error"] = "lockbox_passphrase_recovery_not_migrated"
+        out["matches_current_data_root"] = bool(
+            seed_matches and data_root_matches
+        )
+        out["matches_current_identity"] = bool(
+            seed_matches and identity_matches and data_root_matches
+        )
+        out["matches_current_authority"] = out["matches_current_identity"]
     finally:
         # Best-effort wipe of the candidate seed we just decoded.
         candidate = b"\x00" * len(candidate)
@@ -429,12 +1028,19 @@ def test_shares_against_current_seed(
     audit (e.g., 'every six months I'll verify a K-quorum of my
     friends still hold valid shares').
     """
-    from one_link import master_seed, social_recovery
+    from one_link import lockbox, master_seed, paths, social_recovery
     import secrets as _secrets
     out: dict[str, Any] = {
         "valid_recovery": False,
+        "matches_current_seed": False,
         "matches_current_identity": False,
+        "matches_current_data_root": False,
+        "matches_current_authority": False,
+        "has_current_seed": False,
         "has_current_identity": False,
+        "has_current_identity_artifact": False,
+        "requires_lockbox_passphrase": False,
+        "additional_recovery_factors": [],
         "share_count": len(shares) if shares else 0,
         "error": "",
     }
@@ -455,15 +1061,62 @@ def test_shares_against_current_seed(
     out["valid_recovery"] = True
     try:
         current = master_seed.load_seed(Path(data_dir))
-    except Exception:
-        current = None
-    if current is None:
+    except Exception as exc:
+        from one_link.key_material import KeyMaterialError
+
+        if not isinstance(exc, KeyMaterialError):
+            raise
+        out["has_current_seed"] = True
+        out["has_current_identity"] = True
+        out["has_current_identity_artifact"] = artifact_exists(
+            paths.key_path(), label="identity key"
+        )
+        out["error"] = "current_master_seed_unavailable"
+        candidate = b"\x00" * len(candidate)
+        del candidate
         return out
+    if current is None:
+        out["has_current_identity_artifact"] = artifact_exists(
+            paths.key_path(), label="identity key"
+        )
+        return out
+    out["has_current_seed"] = True
     out["has_current_identity"] = True
+    out["has_current_identity_artifact"] = artifact_exists(
+        paths.key_path(), label="identity key"
+    )
     try:
-        out["matches_current_identity"] = _secrets.compare_digest(
+        seed_matches = _secrets.compare_digest(
             bytes(current), bytes(candidate),
         )
+        out["matches_current_seed"] = seed_matches
+        try:
+            evidence = master_seed.inspect_derived_authority(
+                Path(data_dir),
+                identity_path=paths.key_path(),
+                seed=bytes(candidate),
+            )
+        except KeyMaterialError:
+            evidence = {"identity": False, "data_root": False}
+            out["error"] = "current_derived_authority_unavailable"
+        identity_matches = evidence["identity"] is True
+        data_root_matches = evidence["data_root"] is True
+        requires_passphrase = lockbox.requires_legacy_passphrase_recovery(
+            Path(data_dir)
+        )
+        out["requires_lockbox_passphrase"] = requires_passphrase
+        out["additional_recovery_factors"] = (
+            ["ONE_LINK_PASSPHRASE"] if requires_passphrase else []
+        )
+        if seed_matches and identity_matches and requires_passphrase:
+            out["error"] = "lockbox_passphrase_recovery_not_migrated"
+        out["matches_current_data_root"] = bool(
+            seed_matches and data_root_matches
+        )
+        out["matches_current_identity"] = bool(
+            seed_matches and identity_matches and data_root_matches
+        )
+        out["matches_current_authority"] = out["matches_current_identity"]
     finally:
         candidate = b"\x00" * len(candidate)
         current = b"\x00" * len(current)
@@ -714,7 +1367,657 @@ def _safe_filename_segment(s: str) -> str:
 # ── restore from phrase ──────────────────────────────────────────────
 
 
-def is_install_clean_for_restore(state) -> tuple[bool, dict[str, int]]:
+def _durable_unlink(path: Path, *, label: str) -> None:
+    try:
+        Path(path).unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise KeyMaterialPersistenceError(f"cannot remove committed {label}") from exc
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0))
+    try:
+        fd = os.open(str(Path(path).parent), flags)
+    except OSError as exc:
+        raise KeyMaterialPersistenceError(
+            f"cannot open {label} directory for cleanup durability"
+        ) from exc
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        raise KeyMaterialPersistenceError(
+            f"cannot durably commit {label} cleanup"
+        ) from exc
+    finally:
+        os.close(fd)
+
+
+def _load_staged_recovery_seed(data_dir: Path, intent: dict[str, Any]) -> bytes:
+    from one_link import master_seed
+
+    blob = read_bytes_if_exists(
+        _seed_stage_path(data_dir),
+        label="recovery seed stage",
+        max_bytes=65536,
+        harden_path=_private_hardener,
+    )
+    if blob is not None:
+        seed = master_seed._decode_seed_blob(blob)
+    else:
+        # A crash may happen after all authority files converged but before
+        # stage cleanup finished.  The durable master seed is then a valid
+        # replay source, but only after matching the journal commitment.
+        fallback_seed = master_seed.load_seed(Path(data_dir))
+        if fallback_seed is None:
+            raise RecoveryTransactionError(
+                "recovery intent exists but its protected seed stage is missing"
+            )
+        seed = fallback_seed
+    if hashlib.sha256(seed).hexdigest() != intent["seed_sha256"]:
+        raise RecoveryTransactionError(
+            "recovery seed does not match the durable intent commitment"
+        )
+    return seed
+
+
+def _is_canonical_fingerprint(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(ch in "0123456789abcdef" for ch in value)
+    )
+
+
+def _canonical_rotation_stage_bytes(stage: dict[str, Any]) -> bytes:
+    return (json.dumps(stage, sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
+
+
+def _parse_rotation_stage(
+    blob: bytes,
+    *,
+    seed: bytes,
+) -> tuple[dict[str, Any], Any]:
+    """Validate committed rotation metadata and its old-key signature."""
+    from one_link import identity_rotation, master_seed
+
+    try:
+        stage = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RecoveryTransactionError(
+            "recovery rotation stage is not canonical JSON"
+        ) from exc
+    required = {
+        "version",
+        "old_pub_hex",
+        "old_fp",
+        "new_fp",
+        "cert_json",
+        "sig_hex",
+        "peer_fps",
+        "queued_ms",
+    }
+    if not isinstance(stage, dict) or set(stage) != required:
+        raise RecoveryTransactionError("recovery rotation stage schema is invalid")
+    if stage.get("version") != _RECOVERY_ROTATION_STAGE_VERSION:
+        raise RecoveryTransactionError("recovery rotation stage version is unsupported")
+    if _canonical_rotation_stage_bytes(stage) != blob:
+        raise RecoveryTransactionError("recovery rotation stage encoding is not canonical")
+    old_pub_hex = stage.get("old_pub_hex")
+    if (
+        not isinstance(old_pub_hex, str)
+        or len(old_pub_hex) != 64
+        or any(ch not in "0123456789abcdef" for ch in old_pub_hex)
+    ):
+        raise RecoveryTransactionError("recovery rotation old public key is invalid")
+    try:
+        old_pub = bytes.fromhex(old_pub_hex)
+    except ValueError as exc:
+        raise RecoveryTransactionError(
+            "recovery rotation old public key is invalid"
+        ) from exc
+    if not _is_canonical_fingerprint(stage.get("old_fp")):
+        raise RecoveryTransactionError("recovery rotation old fingerprint is invalid")
+    if not _is_canonical_fingerprint(stage.get("new_fp")):
+        raise RecoveryTransactionError("recovery rotation new fingerprint is invalid")
+    peers = stage.get("peer_fps")
+    if (
+        not isinstance(peers, list)
+        or len(peers) > MAX_ROTATION_PEERS
+        or any(not _is_canonical_fingerprint(peer) for peer in peers)
+        or peers != sorted(set(peers))
+    ):
+        raise RecoveryTransactionError("recovery rotation peer snapshot is invalid")
+    queued_ms = stage.get("queued_ms")
+    if type(queued_ms) is not int or queued_ms < 0:
+        raise RecoveryTransactionError("recovery rotation timestamp is invalid")
+    try:
+        cert = identity_rotation.RotationCertificate.from_wire_dict(
+            {
+                "cert_json": stage.get("cert_json"),
+                "sig_hex": stage.get("sig_hex"),
+            }
+        )
+        identity_rotation.verify_certificate(
+            cert=cert,
+            expected_old_pubkey=old_pub,
+        )
+    except (ValueError, identity_rotation.CertVerifyError) as exc:
+        raise RecoveryTransactionError(
+            "recovery rotation certificate is invalid"
+        ) from exc
+    new_pub = master_seed.derive_identity_priv(bytes(seed)).public_key().public_bytes_raw()
+    if (
+        cert.old_fp != stage["old_fp"]
+        or cert.new_fp != stage["new_fp"]
+        or cert.new_pub_hex != new_pub.hex()
+        or cert.ts_ms != queued_ms
+    ):
+        raise RecoveryTransactionError(
+            "recovery rotation certificate does not match staged authority"
+        )
+    return stage, cert
+
+
+def _load_staged_rotation(
+    data_dir: Path,
+    intent: dict[str, Any],
+    *,
+    seed: bytes,
+) -> tuple[dict[str, Any], Any]:
+    digest = intent.get("rotation_sha256")
+    if not isinstance(digest, str):
+        raise RecoveryTransactionError("recovery rotation commitment is missing")
+    blob = read_bytes_if_exists(
+        _rotation_stage_path(data_dir),
+        label="recovery rotation stage",
+        max_bytes=_RECOVERY_ROTATION_STAGE_MAX_BYTES,
+        harden_path=_private_hardener,
+    )
+    if blob is None:
+        raise RecoveryTransactionError("recovery rotation stage is missing")
+    if hashlib.sha256(blob).hexdigest() != digest:
+        raise RecoveryTransactionError(
+            "recovery rotation stage does not match the durable intent commitment"
+        )
+    return _parse_rotation_stage(blob, seed=seed)
+
+
+def stage_rotation_authority_replacement(
+    *,
+    data_dir: Path,
+    seed: bytes,
+    old_priv: Any,
+    cert: Any,
+    pinned_peer_fingerprints: list[str],
+    identity_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Durably stage a signed identity rotation without live mutation.
+
+    The current seed, identity, data-root authority, and SQLite announcement
+    queue remain byte-for-byte unchanged.  Daemon startup applies the staged
+    authority under its singleton lock, then commits the complete peer snapshot
+    in one FULL-synchronous SQLite transaction before retiring this journal.
+    """
+    from one_link import identity_rotation, lockbox, master_seed, paths
+
+    root = Path(data_dir)
+    id_path = Path(identity_path) if identity_path is not None else paths.key_path()
+    candidate = bytes(seed)
+    if len(candidate) != master_seed.SEED_LEN_BYTES:
+        raise ValueError(f"seed must be {master_seed.SEED_LEN_BYTES} bytes")
+    try:
+        old_pub = old_priv.public_key().public_bytes_raw()
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise TypeError("old_priv must be an Ed25519 private key") from exc
+    current_seed = master_seed.load_seed(root)
+    if current_seed is None:
+        raise RecoveryTransactionError("identity rotation requires a master seed")
+    try:
+        if lockbox.requires_legacy_passphrase_recovery(root):
+            raise RecoveryTransactionError(
+                "legacy passphrase-mode application data has no seed recovery "
+                "envelope; start One Link with the source ONE_LINK_PASSPHRASE "
+                "and export a new backup before identity rotation"
+            )
+        expected_old_pub = (
+            master_seed.derive_identity_priv(current_seed)
+            .public_key()
+            .public_bytes_raw()
+        )
+        if not secrets.compare_digest(old_pub, expected_old_pub):
+            raise RecoveryTransactionError(
+                "live identity does not match the current master seed"
+            )
+        evidence = master_seed.inspect_derived_authority(
+            root,
+            identity_path=id_path,
+            seed=current_seed,
+        )
+        if evidence != {"identity": True, "data_root": True}:
+            raise RecoveryTransactionError(
+                "current identity authority is not fully converged"
+            )
+    finally:
+        current_seed = b"\x00" * len(current_seed)
+        del current_seed
+    try:
+        identity_rotation.verify_certificate(
+            cert=cert,
+            expected_old_pubkey=old_pub,
+        )
+    except identity_rotation.CertVerifyError as exc:
+        raise RecoveryTransactionError("rotation certificate is not authorized") from exc
+    new_pub = master_seed.derive_identity_priv(candidate).public_key().public_bytes_raw()
+    if cert.new_pub_hex != new_pub.hex():
+        raise RecoveryTransactionError(
+            "rotation certificate does not name the staged master seed"
+        )
+    peers = sorted(set(pinned_peer_fingerprints))
+    if len(peers) > MAX_ROTATION_PEERS:
+        raise RecoveryTransactionError(
+            f"rotation peer snapshot exceeds {MAX_ROTATION_PEERS} peers"
+        )
+    if any(not _is_canonical_fingerprint(peer) for peer in peers):
+        raise RecoveryTransactionError(
+            "rotation peer snapshot contains an invalid fingerprint"
+        )
+    wire = cert.to_wire_dict()
+    stage = {
+        "version": _RECOVERY_ROTATION_STAGE_VERSION,
+        "old_pub_hex": old_pub.hex(),
+        "old_fp": cert.old_fp,
+        "new_fp": cert.new_fp,
+        "cert_json": wire["cert_json"],
+        "sig_hex": wire["sig_hex"],
+        "peer_fps": peers,
+        "queued_ms": int(cert.ts_ms),
+    }
+    encoded = _canonical_rotation_stage_bytes(stage)
+    if len(encoded) > _RECOVERY_ROTATION_STAGE_MAX_BYTES:
+        raise RecoveryTransactionError("rotation peer snapshot is too large")
+    # Validate our own serialized artifact before publishing any stage file.
+    _parse_rotation_stage(encoded, seed=candidate)
+    _stage_recovered_authority(
+        data_dir=root,
+        seed=candidate,
+        rotation_bytes=encoded,
+        overwrite_files=False,
+    )
+    return {
+        "pending_restart": True,
+        "staged_peer_count": len(peers),
+        "old_fp": cert.old_fp,
+        "new_fp": cert.new_fp,
+    }
+
+
+def pending_recovery_summary(data_dir: Path) -> dict[str, Any]:
+    """Return a non-secret, validated description of the pending journal."""
+    root = Path(data_dir)
+    intent = _load_recovery_intent(root)
+    if intent is None:
+        return {"pending": False}
+    kind = str(intent.get("kind", "restore"))
+    out: dict[str, Any] = {
+        "pending": True,
+        "kind": kind,
+        "phase": str(intent["phase"]),
+        "restart_required": intent["phase"] == "prepared",
+    }
+    if kind == "rotation" and intent["phase"] != "finalized":
+        seed = _load_staged_recovery_seed(root, intent)
+        try:
+            stage, _cert = _load_staged_rotation(root, intent, seed=seed)
+            out.update(
+                {
+                    "staged_peer_count": len(stage["peer_fps"]),
+                    "old_fp": stage["old_fp"],
+                    "new_fp": stage["new_fp"],
+                }
+            )
+        finally:
+            seed = b"\x00" * len(seed)
+            del seed
+    return out
+
+
+def reveal_pending_rotation_phrase(
+    *,
+    data_dir: Path,
+    expected_new_fp: str,
+) -> dict[str, Any]:
+    """Recover the phrase for exactly the named, not-yet-applied rotation.
+
+    A successful rotation response can be lost before the browser renders its
+    24 words. The protected seed must remain available for boot replay, so an
+    authenticated UI may re-read it while the journal is still ``prepared``.
+    Requiring the caller's observed target fingerprint prevents a stale tab
+    from accidentally disclosing a later rotation. Disclosure is retry-safe
+    for response loss but ceases permanently when that journal advances.
+    """
+    from one_link import mnemonic
+
+    if not _is_canonical_fingerprint(expected_new_fp):
+        raise ValueError("expected rotation fingerprint is invalid")
+    root = Path(data_dir)
+    with _recovery_transaction_lock(root):
+        intent = _load_recovery_intent(root)
+        if intent is None or intent.get("kind", "restore") != "rotation":
+            raise RecoveryTransactionError("no identity rotation is pending")
+        if intent["phase"] != "prepared":
+            raise RecoveryTransactionError(
+                "the pending rotation phrase is no longer available"
+            )
+        seed = _load_staged_recovery_seed(root, intent)
+        try:
+            stage, cert = _load_staged_rotation(root, intent, seed=seed)
+            if not secrets.compare_digest(stage["new_fp"], expected_new_fp):
+                raise RecoveryTransactionError(
+                    "the pending rotation does not match the requested fingerprint"
+                )
+            phrase = mnemonic.encode(seed)
+            return {
+                "new_phrase": phrase,
+                "new_words": phrase.split(),
+                "old_fp": stage["old_fp"],
+                "new_fp": stage["new_fp"],
+                "staged_peer_count": len(stage["peer_fps"]),
+                "created_ms": int(intent["created_ms"]),
+                "reason": cert.reason,
+            }
+        finally:
+            seed = b"\x00" * len(seed)
+            del seed
+
+
+def complete_pending_recovery(
+    *,
+    data_dir: Path,
+    identity_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Replay a staged restore before daemon key/state initialization.
+
+    This operation is idempotent.  Its intent marker remains durable across
+    every intermediate failure and is removed last, after the bundle (if any)
+    has been promoted and seed/identity/DRK exact-match proofs pass. A rotation
+    keeps its applied journal until ``finalize_pending_rotation`` atomically
+    commits every peer announcement after State opens.
+    """
+    from one_link import backup_bundle, master_seed, paths
+
+    root = Path(data_dir)
+    id_path = Path(identity_path) if identity_path is not None else paths.key_path()
+    with _recovery_transaction_lock(root):
+        intent = _load_recovery_intent(root)
+        if intent is None:
+            # Inputs written before a crash that happened prior to the final
+            # intent publication are unauthorized orphans, not a transaction.
+            for orphan, label in (
+                (_bundle_stage_path(root), "orphaned recovery bundle stage"),
+                (_seed_stage_path(root), "orphaned recovery seed stage"),
+                (_rotation_stage_path(root), "orphaned recovery rotation stage"),
+            ):
+                if artifact_exists(orphan, label=label):
+                    _durable_unlink(orphan, label=label)
+            return {"completed": False, "written": []}
+
+        seed = _load_staged_recovery_seed(root, intent)
+        written: list[str] = []
+        bundle_digest = intent["bundle_sha256"]
+        kind = str(intent.get("kind", "restore"))
+        if intent["phase"] == "prepared":
+            # Capture the source seed before a portable archive can replace its
+            # machine-bound on-disk representation.  An in-place passphrase
+            # LockBox migration can then rewrap its stable DEK to the target
+            # seed without ever deleting or guessing authority.  Corrupt or
+            # foreign source authority is recoverable by an authenticated
+            # target-bound bundle/passphrase and therefore is not itself fatal.
+            previous_seed: Optional[bytes]
+            try:
+                previous_seed = master_seed.load_seed(root)
+            except KeyMaterialError:
+                previous_seed = None
+            if kind == "rotation":
+                # A valid signed peer-transition certificate is a required
+                # half of rotation authority. Never install the new key first
+                # and discover corrupt/missing delivery metadata afterward.
+                _load_staged_rotation(root, intent, seed=seed)
+            if bundle_digest is not None:
+                bundle_path = _bundle_stage_path(root)
+                try:
+                    bundle_bytes = backup_bundle.read_bundle_file_bounded(bundle_path)
+                except (OSError, ValueError) as exc:
+                    raise RecoveryTransactionError(
+                        "pending recovery bundle is unavailable or invalid"
+                    ) from exc
+                if hashlib.sha256(bundle_bytes).hexdigest() != bundle_digest:
+                    raise RecoveryTransactionError(
+                        "pending recovery bundle does not match the intent commitment"
+                    )
+                _header, plaintext = backup_bundle.open_bundle(
+                    seed=seed,
+                    bundle_bytes=bundle_bytes,
+                )
+                # Full policy validation precedes publication.  The extraction
+                # helper stages and rolls back observable promotion errors.
+                inspected = backup_bundle.inspect_bundle_archive(plaintext=plaintext)
+                _reject_reserved_recovery_members(inspected)
+                written = backup_bundle.extract_bundle_to_dir(
+                    plaintext=plaintext,
+                    target_dir=root,
+                    overwrite=bool(intent.get("overwrite_files", True)),
+                )
+
+            master_seed.install_seed_derived_authority(
+                root,
+                identity_path=id_path,
+                seed=seed,
+                previous_seed=previous_seed,
+            )
+            # A durable applied phase separates transaction work from cleanup.
+            # If power fails after either stage file is removed, replay can
+            # prove the committed authority and finish cleanup without needing
+            # the already-applied bundle again.
+            intent = {**intent, "phase": "applied"}
+            _atomic_small_private_file(
+                _intent_path(root),
+                _canonical_intent_bytes(intent),
+                label="applied recovery intent",
+            )
+        else:
+            current = master_seed.load_seed(root)
+            evidence = master_seed.inspect_derived_authority(
+                root,
+                identity_path=id_path,
+                seed=seed,
+            )
+            if (
+                current is None
+                or not secrets.compare_digest(current, seed)
+                or evidence != {"identity": True, "data_root": True}
+            ):
+                raise RecoveryTransactionError(
+                    "applied recovery authority failed replay verification"
+                )
+            if kind == "rotation" and intent["phase"] == "applied":
+                _load_staged_rotation(root, intent, seed=seed)
+
+        if kind == "rotation":
+            # Authority is durable, but the signed certificate stays journaled
+            # until the restored/open State DB contains the complete peer
+            # snapshot in one durable transaction.
+            return {
+                "completed": False,
+                "authority_applied": True,
+                "pending_finalization": True,
+                "written": [],
+            }
+
+        # Inputs first, applied intent last.  A cleanup crash re-enters the
+        # applied branch, proves exact convergence, and safely resumes here.
+        if bundle_digest is not None:
+            _durable_unlink(
+                _bundle_stage_path(root), label="recovery bundle stage"
+            )
+        _durable_unlink(_seed_stage_path(root), label="recovery seed stage")
+        _durable_unlink(_intent_path(root), label="recovery intent")
+        return {"completed": True, "written": written}
+
+
+def finalize_pending_rotation(
+    *,
+    data_dir: Path,
+    state: Any,
+    identity_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Commit a boot-applied rotation's peer queue, then retire its journal.
+
+    Queue insertion is FULL-synchronous, all-or-nothing, idempotent, and
+    exact-match checked. The ``finalized`` phase is published only after
+    SQLite commits, so every crash boundary safely replays.
+    """
+    from one_link import master_seed, paths
+
+    root = Path(data_dir)
+    id_path = Path(identity_path) if identity_path is not None else paths.key_path()
+    with _recovery_transaction_lock(root):
+        intent = _load_recovery_intent(root)
+        if intent is None or intent.get("kind", "restore") != "rotation":
+            return {"completed": False, "queued_peer_count": 0}
+        if intent["phase"] == "prepared":
+            raise RecoveryTransactionError(
+                "rotation authority must be applied before queue finalization"
+            )
+
+        seed = _load_staged_recovery_seed(root, intent)
+        try:
+            current = master_seed.load_seed(root)
+            evidence = master_seed.inspect_derived_authority(
+                root,
+                identity_path=id_path,
+                seed=seed,
+            )
+            if (
+                current is None
+                or not secrets.compare_digest(current, seed)
+                or evidence != {"identity": True, "data_root": True}
+            ):
+                raise RecoveryTransactionError(
+                    "rotation authority failed finalization verification"
+                )
+
+            queued_count = 0
+            if intent["phase"] == "applied":
+                stage, _cert = _load_staged_rotation(root, intent, seed=seed)
+                rows = [
+                    {
+                        "peer_fp": peer_fp,
+                        "old_fp": stage["old_fp"],
+                        "new_fp": stage["new_fp"],
+                        "cert_json": stage["cert_json"],
+                        "sig_hex": stage["sig_hex"],
+                        "queued_ms": stage["queued_ms"],
+                    }
+                    for peer_fp in stage["peer_fps"]
+                ]
+                queue_batch = getattr(
+                    state,
+                    "queue_rotation_announcements_durable",
+                    None,
+                )
+                if not callable(queue_batch):
+                    raise RecoveryTransactionError(
+                        "state cannot durably finalize rotation announcements"
+                    )
+                queued_ids = queue_batch(rows)
+                if len(queued_ids) != len(rows):
+                    raise RecoveryTransactionError(
+                        "rotation announcement queue failed exact count proof"
+                    )
+                queued_count = len(rows)
+                intent = {**intent, "phase": "finalized"}
+                _atomic_small_private_file(
+                    _intent_path(root),
+                    _canonical_intent_bytes(intent),
+                    label="finalized recovery rotation intent",
+                )
+            else:
+                # A cleanup crash can leave a finalized marker after metadata
+                # was removed. The marker is the durable proof that exact queue
+                # read-back succeeded, so missing metadata is safe here.
+                staged = read_bytes_if_exists(
+                    _rotation_stage_path(root),
+                    label="recovery rotation stage",
+                    max_bytes=_RECOVERY_ROTATION_STAGE_MAX_BYTES,
+                    harden_path=_private_hardener,
+                )
+                if staged is not None:
+                    stage, _cert = _parse_rotation_stage(staged, seed=seed)
+                    if (
+                        hashlib.sha256(staged).hexdigest()
+                        != intent["rotation_sha256"]
+                    ):
+                        raise RecoveryTransactionError(
+                            "finalized rotation metadata changed before cleanup"
+                        )
+                    queued_count = len(stage["peer_fps"])
+
+            _durable_unlink(
+                _rotation_stage_path(root),
+                label="recovery rotation stage",
+            )
+            _durable_unlink(_seed_stage_path(root), label="recovery seed stage")
+            _durable_unlink(_intent_path(root), label="recovery intent")
+            return {
+                "completed": True,
+                "queued_peer_count": queued_count,
+            }
+        finally:
+            seed = b"\x00" * len(seed)
+            del seed
+
+
+def restore_artifact_evidence(
+    data_dir: Path,
+    *,
+    identity_path: Optional[Path] = None,
+) -> dict[str, int]:
+    """Count durable artifacts whose replacement requires confirmation."""
+    from one_link import keychain, lockbox, master_seed, paths
+
+    root = Path(data_dir)
+    id_path = Path(identity_path) if identity_path is not None else paths.key_path()
+    candidates = {
+        "master_seed_artifact": root / master_seed.SEED_FILENAME,
+        "identity_key_artifact": id_path,
+        "data_root_key_artifact": root / lockbox.DRK_FILENAME,
+        "lockbox_salt_artifact": root / lockbox.SALT_FILENAME,
+        "lockbox_dek_envelope_artifact": root / lockbox.DEK_ENVELOPE_FILENAME,
+        "state_db_artifact": root / "state.db",
+        "state_wal_artifact": root / "state.db-wal",
+        "state_shm_artifact": root / "state.db-shm",
+        "state_key_artifact": root / keychain.LOCAL_KEY_FILENAME,
+        "state_recovery_key_artifact": root / keychain.RECOVERY_KEY_FILENAME,
+        "pending_recovery_artifact": _intent_path(root),
+        "pending_recovery_seed_stage_artifact": _seed_stage_path(root),
+        "pending_recovery_bundle_stage_artifact": _bundle_stage_path(root),
+        "pending_recovery_rotation_stage_artifact": _rotation_stage_path(root),
+    }
+    evidence: dict[str, int] = {}
+    for key, path in candidates.items():
+        evidence[key] = int(artifact_exists(path, label=key.replace("_", " ")))
+    return evidence
+
+
+def is_install_clean_for_restore(
+    state,
+    *,
+    data_dir: Optional[Path] = None,
+    identity_path: Optional[Path] = None,
+) -> tuple[bool, dict[str, int]]:
     """Return (clean, evidence). An install is "clean" if restoring
     a different identity over it does not destroy meaningful user
     state. We count what would be orphaned: pinned peers, sent +
@@ -725,20 +2028,81 @@ def is_install_clean_for_restore(state) -> tuple[bool, dict[str, int]]:
     a stern UI warning that the prior identity will be replaced.
     """
     evidence: dict[str, int] = {}
+    snapshot = getattr(state, "recovery_safety_counts", None)
+    if callable(snapshot):
+        try:
+            raw = snapshot()
+            required = (
+                "pinned_peers",
+                "messages",
+                "group_messages",
+                "groups",
+                "shared_folders",
+                "self_mesh_devices",
+                "pending_transfers",
+                "pending_outbox",
+                "pending_folder_offers",
+                "pending_rotation_announcements",
+                "held_recovery_shares",
+            )
+            evidence = {key: max(0, int(raw[key])) for key in required}
+            if data_dir is not None:
+                evidence.update(
+                    restore_artifact_evidence(
+                        Path(data_dir), identity_path=identity_path
+                    )
+                )
+            return all(value == 0 for value in evidence.values()), evidence
+        except Exception:
+            # This function controls whether identity replacement needs the
+            # explicit destructive confirmation.  A corrupt/unavailable DB or
+            # malformed adapter must never be interpreted as an empty install.
+            return False, {
+                "pinned_peers": 0,
+                "messages": 0,
+                "group_messages": 0,
+                "groups": 0,
+                "shared_folders": 0,
+                "self_mesh_devices": 0,
+                "pending_transfers": 0,
+                "pending_outbox": 0,
+                "pending_folder_offers": 0,
+                "pending_rotation_announcements": 0,
+                "held_recovery_shares": 0,
+                "inspection_failures": 1,
+            }
+
+    # Compatibility for old State-like adapters.  It remains fail-closed:
+    # missing/throwing collection methods add inspection_failures so they can
+    # never authorize an unconfirmed destructive restore.
+    failures = 0
     try:
         peers = state.list_peers()
         pinned = [p for p in (peers or []) if getattr(p, "trust", None) == "pinned"]
         evidence["pinned_peers"] = len(pinned)
     except Exception:
         evidence["pinned_peers"] = 0
+        failures += 1
     for fn, key in (
-        ("list_groups", "groups"),
+        ("recent_messages", "messages"),
+        ("recent_group_messages", "group_messages"),
+        ("list_group_ids", "groups"),
+        ("list_folders", "shared_folders"),
         ("list_self_mesh_devices", "self_mesh_devices"),
     ):
         f = getattr(state, fn, None)
         if callable(f):
             try:
-                items = f()
+                if fn == "recent_messages":
+                    items = f(limit=1)
+                elif fn == "recent_group_messages":
+                    # This compatibility path cannot enumerate all group
+                    # rooms without a group id. A missing optimized snapshot
+                    # remains an inspection failure below rather than an
+                    # accidental clean verdict.
+                    raise RuntimeError("group-message safety count unavailable")
+                else:
+                    items = f()
                 if items is None:
                     evidence[key] = 0
                 elif hasattr(items, "__len__"):
@@ -747,11 +2111,80 @@ def is_install_clean_for_restore(state) -> tuple[bool, dict[str, int]]:
                     evidence[key] = sum(1 for _ in items)
             except Exception:
                 evidence[key] = 0
+                failures += 1
         else:
             evidence[key] = 0
+            failures += 1
+    # Older adapters do not expose durable operation queues. Their absence is
+    # explicitly unknown, hence fail-closed, rather than guessed empty.
+    for key in (
+        "pending_transfers",
+        "pending_outbox",
+        "pending_folder_offers",
+        "pending_rotation_announcements",
+        "held_recovery_shares",
+    ):
+        evidence[key] = 0
+        failures += 1
+    evidence["inspection_failures"] = failures
+    if data_dir is not None:
+        try:
+            evidence.update(
+                restore_artifact_evidence(
+                    Path(data_dir), identity_path=identity_path
+                )
+            )
+        except Exception:
+            evidence["artifact_inspection_failures"] = 1
     # A "dirty" install has any of these.
     clean = all(v == 0 for v in evidence.values())
     return clean, evidence
+
+
+def stage_seed_authority_replacement(
+    *,
+    data_dir: Path,
+    seed: bytes,
+    allow_replace: bool,
+    identity_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Publish one durable seed/identity/DRK replacement transaction.
+
+    The function is the only supported primitive for CLI and HTTP paper/social
+    recovery.  It never pre-deletes current authority.  A genuinely empty,
+    offline target commits synchronously; any existing authority or state
+    remains byte-identical until daemon startup owns the singleton lock and
+    replays the intent.
+    """
+
+    from one_link import lockbox, master_seed, paths
+
+    if not isinstance(seed, (bytes, bytearray)) or len(seed) != master_seed.SEED_LEN_BYTES:
+        raise ValueError(f"seed must be {master_seed.SEED_LEN_BYTES} bytes")
+    root = Path(data_dir)
+    id_path = Path(identity_path) if identity_path is not None else paths.key_path()
+    evidence = restore_artifact_evidence(root, identity_path=id_path)
+    destructive = any(evidence.values())
+    if destructive and not allow_replace:
+        raise RecoveryTransactionError(
+            "restore would replace existing authority or state without confirmation"
+        )
+    if (
+        destructive
+        and lockbox.requires_legacy_passphrase_recovery(root)
+        and not os.environ.get(lockbox.PASSPHRASE_ENV, "")
+    ):
+        raise RecoveryTransactionError(
+            "legacy application data requires the source "
+            "ONE_LINK_PASSPHRASE as an explicit recovery factor"
+        )
+    _stage_recovered_authority(data_dir=root, seed=bytes(seed))
+    if not destructive:
+        complete_pending_recovery(data_dir=root, identity_path=id_path)
+    return {
+        "pending_restart": destructive,
+        "evidence": evidence,
+    }
 
 
 def restore_seed_from_phrase(
@@ -760,20 +2193,20 @@ def restore_seed_from_phrase(
     phrase: str,
     delete_identity_files: bool,
 ) -> bytes:
-    """Decode the 24-word phrase, write the master seed to disk, and
-    (when ``delete_identity_files`` is True) clear the existing
-    identity.key + DRK so the daemon re-derives both from the
-    restored seed on next start.
+    """Decode the 24-word phrase and stage one authority transaction.
+
+    Existing seed/identity/DRK/state files are never pre-deleted or modified.
+    An empty offline target completes synchronously; replacement remains a
+    durable intent until daemon startup owns the singleton lock and proves
+    seed, identity, and data-root convergence.
 
     Raises ``ValueError`` on bad/incomplete phrase (mnemonic.decode's
     own checksum check), ``FileNotFoundError`` is not raised here -
     callers decide whether to allow overwriting an existing seed.
 
-    Returns the 32-byte decoded seed (for the caller's logging or
-    audit; the seed itself is also persisted to disk).
+    Returns the 32-byte decoded seed for the caller's immediate verification.
     """
     from one_link import master_seed, mnemonic
-    from one_link import paths
     # Decode + verify checksum BEFORE touching disk. mnemonic.decode
     # raises ValueError with a clear message on bad phrase / typo.
     seed = mnemonic.decode(phrase)
@@ -782,13 +2215,11 @@ def restore_seed_from_phrase(
             f"decoded seed has wrong length {len(seed)}; "
             f"expected {master_seed.SEED_LEN_BYTES}"
         )
-    if delete_identity_files:
-        # Wipe identity.key + DRK so the daemon's next start
-        # re-derives both from the restored seed.
-        for f in (paths.key_path(), Path(data_dir) / "data-root-key.bin"):
-            with contextlib.suppress(OSError):
-                Path(f).unlink()
-    master_seed.store_seed(Path(data_dir), seed)
+    stage_seed_authority_replacement(
+        data_dir=Path(data_dir),
+        seed=seed,
+        allow_replace=delete_identity_files,
+    )
     return seed
 
 
@@ -796,15 +2227,17 @@ def restore_from_bundle(
     *,
     data_dir: Path,
     phrase: str,
-    bundle_bytes: bytes,
+    bundle_bytes: bytes | bytearray | memoryview,
     delete_identity_files: bool,
     overwrite: bool,
+    identity_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     """Combined phrase + .olbak restore. Decodes the phrase to a
-    seed, decrypts the bundle (the bundle key derives from the
-    seed via HKDF, so the same phrase that restores the identity
-    also unlocks the chat history + settings), and extracts the
-    plaintext archive into ``data_dir``.
+    seed and authenticates the outer bundle with its seed-derived HKDF key.
+    Current bundles also carry seed-wrapped LockBox/SQLCipher recovery
+    artifacts; unmigrated legacy passphrase bundles explicitly require their
+    source passphrase. A live target is durably staged, not extracted under an
+    open daemon.
 
     Returns a small descriptor: which files were written, plus the
     bundle's created_ms timestamp so the UI can confirm "restored a
@@ -813,7 +2246,7 @@ def restore_from_bundle(
     Raises ``ValueError`` on bad phrase OR bad bundle (tampered /
     wrong key / truncated).
     """
-    from one_link import backup_bundle, master_seed, mnemonic
+    from one_link import backup_bundle, lockbox, master_seed, mnemonic
     from one_link import paths
     seed = mnemonic.decode(phrase)
     if len(seed) != master_seed.SEED_LEN_BYTES:
@@ -827,32 +2260,49 @@ def restore_from_bundle(
     header, plaintext = backup_bundle.open_bundle(
         seed=seed, bundle_bytes=bundle_bytes,
     )
-    # All-or-nothing: stage extraction to a temp dir, atomically
-    # promote. `extract_bundle_to_dir` already does this internally.
-    written = backup_bundle.extract_bundle_to_dir(
-        plaintext=plaintext,
-        target_dir=Path(data_dir),
-        overwrite=overwrite,
+    # Fully validate the authenticated archive before publishing a durable
+    # restore intent.  The bundle itself stays encrypted while staged.
+    visible = backup_bundle.inspect_bundle_archive(plaintext=plaintext)
+    _reject_reserved_recovery_members(visible)
+    visible_names = {str(name).casefold() for name in visible}
+    if (
+        lockbox.SALT_FILENAME.casefold() in visible_names
+        and lockbox.DEK_ENVELOPE_FILENAME.casefold() not in visible_names
+        and not os.environ.get(lockbox.PASSPHRASE_ENV, "")
+    ):
+        raise RecoveryTransactionError(
+            "this legacy backup requires its source ONE_LINK_PASSPHRASE "
+            "in addition to the recovery phrase"
+        )
+    root = Path(data_dir)
+    id_path = Path(identity_path) if identity_path is not None else paths.key_path()
+    evidence = restore_artifact_evidence(root, identity_path=id_path)
+    if any(evidence.values()) and not (delete_identity_files and overwrite):
+        raise RecoveryTransactionError(
+            "bundle restore would replace existing authority or state without confirmation"
+        )
+    _stage_recovered_authority(
+        data_dir=root,
+        seed=seed,
+        bundle_bytes=bytes(bundle_bytes),
+        overwrite_files=overwrite,
     )
-    # The bundle's MANIFEST always rides as the first entry; users
-    # see the real payload list in `written`, so drop the metadata
-    # row from the visible list.
-    visible = [w for w in written if w != "MANIFEST"]
-    if delete_identity_files:
-        # Wipe identity.key + DRK so the daemon's next start
-        # re-derives both from the restored seed. The bundle
-        # already contains master.seed + data-root-key.bin, but
-        # identity.key lives in config_dir() and may not be in
-        # the bundle on a freshly-recovered install.
-        for f in (paths.key_path(), Path(data_dir) / "data-root-key.bin"):
-            with contextlib.suppress(OSError):
-                Path(f).unlink()
+    pending_restart = bool(delete_identity_files)
+    validated_members = list(visible)
+    if not delete_identity_files:
+        completed = complete_pending_recovery(
+            data_dir=root,
+            identity_path=id_path,
+        )
+        visible = list(completed["written"])
     # Best-effort seed wipe.
     try:
         return {
-            "written": visible,
-            "file_count": len(visible),
+            "written": [] if pending_restart else visible,
+            "validated_members": validated_members,
+            "file_count": len(validated_members),
             "bundle_created_ms": int(header.created_ms),
+            "pending_restart": pending_restart,
         }
     finally:
         seed = b"\x00" * len(seed)
@@ -868,9 +2318,10 @@ def restore_from_shares(
     shares: list[tuple[int, bytes]],
     delete_identity_files: bool,
 ) -> bytes:
-    """Combine K unwrapped Shamir shares into the original master
-    seed and persist it. Mirrors restore_seed_from_phrase but takes
-    shares instead of a phrase: the recoverer's third path.
+    """Combine K unwrapped Shamir shares and stage recovered authority.
+
+    Mirrors ``restore_seed_from_phrase`` but takes shares instead of a phrase:
+    the recoverer's third path. Existing live authority is never pre-deleted.
 
     Each share is (share_index, share_bytes) as produced by the
     guardian's unwrap_share call (or the unwrap HTTP endpoint).
@@ -880,11 +2331,9 @@ def restore_from_shares(
 
     Raises ValueError on malformed shares OR on combine failure
     (e.g., shares from different splits, fewer than threshold).
-    Returns the 32-byte reconstructed seed (also persisted).
+    Returns the 32-byte reconstructed seed for immediate verification.
     """
     from one_link import master_seed, social_recovery
-    from one_link import paths
-    from pathlib import Path as _Path
     if not shares or len(shares) < 2:
         raise ValueError("need at least 2 shares to recover")
     seed = social_recovery.combine_shares(shares)
@@ -894,24 +2343,21 @@ def restore_from_shares(
             f"expected {master_seed.SEED_LEN_BYTES}"
         )
     try:
-        if delete_identity_files:
-            for f in (paths.key_path(), _Path(data_dir) / "data-root-key.bin"):
-                with contextlib.suppress(OSError):
-                    _Path(f).unlink()
-        master_seed.store_seed(_Path(data_dir), seed)
+        stage_seed_authority_replacement(
+            data_dir=Path(data_dir),
+            seed=seed,
+            allow_replace=delete_identity_files,
+        )
         return seed
     finally:
         # Best-effort wipe of our reference; on-disk copy is the
         # canonical source going forward.
-        try:
-            seed_copy = seed
-            seed = b"\x00" * len(seed)
-            del seed
-            # Wipe the local var too (not perfect; Python bytes are
-            # immutable, but this drops our reference).
-            del seed_copy
-        except Exception:
-            pass
+        seed_copy = seed
+        seed = b"\x00" * len(seed)
+        del seed
+        # Wipe the local var too (not perfect; Python bytes are
+        # immutable, but this drops our reference).
+        del seed_copy
 
 
 def parse_held_share_blob(blob: bytes) -> dict[str, Any]:

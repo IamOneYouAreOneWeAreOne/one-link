@@ -1,7 +1,7 @@
-"""Semantic scene codec — Tier θ scene-feature compression.
+"""Research-only semantic scene codec — Tier θ design substrate.
 
-Where Tier ζ voice ships ~640 bps of articulatory features, Tier θ
-ships ~3-5 kbps of *scene-level* video features:
+The stable daemon does not capture, transport, or render this representation.
+The design targets ~3-5 kbps of *scene-level* video features:
 
   38-dim scene snapshot per frame
     [n_objects, mean_conf, lighting, camera_motion, object_activity,
@@ -23,9 +23,10 @@ boxes / icons / face stand-ins. The doctrine of invisibility (§4.c)
 keeps the rendering plain-language: "Mom · in motion · camera panning"
 rather than a synthetic-face uncanny-valley.
 
-Capability gate: ``SEMANTIC_SCENE_V1``. Peers must advertise this
-AND match model_pack_hash for the Compiler to consider the
-SEMANTIC_DELTA_AV rung at the video plane.
+Intended capability gate: ``SEMANTIC_SCENE_V1`` plus a signed matching
+``model_pack_hash``. The stable capability registry intentionally does not
+advertise this gate before the browser media-wire and physical quality gates
+are complete.
 
 Companion: docs/LIVING_PRESENCE_ARCHITECTURE.md §4.8 (Semantic Engine)
 """
@@ -162,7 +163,6 @@ class SemanticSceneEncoder:
 
     def __init__(self, ckpt_path: Path, device: str = "cpu") -> None:
         from one_link.ml.onnx_oracles import load_scene_oracle
-        from one_link.ml.trained_scene_oracle import TrainedSceneOracle
         self._lock = threading.Lock()
         ckpt_path = Path(ckpt_path)
         if ckpt_path.is_dir():
@@ -170,6 +170,7 @@ class SemanticSceneEncoder:
         elif ckpt_path.suffix == ".onnx":
             self._oracle = load_scene_oracle(ckpt_path.parent)
         else:
+            from one_link.ml.trained_scene_oracle import TrainedSceneOracle
             self._oracle = TrainedSceneOracle(ckpt_path, device=device)
         self._is_torch_backed = type(self._oracle).__name__ == "TrainedSceneOracle"
         self._prev_features: Optional[np.ndarray] = None
@@ -253,7 +254,6 @@ class SemanticSceneDecoder:
 
     def __init__(self, ckpt_path: Path, device: str = "cpu") -> None:
         from one_link.ml.onnx_oracles import load_scene_oracle
-        from one_link.ml.trained_scene_oracle import TrainedSceneOracle
         self._lock = threading.Lock()
         ckpt_path = Path(ckpt_path)
         if ckpt_path.is_dir():
@@ -261,6 +261,7 @@ class SemanticSceneDecoder:
         elif ckpt_path.suffix == ".onnx":
             self._oracle = load_scene_oracle(ckpt_path.parent)
         else:
+            from one_link.ml.trained_scene_oracle import TrainedSceneOracle
             self._oracle = TrainedSceneOracle(ckpt_path, device=device)
         self._is_torch_backed = type(self._oracle).__name__ == "TrainedSceneOracle"
         self._reconstructed: Optional[np.ndarray] = None

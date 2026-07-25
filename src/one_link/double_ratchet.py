@@ -508,7 +508,7 @@ def _try_skipped(
     use it once and discard. Returns plaintext or None if no
     skipped key matches."""
     key = (header.dh, header.n)
-    msg_key = state.skipped.pop(key, None)
+    msg_key = state.skipped.get(key)
     if msg_key is None:
         return None
     if key in state.decrypted_seen:
@@ -517,6 +517,10 @@ def _try_skipped(
     nonce = _aead_nonce(header.n)
     aead_ad = header.encode() + (ad or b"")
     pt = _aead_for(msg_key).decrypt(nonce, ciphertext, aead_ad)
+    # Authenticate first, consume second.  A forged ciphertext for a
+    # delayed message must not burn the only cached key that can decrypt the
+    # legitimate retransmission.
+    state.skipped.pop(key, None)
     # v0.20.7 (security audit H2): see RatchetState.decrypted_seen.
     state.decrypted_seen[key] = True
     while len(state.decrypted_seen) > MAX_SKIP_KEYS * 4:

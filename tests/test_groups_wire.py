@@ -7,12 +7,11 @@ encrypted GROUP_KEY_OFFER + GROUP_MSG → decrypt → persist round-trip.
 from __future__ import annotations
 
 import asyncio
+import copy
 import contextlib
 from pathlib import Path
-from typing import AsyncIterator
 
 import pytest
-import pytest_asyncio
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.daemon import Daemon
@@ -161,12 +160,51 @@ async def test_two_daemon_group_chat_round_trip(tmp_path: Path):
         assert msgs[0]["direction"] == "in"
         assert msgs[0]["epoch"] == 1
         assert msgs[0]["counter"] == 0
+        assert msgs[0]["id"] == result["msg_id"]
 
         # A also has a record in their own outbound history.
         a_msgs = state_a.recent_group_messages(group_id=gid)
         a_bodies = [m["body"] for m in a_msgs]
         assert "hello group" in a_bodies
         assert a_msgs[0]["direction"] == "out"
+        assert a_msgs[0]["id"] == result["msg_id"]
+
+        # Sender retains the exact content-addressed GROUP_MSG in its durable
+        # fan-out ledger. Replaying after a lost ACK is acknowledged from B's
+        # durable receipt without advancing/decrypting the ratchet twice.
+        group_entry = next(
+            entry for entry in state_a.list_outbox(
+                peer_fp=me_b.fingerprint, pending_only=False,
+            )
+            if entry.msg_kind == "GROUP_MSG"
+            and entry.msg_id == result["msg_id"]
+        )
+        replay_replies: list[dict] = []
+
+        class _ReplayChannel:
+            peer_ed_pub = me_a.public_bytes
+            peer_short_id = me_a.short_id
+
+            async def send(self, raw):
+                from one_link.wire import decode_msg
+                replay_replies.append(decode_msg(raw))
+
+        await daemon_b._handle_group_msg(
+            _ReplayChannel(), group_entry.msg_body,
+            peer_fp=me_a.fingerprint, peer_sid=me_a.short_id,
+        )
+        assert replay_replies[-1].get("durable") is True
+        assert len(state_b.recent_group_messages(group_id=gid)) == 1
+
+        # Reusing that id with any modified signed-wire bytes is a conflict,
+        # even before ratchet/decrypt work begins.
+        tampered = copy.deepcopy(group_entry.msg_body)
+        tampered["wire"]["counter"] += 1
+        await daemon_b._handle_group_msg(
+            _ReplayChannel(), tampered,
+            peer_fp=me_a.fingerprint, peer_sid=me_a.short_id,
+        )
+        assert replay_replies[-1].get("rejected") == "message_id_conflict"
 
         # Send a second message. Chain advances to counter=1.
         result2 = await daemon_a.send_group_message(group_id=gid, body="second")
@@ -284,15 +322,18 @@ async def test_group_msg_without_chain_is_rejected_with_clear_reason(tmp_path: P
     )
 
     # Build the outer wrapper.
+    from one_link.daemon import _group_wire_message_id
     from one_link.wire import make_msg
     outer = make_msg(
         "GROUP_MSG", me_a.short_id,
+        id=_group_wire_message_id(
+            group_id=gid, sender_pub=me_a.public_bytes, wire=wire,
+        ),
         group_id_b64=gc._b64(gid),
         wire=wire,
     )
 
     # Synthesize a channel with peer_ed_pub set to A's pubkey.
-    from types import SimpleNamespace
     sent_back = []
     class _FakeChannel:
         peer_ed_pub = me_a.public_bytes

@@ -1,4 +1,4 @@
-//! τ_c × persistent-homology coupling.
+//! `τ_c` × persistent-homology coupling.
 //!
 //! When `ol_homology` detects a closing-loop fragility event in the
 //! chunk-co-hold graph, that's a *predictive* signal: the topology

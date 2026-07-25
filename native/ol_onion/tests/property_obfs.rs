@@ -1,4 +1,4 @@
-//! Property tests for the Row 7 transport_obfs primitive + handshake.
+//! Property tests for the Row 7 `transport_obfs` primitive + handshake.
 //!
 //! Two surfaces, two gate tiers:
 //!   - `primitive` (cheap, pure XOR): 1M iters CI default.
@@ -200,7 +200,7 @@ proptest! {
         client_seed in any::<[u8; 32]>(),
         server_seed in any::<[u8; 32]>(),
         now in any::<u64>(),
-        flip_idx in 0u8..HANDSHAKE_LEN as u8,
+        flip_idx in 0usize..HANDSHAKE_LEN,
     ) {
         let bridge = BridgeKeypair::from_parts(bridge_seed, bridge_id);
         let bridge_pk = *bridge.public.as_bytes();
@@ -209,7 +209,7 @@ proptest! {
 
         let client = ClientHandshake::start(&mut client_rng, &bridge_pk, &bridge_id, now);
         let mut tampered = *client.first_message();
-        tampered[flip_idx as usize] ^= 0x01;
+        tampered[flip_idx] ^= 0x01;
         let r = ServerHandshake::accept(&mut server_rng, &bridge, &tampered, now);
         // Either BadMac (most likely) or SmallOrderPubkey (vanishingly
         // rare; flipping byte 0 may yield a low-order point).

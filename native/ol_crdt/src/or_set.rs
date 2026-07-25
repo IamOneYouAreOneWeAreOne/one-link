@@ -53,7 +53,7 @@ impl<E: Ord + Clone> OrSet<E> {
     /// element value. Future adds with a fresh tag survive — the
     /// add-wins property.
     pub fn remove(&mut self, element: &E) {
-        for (e, tag) in self.added.iter() {
+        for (e, tag) in &self.added {
             if e == element && !self.removed.contains(tag) {
                 self.removed.insert(tag.clone());
             }

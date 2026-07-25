@@ -8,9 +8,9 @@ Three concrete UX bugs the user hit:
 3. Rendezvous help modal was wordy + non-actionable.
 
 Fixes:
-- Server: switch inbox-open to os.startfile (ShellExecute, reuses
-  existing Explorer window when available). Use list-form Popen
-  for /select reveal so the comma-separated arg is unambiguous.
+- Server: route inbox/reveal launches through the hardened system-opener
+  boundary. It resolves an absolute Explorer/Finder/xdg-open executable and
+  uses list-form argv so /select remains unambiguous.
 - Client: rename "Reveal" → "Show in folder", add immediate toast
   on click, distinct toast on throttled response.
 - Help modal: lead with "Wi-Fi only is fine" + advanced setup
@@ -19,41 +19,28 @@ Fixes:
 
 from __future__ import annotations
 
-import os
-import sys
 from pathlib import Path
 
 import pytest
 
 
-# ───────── server: list-form Popen + os.startfile ────────────────────
+# ───────── server: hardened system opener ───────────────────────────
 
-def test_inbox_reveal_uses_startfile_on_windows():
-    """v0.9.7: switched inbox-open to os.startfile for faster
-    perceived performance + reusing an existing Explorer window."""
+def test_inbox_reveal_uses_hardened_system_opener():
     src = Path("src/one_link/server.py").read_text(encoding="utf-8")
     idx = src.find("async def api_inbox_reveal(")
     snippet = src[idx:idx + 2500]
-    assert 'os.startfile(' in snippet
-    # Make sure we're using it for the win32 branch specifically.
-    win_idx = snippet.find('sys.platform == "win32"')
-    osstart_idx = snippet.find("os.startfile(", win_idx)
-    next_branch_idx = snippet.find("sys.platform ==", win_idx + 30)
-    assert win_idx > 0
-    assert osstart_idx > 0
-    assert osstart_idx < next_branch_idx, "os.startfile must be in win32 branch"
+    assert "launch_system_opener(path, platform_name=sys.platform)" in snippet
 
 
-def test_file_reveal_uses_list_form_popen():
-    """The string-form Popen was the suspect for 'reveal looks dead'.
-    List form is unambiguous — the /select,<path> argv token is
-    passed as one element, no quoting bugs."""
+def test_file_reveal_uses_hardened_reveal_mode():
     src = Path("src/one_link/server.py").read_text(encoding="utf-8")
     idx = src.find("async def api_file_reveal(")
     snippet = src[idx:idx + 2500]
-    # List-form: ["explorer.exe", f"/select,{path}"]
-    assert '["explorer.exe", f"/select,{path}"]' in snippet
-    # No more f-string command-line form
+    assert (
+        "launch_system_opener(path, reveal=True, platform_name=sys.platform)"
+        in snippet
+    )
     assert 'f\'explorer.exe /select,"{norm}"\'' not in snippet
 
 
@@ -129,9 +116,9 @@ def test_rdz_help_leads_with_wifi_only_message(index_html: str):
     """The default answer for most users is 'you don't need this' —
     that should be the first sentence, not the third."""
     idx = index_html.find('id="rdz-help-backdrop"')
-    snippet = index_html[idx:idx + 2500]
+    snippet = " ".join(index_html[idx:idx + 2500].split())
     assert 'Wi-Fi network' in snippet
-    assert "perfect for household use" in snippet
+    assert "usually all a household needs" in snippet
 
 
 def test_rdz_help_close_label_changed(index_html: str):

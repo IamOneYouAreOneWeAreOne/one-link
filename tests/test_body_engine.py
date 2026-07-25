@@ -18,12 +18,10 @@ Covers:
 
 from __future__ import annotations
 
-import pytest
 
 from one_link.body_engine import (
     BodyEngine,
     DeviceCapability,
-    ScoringWeights,
     SurfaceHandoff,
     score_device_for_role,
 )

@@ -11,12 +11,11 @@
 //!   chain_key = BLAKE3.derive_key("OL-pair-qr-v1-chain-key", transcript || x25519_ss)
 //! ```
 //!
-//! Optional Factor-2: if both sides also ran channel-reciprocity
-//! (see [`crate::PROTOCOL_DOMAIN`] + `ol_proximity_pair`), the
-//! privacy-amplified Factor-2 key is mixed in via
-//! [`mix_factor2_recip`] producing a new chain key that requires
-//! BOTH the in-person QR scan AND physical co-presence to derive.
-//! Remote-relay attackers without RF access cannot reproduce it.
+//! Optional Factor-2: externally supplied 32-byte candidate material can be
+//! mixed in via [`mix_factor2_recip`]. The stateful pairing API performs
+//! explicit key confirmation before releasing the mixed key. This low-level
+//! transform alone does not prove candidate entropy, provenance, physical
+//! co-presence, or resistance to relay attacks.
 
 use blake3::Hasher;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -26,6 +25,25 @@ use crate::PROTOCOL_DOMAIN;
 
 /// Length of the chain key in bytes.
 pub const CHAIN_KEY_LEN: usize = 32;
+
+/// Byte length of each Factor-2 key-confirmation tag.
+pub const FACTOR2_CONFIRMATION_TAG_LEN: usize = 32;
+
+/// Protocol role bound into a Factor-2 key-confirmation tag.
+#[derive(Clone, Copy)]
+pub(crate) enum Factor2ConfirmationRole {
+    Inviter,
+    Scanner,
+}
+
+impl Factor2ConfirmationRole {
+    fn domain(self) -> &'static [u8] {
+        match self {
+            Self::Inviter => b"inviter",
+            Self::Scanner => b"scanner",
+        }
+    }
+}
 
 /// Strongly-typed chain key. Zeroized on drop.
 #[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
@@ -69,13 +87,14 @@ pub fn derive_chain_key(transcript: &TranscriptHash, x25519_ss: &[u8; 32]) -> Ch
     ChainKey { inner: k }
 }
 
-/// Mix a Factor-2 channel-reciprocity-derived key into the chain
-/// key. The output requires possession of BOTH factor secrets to
-/// reproduce. Use this when both peers also ran
-/// `ol_proximity_pair`'s quantize→reconcile→amplify pipeline.
+/// Mix externally supplied Factor-2 candidate material into the chain key.
+/// The output requires both the base chain key and candidate to reproduce.
 ///
-/// `factor2_key` should be the 32-byte output of
-/// `ol_proximity_pair::privacy_amplify`.
+/// This is a low-level deterministic transform, not an agreement protocol.
+/// Applications must use [`crate::Inviter::confirm_with_factor2`],
+/// [`crate::Scanner::receive_confirm_with_factor2`], and
+/// [`crate::Inviter::receive_factor2_ack`] so mismatched candidates fail
+/// closed before ratchet state is created.
 pub fn mix_factor2_recip(chain_key: &ChainKey, factor2_key: &[u8; 32]) -> ChainKey {
     let mut h = Hasher::new();
     h.update(PROTOCOL_DOMAIN);
@@ -86,6 +105,34 @@ pub fn mix_factor2_recip(chain_key: &ChainKey, factor2_key: &[u8; 32]) -> ChainK
     let mut k = [0u8; CHAIN_KEY_LEN];
     k.copy_from_slice(digest.as_bytes());
     ChainKey { inner: k }
+}
+
+/// Produce a transcript- and role-bound proof of possession of the final
+/// Factor-2-mixed chain key.
+///
+/// This is intentionally crate-private: applications must use the stateful
+/// [`crate::Inviter`] / [`crate::Scanner`] confirmation exchange instead of
+/// treating a standalone tag as authentication.
+pub(crate) fn factor2_confirmation_tag(
+    chain_key: &ChainKey,
+    transcript: &TranscriptHash,
+    role: Factor2ConfirmationRole,
+) -> [u8; FACTOR2_CONFIRMATION_TAG_LEN] {
+    let mut h = Hasher::new_keyed(chain_key.as_bytes());
+    h.update(PROTOCOL_DOMAIN);
+    h.update(b"-factor2-key-confirm-v1");
+    h.update(role.domain());
+    h.update(transcript.as_bytes());
+    *h.finalize().as_bytes()
+}
+
+/// Constant-time verification for a Factor-2 key-confirmation tag.
+pub(crate) fn factor2_confirmation_matches(
+    expected: &[u8; FACTOR2_CONFIRMATION_TAG_LEN],
+    supplied: &[u8; FACTOR2_CONFIRMATION_TAG_LEN],
+) -> bool {
+    use subtle::ConstantTimeEq;
+    bool::from(expected.ct_eq(supplied))
 }
 
 #[cfg(test)]
@@ -152,6 +199,24 @@ mod tests {
         let m2 = mix_factor2_recip(&k, &f2b);
         f2a.zeroize();
         assert_ne!(m1, m2);
+    }
+
+    #[test]
+    fn factor2_confirmation_is_key_transcript_and_role_bound() {
+        let t1 = TranscriptHash::from_bytes([0x42; TRANSCRIPT_LEN]);
+        let t2 = TranscriptHash::from_bytes([0x43; TRANSCRIPT_LEN]);
+        let k1 = ChainKey::from_bytes([0x11; CHAIN_KEY_LEN]);
+        let k2 = ChainKey::from_bytes([0x12; CHAIN_KEY_LEN]);
+        let inviter = factor2_confirmation_tag(&k1, &t1, Factor2ConfirmationRole::Inviter);
+        let same = factor2_confirmation_tag(&k1, &t1, Factor2ConfirmationRole::Inviter);
+        let other_key = factor2_confirmation_tag(&k2, &t1, Factor2ConfirmationRole::Inviter);
+        let other_transcript = factor2_confirmation_tag(&k1, &t2, Factor2ConfirmationRole::Inviter);
+        let other_role = factor2_confirmation_tag(&k1, &t1, Factor2ConfirmationRole::Scanner);
+
+        assert!(factor2_confirmation_matches(&inviter, &same));
+        assert!(!factor2_confirmation_matches(&inviter, &other_key));
+        assert!(!factor2_confirmation_matches(&inviter, &other_transcript));
+        assert!(!factor2_confirmation_matches(&inviter, &other_role));
     }
 
     #[test]

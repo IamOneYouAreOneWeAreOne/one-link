@@ -5,7 +5,7 @@
 //! 1%) and uses Kirsch + Mitzenmacher 2006 double-hashing to avoid
 //! computing `k` independent BLAKE3 hashes per insert/query. Two
 //! BLAKE3-derived hashes (one per registered domain context) are
-//! computed once per chunk_id; the `k` bit-positions are linear
+//! computed once per `chunk_id`; the `k` bit-positions are linear
 //! combinations.
 //!
 //! ## Wire format
@@ -28,7 +28,7 @@ pub mod filter;
 pub mod sizing;
 
 pub use error::BloomError;
-pub use filter::{Bloom, BLOOM_HEADER_LEN, MAX_FILTER_BYTES};
+pub use filter::{Bloom, BLOOM_HEADER_LEN, MAX_FILTER_BITS, MAX_FILTER_BYTES};
 pub use sizing::{optimal_k, optimal_m_bits, target_fp_rate, DEFAULT_TARGET_FP_RATE};
 
 /// Crate version embedded for diagnostics.

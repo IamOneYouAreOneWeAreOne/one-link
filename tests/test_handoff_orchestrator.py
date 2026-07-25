@@ -11,11 +11,9 @@ import pytest
 
 from one_link.crossfade import CrossfadeKind
 from one_link.handoff_orchestrator import (
-    ActiveHandoff,
     HandoffOrchestrator,
     HandoffPhase,
     HandoffRequest,
-    HandoffTick,
 )
 
 

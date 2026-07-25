@@ -15,14 +15,22 @@ fn take_byte(input: &mut &[u8]) -> Option<u8> {
 
 fuzz_target!(|data: &[u8]| {
     let mut input = data;
-    let Some(n_nodes) = take_byte(&mut input) else { return };
+    let Some(n_nodes) = take_byte(&mut input) else {
+        return;
+    };
     let n_nodes = (n_nodes % 16) as usize + 1;
     let nodes: Vec<String> = (0..n_nodes).map(|i| format!("n{}", i)).collect();
     let mut edges: Vec<(String, String)> = Vec::new();
-    let Some(n_edges) = take_byte(&mut input) else { return };
+    let Some(n_edges) = take_byte(&mut input) else {
+        return;
+    };
     for _ in 0..(n_edges % 32) {
-        let Some(a) = take_byte(&mut input) else { break };
-        let Some(b) = take_byte(&mut input) else { break };
+        let Some(a) = take_byte(&mut input) else {
+            break;
+        };
+        let Some(b) = take_byte(&mut input) else {
+            break;
+        };
         let ai = (a as usize) % nodes.len();
         let bi = (b as usize) % nodes.len();
         if ai != bi {

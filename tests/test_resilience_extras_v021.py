@@ -17,10 +17,7 @@ from __future__ import annotations
 
 import inspect
 import os
-import sys
 from pathlib import Path
-from types import SimpleNamespace
-from unittest import mock
 
 import pytest
 
@@ -148,20 +145,43 @@ def test_quote_for_shell_double_quotes_spaces_on_nt(monkeypatch):
     assert " python " in " " + out + " "
 
 
-def test_quote_for_shell_single_quotes_on_posix(monkeypatch):
+def test_quote_for_shell_double_quotes_on_posix(monkeypatch):
     from one_link import autostart
     monkeypatch.setattr(autostart.os, "name", "posix", raising=False)
     out = autostart._quote_for_shell(["python", "with space"])
-    assert "'with space'" in out
-    assert "'python'" in out
+    assert '"with space"' in out
+    assert '"python"' in out
 
 
 def test_quote_for_shell_escapes_embedded_quotes_on_posix(monkeypatch):
     from one_link import autostart
     monkeypatch.setattr(autostart.os, "name", "posix", raising=False)
     out = autostart._quote_for_shell(["weird's name"])
-    # Single quote inside single-quoted string: close, escape, reopen.
-    assert "weird'\\''s name" in out
+    # Desktop Exec uses double quotes, so apostrophes remain literal.
+    assert out == '"weird\'s name"'
+
+
+def test_autostart_launch_command_ignores_attacker_path(tmp_path, monkeypatch):
+    from one_link import autostart
+
+    attacker = tmp_path / ("one-link.exe" if os.name == "nt" else "one-link")
+    attacker.write_text("attacker", encoding="utf-8")
+    attacker.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    command = autostart._launch_command()
+
+    assert Path(command[0]).is_absolute()
+    assert Path(command[0]).resolve() != attacker.resolve()
+
+
+def test_desktop_exec_escapes_field_codes_and_rejects_controls(monkeypatch):
+    from one_link import autostart
+
+    monkeypatch.setattr(autostart.os, "name", "posix", raising=False)
+    assert autostart._quote_for_shell(["100%", "$HOME"]) == '"100%%" "\\$HOME"'
+    with pytest.raises(ValueError):
+        autostart._quote_for_shell(["line\nbreak"])
 
 
 # ─── autostart — macOS backend ─────────────────────────────────────────
@@ -183,6 +203,25 @@ def test_macos_enable_writes_plist_and_round_trips(tmp_path, monkeypatch):
     assert autostart.is_enabled() is True
     assert autostart.disable() is True
     assert autostart.is_enabled() is False
+
+
+def test_macos_plist_escapes_executable_arguments(tmp_path, monkeypatch):
+    import plistlib
+    from one_link import autostart
+
+    monkeypatch.setattr(autostart.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(autostart, "_backend", lambda: "macos")
+    monkeypatch.setattr(
+        autostart,
+        "_launch_command",
+        lambda: ["/Applications/One & Link.app/one<link>", "app"],
+    )
+    path = autostart.enable()
+    payload = plistlib.loads(path.read_bytes())
+    assert payload["ProgramArguments"] == [
+        "/Applications/One & Link.app/one<link>",
+        "app",
+    ]
 
 
 def test_macos_disable_idempotent_when_not_enabled(tmp_path, monkeypatch):

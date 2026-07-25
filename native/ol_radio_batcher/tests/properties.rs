@@ -26,7 +26,8 @@ proptest! {
     ) {
         let mut b: Batcher<u32> = Batcher::new();
         for i in 0..n_enqueue {
-            b.enqueue(format!("p{i}"), i as u32, prio, start_ms).unwrap();
+            let value = u32::try_from(i).expect("the generator limits queue length to 49");
+            b.enqueue(format!("p{i}"), value, prio, start_ms).unwrap();
         }
         let prior_len = b.len();
         let (drained, outcome) = b.drain(start_ms + drain_offset_ms);
@@ -46,7 +47,9 @@ proptest! {
         let mut b: Batcher<u32> = Batcher::with_config(50, max_size, 20_000).unwrap();
         for i in 0..n_attempts {
             let prior = b.len();
-            match b.enqueue(format!("p{i}"), i as u32, Priority::Normal, start_ms + i as u64) {
+            let value = u32::try_from(i).expect("the generator limits attempts to 49");
+            let elapsed = u64::try_from(i).expect("supported Rust pointer widths fit in u64");
+            match b.enqueue(format!("p{i}"), value, Priority::Normal, start_ms + elapsed) {
                 Ok(()) => {
                     prop_assert_eq!(b.len(), prior + 1);
                 }
@@ -84,7 +87,9 @@ proptest! {
     ) {
         let mut b: Batcher<u32> = Batcher::new();
         for i in 0..n {
-            b.enqueue("p", i as u32, prio, start_ms + i as u64).unwrap();
+            let value = u32::try_from(i).expect("the generator limits queue length to 19");
+            let elapsed = u64::try_from(i).expect("supported Rust pointer widths fit in u64");
+            b.enqueue("p", value, prio, start_ms + elapsed).unwrap();
         }
         // Drain far in the future so everything is eligible.
         let (drained, _) = b.drain(start_ms + 1_000_000);
@@ -102,7 +107,8 @@ proptest! {
     ) {
         let mut b: Batcher<u32> = Batcher::new();
         for i in 0..n {
-            b.enqueue("p", i as u32, prio, 1000).unwrap();
+            let value = u32::try_from(i).expect("the generator limits queue length to 49");
+            b.enqueue("p", value, prio, 1000).unwrap();
         }
         let drained = b.drain_all();
         prop_assert_eq!(drained.len(), n);
@@ -137,7 +143,8 @@ proptest! {
         let mut prev_rejected = 0u64;
         let mut prev_aged = 0u64;
         for (i, (prio, val)) in ops.iter().enumerate() {
-            let now = 1000 + i as u64 * 10;
+            let index = u64::try_from(i).expect("supported Rust pointer widths fit in u64");
+            let now = 1000 + index * 10;
             let _ = b.enqueue(format!("p{i}"), *val, *prio, now);
             // Periodic drain.
             if i % 5 == 4 {

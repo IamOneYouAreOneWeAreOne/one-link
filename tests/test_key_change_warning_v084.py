@@ -17,7 +17,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from aiohttp import web
 
+from one_link.server import UIServer
 from one_link.state import State
 
 
@@ -216,23 +218,46 @@ def test_upsert_peer_no_pending_id_when_no_conflict(state: State):
 # ───────── server / UI smoke ─────────────────────────────────────────
 
 def test_server_routes_key_change_endpoints():
-    src = Path("src/one_link/server.py").read_text(encoding="utf-8")
-    assert (
-        'r.add_get("/api/key-change-events", '
-        'self._guarded(self.api_list_key_change_events))'
-    ) in src
-    assert (
-        'r.add_post(r"/api/key-change-events/{event_id}/ack", '
-        'self._guarded(self.api_ack_key_change_event))'
-    ) in src
-    assert (
-        'r.add_post(r"/api/peers/{fp}/key-change-events/ack-all", '
-        'self._guarded(self.api_ack_peer_key_change_events))'
-    ) in src
-    assert (
-        'r.add_get(r"/api/peers/{fp}/key-history", '
-        'self._guarded(self.api_get_peer_key_history))'
-    ) in src
+    """Assert the executable aiohttp routing contract, not source layout.
+
+    Constructing the route table without running ``UIServer.__init__`` keeps
+    this a fast unit test while still executing the same registration method
+    production uses.  Exact-source assertions made harmless formatter changes
+    look like missing security endpoints.
+    """
+    server = UIServer.__new__(UIServer)
+    server.app = web.Application()
+    server._setup_routes()
+
+    routes: dict[tuple[str, str], tuple[str, str]] = {}
+    for resource in server.app.router.resources():
+        for route in resource:
+            info = route.get_info()
+            path = info.get("path") or info.get("formatter")
+            target_name = ""
+            for cell in route.handler.__closure__ or ():
+                candidate = cell.cell_contents
+                if getattr(candidate, "__self__", None) is server:
+                    target_name = getattr(candidate, "__name__", "")
+                    break
+            routes[(route.method, path)] = (
+                target_name,
+                route.handler.__qualname__,
+            )
+
+    expected = {
+        ("GET", "/api/key-change-events"): "api_list_key_change_events",
+        ("POST", "/api/key-change-events/{event_id}/ack"): "api_ack_key_change_event",
+        (
+            "POST",
+            "/api/peers/{fp}/key-change-events/ack-all",
+        ): "api_ack_peer_key_change_events",
+        ("GET", "/api/peers/{fp}/key-history"): "api_get_peer_key_history",
+    }
+    for route_contract, target_name in expected.items():
+        actual_target, wrapper = routes[route_contract]
+        assert actual_target == target_name
+        assert wrapper.startswith("UIServer._guarded.")
 
 
 def test_api_peers_attaches_key_change_alert():

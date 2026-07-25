@@ -25,10 +25,10 @@ properties.
 
 from __future__ import annotations
 
-import hashlib
 from typing import List
 
-import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.call_immune import (
     GraduationMode,
@@ -60,7 +60,7 @@ from one_link.frame_provenance import (
     sign_provenance,
     make_segment_hash,
 )
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from one_link.identity import fingerprint_of
 
 
 # ---------------------------------------------------------------------------
@@ -130,13 +130,18 @@ def test_wifi_unplug_to_voice_note_to_resume() -> None:
 
     # Set up a CallManager in originator role.
     signing_key = Ed25519PrivateKey.generate()
-    device_id = hashlib.sha256(b"alice").hexdigest()[:8]
+    local_public = signing_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    local_fingerprint = fingerprint_of(local_public)
+    device_id = local_fingerprint[:8]
     call_id = "demo-headline-1"
     mgr = CallManager(
         call_id=call_id,
-        peer_master_vk_hex="bob",
+        peer_master_vk_hex="b" * 64,
         local_role="originator",
-        local_master_vk_hex="alice",
+        local_master_vk_hex=local_fingerprint,
         started_at_ms=1_000,
     )
 
@@ -264,9 +269,9 @@ def test_voice_only_then_recovery_does_not_convert_to_async() -> None:
     call_id = "demo-recover-1"
     mgr = CallManager(
         call_id=call_id,
-        peer_master_vk_hex="bob",
+        peer_master_vk_hex="b" * 64,
         local_role="originator",
-        local_master_vk_hex="alice",
+        local_master_vk_hex="a" * 64,
         started_at_ms=1_000,
     )
     mgr.handle(ManagerEvent(ManagerEventKind.USER_INITIATE_CALL, 1_000))
@@ -311,13 +316,18 @@ def test_capsule_carries_chained_provenance_post_demo() -> None:
     property: every byte the recipient hears has cryptographic
     provenance back to Alice's identity key."""
     signing_key = Ed25519PrivateKey.generate()
-    device_id = hashlib.sha256(b"alice").hexdigest()[:8]
+    local_public = signing_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    local_fingerprint = fingerprint_of(local_public)
+    device_id = local_fingerprint[:8]
     call_id = "demo-capsule-prov-1"
     mgr = CallManager(
         call_id=call_id,
-        peer_master_vk_hex="bob",
+        peer_master_vk_hex="b" * 64,
         local_role="originator",
-        local_master_vk_hex="alice",
+        local_master_vk_hex=local_fingerprint,
         started_at_ms=1_000,
     )
     mgr.handle(ManagerEvent(ManagerEventKind.USER_INITIATE_CALL, 1_000))
@@ -341,6 +351,7 @@ def test_capsule_carries_chained_provenance_post_demo() -> None:
     ))
     capsule = out.finalized_capsule
     assert capsule is not None
+    assert capsule.all_frames_verified_by(local_public)
     # Every audio segment has its FrameProvenance attached.
     assert len(capsule.provenance_chain) == 5
     for prov in capsule.provenance_chain:

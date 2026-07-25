@@ -8,7 +8,7 @@
 //! - [`LtDecoder`] — reconstructs the chunk plaintext from any
 //!   sufficient subset of encoded symbols via belief propagation.
 //! - [`FountainPacket`] — on-wire encode/decode of a single fountain
-//!   packet (chunk_id + k + symbol_id + source_length + payload).
+//!   packet (`chunk_id` + `k` + `symbol_id` + `source_length` + payload).
 //! - [`Distribution`](distribution) — Robust Soliton degree distribution
 //!   with Phase B-fixed (`c=0.03`, `δ=0.05`) parameters.
 //!
@@ -18,7 +18,7 @@
 //!   that's `ol_transfer`'s job (will land in Phase B-1.5 once a
 //!   `FountainBurst` frame kind ships).
 //! - It does not verify chunk integrity. The caller is expected to
-//!   compute `BLAKE3(decoded_plaintext)` and compare to the chunk_id
+//!   compute `BLAKE3(decoded_plaintext)` and compare to the `chunk_id`
 //!   before storing.
 
 #![doc(html_root_url = "https://docs.rs/ol_fountain/0.21.0")]
@@ -31,7 +31,10 @@ pub mod packet;
 pub mod rng;
 mod xor;
 
-pub use decoder::{LtDecoder, MAX_ENCODED_PER_CHUNK};
+pub use decoder::{
+    LtDecoder, MAX_DECODER_BUFFER_BYTES, MAX_ENCODED_PER_CHUNK, MAX_SOURCE_BYTES,
+    MAX_SOURCE_SYMBOLS_PER_CHUNK, MAX_SYMBOL_LEN,
+};
 pub use distribution::{robust_soliton_cdf, sample_degree, sample_neighbors, C, DELTA};
 pub use encoder::LtEncoder;
 pub use error::FountainError;

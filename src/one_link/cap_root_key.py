@@ -20,7 +20,9 @@ Persistence
 The cap_root_key file lives at ``<data_dir>/cap_root.key``. On
 Windows it's DPAPI-wrapped (same scheme as ``master.seed`` and the
 lockbox data-root key); on POSIX it's raw 32 bytes with mode 0600.
-Atomic via temp + rename.
+Explicit rotations use validated temp + atomic replace. First boot uses a
+fsynced temp + atomic no-replace hard-link so concurrent daemons converge on
+one authority and an existing corrupt/unreadable artifact is never replaced.
 
 Recovery
 --------
@@ -36,9 +38,19 @@ from __future__ import annotations
 
 import os
 import secrets
-import tempfile
 from pathlib import Path
 from typing import Optional
+
+from one_link.key_material import (
+    KeyMaterialIntegrityError,
+    KeyMaterialPersistenceError,
+    KeyMaterialProtectionError,
+    artifact_exists,
+    atomic_create_bytes,
+    atomic_replace_bytes,
+    read_bytes_if_exists,
+    sync_existing_authority,
+)
 
 
 CAP_ROOT_KEY_FILENAME = "cap_root.key"
@@ -50,33 +62,66 @@ def _cap_root_key_path(data_dir: Path) -> Path:
 
 
 def has_cap_root_key(data_dir: Path) -> bool:
-    """True iff a cap_root_key file exists on disk."""
-    return _cap_root_key_path(data_dir).is_file()
+    """True iff any cap-root authority artifact exists on disk."""
+    return artifact_exists(
+        _cap_root_key_path(data_dir), label="capability root key"
+    )
+
+
+def _harden_cap_root_path(path: Path) -> None:
+    if os.name == "nt":
+        from one_link.identity import _restrict_windows_acl
+
+        _restrict_windows_acl(path)
+
+
+def _decode_cap_root_blob(blob: bytes) -> bytes:
+    if not blob:
+        raise KeyMaterialIntegrityError("existing capability root key is empty")
+    if os.name == "nt":
+        from one_link.lockbox import _dpapi_unprotect
+
+        unwrapped = _dpapi_unprotect(blob)
+        if unwrapped is None:
+            raise KeyMaterialProtectionError(
+                "existing capability root key could not be DPAPI-unprotected"
+            )
+        if len(unwrapped) != CAP_ROOT_KEY_LEN_BYTES:
+            raise KeyMaterialIntegrityError(
+                "existing capability root key has an invalid unwrapped length"
+            )
+        return bytes(unwrapped)
+    if len(blob) != CAP_ROOT_KEY_LEN_BYTES:
+        raise KeyMaterialIntegrityError(
+            "existing capability root key has an invalid length"
+        )
+    return bytes(blob)
+
+
+def _encode_cap_root(key: bytes) -> bytes:
+    if os.name != "nt":
+        return bytes(key)
+    from one_link.lockbox import _dpapi_protect
+
+    wrapped = _dpapi_protect(bytes(key))
+    if not wrapped:
+        raise KeyMaterialProtectionError(
+            "DPAPI protection failed; refusing to persist a raw capability root key"
+        )
+    return bytes(wrapped)
 
 
 def load_cap_root_key(data_dir: Path) -> Optional[bytes]:
-    """Read the cap_root_key off disk + DPAPI-unwrap on Windows.
-    Returns None if no cap_root_key file exists or unwrap fails.
-    """
-    p = _cap_root_key_path(data_dir)
-    if not p.is_file():
+    """Load the key; return ``None`` only for a proven-absent artifact."""
+    blob = read_bytes_if_exists(
+        _cap_root_key_path(data_dir),
+        label="capability root key",
+        max_bytes=65536,
+        harden_path=_harden_cap_root_path,
+    )
+    if blob is None:
         return None
-    try:
-        blob = p.read_bytes()
-    except OSError:
-        return None
-    if not blob:
-        return None
-    if os.name == "nt":
-        # Same DPAPI scheme as master.seed.
-        from one_link.lockbox import _dpapi_unprotect
-        unwrapped = _dpapi_unprotect(blob)
-        if unwrapped is None or len(unwrapped) != CAP_ROOT_KEY_LEN_BYTES:
-            return None
-        return unwrapped
-    if len(blob) != CAP_ROOT_KEY_LEN_BYTES:
-        return None
-    return blob
+    return _decode_cap_root_blob(blob)
 
 
 def store_cap_root_key(data_dir: Path, key: bytes) -> None:
@@ -89,44 +134,22 @@ def store_cap_root_key(data_dir: Path, key: bytes) -> None:
             f"cap_root_key must be {CAP_ROOT_KEY_LEN_BYTES} bytes, "
             f"got {len(key)}"
         )
-    data_dir = Path(data_dir)
-    data_dir.mkdir(parents=True, exist_ok=True)
-    p = _cap_root_key_path(data_dir)
+    expected = bytes(key)
+    payload = _encode_cap_root(expected)
 
-    if os.name == "nt":
-        from one_link.lockbox import _dpapi_protect
-        wrapped = _dpapi_protect(bytes(key))
-        if wrapped is None:
-            raise RuntimeError("DPAPI wrap failed for cap_root_key")
-        payload = wrapped
-    else:
-        payload = bytes(key)
+    def _validate(blob: bytes) -> None:
+        if not secrets.compare_digest(_decode_cap_root_blob(blob), expected):
+            raise KeyMaterialIntegrityError(
+                "persisted capability root key does not match requested authority"
+            )
 
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=".cap_root_key.tmp.", dir=str(data_dir),
+    atomic_replace_bytes(
+        _cap_root_key_path(data_dir),
+        payload,
+        label="capability root key",
+        validate=_validate,
+        harden_path=_harden_cap_root_path,
     )
-    try:
-        try:
-            os.write(fd, payload)
-            # 2026-05-22 audit Batch KK: fsync before close so a
-            # power-loss / OS crash between write and rename can't
-            # leave a zero-byte or partial cap_root_key file. The
-            # rename is atomic on POSIX; without fsync, the rename
-            # may complete with the destination pointing at
-            # unflushed bytes.
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        if os.name != "nt":
-            os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, p)
-    except Exception:
-        # Best-effort cleanup of the temp file if rename failed.
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
 
 
 def load_or_create_cap_root_key(data_dir: Path) -> tuple[bytes, bool]:
@@ -138,8 +161,31 @@ def load_or_create_cap_root_key(data_dir: Path) -> tuple[bytes, bool]:
     if existing is not None:
         return existing, False
     key = secrets.token_bytes(CAP_ROOT_KEY_LEN_BYTES)
-    store_cap_root_key(data_dir, key)
-    return key, True
+    payload = _encode_cap_root(key)
+
+    def _validate(blob: bytes) -> None:
+        if not secrets.compare_digest(_decode_cap_root_blob(blob), key):
+            raise KeyMaterialIntegrityError(
+                "published capability root key does not match generated authority"
+            )
+
+    if atomic_create_bytes(
+        _cap_root_key_path(data_dir),
+        payload,
+        label="capability root key",
+        validate=_validate,
+        harden_path=_harden_cap_root_path,
+    ):
+        return key, True
+    sync_existing_authority(
+        _cap_root_key_path(data_dir), label="capability root key"
+    )
+    winner = load_cap_root_key(data_dir)
+    if winner is None:
+        raise KeyMaterialPersistenceError(
+            "concurrent capability-root publication reported a winner but none exists"
+        )
+    return winner, False
 
 
 CAP_ROOT_KEY_OLD_FILENAME = "cap_root.old.key"
@@ -151,9 +197,9 @@ def rotate_cap_root_key(data_dir: Path) -> tuple[bytes, bytes | None]:
     Mints a fresh key, atomically swaps the active key file, and
     preserves the previous key at ``cap_root.old.key`` so any
     in-flight macaroons that haven't expired yet can still verify
-    during a brief grace window. Operators invoke this via a
-    privileged control-socket command (TBD) when a cap_root_key
-    compromise is suspected.
+    during a brief grace window. This low-level primitive is intended for
+    authenticated recovery tooling; it is deliberately not exposed through
+    the daemon's ordinary peer-facing command surface.
 
     Returns ``(new_key, prior_key_or_None)``. The prior key is
     None on first-ever rotation (no active key was present).
@@ -169,46 +215,21 @@ def rotate_cap_root_key(data_dir: Path) -> tuple[bytes, bytes | None]:
         # verifier can accept macaroons minted under it for a
         # short overlap window.
         old_path = data_dir / CAP_ROOT_KEY_OLD_FILENAME
-        if os.name == "nt":
-            from one_link.lockbox import _dpapi_protect
-            wrapped = _dpapi_protect(prior)
-            if wrapped is None:
-                # 2026-05-22 audit FO-4: REFUSE to silently write the
-                # prior key in plaintext when DPAPI wrap fails. The
-                # active key's ``store_cap_root_key`` raises on this
-                # same condition; rotation's old-key persistence must
-                # match that contract, not degrade to a plaintext
-                # file. Caller can retry rotation after the operator
-                # investigates DPAPI availability.
-                raise RuntimeError(
-                    "rotate_cap_root_key: cannot persist prior key — "
-                    "DPAPI wrap failed and we refuse to write key "
-                    "material in plaintext. Investigate DPAPI "
-                    "availability (Windows credential store) and retry."
+        payload = _encode_cap_root(prior)
+
+        def _validate_prior(blob: bytes) -> None:
+            if not secrets.compare_digest(_decode_cap_root_blob(blob), prior):
+                raise KeyMaterialIntegrityError(
+                    "persisted prior capability root does not match authority"
                 )
-            payload = wrapped
-        else:
-            payload = prior
-        fd, tmp_path = tempfile.mkstemp(
-            prefix=".cap_root_key_old.tmp.", dir=str(data_dir),
+
+        atomic_replace_bytes(
+            old_path,
+            payload,
+            label="prior capability root key",
+            validate=_validate_prior,
+            harden_path=_harden_cap_root_path,
         )
-        try:
-            try:
-                os.write(fd, payload)
-                # 2026-05-22 audit Batch KK: fsync the old-key file
-                # too so the grace-window verifier sees the full
-                # blob if power-loss / crash interrupts rotation.
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            if os.name != "nt":
-                os.chmod(tmp_path, 0o600)
-            os.replace(tmp_path, old_path)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
     new_key = secrets.token_bytes(CAP_ROOT_KEY_LEN_BYTES)
     store_cap_root_key(data_dir, new_key)
     return new_key, prior
@@ -220,21 +241,12 @@ def load_prior_cap_root_key(data_dir: Path) -> Optional[bytes]:
     during the grace window so macaroons minted under the prior key
     still verify until they expire / are revoked.
     """
-    p = Path(data_dir) / CAP_ROOT_KEY_OLD_FILENAME
-    if not p.is_file():
+    blob = read_bytes_if_exists(
+        Path(data_dir) / CAP_ROOT_KEY_OLD_FILENAME,
+        label="prior capability root key",
+        max_bytes=65536,
+        harden_path=_harden_cap_root_path,
+    )
+    if blob is None:
         return None
-    try:
-        blob = p.read_bytes()
-    except OSError:
-        return None
-    if not blob:
-        return None
-    if os.name == "nt":
-        from one_link.lockbox import _dpapi_unprotect
-        unwrapped = _dpapi_unprotect(blob)
-        if unwrapped is None or len(unwrapped) != CAP_ROOT_KEY_LEN_BYTES:
-            return None
-        return unwrapped
-    if len(blob) != CAP_ROOT_KEY_LEN_BYTES:
-        return None
-    return blob
+    return _decode_cap_root_blob(blob)

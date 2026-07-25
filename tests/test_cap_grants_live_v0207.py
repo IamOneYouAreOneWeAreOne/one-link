@@ -18,7 +18,6 @@ import time
 from types import SimpleNamespace
 from typing import Optional
 
-import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link import cap_store, caps_grants
@@ -86,7 +85,7 @@ def test_grant_allows_capability_denied_by_policy():
     d = _make_daemon_for_capability_test()
     _, peer_pub = _gen_ed25519()
     peer_fp = peer_pub.hex()
-    d.state._peers[peer_fp] = SimpleNamespace(pubkey=peer_pub)
+    d.state._peers[peer_fp] = SimpleNamespace(pubkey=peer_pub, trust="pinned")
     # Binary policy explicitly denies files:read.
     d.state._policies[peer_fp] = {"chat:send"}  # only chat allowed
     # Without a grant, files:read is denied.
@@ -115,7 +114,7 @@ def test_expired_grant_falls_through_to_policy():
     d = _make_daemon_for_capability_test()
     _, peer_pub = _gen_ed25519()
     peer_fp = peer_pub.hex()
-    d.state._peers[peer_fp] = SimpleNamespace(pubkey=peer_pub)
+    d.state._peers[peer_fp] = SimpleNamespace(pubkey=peer_pub, trust="pinned")
     d.state._policies[peer_fp] = set()  # deny all
     me_seed = d.me.private.private_bytes_raw()
     base = _now_ms()
@@ -147,7 +146,7 @@ def test_revoked_grant_no_longer_allows():
     d = _make_daemon_for_capability_test()
     _, peer_pub = _gen_ed25519()
     peer_fp = peer_pub.hex()
-    d.state._peers[peer_fp] = SimpleNamespace(pubkey=peer_pub)
+    d.state._peers[peer_fp] = SimpleNamespace(pubkey=peer_pub, trust="pinned")
     d.state._policies[peer_fp] = set()  # deny all
     me_seed = d.me.private.private_bytes_raw()
     blob = caps_grants.encode_grant(
@@ -172,8 +171,8 @@ def test_grant_for_other_subject_does_not_apply():
     _, peer_b_pub = _gen_ed25519()
     peer_a_fp = peer_a_pub.hex()
     peer_b_fp = peer_b_pub.hex()
-    d.state._peers[peer_a_fp] = SimpleNamespace(pubkey=peer_a_pub)
-    d.state._peers[peer_b_fp] = SimpleNamespace(pubkey=peer_b_pub)
+    d.state._peers[peer_a_fp] = SimpleNamespace(pubkey=peer_a_pub, trust="pinned")
+    d.state._peers[peer_b_fp] = SimpleNamespace(pubkey=peer_b_pub, trust="pinned")
     d.state._policies[peer_a_fp] = set()  # deny all
     d.state._policies[peer_b_fp] = set()  # deny all
 
@@ -200,7 +199,7 @@ def test_grant_from_other_granter_not_recognized():
     d = _make_daemon_for_capability_test()
     _, peer_pub = _gen_ed25519()
     peer_fp = peer_pub.hex()
-    d.state._peers[peer_fp] = SimpleNamespace(pubkey=peer_pub)
+    d.state._peers[peer_fp] = SimpleNamespace(pubkey=peer_pub, trust="pinned")
     d.state._policies[peer_fp] = set()  # deny all
 
     other_seed, other_pub = _gen_ed25519()
@@ -217,13 +216,11 @@ def test_grant_from_other_granter_not_recognized():
     assert not d._capability_allowed(peer_fp, "files:read")
 
 
-def test_unknown_peer_fp_falls_through_to_policy():
-    """A peer_fp we don't have a pubkey for can't be matched
-    against grants — fall through to the binary policy check."""
+def test_unknown_peer_fp_is_not_authorized_by_missing_policy():
+    """A missing policy is legacy allow-all only for pinned peers."""
     d = _make_daemon_for_capability_test()
     unknown_fp = "ff" * 32
-    # No state entry. policy missing → None → allow-all.
-    assert d._capability_allowed(unknown_fp, "files:read")
+    assert not d._capability_allowed(unknown_fp, "files:read")
 
 
 def test_no_state_returns_false():

@@ -11,24 +11,24 @@ use ol_pqsig::{
 };
 
 fn map_err(e: PqSigError) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    PyValueError::new_err(crate::errors::owned_error_message(e))
 }
 
-/// Generate a fresh hybrid keypair. Returns (sk_64, vk_1984).
+/// Generate a fresh hybrid keypair. Returns (`sk_64`, `vk_1984`).
 #[pyfunction]
-fn generate_keypair<'py>(py: Python<'py>) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+fn generate_keypair(py: Python<'_>) -> (Bound<'_, PyBytes>, Bound<'_, PyBytes>) {
     let (sk, vk) = HybridSigningKey::generate(&mut OsRng);
-    Ok((
-        PyBytes::new_bound(py, &sk.to_bytes()),
-        PyBytes::new_bound(py, &vk.to_bytes()),
-    ))
+    (
+        PyBytes::new(py, &sk.to_bytes()),
+        PyBytes::new(py, &vk.to_bytes()),
+    )
 }
 
 /// Derive the verifying key from a 64-byte hybrid signing key.
 #[pyfunction]
 fn derive_vk<'py>(py: Python<'py>, sk_bytes: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     let sk = HybridSigningKey::from_bytes(sk_bytes).map_err(map_err)?;
-    Ok(PyBytes::new_bound(py, &sk.verifying_key().to_bytes()))
+    Ok(PyBytes::new(py, &sk.verifying_key().to_bytes()))
 }
 
 /// Sign `message` with the 64-byte hybrid signing key. Returns the
@@ -37,10 +37,10 @@ fn derive_vk<'py>(py: Python<'py>, sk_bytes: &[u8]) -> PyResult<Bound<'py, PyByt
 fn sign<'py>(py: Python<'py>, sk_bytes: &[u8], message: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
     let sk = HybridSigningKey::from_bytes(sk_bytes).map_err(map_err)?;
     let sig = sk.sign(message).map_err(map_err)?;
-    Ok(PyBytes::new_bound(py, &sig))
+    Ok(PyBytes::new(py, &sig))
 }
 
-/// Verify a hybrid signature. Raises ValueError on any failure.
+/// Verify a hybrid signature. Raises `ValueError` on any failure.
 #[pyfunction]
 fn verify(vk_bytes: &[u8], message: &[u8], sig: &[u8]) -> PyResult<()> {
     let vk = HybridVerifyingKey::from_bytes(vk_bytes).map_err(map_err)?;

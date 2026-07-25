@@ -7,8 +7,8 @@
 //!           (E_quantum(d) + α·|∇τ_c|² + (ΔC/ΔS)·A(x,t) + E_dark(d))
 //! ```
 //!
-//! over a small grid of candidate Decisions. Candidates that violate
-//! the user_mode contract are filtered out BEFORE energy comparison,
+//! over a small grid of candidate `Decision`s. Candidates that violate
+//! the `user_mode` contract are filtered out BEFORE energy comparison,
 //! so the F4 invariant
 //! (`selector_output_respects_mode_contract`) holds by construction.
 //!
@@ -34,6 +34,38 @@
 use crate::decision::{BatchDecision, ContractMode, Decision, OnionHops, Path, Transport};
 use crate::weights::Weights;
 use ol_decide::{Context, Decide, EventKind, NetworkType, PeerRelationship, UserMode};
+
+pub(crate) fn usize_as_f32(value: usize) -> f32 {
+    let integer = match u64::try_from(value) {
+        Ok(integer) => integer,
+        Err(error) => panic!("supported pointer widths must fit u64: {error}"),
+    };
+    if integer == 0 {
+        return 0.0;
+    }
+
+    let mut exponent = integer.ilog2();
+    let mut significand = if exponent <= 23 {
+        integer << (23 - exponent)
+    } else {
+        let shift = exponent - 23;
+        let truncated = integer >> shift;
+        let remainder = integer & ((1_u64 << shift) - 1);
+        let halfway = 1_u64 << (shift - 1);
+        let round_up = remainder > halfway || (remainder == halfway && truncated & 1 == 1);
+        truncated + u64::from(round_up)
+    };
+
+    if significand == 1_u64 << 24 {
+        significand >>= 1;
+        exponent += 1;
+    }
+    let mantissa = match u32::try_from(significand & 0x7F_FFFF) {
+        Ok(mantissa) => mantissa,
+        Err(error) => panic!("f32 mantissa must fit u32: {error}"),
+    };
+    f32::from_bits(((exponent + 127) << 23) | mantissa)
+}
 
 /// The continuous energy-minimization selector.
 ///
@@ -102,7 +134,7 @@ impl Decide<Decision> for UnifiedMin {
 }
 
 impl UnifiedMin {
-    /// Total energy for one (ctx, decision) pair.
+    /// Total energy for one (`ctx`, `decision`) pair.
     pub fn total_energy(&self, ctx: &Context, d: &Decision) -> f32 {
         let cd = self.c_dynamic(ctx);
         let eq = self.e_quantum(ctx, d);
@@ -112,12 +144,12 @@ impl UnifiedMin {
         cd * (eq + ec + ea + ed)
     }
 
-    /// C_dynamic = e^{-λD} where D is an event-scale dimension.
-    /// Smaller events have higher D → smaller C_dynamic → less
+    /// `C_dynamic = e^{-λD}` where `D` is an event-scale dimension.
+    /// Smaller events have higher `D` → smaller `C_dynamic` → less
     /// weight on overhead terms (we don't want to penalize a tiny
     /// chat for using a relay).
     pub fn c_dynamic(&self, ctx: &Context) -> f32 {
-        let scale = (ctx.size as f32).max(1.0).log10();
+        let scale = usize_as_f32(ctx.size).max(1.0).log10();
         let sensitivity_bump = match ctx.user_mode {
             UserMode::Paranoid => 3.0,
             UserMode::LatencyStrict => -1.0,
@@ -132,7 +164,7 @@ impl UnifiedMin {
         (-self.weights.lambda_dynamic * d).exp() * 100.0
     }
 
-    /// E_quantum: perf cost (latency + transport overhead).
+    /// `E_quantum`: performance cost (latency + transport overhead).
     pub fn e_quantum(&self, ctx: &Context, d: &Decision) -> f32 {
         let rtt = match ctx.network {
             NetworkType::Wifi => 28.0,
@@ -150,8 +182,8 @@ impl UnifiedMin {
         base_lat / 100.0
     }
 
-    /// E_coherence: stability/organization energy.
-    /// α·|∇τ_c|² + info-flow-counteracts-entropy term.
+    /// `E_coherence`: stability/organization energy.
+    /// `α·|∇τ_c|²` plus the information-flow-counteracts-entropy term.
     pub fn e_coherence(&self, ctx: &Context, d: &Decision) -> f32 {
         // |∇τ_c|² proxy: high uncertainty when both field warmth
         // (pattern_strength) is low AND no recent activity.
@@ -188,7 +220,7 @@ impl UnifiedMin {
         self.weights.alpha_coherence * coh_grad_sq + entropy_term + anchor_term
     }
 
-    /// E_alignment: (ΔC/ΔS) · A(x,t).
+    /// `E_alignment: (ΔC/ΔS) · A(x,t)`.
     /// Captures the privacy/trust cost of the decision.
     pub fn e_alignment(&self, ctx: &Context, d: &Decision) -> f32 {
         // Hop distance proxy from peer relationship.
@@ -231,7 +263,7 @@ impl UnifiedMin {
         cost
     }
 
-    /// E_dark: irreducible protocol overhead.
+    /// `E_dark`: irreducible protocol overhead.
     pub fn e_dark(&self, d: &Decision) -> f32 {
         let mut e = self.weights.dark_base;
         if d.path == Path::Coherence {
@@ -244,10 +276,10 @@ impl UnifiedMin {
     }
 }
 
-/// Generate the candidate grid for the given (context, predictor_warm,
-/// contract_mode). Filtered to candidates that pass the contract.
+/// Generate the candidate grid for the given (`context`, `predictor_warm`,
+/// `contract_mode`). Filtered to candidates that pass the contract.
 ///
-/// Returns a Vec rather than an iterator because the cartesian product
+/// Returns a `Vec` rather than an iterator because the cartesian product
 /// across heap-allocated `transport_options(ctx)` would require lifetime
 /// gymnastics to express as nested move-closures; the grid is small
 /// (≤ ~120 entries) so the allocation cost is trivial.
@@ -332,6 +364,21 @@ mod tests {
             user_mode: UserMode::Normal,
             observed_loss: 0.0,
             pattern_strength: 0.5,
+        }
+    }
+
+    #[test]
+    fn usize_to_f32_rounds_ties_to_even() {
+        let cases = [
+            (0, 0x0000_0000),
+            (1, 0x3F80_0000),
+            (16_777_215, 0x4B7F_FFFF),
+            (16_777_216, 0x4B80_0000),
+            (16_777_217, 0x4B80_0000),
+            (16_777_219, 0x4B80_0002),
+        ];
+        for (value, expected_bits) in cases {
+            assert_eq!(usize_as_f32(value).to_bits(), expected_bits);
         }
     }
 

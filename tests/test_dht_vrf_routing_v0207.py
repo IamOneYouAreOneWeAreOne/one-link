@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import os
 
-import pytest
 
 from one_link import dht, dht_vrf_routing as vrr, vrf
 
@@ -196,7 +195,6 @@ def test_vrf_routed_lookup_empty_table():
 
 
 def test_vrf_routed_lookup_reproducible_with_same_seed():
-    import secrets
     seed = os.urandom(32)
     nodes = [dht.NodeID.random() for _ in range(20)]
     contacts = {nid: dht.Contact(id=nid, address=f"a-{i}")

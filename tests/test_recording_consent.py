@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from one_link.frame_provenance import RecordingState
 from one_link.recording_consent import (

@@ -15,7 +15,7 @@ from one_link.call_api import (
     CallAction,
 )
 from one_link.call_manager import CallManagerRegistry, ManagerEvent, ManagerEventKind
-from one_link.call_signaling import CALL_ACCEPT, CALL_END, CALL_INVITE
+from one_link.call_signaling import CALL_END, CALL_INVITE
 from one_link.identity import Identity
 from one_link.recording_consent import RECORDING_REQUEST
 
@@ -154,6 +154,26 @@ def test_hangup_active_call_emits_end_and_completes(
     assert len(ends) == 1
 
 
+def test_convert_to_async_action_opens_real_capsule_capture(
+    alice_api: CallAPI, mom: Identity,
+) -> None:
+    initiated = alice_api.initiate(peer_master_vk_hex=mom.fingerprint)
+    assert initiated.call_id is not None
+    manager = alice_api._registry.get(initiated.call_id)
+    assert manager is not None
+    manager.handle(ManagerEvent(ManagerEventKind.WIRE_CALL_ACCEPT, 2_000))
+
+    response = alice_api.handle_json({
+        "action": "convert_to_async",
+        "call_id": initiated.call_id,
+    })
+
+    assert response.ok is True
+    assert response.phase == "async_capture"
+    assert manager.state.capsule_builder is not None
+    assert manager.state.capsule_builder.is_empty()
+
+
 # ---------------------------------------------------------------------------
 # Recording flow
 # ---------------------------------------------------------------------------
@@ -206,6 +226,56 @@ def test_handle_json_initiate(alice_api: CallAPI, mom: Identity) -> None:
     })
     assert resp.ok
     assert resp.call_id is not None
+
+
+@pytest.mark.parametrize("call_kind", ["voice", "video"])
+def test_initiate_binds_and_propagates_call_kind(
+    alice_api: CallAPI,
+    mom: Identity,
+    call_kind: str,
+) -> None:
+    resp = alice_api.handle_json({
+        "action": "initiate",
+        "peer_master_vk_hex": mom.fingerprint,
+        "kind": call_kind,
+    })
+    assert resp.ok
+    assert resp.call_kind == call_kind
+    assert resp.call_id is not None
+    mgr = alice_api._registry.get(resp.call_id)
+    assert mgr is not None
+    assert mgr.state.call_kind == call_kind
+    invites = [item for item in resp.outbound if item.type == CALL_INVITE]
+    assert len(invites) == 1
+    assert invites[0].payload["call_kind"] == call_kind
+
+
+def test_initiate_defaults_legacy_request_to_voice(
+    alice_api: CallAPI,
+    mom: Identity,
+) -> None:
+    resp = alice_api.handle_json({
+        "action": "initiate",
+        "peer_master_vk_hex": mom.fingerprint,
+    })
+    assert resp.ok
+    assert resp.call_kind == "voice"
+    assert resp.outbound[0].payload["call_kind"] == "voice"
+
+
+@pytest.mark.parametrize("call_kind", ["screen", "", 7, ["video"]])
+def test_initiate_rejects_invalid_call_kind_without_allocating(
+    alice_api: CallAPI,
+    mom: Identity,
+    call_kind,
+) -> None:
+    resp = alice_api.handle_json({
+        "action": "initiate",
+        "peer_master_vk_hex": mom.fingerprint,
+        "kind": call_kind,
+    })
+    assert not resp.ok
+    assert len(alice_api._registry) == 0
 
 
 def test_handle_json_accepts_uppercase_action(

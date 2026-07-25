@@ -29,7 +29,6 @@ envelope shape; test surface exposes the new helpers.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -350,7 +349,7 @@ def test_autopair_signs_offer_envelope(peer_html: str):
     """The offer envelope MUST carry pubkey + fingerprint +
     pair_token + ts + signature. Daemon's verify_offer_envelope
     rejects anything missing any of these."""
-    snippet = _snippet(peer_html, "async function _runAutoPairFlow", 6000)
+    snippet = _snippet(peer_html, "async function _runAutoPairFlow", 12000)
     assert "pubkey_b64u: rec.public_key_b64u" in snippet
     assert "fingerprint: rec.fingerprint" in snippet
     assert "pair_token: pair.pair_token" in snippet
@@ -360,12 +359,19 @@ def test_autopair_signs_offer_envelope(peer_html: str):
 
 
 def test_autopair_waits_for_ice_gathering(peer_html: str):
-    """Better LAN reliability if we wait for ICE gathering to
-    complete (or 2s cap) before sending the offer — sends a fully-
-    populated SDP rather than relying on trickle-only."""
-    snippet = _snippet(peer_html, "async function _runAutoPairFlow", 6000)
-    assert "iceGatheringState" in snippet
-    assert "icegatheringstatechange" in snippet
+    """The QR one-blob handoff uses the shared bounded ICE-completion gate.
+
+    Pin both the call site and the helper's event/timeout semantics so a
+    refactor cannot silently send a host-candidate-incomplete offer.
+    """
+    snippet = _snippet(peer_html, "async function _runAutoPairFlow", 12000)
+    assert "await _waitForIceGatheringComplete(pc)" in snippet
+    assert "if (!iceComplete)" in snippet
+    waiter = _snippet(peer_html, "function _waitForIceGatheringComplete", 2000)
+    assert 'iceGatheringState === "complete"' in waiter
+    assert 'addEventListener("icegatheringstatechange"' in waiter
+    assert "setTimeout" in waiter
+    assert "resolve(false)" in waiter
 
 
 def test_autopair_persists_daemon_as_peer(peer_html: str):
@@ -383,7 +389,7 @@ def test_autopair_surfaces_clear_failure_states(peer_html: str):
     fail, daemon error, connection failed) MUST update the status
     line to a specific message — never leave the user with a
     stuck spinner."""
-    snippet = _snippet(peer_html, "async function _runAutoPairFlow", 8000)
+    snippet = _snippet(peer_html, "async function _runAutoPairFlow", 12000)
     for failure_label in (
         "no identity",
         "no webrtc",
@@ -400,7 +406,7 @@ def test_autopair_surfaces_clear_failure_states(peer_html: str):
 def test_autopair_cancel_button_tears_down(peer_html: str):
     """The user can cancel mid-flight. Cancel MUST close the
     WebSocket + the RTCPeerConnection so we don't leak."""
-    snippet = _snippet(peer_html, "async function _runAutoPairFlow", 8000)
+    snippet = _snippet(peer_html, "async function _runAutoPairFlow", 12000)
     assert '"#btn-autopair-cancel"' in snippet
     assert "ws.close()" in snippet
     assert "pc.close()" in snippet
@@ -415,21 +421,28 @@ def test_boot_detects_pair_query_first(peer_html: str):
     flow. The user should never see the manual UX in pair mode."""
     idx = peer_html.find("const _pairQuery = _detectPairQuery();")
     assert idx >= 0
-    # And the autopair card is shown before boot is awaited.
-    snippet = peer_html[idx:idx + 7000]
-    assert '_showOnly("#autopair-card")' in snippet
-    assert "boot()" in snippet
+    show_idx = peer_html.find('_showOnly("#autopair-card")', idx)
+    boot_idx = peer_html.find("boot().then(", idx)
+    assert idx < show_idx < boot_idx
 
 
 def test_boot_chains_autopair_after_identity(peer_html: str):
-    """boot() resolves once identity is provisioned. Then we kick
-    off the auto-pair flow if a pair query is present. Chaining via
-    .then() rather than awaiting before boot is fine because boot
-    is what gives us state.rec."""
+    """Auto-pair dispatch is identity-gated.
+
+    Fresh and legacy-plaintext identities pause for encrypted setup, so boot
+    may resolve before ``state.rec`` exists. The shared dispatcher must refuse
+    to start until the encrypted identity is ready and must run at most once.
+    """
     idx = peer_html.find("const _pairQuery = _detectPairQuery();")
-    snippet = peer_html[idx:idx + 7000]
-    assert "boot().then(" in snippet
-    assert "_runAutoPairFlow(_pairQuery)" in snippet
+    dispatch_idx = peer_html.find("function _dispatchPostIdentityFlow()", idx)
+    gate_idx = peer_html.find(
+        "if (!state.rec || state.post_identity_flow_started) return;",
+        dispatch_idx,
+    )
+    run_idx = peer_html.find("_runAutoPairFlow(_pairQuery)", dispatch_idx)
+    boot_idx = peer_html.find("boot().then(", idx)
+    boot_dispatch_idx = peer_html.find("_dispatchPostIdentityFlow();", boot_idx)
+    assert idx < dispatch_idx < gate_idx < run_idx < boot_idx < boot_dispatch_idx
 
 
 # ───────── test surface ───────────────────────────────────────────

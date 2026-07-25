@@ -57,8 +57,55 @@ pub enum FsError {
     PermissionDenied,
     #[error("backend exhausted (out of space / disk full)")]
     NoSpace,
+    #[error("invalid filesystem input: {0}")]
+    InvalidInput(&'static str),
+    #[error("backend state is unavailable because its lock was poisoned")]
+    StateUnavailable,
     #[error("backend I/O error: {0}")]
     Io(String),
+}
+
+/// Maximum normalized UTF-8 path length accepted by the reference backend.
+pub const MAX_FS_PATH_BYTES: usize = 4_096;
+/// Maximum bytes accepted by one read or write callback.
+pub const MAX_FS_IO_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum size of one file in the bounded in-memory backend.
+pub const MAX_MEMORY_FILE_BYTES: usize = 256 * 1024 * 1024;
+/// Maximum total payload bytes retained by the in-memory backend.
+pub const MAX_MEMORY_TOTAL_BYTES: usize = 512 * 1024 * 1024;
+/// Maximum file count retained by the in-memory backend.
+pub const MAX_MEMORY_FILES: usize = 65_536;
+
+fn canonical_path(path: &str) -> Result<Option<&str>, FsError> {
+    if path.len() > MAX_FS_PATH_BYTES {
+        return Err(FsError::InvalidInput("path is too long"));
+    }
+    if path.as_bytes().contains(&0) {
+        return Err(FsError::InvalidInput("path contains NUL"));
+    }
+    let normalized = path.trim_matches('/');
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    if normalized
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(FsError::InvalidInput(
+            "path contains an empty, current, or parent segment",
+        ));
+    }
+    Ok(Some(normalized))
+}
+
+fn is_synthetic_directory(inner: &MemoryInner, path: &str) -> bool {
+    let prefix = format!("{path}/");
+    inner.files.keys().any(|key| key.starts_with(&prefix))
+}
+
+fn has_file_ancestor(inner: &MemoryInner, path: &str) -> bool {
+    path.match_indices('/')
+        .any(|(index, _)| inner.files.contains_key(&path[..index]))
 }
 
 /// FUSE-shaped filesystem callbacks. Every method mirrors a libfuse
@@ -91,7 +138,7 @@ pub trait FilesystemBackend: Send + Sync {
     fn unlink(&self, path: &str) -> Result<(), FsError>;
 }
 
-/// Tiny reference implementation: an in-memory BTreeMap. Useful for
+/// Tiny reference implementation: an in-memory `BTreeMap`. Useful for
 /// unit tests + the daemon's smoke tests before the chunk-store
 /// backend lands. Not for production — no persistence, no fsync, no
 /// concurrent-safety beyond `RwLock`.
@@ -116,16 +163,17 @@ impl MemoryBackend {
 
 impl FilesystemBackend for MemoryBackend {
     fn getattr(&self, path: &str) -> Result<Stat, FsError> {
-        let inner = self.inner.read().expect("poisoned");
+        let path = canonical_path(path)?;
+        let inner = self.inner.read().map_err(|_| FsError::StateUnavailable)?;
         // Root + intermediate directories: synthetic.
-        if path.is_empty() || path == "/" {
+        let Some(path) = path else {
             return Ok(Stat {
                 kind: EntryKind::Directory,
                 size: 0,
                 mtime_ms: 0,
                 mode: 0o755,
             });
-        }
+        };
         if let Some(bytes) = inner.files.get(path) {
             let mtime = inner.mtimes.get(path).copied().unwrap_or(0);
             return Ok(Stat {
@@ -135,14 +183,7 @@ impl FilesystemBackend for MemoryBackend {
                 mode: 0o644,
             });
         }
-        // Maybe it's a synthetic directory: any prefix that's a parent
-        // of a file we know about counts.
-        let prefix = if path.ends_with('/') {
-            path.to_string()
-        } else {
-            format!("{}/", path)
-        };
-        if inner.files.keys().any(|k| k.starts_with(&prefix)) {
+        if is_synthetic_directory(&inner, path) {
             return Ok(Stat {
                 kind: EntryKind::Directory,
                 size: 0,
@@ -154,13 +195,19 @@ impl FilesystemBackend for MemoryBackend {
     }
 
     fn readdir(&self, path: &str) -> Result<Vec<DirEntry>, FsError> {
-        let inner = self.inner.read().expect("poisoned");
-        let prefix = if path.is_empty() || path == "/" {
-            String::new()
-        } else if path.ends_with('/') {
-            path.to_string()
-        } else {
-            format!("{}/", path)
+        let path = canonical_path(path)?;
+        let inner = self.inner.read().map_err(|_| FsError::StateUnavailable)?;
+        if let Some(path) = path {
+            if inner.files.contains_key(path) {
+                return Err(FsError::NotADirectory);
+            }
+            if !is_synthetic_directory(&inner, path) {
+                return Err(FsError::NotFound);
+            }
+        }
+        let prefix = match path {
+            None => String::new(),
+            Some(path) => format!("{path}/"),
         };
         let mut out = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
@@ -176,7 +223,7 @@ impl FilesystemBackend for MemoryBackend {
             if bare.is_empty() || !seen.insert(bare.to_string()) {
                 continue;
             }
-            let full = format!("{}{}", prefix, bare);
+            let full = format!("{prefix}{bare}");
             let is_file = inner.files.contains_key(&full);
             let stat = if is_file {
                 Stat {
@@ -202,35 +249,81 @@ impl FilesystemBackend for MemoryBackend {
     }
 
     fn read(&self, path: &str, offset: u64, size: u32) -> Result<Vec<u8>, FsError> {
-        let inner = self.inner.read().expect("poisoned");
-        let bytes = inner.files.get(path).ok_or(FsError::NotFound)?;
-        let off = offset as usize;
+        if size as usize > MAX_FS_IO_BYTES {
+            return Err(FsError::InvalidInput("read exceeds callback byte limit"));
+        }
+        let path = canonical_path(path)?.ok_or(FsError::IsADirectory)?;
+        let inner = self.inner.read().map_err(|_| FsError::StateUnavailable)?;
+        let bytes = match inner.files.get(path) {
+            Some(bytes) => bytes,
+            None if is_synthetic_directory(&inner, path) => return Err(FsError::IsADirectory),
+            None => return Err(FsError::NotFound),
+        };
+        let Ok(off) = usize::try_from(offset) else {
+            return Ok(Vec::new());
+        };
         if off >= bytes.len() {
             return Ok(Vec::new());
         }
-        let end = (off + size as usize).min(bytes.len());
+        let end = off.saturating_add(size as usize).min(bytes.len());
         Ok(bytes[off..end].to_vec())
     }
 
     fn write(&self, path: &str, offset: u64, data: &[u8]) -> Result<u32, FsError> {
-        let mut inner = self.inner.write().expect("poisoned");
+        if data.len() > MAX_FS_IO_BYTES {
+            return Err(FsError::InvalidInput("write exceeds callback byte limit"));
+        }
+        let path = canonical_path(path)?.ok_or(FsError::IsADirectory)?;
+        let off = usize::try_from(offset).map_err(|_| FsError::NoSpace)?;
+        let end = off.checked_add(data.len()).ok_or(FsError::NoSpace)?;
+        if end > MAX_MEMORY_FILE_BYTES {
+            return Err(FsError::NoSpace);
+        }
+        let written = u32::try_from(data.len())
+            .map_err(|_| FsError::InvalidInput("write length does not fit u32"))?;
+        let mut inner = self.inner.write().map_err(|_| FsError::StateUnavailable)?;
+        if is_synthetic_directory(&inner, path) {
+            return Err(FsError::IsADirectory);
+        }
+        if has_file_ancestor(&inner, path) {
+            return Err(FsError::NotADirectory);
+        }
+        let existing_len = inner.files.get(path).map_or(0, Vec::len);
+        if existing_len == 0
+            && !inner.files.contains_key(path)
+            && inner.files.len() >= MAX_MEMORY_FILES
+        {
+            return Err(FsError::NoSpace);
+        }
+        let growth = end.saturating_sub(existing_len);
+        let current_total = inner.files.values().try_fold(0usize, |total, value| {
+            total.checked_add(value.len()).ok_or(FsError::NoSpace)
+        })?;
+        if current_total
+            .checked_add(growth)
+            .is_none_or(|total| total > MAX_MEMORY_TOTAL_BYTES)
+        {
+            return Err(FsError::NoSpace);
+        }
         let entry = inner.files.entry(path.to_string()).or_default();
-        let off = offset as usize;
         if entry.len() < off {
             entry.resize(off, 0);
         }
-        let end = off + data.len();
         if entry.len() < end {
             entry.resize(end, 0);
         }
         entry[off..end].copy_from_slice(data);
         inner.mtimes.insert(path.to_string(), now_ms());
-        Ok(data.len() as u32)
+        Ok(written)
     }
 
     fn unlink(&self, path: &str) -> Result<(), FsError> {
-        let mut inner = self.inner.write().expect("poisoned");
+        let path = canonical_path(path)?.ok_or(FsError::IsADirectory)?;
+        let mut inner = self.inner.write().map_err(|_| FsError::StateUnavailable)?;
         if inner.files.remove(path).is_none() {
+            if is_synthetic_directory(&inner, path) {
+                return Err(FsError::IsADirectory);
+            }
             return Err(FsError::NotFound);
         }
         inner.mtimes.remove(path);
@@ -239,19 +332,19 @@ impl FilesystemBackend for MemoryBackend {
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+        Err(_) => 0,
+    }
 }
 
 /// D27 — Read-only adapter that bridges a daemon-supplied manifest +
 /// blob-reader closure to the FUSE [`FilesystemBackend`] trait.
 ///
-/// The manifest is a flat ``path -> (size, mtime_ms, blob_hash)`` map;
+/// The manifest is a flat `path -> (size, mtime_ms, blob_hash)` map;
 /// directory structure is inferred from the path separators. The
 /// blob reader is a closure that, given a 64-hex blob hash, offset,
-/// and length, returns the slice of bytes. This split keeps ol_fuse
+/// and length, returns the slice of bytes. This split keeps `ol_fuse`
 /// crypto-free — the daemon already has the chunk-store + AEAD wired
 /// up and can supply a closure that walks them.
 ///
@@ -292,22 +385,23 @@ impl std::fmt::Debug for FolderManifestBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FolderManifestBackend")
             .field("files", &self.files.len())
+            .field("blob_reader", &"<closure>")
             .finish()
     }
 }
 
 impl FilesystemBackend for FolderManifestBackend {
     fn getattr(&self, path: &str) -> Result<Stat, FsError> {
-        if path.is_empty() || path == "/" {
+        let lookup = canonical_path(path)?;
+        let Some(lookup) = lookup else {
             return Ok(Stat {
                 kind: EntryKind::Directory,
                 size: 0,
                 mtime_ms: 0,
                 mode: 0o555,
             });
-        }
-        let lookup = path.trim_start_matches('/').to_string();
-        if let Some(row) = self.files.get(&lookup) {
+        };
+        if let Some(row) = self.files.get(lookup) {
             return Ok(Stat {
                 kind: EntryKind::File,
                 size: row.size,
@@ -315,11 +409,7 @@ impl FilesystemBackend for FolderManifestBackend {
                 mode: 0o444,
             });
         }
-        let prefix = if lookup.ends_with('/') {
-            lookup
-        } else {
-            format!("{}/", lookup)
-        };
+        let prefix = format!("{lookup}/");
         if self.files.keys().any(|k| k.starts_with(&prefix)) {
             return Ok(Stat {
                 kind: EntryKind::Directory,
@@ -332,13 +422,19 @@ impl FilesystemBackend for FolderManifestBackend {
     }
 
     fn readdir(&self, path: &str) -> Result<Vec<DirEntry>, FsError> {
-        let trimmed = path.trim_start_matches('/');
-        let prefix = if trimmed.is_empty() {
-            String::new()
-        } else if trimmed.ends_with('/') {
-            trimmed.to_string()
-        } else {
-            format!("{}/", trimmed)
+        let lookup = canonical_path(path)?;
+        if let Some(lookup) = lookup {
+            if self.files.contains_key(lookup) {
+                return Err(FsError::NotADirectory);
+            }
+            let prefix = format!("{lookup}/");
+            if !self.files.keys().any(|key| key.starts_with(&prefix)) {
+                return Err(FsError::NotFound);
+            }
+        }
+        let prefix = match lookup {
+            None => String::new(),
+            Some(lookup) => format!("{lookup}/"),
         };
         let mut seen = std::collections::BTreeSet::new();
         let mut out = Vec::new();
@@ -354,7 +450,7 @@ impl FilesystemBackend for FolderManifestBackend {
             if bare.is_empty() || !seen.insert(bare.to_string()) {
                 continue;
             }
-            let full = format!("{}{}", prefix, bare);
+            let full = format!("{prefix}{bare}");
             let stat = if let Some(r) = self.files.get(&full) {
                 Stat {
                     kind: EntryKind::File,
@@ -376,18 +472,34 @@ impl FilesystemBackend for FolderManifestBackend {
                 stat,
             });
         }
-        if out.is_empty() && !prefix.is_empty() {
-            // Path doesn't resolve to either a known file or a known
-            // directory prefix.
-            return Err(FsError::NotFound);
-        }
         Ok(out)
     }
 
     fn read(&self, path: &str, offset: u64, size: u32) -> Result<Vec<u8>, FsError> {
-        let lookup = path.trim_start_matches('/');
-        let row = self.files.get(lookup).ok_or(FsError::NotFound)?;
-        (self.blob_reader)(&row.blob_hash, offset, size)
+        if size as usize > MAX_FS_IO_BYTES {
+            return Err(FsError::InvalidInput("read exceeds callback byte limit"));
+        }
+        let lookup = canonical_path(path)?.ok_or(FsError::IsADirectory)?;
+        let Some(row) = self.files.get(lookup) else {
+            let prefix = format!("{lookup}/");
+            if self.files.keys().any(|key| key.starts_with(&prefix)) {
+                return Err(FsError::IsADirectory);
+            }
+            return Err(FsError::NotFound);
+        };
+        if offset >= row.size {
+            return Ok(Vec::new());
+        }
+        let remaining = row.size - offset;
+        let bounded_size = u32::try_from(u64::from(size).min(remaining))
+            .map_err(|_| FsError::InvalidInput("bounded read size does not fit u32"))?;
+        let bytes = (self.blob_reader)(&row.blob_hash, offset, bounded_size)?;
+        if bytes.len() > bounded_size as usize {
+            return Err(FsError::Io(
+                "blob reader returned more bytes than requested".into(),
+            ));
+        }
+        Ok(bytes)
     }
 
     fn write(&self, _path: &str, _offset: u64, _data: &[u8]) -> Result<u32, FsError> {
@@ -485,9 +597,73 @@ mod tests {
         assert_eq!(&bytes[16..], b"XYZ");
     }
 
+    #[test]
+    fn memory_backend_canonicalizes_root_slashes_and_rejects_traversal() {
+        let fs = MemoryBackend::new();
+        fs.write("/docs/a.txt", 0, b"a").unwrap();
+        assert_eq!(fs.read("docs/a.txt", 0, 1).unwrap(), b"a");
+        assert!(matches!(
+            fs.write("docs/../escape", 0, b"x"),
+            Err(FsError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            fs.getattr(&"a".repeat(MAX_FS_PATH_BYTES + 1)),
+            Err(FsError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn memory_backend_enforces_io_and_sparse_file_limits_before_allocation() {
+        let fs = MemoryBackend::new();
+        assert_eq!(
+            fs.write("too-sparse", (MAX_MEMORY_FILE_BYTES + 1) as u64, b"x"),
+            Err(FsError::NoSpace)
+        );
+        assert!(matches!(
+            fs.read(
+                "missing",
+                0,
+                u32::try_from(MAX_FS_IO_BYTES + 1).expect("I/O limit fits u32"),
+            ),
+            Err(FsError::InvalidInput(_))
+        ));
+        let oversized = vec![0u8; MAX_FS_IO_BYTES + 1];
+        assert!(matches!(
+            fs.write("oversized", 0, &oversized),
+            Err(FsError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn memory_backend_reports_file_directory_conflicts() {
+        let fs = MemoryBackend::new();
+        fs.write("docs/a.txt", 0, b"a").unwrap();
+        assert_eq!(fs.read("docs", 0, 1), Err(FsError::IsADirectory));
+        assert_eq!(fs.write("docs", 0, b"x"), Err(FsError::IsADirectory));
+        assert_eq!(fs.readdir("docs/a.txt"), Err(FsError::NotADirectory));
+        assert_eq!(
+            fs.write("docs/a.txt/child", 0, b"x"),
+            Err(FsError::NotADirectory)
+        );
+    }
+
+    #[test]
+    fn poisoned_memory_backend_fails_closed_without_panicking() {
+        let fs = MemoryBackend::new();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = fs.inner.write().unwrap();
+            panic!("deliberately poison the test lock");
+        }));
+        assert_eq!(fs.getattr("/"), Err(FsError::StateUnavailable));
+        assert_eq!(fs.readdir("/"), Err(FsError::StateUnavailable));
+        assert_eq!(fs.read("a", 0, 1), Err(FsError::StateUnavailable));
+        assert_eq!(fs.write("a", 0, b"x"), Err(FsError::StateUnavailable));
+        assert_eq!(fs.unlink("a"), Err(FsError::StateUnavailable));
+    }
+
     // ---- D27 FolderManifestBackend ----
 
-    fn _row(size: u64, mtime: u64, hash: &str) -> ManifestRow {
+    fn manifest_row(size: u64, mtime: u64, hash: &str) -> ManifestRow {
         ManifestRow {
             size,
             mtime_ms: mtime,
@@ -498,7 +674,7 @@ mod tests {
     #[test]
     fn folder_backend_getattr_root_is_dir() {
         let mut files = BTreeMap::new();
-        files.insert("a.txt".to_string(), _row(3, 100, "hash_a"));
+        files.insert("a.txt".to_string(), manifest_row(3, 100, "hash_a"));
         let fs = FolderManifestBackend::new(files, Box::new(|_, _, _| Ok(Vec::new())));
         let root = fs.getattr("/").unwrap();
         assert_eq!(root.kind, EntryKind::Directory);
@@ -509,7 +685,7 @@ mod tests {
     #[test]
     fn folder_backend_getattr_known_file() {
         let mut files = BTreeMap::new();
-        files.insert("docs/a.txt".to_string(), _row(99, 1234, "hash_a"));
+        files.insert("docs/a.txt".to_string(), manifest_row(99, 1234, "hash_a"));
         let fs = FolderManifestBackend::new(files, Box::new(|_, _, _| Ok(Vec::new())));
         let stat = fs.getattr("docs/a.txt").unwrap();
         assert_eq!(stat.kind, EntryKind::File);
@@ -522,7 +698,7 @@ mod tests {
     #[test]
     fn folder_backend_getattr_intermediate_dir() {
         let mut files = BTreeMap::new();
-        files.insert("docs/sub/x.txt".to_string(), _row(1, 0, "h"));
+        files.insert("docs/sub/x.txt".to_string(), manifest_row(1, 0, "h"));
         let fs = FolderManifestBackend::new(files, Box::new(|_, _, _| Ok(Vec::new())));
         let d = fs.getattr("docs").unwrap();
         assert_eq!(d.kind, EntryKind::Directory);
@@ -540,9 +716,9 @@ mod tests {
     #[test]
     fn folder_backend_readdir_root_lists_top() {
         let mut files = BTreeMap::new();
-        files.insert("a.txt".to_string(), _row(1, 0, "ha"));
-        files.insert("b.txt".to_string(), _row(2, 0, "hb"));
-        files.insert("docs/x.txt".to_string(), _row(3, 0, "hd"));
+        files.insert("a.txt".to_string(), manifest_row(1, 0, "ha"));
+        files.insert("b.txt".to_string(), manifest_row(2, 0, "hb"));
+        files.insert("docs/x.txt".to_string(), manifest_row(3, 0, "hd"));
         let fs = FolderManifestBackend::new(files, Box::new(|_, _, _| Ok(Vec::new())));
         let mut names: Vec<_> = fs
             .readdir("/")
@@ -560,7 +736,7 @@ mod tests {
         use std::sync::Arc;
 
         let mut files = BTreeMap::new();
-        files.insert("x.bin".to_string(), _row(6, 0, "hash_x"));
+        files.insert("x.bin".to_string(), manifest_row(6, 0, "hash_x"));
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
         let fs = FolderManifestBackend::new(
@@ -605,10 +781,40 @@ mod tests {
     #[test]
     fn folder_backend_strips_leading_slash() {
         let mut files = BTreeMap::new();
-        files.insert("a.txt".to_string(), _row(5, 0, "ha"));
+        files.insert("a.txt".to_string(), manifest_row(5, 0, "ha"));
         let fs = FolderManifestBackend::new(files, Box::new(|_, _, _| Ok(b"hello".to_vec())));
         // Both /a.txt and a.txt should resolve.
         assert_eq!(fs.getattr("/a.txt").unwrap().size, 5);
         assert_eq!(fs.getattr("a.txt").unwrap().size, 5);
+    }
+
+    #[test]
+    fn folder_backend_rejects_traversal_and_file_as_directory() {
+        let mut files = BTreeMap::new();
+        files.insert("a.txt".to_string(), manifest_row(5, 0, "ha"));
+        let fs = FolderManifestBackend::new(files, Box::new(|_, _, _| Ok(Vec::new())));
+        assert!(matches!(
+            fs.getattr("../a.txt"),
+            Err(FsError::InvalidInput(_))
+        ));
+        assert_eq!(fs.readdir("a.txt"), Err(FsError::NotADirectory));
+        assert_eq!(fs.read("/", 0, 1), Err(FsError::IsADirectory));
+    }
+
+    #[test]
+    fn folder_backend_bounds_reads_and_rejects_reader_overrun() {
+        let mut files = BTreeMap::new();
+        files.insert("a.txt".to_string(), manifest_row(5, 0, "ha"));
+        let fs = FolderManifestBackend::new(files, Box::new(|_, _, _| Ok(vec![0u8; 6])));
+        assert!(matches!(
+            fs.read(
+                "a.txt",
+                0,
+                u32::try_from(MAX_FS_IO_BYTES + 1).expect("I/O limit fits u32"),
+            ),
+            Err(FsError::InvalidInput(_))
+        ));
+        assert!(matches!(fs.read("a.txt", 0, 5), Err(FsError::Io(_))));
+        assert_eq!(fs.read("a.txt", 5, 5).unwrap(), Vec::<u8>::new());
     }
 }

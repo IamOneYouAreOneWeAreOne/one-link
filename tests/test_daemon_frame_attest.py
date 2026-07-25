@@ -237,7 +237,7 @@ def test_inbound_call_frame_attest_broadcasts_tail_event(
     assert ev["call_id"] == "frame-call-2"
     assert ev["verified"] is True
     # Doctrine — plain language UI words.
-    assert ev["kind"] == "Real"
+    assert ev["kind"] == "Original"
 
 
 def test_inbound_call_frame_attest_with_forged_sig_marks_unverified(

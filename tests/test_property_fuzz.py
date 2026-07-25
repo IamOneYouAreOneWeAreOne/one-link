@@ -18,10 +18,7 @@ Modules covered:
 
 from __future__ import annotations
 
-import math
 import random
-import secrets
-import string
 from pathlib import Path
 
 import pytest
@@ -29,9 +26,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
 from one_link.call_sdp_signaling import (
-    CALL_INVITE_SDP_V1,
     IceCandidatePayload,
-    SdpKind,
     SdpPayload,
 )
 from one_link.capsule_at_rest import open_from_path, seal_to_path
@@ -48,10 +43,8 @@ from one_link.frame_provenance import (
     verify_provenance,
 )
 from one_link.live_frame_provenance import (
-    LIVE_SCHEMA_V2,
     WindowAttestor,
     WindowVerifier,
-    sign_browser_window,
 )
 
 

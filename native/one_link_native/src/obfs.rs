@@ -1,7 +1,7 @@
 //! pyo3 wrapper for `ol_onion::transport_obfs` — row 7 pluggable
 //! transport. Exposes:
 //! - Primitive byte XOR (`obfuscate` / `deobfuscate` / `derive_nonce`).
-//! - Handshake (BridgeKeypair, ClientHandshake, ServerHandshake).
+//! - Handshake (`BridgeKeypair`, `ClientHandshake`, `ServerHandshake`).
 //! - Session (per-direction seal/open with handshake-derived keys).
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -35,7 +35,7 @@ fn check_key_nonce(key: &[u8], nonce: &[u8]) -> PyResult<()> {
 }
 
 fn map_hs_err(e: HandshakeError) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    PyValueError::new_err(crate::errors::owned_error_message(e))
 }
 
 // ── Primitive ───────────────────────────────────────────────────
@@ -53,7 +53,7 @@ fn obfuscate<'py>(
     let mut nonce_arr = [0u8; OBFS_NONCE_LEN];
     nonce_arr.copy_from_slice(nonce);
     let out = core_obfuscate(&key_arr, &nonce_arr, data);
-    Ok(PyBytes::new_bound(py, &out))
+    Ok(PyBytes::new(py, &out))
 }
 
 #[pyfunction]
@@ -69,32 +69,28 @@ fn deobfuscate<'py>(
     let mut nonce_arr = [0u8; OBFS_NONCE_LEN];
     nonce_arr.copy_from_slice(nonce);
     let out = core_deobfuscate(&key_arr, &nonce_arr, data);
-    Ok(PyBytes::new_bound(py, &out))
+    Ok(PyBytes::new(py, &out))
 }
 
 #[pyfunction]
-fn derive_nonce<'py>(py: Python<'py>, conn_id: u32, packet_counter: u64) -> Bound<'py, PyBytes> {
+fn derive_nonce(py: Python<'_>, conn_id: u32, packet_counter: u64) -> Bound<'_, PyBytes> {
     let n = core_derive_nonce(conn_id, packet_counter);
-    PyBytes::new_bound(py, &n)
+    PyBytes::new(py, &n)
 }
 
 // ── Handshake / Session ────────────────────────────────────────
 
-/// Generate a fresh bridge keypair. Returns (secret_seed_32, public_32, id_32).
+/// Generate a fresh bridge keypair. Returns (`secret_seed_32`, `public_32`, `id_32`).
 #[pyfunction]
-fn generate_bridge_keypair<'py>(
-    py: Python<'py>,
-) -> PyResult<(
-    Bound<'py, PyBytes>,
-    Bound<'py, PyBytes>,
-    Bound<'py, PyBytes>,
-)> {
+fn generate_bridge_keypair(
+    py: Python<'_>,
+) -> (Bound<'_, PyBytes>, Bound<'_, PyBytes>, Bound<'_, PyBytes>) {
     let kp = BridgeKeypair::generate(&mut OsRng);
-    Ok((
-        PyBytes::new_bound(py, &kp.secret_bytes()),
-        PyBytes::new_bound(py, &kp.public_bytes()),
-        PyBytes::new_bound(py, &kp.id_bytes()),
-    ))
+    (
+        PyBytes::new(py, &kp.secret_bytes()),
+        PyBytes::new(py, &kp.public_bytes()),
+        PyBytes::new(py, &kp.id_bytes()),
+    )
 }
 
 /// Bidirectional obfuscation session.
@@ -117,7 +113,7 @@ impl PySession {
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("session is closed"))?;
         let out = session.seal_outbound(plaintext, counter);
-        Ok(PyBytes::new_bound(py, &out))
+        Ok(PyBytes::new(py, &out))
     }
 
     /// Open inbound data with the peer's packet counter.
@@ -133,8 +129,8 @@ impl PySession {
             .ok_or_else(|| PyRuntimeError::new_err("session is closed"))?;
         let out = session
             .open_inbound(ciphertext, counter)
-            .map_err(|_| PyValueError::new_err("session open failed"))?;
-        Ok(PyBytes::new_bound(py, &out))
+            .map_err(|()| PyValueError::new_err("session open failed"))?;
+        Ok(PyBytes::new(py, &out))
     }
 
     /// Explicitly close the session, zeroizing the keys on drop.
@@ -183,7 +179,7 @@ impl PyClientHandshake {
 
     /// The bytes the daemon transmits to the bridge.
     fn first_message<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.first_message)
+        PyBytes::new(py, &self.first_message)
     }
 
     /// Complete the handshake using the bridge's reply. Consumes
@@ -228,7 +224,7 @@ fn server_accept<'py>(
         RustServerHandshake::accept(&mut OsRng, &bridge, client_first_message, now_unix)
             .map_err(map_hs_err)?;
     Ok((
-        PyBytes::new_bound(py, &reply),
+        PyBytes::new(py, &reply),
         PySession {
             inner: Some(session),
         },

@@ -1,4 +1,8 @@
-# Coherence Mesh Native Bench Results — aggregate
+# Coherence Mesh Native Bench Results — archived aggregate
+
+> Historical source-tree snapshot from one Windows host. These numbers are
+> not current packaged-platform, release, security, or production evidence;
+> rerun the pinned benchmark and release gates on the artifact being judged.
 
 One-pager covering every native crate that's been brought to the
 F1.x audit-closeout polish bar. Numbers captured on Windows 11
@@ -49,9 +53,10 @@ See [`ol_onion/COVER_BENCH_RESULTS.md`](ol_onion/COVER_BENCH_RESULTS.md).
 | `cover::rate_equalizer_current_cover_rate` | 195 ps    | trivial subtract               |
 | `cover::build_cover_packet_3_hop`          | 159 µs    | 3-hop Sphinx + sentinel        |
 
-Cover-traffic primitive sits on top of Sphinx Coherence; on-wire
-indistinguishable from real packets by construction (same byte
-size, same Sphinx machinery).
+The cover primitive uses the same Sphinx encoded length and packet machinery
+as an equally shaped real packet. The benchmark does not test timing, volume,
+route, real-traffic shaping, mixing, or observer classification and therefore
+does not establish wire-traffic indistinguishability or anonymity.
 
 ## Row 7 — `ol_onion::transport_obfs` (pluggable transport)
 
@@ -67,7 +72,7 @@ See [`ol_onion/TRANSPORT_OBFS_BENCH_RESULTS.md`](ol_onion/TRANSPORT_OBFS_BENCH_R
 
 obfs4-style handshake with bridge-ID HMAC + 1-epoch skew tolerance;
 ct-gate at 15% relative stddev on MAC verify path. TLA+ spec at
-`docs/formal/obfs_handshake.tla` proves NoCrossBridgeReplay /
+`docs/formal/ObfsHandshake.tla` proves NoCrossBridgeReplay /
 NoOutOfEpochAccept / NoUnauthBypass / SessionAgreementOnHonestRun.
 
 ## Row 9 — `ol_threshold_recovery` (wired path)
@@ -119,4 +124,4 @@ Fuzz targets added: 4 (pqsig_verify, cover_sentinel,
 obfs_handshake_accept, obfs_primitive). Picked up by the nightly
 cargo-fuzz CI.
 
-TLA+ specs added: 1 (`obfs_handshake.tla` + `.cfg`).
+TLA+ specs added: 1 (`ObfsHandshake.tla` + `.cfg`).

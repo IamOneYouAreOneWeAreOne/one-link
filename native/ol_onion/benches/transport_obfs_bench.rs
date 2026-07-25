@@ -1,4 +1,4 @@
-//! Microbenchmarks for the Row 7 transport_obfs primitive + handshake.
+//! Microbenchmarks for the Row 7 `transport_obfs` primitive + handshake.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rand::rngs::OsRng;
@@ -42,7 +42,7 @@ fn bench_deobfuscate(c: &mut Criterion) {
 fn bench_derive_nonce(c: &mut Criterion) {
     c.bench_function("obfs::derive_nonce", |b| {
         b.iter(|| {
-            let n = derive_nonce(black_box(0xDEADBEEF), black_box(0x123456789ABCDEF0));
+            let n = derive_nonce(black_box(0xDEAD_BEEF), black_box(0x1234_5678_9ABC_DEF0));
             black_box(n);
         });
     });
@@ -104,14 +104,25 @@ fn bench_session_seal(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_obfuscate,
-    bench_deobfuscate,
-    bench_derive_nonce,
-    bench_handshake_start,
-    bench_handshake_accept,
-    bench_handshake_full_round_trip,
-    bench_session_seal,
-);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{
+        bench_deobfuscate, bench_derive_nonce, bench_handshake_accept,
+        bench_handshake_full_round_trip, bench_handshake_start, bench_obfuscate,
+        bench_session_seal, criterion_group,
+    };
+
+    criterion_group!(
+        benches,
+        bench_obfuscate,
+        bench_deobfuscate,
+        bench_derive_nonce,
+        bench_handshake_start,
+        bench_handshake_accept,
+        bench_handshake_full_round_trip,
+        bench_session_seal,
+    );
+}
+criterion_main!(criterion_benchmark_harness::benches);

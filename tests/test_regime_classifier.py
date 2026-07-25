@@ -11,16 +11,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import AsyncIterator
 
 import asyncio
 import json
 import time
 import pytest
-import pytest_asyncio
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from one_link.daemon import Daemon, OutboundSession, _classify_address_regime
+from one_link.daemon import OutboundSession, _classify_address_regime
 from one_link.identity import Identity, fingerprint_of
 from one_link.state import State
 

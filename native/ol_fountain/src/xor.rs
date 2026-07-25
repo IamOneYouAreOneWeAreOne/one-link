@@ -5,7 +5,7 @@
 //! into 64-byte chunks and XOR'ing word-by-word (via `u64::from_ne_bytes`),
 //! we hand the compiler a straight-line vectorizable shape that lowers
 //! to AVX2 `vpxor` (32 bytes / iter) or SSE2 `pxor` (16 bytes / iter)
-//! on x86_64, and NEON `eor` on aarch64.
+//! on `x86_64`, and NEON `eor` on `aarch64`.
 //!
 //! For Phase B v1 symbols of 1 KiB:
 //!   - Naive: 1024 iterations.
@@ -14,36 +14,19 @@
 /// In-place XOR: `dest[i] ^= src[i]` for `i in 0..len`. Both slices
 /// must be the same length.
 ///
-/// Hot-path-tuned: uses raw `read_unaligned` / `write_unaligned` to
-/// strip the bounds-check overhead `try_into()` would inject, while
-/// staying within `debug_assert`-validated bounds. The compiler
-/// vectorizes the u64 loop into AVX2 `vpxor` on x86_64 and NEON `eor`
-/// on aarch64.
+/// Returns `false` without modifying `dest` when the lengths differ.
+/// The equal-length loop is deliberately safe Rust: LLVM autovectorizes
+/// this shape, and a future invariant regression cannot become an
+/// out-of-bounds raw-pointer read in release builds.
 #[inline]
-pub(crate) fn xor_into(dest: &mut [u8], src: &[u8]) {
-    debug_assert_eq!(dest.len(), src.len());
-    let n = dest.len();
-    let head_words = n / 8;
-    let tail_start = head_words * 8;
-
-    // SAFETY: We never read or write outside `0..n`. The pointers
-    // alias different allocations (`dest` is &mut, `src` is &; the
-    // borrow checker rejects overlap before we get here). u64 reads
-    // are `read_unaligned`, so alignment of the base allocation does
-    // not matter.
-    unsafe {
-        let dst_u64 = dest.as_mut_ptr().cast::<u64>();
-        let src_u64 = src.as_ptr().cast::<u64>();
-        for i in 0..head_words {
-            let a = std::ptr::read_unaligned(dst_u64.add(i));
-            let b = std::ptr::read_unaligned(src_u64.add(i));
-            std::ptr::write_unaligned(dst_u64.add(i), a ^ b);
-        }
+pub(crate) fn xor_into(dest: &mut [u8], src: &[u8]) -> bool {
+    if dest.len() != src.len() {
+        return false;
     }
-    // Byte tail (0..7 bytes).
-    for i in tail_start..n {
-        dest[i] ^= src[i];
+    for (dest_byte, src_byte) in dest.iter_mut().zip(src) {
+        *dest_byte ^= *src_byte;
     }
+    true
 }
 
 #[cfg(test)]
@@ -74,10 +57,21 @@ mod tests {
             1024,
             1024 + 3,
         ] {
-            let a: Vec<u8> = (0..len).map(|i| (i as u32 * 31) as u8).collect();
-            let b: Vec<u8> = (0..len).map(|i| ((i as u32) ^ 0xDEAD) as u8).collect();
+            let a: Vec<u8> = (0..len)
+                .map(|i| {
+                    let index = u32::try_from(i).expect("test vector index fits in u32");
+                    u8::try_from(index.wrapping_mul(31) & 0xFF)
+                        .expect("masked test value fits in u8")
+                })
+                .collect();
+            let b: Vec<u8> = (0..len)
+                .map(|i| {
+                    let index = u32::try_from(i).expect("test vector index fits in u32");
+                    u8::try_from((index ^ 0xDEAD) & 0xFF).expect("masked test value fits in u8")
+                })
+                .collect();
             let mut x = a.clone();
-            xor_into(&mut x, &b);
+            assert!(xor_into(&mut x, &b));
             let mut y = a.clone();
             naive(&mut y, &b);
             assert_eq!(x, y, "len={len}");
@@ -87,7 +81,7 @@ mod tests {
     #[test]
     fn empty_no_op() {
         let mut d: Vec<u8> = vec![];
-        xor_into(&mut d, &[]);
+        assert!(xor_into(&mut d, &[]));
         assert!(d.is_empty());
     }
 
@@ -95,8 +89,16 @@ mod tests {
     fn idempotent_double_xor() {
         let mut dest = vec![0xAAu8; 1024];
         let src = vec![0x55u8; 1024];
-        xor_into(&mut dest, &src);
-        xor_into(&mut dest, &src);
+        assert!(xor_into(&mut dest, &src));
+        assert!(xor_into(&mut dest, &src));
         assert_eq!(dest, vec![0xAAu8; 1024]);
+    }
+
+    #[test]
+    fn mismatch_is_rejected_without_partial_mutation() {
+        let mut dest = [0xAAu8; 8];
+        let original = dest;
+        assert!(!xor_into(&mut dest, &[0x55u8; 7]));
+        assert_eq!(dest, original);
     }
 }

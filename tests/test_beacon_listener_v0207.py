@@ -19,11 +19,8 @@ Pinned:
 """
 from __future__ import annotations
 
-import asyncio
-import socket
 import time
 
-import pytest
 
 from one_link import beacon, beacon_listener as bl
 

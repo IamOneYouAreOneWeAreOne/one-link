@@ -14,8 +14,6 @@ Skipped when the native crate isn't installed.
 
 from __future__ import annotations
 
-import asyncio
-import threading
 import time
 from types import SimpleNamespace
 
@@ -153,10 +151,9 @@ def test_quic_connection_exposes_peer_fingerprint_t1h() -> None:
         in the test daemon), the method returns 32 bytes that
         match the peer's pinned identity fingerprint.
 
-    Without this contract the daemon's accept loop would silently
-    fall back to the legacy deque-based binding under simultaneous
-    handshakes, surfacing a ``quic_accept_fifo_race_window``
-    degradation event but not closing the race.
+    Without this contract the daemon disables QUIC. An individual accepted
+    connection that cannot return this ground-truth value is closed before
+    frame dispatch; callback FIFO order is never authorization.
     """
     from one_link_native import quic as native_q
     # The Connection class must declare peer_fingerprint().
@@ -196,7 +193,7 @@ def test_quic_connection_exposes_peer_fingerprint_t1h() -> None:
         )
         assert ping.get("ok") is True, ping
 
-        # No FIFO-race degradation event should have fired on
+        # No identity-binding rejection should have fired on
         # either side — the ground-truth binding makes the race
         # window irrelevant.
         diag_a = request(p.a.control_port, cmd="transfer_diagnostics")
@@ -204,10 +201,10 @@ def test_quic_connection_exposes_peer_fingerprint_t1h() -> None:
         race_events = [
             e for e in (diag_a.get("degradation_events") or [])
             + (diag_b.get("degradation_events") or [])
-            if e.get("kind") == "quic_accept_fifo_race_window"
+            if e.get("kind") == "quic_accept_identity_binding_rejected"
         ]
         assert not race_events, (
-            f"T1-H regression: FIFO-race fallback fired even though "
+            f"T1-H regression: identity-bound accept was rejected even though "
             f"the native crate exposes peer_fingerprint(). "
             f"Events: {race_events}"
         )
@@ -372,7 +369,7 @@ def test_send_file_stream_mode_survives_with_quic_route_available() -> None:
          which run on the QUIC fast path).
     """
     payload = b"quic-fast-path-payload" * 64  # ~1.4 KiB, way under CDC threshold
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         # Pin both directions so QUIC port advertisement flows.
         a_pin = request(p.a.control_port, cmd="pin_peer",
                         peer=p.b.short_id)

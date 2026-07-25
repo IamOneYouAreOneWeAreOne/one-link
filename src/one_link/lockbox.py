@@ -1,4 +1,4 @@
-"""At-rest secret wrapping when ONE_LINK_PASSPHRASE is set.
+"""Fail-closed at-rest secret wrapping with recoverable DEK authority.
 
 v0.20.7 (security audit H21 + M29 + partial C5): the desktop daemon
 historically stored its highest-value secrets cleartext on disk:
@@ -9,80 +9,91 @@ historically stored its highest-value secrets cleartext on disk:
   - The UI bearer token (full daemon control if exfiltrated).
 
 The browser PWA path encrypts these via OPFS + Argon2id from a user
-passphrase; the daemon path had no equivalent. This module is the
-daemon-side primitive that closes the gap when the user opts into
-encryption-at-rest by setting the ``ONE_LINK_PASSPHRASE`` environment
-variable. It is intentionally narrow: scrypt-derived AES-GCM wrap on
-the most damaging fields only. Full at-rest encryption (every chat
-body, every blob) is the longer C5 ship that needs SQLCipher or
-equivalent.
+passphrase. This module protects the daemon's field-level secrets with
+AES-GCM; the State database itself is separately protected by SQLCipher.
 
 Design:
 
-  - The user's passphrase is read from ``ONE_LINK_PASSPHRASE`` once at
-    daemon startup (same env var that gates identity-key encryption).
-    A 16-byte random salt is generated on first use and persisted to
-    a sibling file under the daemon's config dir; the salt is non-
-    secret but per-install, so a captured passphrase can't be used
-    against another install's wrapped data.
-  - From (passphrase, salt) we derive a 32-byte data root key (DRK)
-    using scrypt at the recommended memory-hard parameters. The DRK
-    never leaves the running process.
+  - Every install has a stable 32-byte data-encryption key (DEK). Silent mode
+    obtains it from the seed-derived/OS-protected data-root artifact.
+  - Passphrase mode derives a wrapping key from ``ONE_LINK_PASSPHRASE`` and a
+    per-install salt using scrypt. New installs wrap the stable DEK in a fixed
+    versioned envelope with both passphrase and master-seed recovery slots.
+  - Legacy passphrase ciphertext keeps its historical scrypt key as the stable
+    DEK, so migration is byte-preserving: only the dual-slot envelope is added.
+    Passphrase changes rewrap the DEK instead of orphaning existing rows.
+  - Missing, corrupt, mismatched, or unauthenticated authority fails closed;
+    no path silently invents a replacement key for existing ciphertext.
   - Wrap = AES-GCM-256 with a fresh 12-byte random nonce per call.
     Output format: ``b"\\x01" + nonce(12) + ciphertext + tag(16)``.
-    The 0x01 marker disambiguates wrapped values from legacy
-    cleartext (which for a chain_key is exactly 32 bytes; for the UI
-    token is a base64url string).
-  - Unwrap: detect marker; if absent return the input unchanged
-    (transparent migration — old cleartext rows remain readable).
-    If marker present but tag verification fails, raise (prevents
-    silent acceptance of a tampered wrapped value).
+    The marker is sufficient only for legacy plaintext formats whose grammar
+    excludes that byte. Fixed-width random secrets can naturally begin with
+    0x01, so their state adapters length-discriminate cleartext (32 bytes)
+    from the authenticated envelope (61 bytes).
+  - Generic unwrap detects the marker; if absent it returns the input
+    unchanged. If the marker is present but authentication fails, it raises
+    instead of silently accepting tampered ciphertext.
 
 Why scrypt and not Argon2id?
 
 The audit's preferred KDF was Argon2id; ``cryptography>=42`` (our
 floor) does not expose Argon2id directly. Adding ``argon2-cffi``
 would require a new dependency. scrypt is in the same memory-hard
-family, audited, available without adding deps, and meets the
-practical defense (a brute-force attacker needs ~256 MB and ~hours
-per candidate passphrase — slow enough to make a stolen-disk
-dictionary attack costly). When ``cryptography`` ships Argon2id (or
+family, audited, and available without adding dependencies. The v1
+parameters require approximately 128 MiB per derivation and materially
+raise the cost of parallel offline guessing; they do not make weak
+passphrases safe. When ``cryptography`` ships Argon2id (or
 when the project takes the argon2-cffi dep), the DRK derivation
-function here is the only thing that needs to change.
+must move behind a new persisted envelope version with an explicit migration;
+changing these v1 parameters in place would orphan existing ciphertext.
 
 Backward compatibility:
 
-  - If ``ONE_LINK_PASSPHRASE`` is not set, no LockBox is constructed
-    and every wrap/unwrap call is a passthrough. State + server keep
-    storing values cleartext — same posture as before.
-  - If the user later sets the env var, NEW writes get wrapped; OLD
-    cleartext reads still succeed (marker absent → passthrough).
-    Re-encryption of legacy rows is left as a future ship; the
-    user can force it by re-issuing whatever creates the row (e.g.
-    rejoining a group rotates the chain).
+  - Legacy plaintext values remain readable by marker/length discrimination;
+    new sensitive writes are wrapped on every install.
+  - Legacy passphrase mode requires the source passphrase exactly once to mint
+    its seed recovery slot. Recovery status and backup export report/refuse
+    that incomplete migration instead of claiming paper-only recoverability.
 """
 from __future__ import annotations
 
 import os
 import secrets
+import hashlib
+import sys
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
+from one_link.key_material import (
+    KeyMaterialIntegrityError,
+    KeyMaterialPersistenceError,
+    KeyMaterialProtectionError,
+    atomic_create_bytes,
+    atomic_replace_bytes,
+    read_bytes_if_exists,
+    sync_existing_authority,
+)
 
-# 0x01 marker prefix for wrapped values. Distinct from any cleartext
-# shape we wrap (chain_key is exactly 32 raw bytes; UI token is
-# base64url ASCII — neither starts with 0x01 in well-formed input).
+
+# 0x01 marker prefix for wrapped values. This is distinct from textual legacy
+# formats such as base64url tokens, but NOT from arbitrary random bytes. State
+# adapters for fixed-width binary secrets must discriminate by exact length.
 WRAP_MARKER = b"\x01"
 NONCE_LEN = 12
 TAG_LEN = 16
 MIN_WRAPPED_LEN = 1 + NONCE_LEN + TAG_LEN  # marker + nonce + tag (zero-byte plaintext)
 
-# scrypt parameters. ~256 MiB memory cost, ~50ms on a 2024 laptop.
-# The audit asked for "Argon2id ≥256MB ≥3 iterations"; this is the
-# scrypt analogue.
+# scrypt v1 parameters. RFC 7914's approximate working memory is
+# 128 * N * r = 128 MiB. These constants are part of the persisted format:
+# changing them without versioned KDF metadata would make existing data
+# undecryptable.
 SCRYPT_N = 1 << 17  # 131072
 SCRYPT_R = 8
 SCRYPT_P = 1
@@ -102,6 +113,33 @@ PASSPHRASE_ENV = "ONE_LINK_PASSPHRASE"
 # ONE_LINK_PASSPHRASE which routes through scrypt instead.
 DRK_FILENAME = "data-root-key.bin"
 DRK_DPAPI_DESCRIPTION = "OneLink-DRK-v1"
+
+# Passphrase mode historically used the scrypt output directly as the
+# application data-encryption key.  That made already-wrapped rows impossible
+# to recover from the paper seed even though the recovery UI reported the
+# derived DRK as healthy.  v1 keeps that legacy key as the stable DEK (so no
+# row rewrite is needed) and stores two authenticated wraps: one opened by the
+# configured passphrase and one opened by the paper master seed.  The envelope
+# is portable and therefore belongs in encrypted backup bundles; neither wrap
+# contains a plaintext key.
+DEK_ENVELOPE_FILENAME = "lockbox.dek-envelope-v1"
+DEK_ENVELOPE_LOCK_FILENAME = ".lockbox.dek-envelope.lock"
+DEK_ENVELOPE_MAGIC = b"OLLBDEK\x01"
+DEK_ENVELOPE_NONCE_LEN = 12
+DEK_ENVELOPE_CIPHERTEXT_LEN = 32 + 16
+DEK_ENVELOPE_SALT_DIGEST_LEN = 32
+DEK_ENVELOPE_LEN = (
+    len(DEK_ENVELOPE_MAGIC)
+    + DEK_ENVELOPE_SALT_DIGEST_LEN
+    + DEK_ENVELOPE_NONCE_LEN
+    + DEK_ENVELOPE_CIPHERTEXT_LEN
+    + DEK_ENVELOPE_NONCE_LEN
+    + DEK_ENVELOPE_CIPHERTEXT_LEN
+)
+_DEK_PASSPHRASE_WRAP_INFO = b"OL/lockbox/dek-passphrase-wrap|v1"
+_DEK_SEED_WRAP_INFO = b"OL/master/lockbox-dek-recovery|v1"
+_DEK_PASSPHRASE_AAD_SUFFIX = b"|passphrase"
+_DEK_SEED_AAD_SUFFIX = b"|master-seed"
 
 
 class LockBoxError(RuntimeError):
@@ -134,14 +172,7 @@ class LockBox:
             raise ValueError("passphrase must be non-empty bytes")
         if not isinstance(salt, (bytes, bytearray)) or len(salt) < 16:
             raise ValueError("salt must be at least 16 bytes")
-        kdf = Scrypt(
-            salt=bytes(salt),
-            length=32,
-            n=SCRYPT_N,
-            r=SCRYPT_R,
-            p=SCRYPT_P,
-        )
-        data_key = kdf.derive(bytes(passphrase))
+        data_key = _derive_legacy_passphrase_dek(bytes(passphrase), bytes(salt))
         # Passphrase-derived = explicit user opt-in = stronger mode.
         return cls(data_key, is_silent=False)
 
@@ -184,6 +215,355 @@ class LockBox:
         return blob
 
 
+@dataclass(frozen=True)
+class _DekEnvelope:
+    """Strict fixed-width v1 envelope for the stable application DEK."""
+
+    salt_digest: bytes
+    passphrase_nonce: bytes
+    passphrase_ciphertext: bytes
+    seed_nonce: bytes
+    seed_ciphertext: bytes
+
+    def encode(self) -> bytes:
+        payload = b"".join(
+            (
+                DEK_ENVELOPE_MAGIC,
+                self.salt_digest,
+                self.passphrase_nonce,
+                self.passphrase_ciphertext,
+                self.seed_nonce,
+                self.seed_ciphertext,
+            )
+        )
+        if len(payload) != DEK_ENVELOPE_LEN:
+            raise KeyMaterialIntegrityError("lockbox DEK envelope has invalid fields")
+        return payload
+
+    @classmethod
+    def decode(cls, payload: bytes) -> "_DekEnvelope":
+        if not isinstance(payload, bytes) or len(payload) != DEK_ENVELOPE_LEN:
+            raise KeyMaterialIntegrityError(
+                "lockbox DEK envelope has an invalid length"
+            )
+        if not secrets.compare_digest(
+            payload[: len(DEK_ENVELOPE_MAGIC)], DEK_ENVELOPE_MAGIC
+        ):
+            raise KeyMaterialIntegrityError(
+                "lockbox DEK envelope has an unsupported format"
+            )
+        offset = len(DEK_ENVELOPE_MAGIC)
+
+        def take(length: int) -> bytes:
+            nonlocal offset
+            result = payload[offset : offset + length]
+            offset += length
+            return result
+
+        envelope = cls(
+            salt_digest=take(DEK_ENVELOPE_SALT_DIGEST_LEN),
+            passphrase_nonce=take(DEK_ENVELOPE_NONCE_LEN),
+            passphrase_ciphertext=take(DEK_ENVELOPE_CIPHERTEXT_LEN),
+            seed_nonce=take(DEK_ENVELOPE_NONCE_LEN),
+            seed_ciphertext=take(DEK_ENVELOPE_CIPHERTEXT_LEN),
+        )
+        if offset != len(payload):
+            raise KeyMaterialIntegrityError("lockbox DEK envelope parser drift")
+        return envelope
+
+
+def _derive_legacy_passphrase_dek(passphrase: bytes, salt: bytes) -> bytes:
+    """Derive the exact pre-envelope key so existing rows remain readable."""
+
+    if not passphrase:
+        raise ValueError("passphrase must be non-empty bytes")
+    if len(salt) != 16:
+        raise ValueError("lockbox KDF salt must be 16 bytes")
+    return Scrypt(
+        salt=bytes(salt),
+        length=32,
+        n=SCRYPT_N,
+        r=SCRYPT_R,
+        p=SCRYPT_P,
+    ).derive(bytes(passphrase))
+
+
+def _hkdf_key(material: bytes, *, info: bytes) -> bytes:
+    if len(material) != 32:
+        raise ValueError("lockbox wrapping authority must be 32 bytes")
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=info,
+    ).derive(bytes(material))
+
+
+def _passphrase_wrap_key(legacy_dek: bytes) -> bytes:
+    return _hkdf_key(legacy_dek, info=_DEK_PASSPHRASE_WRAP_INFO)
+
+
+def _seed_wrap_key(seed: bytes) -> bytes:
+    return _hkdf_key(seed, info=_DEK_SEED_WRAP_INFO)
+
+
+def _slot_aad(salt_digest: bytes, *, seed_slot: bool) -> bytes:
+    suffix = _DEK_SEED_AAD_SUFFIX if seed_slot else _DEK_PASSPHRASE_AAD_SUFFIX
+    return DEK_ENVELOPE_MAGIC + salt_digest + suffix
+
+
+def _encrypt_dek_slot(
+    dek: bytes,
+    *,
+    wrapping_key: bytes,
+    salt_digest: bytes,
+    seed_slot: bool,
+) -> tuple[bytes, bytes]:
+    if len(dek) != 32 or len(salt_digest) != DEK_ENVELOPE_SALT_DIGEST_LEN:
+        raise ValueError("invalid lockbox DEK envelope input")
+    nonce = secrets.token_bytes(DEK_ENVELOPE_NONCE_LEN)
+    ciphertext = AESGCM(wrapping_key).encrypt(
+        nonce,
+        bytes(dek),
+        _slot_aad(salt_digest, seed_slot=seed_slot),
+    )
+    if len(ciphertext) != DEK_ENVELOPE_CIPHERTEXT_LEN:
+        raise KeyMaterialIntegrityError("lockbox DEK wrap produced invalid output")
+    return nonce, ciphertext
+
+
+def _decrypt_dek_slot(
+    envelope: _DekEnvelope,
+    *,
+    wrapping_key: bytes,
+    seed_slot: bool,
+) -> Optional[bytes]:
+    nonce = envelope.seed_nonce if seed_slot else envelope.passphrase_nonce
+    ciphertext = (
+        envelope.seed_ciphertext
+        if seed_slot
+        else envelope.passphrase_ciphertext
+    )
+    try:
+        plaintext = AESGCM(wrapping_key).decrypt(
+            nonce,
+            ciphertext,
+            _slot_aad(envelope.salt_digest, seed_slot=seed_slot),
+        )
+    except Exception:
+        # Authentication failure is the expected result for a candidate phrase,
+        # seed, or passphrase that is not this envelope's authority.
+        return None
+    if len(plaintext) != 32:
+        raise KeyMaterialIntegrityError(
+            "authenticated lockbox DEK envelope contained an invalid key"
+        )
+    return bytes(plaintext)
+
+
+def _new_envelope(*, dek: bytes, salt: bytes, passphrase_key: bytes, seed: bytes) -> _DekEnvelope:
+    salt_digest = hashlib.sha256(bytes(salt)).digest()
+    pass_nonce, pass_ciphertext = _encrypt_dek_slot(
+        dek,
+        wrapping_key=passphrase_key,
+        salt_digest=salt_digest,
+        seed_slot=False,
+    )
+    seed_nonce, seed_ciphertext = _encrypt_dek_slot(
+        dek,
+        wrapping_key=_seed_wrap_key(seed),
+        salt_digest=salt_digest,
+        seed_slot=True,
+    )
+    return _DekEnvelope(
+        salt_digest=salt_digest,
+        passphrase_nonce=pass_nonce,
+        passphrase_ciphertext=pass_ciphertext,
+        seed_nonce=seed_nonce,
+        seed_ciphertext=seed_ciphertext,
+    )
+
+
+def _replace_envelope_slots(
+    envelope: _DekEnvelope,
+    *,
+    dek: bytes,
+    passphrase_key: Optional[bytes] = None,
+    seed: Optional[bytes] = None,
+    salt: Optional[bytes] = None,
+) -> _DekEnvelope:
+    salt_digest = (
+        hashlib.sha256(bytes(salt)).digest()
+        if salt is not None
+        else envelope.salt_digest
+    )
+    if not secrets.compare_digest(salt_digest, envelope.salt_digest):
+        # The digest participates in both slots' AAD.  Changing it requires
+        # re-encrypting both slots; preserving either ciphertext would corrupt
+        # the envelope.
+        if passphrase_key is None or seed is None:
+            raise KeyMaterialProtectionError(
+                "lockbox salt changed but both recovery factors are unavailable"
+            )
+    if passphrase_key is None:
+        pass_nonce = envelope.passphrase_nonce
+        pass_ciphertext = envelope.passphrase_ciphertext
+    else:
+        pass_nonce, pass_ciphertext = _encrypt_dek_slot(
+            dek,
+            wrapping_key=passphrase_key,
+            salt_digest=salt_digest,
+            seed_slot=False,
+        )
+    if seed is None:
+        seed_nonce = envelope.seed_nonce
+        seed_ciphertext = envelope.seed_ciphertext
+    else:
+        seed_nonce, seed_ciphertext = _encrypt_dek_slot(
+            dek,
+            wrapping_key=_seed_wrap_key(seed),
+            salt_digest=salt_digest,
+            seed_slot=True,
+        )
+    return _DekEnvelope(
+        salt_digest=salt_digest,
+        passphrase_nonce=pass_nonce,
+        passphrase_ciphertext=pass_ciphertext,
+        seed_nonce=seed_nonce,
+        seed_ciphertext=seed_ciphertext,
+    )
+
+
+def _envelope_path(data_dir: Path) -> Path:
+    return Path(data_dir) / DEK_ENVELOPE_FILENAME
+
+
+def _harden_envelope_path(path: Path) -> None:
+    if os.name == "nt":
+        from one_link.identity import _restrict_windows_acl
+
+        _restrict_windows_acl(path)
+
+
+def _load_envelope(data_dir: Path) -> Optional[_DekEnvelope]:
+    payload = read_bytes_if_exists(
+        _envelope_path(data_dir),
+        label="lockbox DEK envelope",
+        max_bytes=DEK_ENVELOPE_LEN + 1,
+        harden_path=_harden_envelope_path,
+    )
+    return None if payload is None else _DekEnvelope.decode(payload)
+
+
+@contextmanager
+def _envelope_mutation_lock(data_dir: Path):
+    """Serialize first migration and passphrase/seed-slot rewraps."""
+
+    root = Path(data_dir)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = root / DEK_ENVELOPE_LOCK_FILENAME
+    flags = os.O_RDWR | os.O_CREAT | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_CLOEXEC", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    try:
+        fd = os.open(str(path), flags, 0o600)
+    except OSError as exc:
+        raise KeyMaterialPersistenceError(
+            "cannot open lockbox DEK envelope lock"
+        ) from exc
+    locked = False
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\x00")
+                os.fsync(fd)
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise KeyMaterialPersistenceError(
+                    "another lockbox DEK envelope transaction is in progress"
+                ) from exc
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise KeyMaterialPersistenceError(
+                    "another lockbox DEK envelope transaction is in progress"
+                ) from exc
+        locked = True
+        if sys.platform != "win32":
+            os.chmod(path, 0o600)
+        yield
+    finally:
+        if locked:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        os.close(fd)
+
+
+def _publish_new_envelope(data_dir: Path, envelope: _DekEnvelope) -> _DekEnvelope:
+    expected = envelope.encode()
+
+    def validate(payload: bytes) -> None:
+        _DekEnvelope.decode(payload)
+        if not secrets.compare_digest(payload, expected):
+            raise KeyMaterialIntegrityError(
+                "published lockbox DEK envelope differs from requested authority"
+            )
+
+    if atomic_create_bytes(
+        _envelope_path(data_dir),
+        expected,
+        label="lockbox DEK envelope",
+        validate=validate,
+        harden_path=_harden_envelope_path,
+    ):
+        return envelope
+    sync_existing_authority(
+        _envelope_path(data_dir), label="lockbox DEK envelope"
+    )
+    winner = _load_envelope(data_dir)
+    if winner is None:
+        raise KeyMaterialPersistenceError(
+            "concurrent lockbox DEK envelope publication has no winner"
+        )
+    return winner
+
+
+def _replace_envelope(data_dir: Path, envelope: _DekEnvelope) -> None:
+    expected = envelope.encode()
+
+    def validate(payload: bytes) -> None:
+        _DekEnvelope.decode(payload)
+        if not secrets.compare_digest(payload, expected):
+            raise KeyMaterialIntegrityError(
+                "persisted lockbox DEK envelope failed exact read-back"
+            )
+
+    atomic_replace_bytes(
+        _envelope_path(data_dir),
+        expected,
+        label="lockbox DEK envelope",
+        validate=validate,
+        harden_path=_harden_envelope_path,
+    )
+
+
 def is_wrapped(blob: bytes) -> bool:
     """Cheap shape check: marker byte + minimum length."""
     if not isinstance(blob, (bytes, bytearray)):
@@ -192,14 +572,16 @@ def is_wrapped(blob: bytes) -> bool:
 
 
 def maybe_unwrap(blob: bytes, lockbox: Optional["LockBox"]) -> bytes:
-    """Top-level convenience: unwrap if marker present and lockbox is
-    available; passthrough otherwise. Use this from state-layer read
-    paths so the call site stays branch-free."""
+    """Unwrap marker-delimited data or return legacy plaintext unchanged.
+
+    This helper is safe only when the plaintext schema excludes
+    ``WRAP_MARKER`` at byte zero. Callers storing fixed-width random bytes
+    must distinguish their exact cleartext and envelope lengths first.
+    """
     if is_wrapped(blob):
         if lockbox is None:
             raise LockBoxError(
-                "found wrapped value but no lockbox is configured "
-                "(was ONE_LINK_PASSPHRASE removed between writes?)"
+                "found wrapped value but recoverable lockbox authority is unavailable"
             )
         return lockbox.unwrap(blob)
     return blob
@@ -226,31 +608,296 @@ def load_or_create_salt(data_dir: Path) -> bytes:
     passphrase can't be used against another install's wrapped data
     via offline rainbow tables."""
     salt_path = Path(data_dir) / SALT_FILENAME
-    try:
-        existing = salt_path.read_bytes()
-        if len(existing) == 16:
-            return existing
-    except (OSError, ValueError):
-        pass
+    existing = read_bytes_if_exists(
+        salt_path,
+        label="lockbox KDF salt",
+        max_bytes=1024,
+    )
+    if existing is not None:
+        if len(existing) != 16:
+            raise KeyMaterialIntegrityError(
+                "existing lockbox KDF salt has an invalid length"
+            )
+        return existing
     fresh = secrets.token_bytes(16)
-    salt_path.parent.mkdir(parents=True, exist_ok=True)
-    # Atomic-ish write: temp + replace. The salt is non-secret so
-    # we don't bother with the full fsync-the-parent dance.
-    tmp = salt_path.with_name(salt_path.name + ".tmp." + secrets.token_hex(4))
-    tmp.write_bytes(fresh)
-    os.replace(tmp, salt_path)
-    return fresh
+
+    def _validate(blob: bytes) -> None:
+        if len(blob) != 16:
+            raise KeyMaterialIntegrityError(
+                "published lockbox KDF salt has an invalid length"
+            )
+
+    if atomic_create_bytes(
+        salt_path,
+        fresh,
+        label="lockbox KDF salt",
+        validate=_validate,
+    ):
+        return fresh
+    sync_existing_authority(salt_path, label="lockbox KDF salt")
+    winner = read_bytes_if_exists(
+        salt_path,
+        label="lockbox KDF salt",
+        max_bytes=1024,
+    )
+    if winner is None:
+        raise KeyMaterialPersistenceError(
+            "concurrent lockbox-salt publication reported a winner but none exists"
+        )
+    _validate(winner)
+    return winner
 
 
 def lockbox_from_env(data_dir: Path) -> Optional["LockBox"]:
-    """Build a LockBox from ``ONE_LINK_PASSPHRASE`` if set; return
-    None otherwise. The original opt-in entry point — kept for
-    callers that want the stronger scrypt-derived path."""
+    """Compatibility gate for callers that require an explicit passphrase.
+
+    It returns ``None`` when the environment factor is absent, but when present
+    it routes through the same versioned stable-DEK envelope as every supported
+    production caller. It must never recreate the legacy direct-scrypt bypass.
+    """
     pw = os.environ.get(PASSPHRASE_ENV, "")
     if not pw:
         return None
-    salt = load_or_create_salt(data_dir)
-    return LockBox.from_passphrase(pw.encode("utf-8"), salt)
+    return acquire_lockbox(Path(data_dir))
+
+
+def _agree_deks(*candidates: Optional[bytes]) -> Optional[bytes]:
+    available = [bytes(candidate) for candidate in candidates if candidate is not None]
+    if not available:
+        return None
+    winner = available[0]
+    if any(not secrets.compare_digest(winner, other) for other in available[1:]):
+        raise KeyMaterialIntegrityError(
+            "lockbox DEK envelope recovery slots disagree"
+        )
+    return winner
+
+
+def _passphrase_envelope_candidate(
+    envelope: _DekEnvelope,
+    *,
+    passphrase: str,
+    salt: bytes,
+) -> tuple[Optional[bytes], bytes]:
+    legacy_dek = _derive_legacy_passphrase_dek(
+        passphrase.encode("utf-8"), bytes(salt)
+    )
+    wrapping_key = _passphrase_wrap_key(legacy_dek)
+    if not secrets.compare_digest(
+        hashlib.sha256(bytes(salt)).digest(), envelope.salt_digest
+    ):
+        return None, wrapping_key
+    return (
+        _decrypt_dek_slot(
+            envelope,
+            wrapping_key=wrapping_key,
+            seed_slot=False,
+        ),
+        wrapping_key,
+    )
+
+
+def recovery_envelope_matches_seed(data_dir: Path, seed: bytes) -> Optional[bool]:
+    """Observe whether the application DEK has a valid wrap for ``seed``.
+
+    ``None`` is a proven-absent envelope (silent DRK mode).  Malformed files
+    raise; a well-formed envelope authenticated by another seed returns False.
+    The function never creates or rewrites authority and is safe for recovery
+    preflight and paper-phrase verification.
+    """
+
+    if not isinstance(seed, (bytes, bytearray)) or len(seed) != 32:
+        raise ValueError("seed must be 32 bytes")
+    envelope = _load_envelope(Path(data_dir))
+    if envelope is None:
+        return None
+    recovered = _decrypt_dek_slot(
+        envelope,
+        wrapping_key=_seed_wrap_key(bytes(seed)),
+        seed_slot=True,
+    )
+    return recovered is not None
+
+
+def requires_legacy_passphrase_recovery(data_dir: Path) -> bool:
+    """Return True when paper/social recovery still needs the old passphrase.
+
+    This is intentionally observational.  A configured passphrase or persisted
+    legacy salt with no DEK envelope means direct-scrypt application rows may
+    exist and the master seed alone has not been proven able to open them.
+    """
+
+    root = Path(data_dir)
+    if _load_envelope(root) is not None:
+        return False
+    if bool(os.environ.get(PASSPHRASE_ENV, "")):
+        return True
+    from one_link.key_material import artifact_exists
+
+    return artifact_exists(root / SALT_FILENAME, label="lockbox KDF salt")
+
+
+def ensure_recovery_envelope_for_backup(data_dir: Path, *, seed: bytes) -> bool:
+    """Ensure passphrase-mode application rows are portable in a backup.
+
+    Returns True when an envelope exists and its seed slot is proven usable,
+    False for ordinary silent-DRK mode.  Existing direct-scrypt installs are
+    migrated without rewriting a single row: the exact legacy key becomes the
+    stable DEK and is atomically dual-wrapped before export continues.
+    """
+
+    if not isinstance(seed, (bytes, bytearray)) or len(seed) != 32:
+        raise ValueError("seed must be 32 bytes")
+    root = Path(data_dir)
+    passphrase = os.environ.get(PASSPHRASE_ENV, "")
+    with _envelope_mutation_lock(root):
+        envelope = _load_envelope(root)
+        if envelope is None and not passphrase:
+            from one_link.key_material import artifact_exists
+
+            if artifact_exists(root / SALT_FILENAME, label="lockbox KDF salt"):
+                raise KeyMaterialProtectionError(
+                    "legacy passphrase-mode LockBox has no DEK recovery "
+                    "envelope; set the source ONE_LINK_PASSPHRASE before backup"
+                )
+            return False
+        if not passphrase:
+            if envelope is None:
+                raise KeyMaterialIntegrityError(
+                    "lockbox DEK envelope disappeared during the locked backup transaction"
+                )
+            recovered = _decrypt_dek_slot(
+                envelope,
+                wrapping_key=_seed_wrap_key(bytes(seed)),
+                seed_slot=True,
+            )
+            if recovered is None:
+                raise KeyMaterialProtectionError(
+                    "lockbox DEK envelope is not recoverable by this backup seed"
+                )
+            return True
+
+        salt = load_or_create_salt(root)
+        legacy_dek = _derive_legacy_passphrase_dek(
+            passphrase.encode("utf-8"), salt
+        )
+        passphrase_key = _passphrase_wrap_key(legacy_dek)
+        if envelope is None:
+            envelope = _publish_new_envelope(
+                root,
+                _new_envelope(
+                    dek=legacy_dek,
+                    salt=salt,
+                    passphrase_key=passphrase_key,
+                    seed=bytes(seed),
+                ),
+            )
+
+        passphrase_dek, passphrase_key = _passphrase_envelope_candidate(
+            envelope,
+            passphrase=passphrase,
+            salt=salt,
+        )
+        seed_dek = _decrypt_dek_slot(
+            envelope,
+            wrapping_key=_seed_wrap_key(bytes(seed)),
+            seed_slot=True,
+        )
+        dek = _agree_deks(passphrase_dek, seed_dek)
+        if dek is None:
+            raise KeyMaterialProtectionError(
+                "neither the configured passphrase nor backup seed can open "
+                "the lockbox DEK envelope"
+            )
+        salt_changed = not secrets.compare_digest(
+            hashlib.sha256(salt).digest(), envelope.salt_digest
+        )
+        if passphrase_dek is None or seed_dek is None or salt_changed:
+            envelope = _replace_envelope_slots(
+                envelope,
+                dek=dek,
+                passphrase_key=passphrase_key,
+                seed=bytes(seed),
+                salt=salt if salt_changed else None,
+            )
+            _replace_envelope(root, envelope)
+        return True
+
+
+def rebind_recovery_envelope(
+    data_dir: Path,
+    *,
+    target_seed: bytes,
+    current_seed: Optional[bytes] = None,
+) -> bool:
+    """Bind an existing stable DEK to a replacement master seed.
+
+    Recovery calls this while its durable intent still exists and before the
+    master seed is replaced.  The DEK can be opened by the target seed (bundle
+    restore/replay), the current seed (in-place seed rotation), or the explicit
+    passphrase.  At least one must authenticate; no guessed or random key is
+    ever published.  The passphrase slot is retained unless an explicit new
+    passphrase/salt is available to authenticate or rotate it.
+    """
+
+    if not isinstance(target_seed, (bytes, bytearray)) or len(target_seed) != 32:
+        raise ValueError("target_seed must be 32 bytes")
+    if current_seed is not None and len(current_seed) != 32:
+        raise ValueError("current_seed must be 32 bytes")
+    root = Path(data_dir)
+    with _envelope_mutation_lock(root):
+        envelope = _load_envelope(root)
+        if envelope is None:
+            return False
+        target_dek = _decrypt_dek_slot(
+            envelope,
+            wrapping_key=_seed_wrap_key(bytes(target_seed)),
+            seed_slot=True,
+        )
+        current_dek = None
+        if current_seed is not None:
+            current_dek = _decrypt_dek_slot(
+                envelope,
+                wrapping_key=_seed_wrap_key(bytes(current_seed)),
+                seed_slot=True,
+            )
+
+        passphrase = os.environ.get(PASSPHRASE_ENV, "")
+        passphrase_dek: Optional[bytes] = None
+        passphrase_key: Optional[bytes] = None
+        salt: Optional[bytes] = None
+        salt_changed = False
+        if passphrase:
+            salt = load_or_create_salt(root)
+            passphrase_dek, passphrase_key = _passphrase_envelope_candidate(
+                envelope,
+                passphrase=passphrase,
+                salt=salt,
+            )
+            salt_changed = not secrets.compare_digest(
+                hashlib.sha256(salt).digest(), envelope.salt_digest
+            )
+
+        dek = _agree_deks(target_dek, current_dek, passphrase_dek)
+        if dek is None:
+            raise KeyMaterialProtectionError(
+                "lockbox DEK recovery requires the source master seed or "
+                "the source ONE_LINK_PASSPHRASE"
+            )
+        if (
+            target_dek is None
+            or (passphrase and passphrase_dek is None)
+            or salt_changed
+        ):
+            replacement = _replace_envelope_slots(
+                envelope,
+                dek=dek,
+                passphrase_key=passphrase_key,
+                seed=bytes(target_seed),
+                salt=salt if salt_changed else None,
+            )
+            _replace_envelope(root, replacement)
+        return True
 
 
 # ─── silent-mode DRK acquisition (v0.20.7 audit C5 partial-auto) ───
@@ -353,46 +1000,62 @@ def _drk_path(data_dir: Path) -> Path:
     return Path(data_dir) / DRK_FILENAME
 
 
+def _harden_drk_path(path: Path) -> None:
+    if os.name == "nt":
+        from one_link.identity import _restrict_windows_acl
+
+        _restrict_windows_acl(path)
+
+
+def _decode_drk_blob(blob: bytes) -> bytes:
+    if not blob:
+        raise KeyMaterialIntegrityError("existing data root key is empty")
+    if os.name == "nt":
+        unwrapped = _dpapi_unprotect(blob)
+        if unwrapped is None:
+            raise KeyMaterialProtectionError(
+                "existing data root key could not be DPAPI-unprotected"
+            )
+        if len(unwrapped) != 32:
+            raise KeyMaterialIntegrityError(
+                "existing data root key has an invalid unwrapped length"
+            )
+        return bytes(unwrapped)
+    if len(blob) != 32:
+        raise KeyMaterialIntegrityError("existing data root key has an invalid length")
+    return bytes(blob)
+
+
+def _encode_drk(drk: bytes) -> bytes:
+    if os.name != "nt":
+        return bytes(drk)
+    wrapped = _dpapi_protect(bytes(drk))
+    if not wrapped:
+        raise KeyMaterialProtectionError(
+            "DPAPI protection failed; refusing to persist a raw data root key"
+        )
+    return bytes(wrapped)
+
+
 def acquire_or_create_silent_drk(data_dir: Path) -> bytes:
     """v0.20.7 (security audit C5 silent-mode): get the per-install
     32-byte data root key without involving the user.
 
-    Behavior:
-      1. If <data_dir>/data-root-key.bin exists:
-         - Windows: try DPAPI-unwrap. On success, return the
-           unwrapped 32 bytes. On failure (wrong user, machine
-           rebuild, corrupt blob): treat as if missing and mint
-           fresh — this matches the user-visible "lost laptop ⇒
-           lose access" behavior we want.
-         - non-Windows: read raw bytes if length == 32.
-      2. Otherwise mint 32 fresh bytes via os.urandom, persist:
-         - Windows: DPAPI-wrap, write the wrapped blob.
-         - non-Windows: write raw bytes with 0o600 perms.
-
-    Returns the DRK bytes; never raises (any failure surfaces as a
-    fresh DRK + best-effort persistence). Callers using the returned
-    DRK get an at-rest LockBox automatically.
+    Only a proven-absent path may create.  Existing unreadable, corrupt, or
+    DPAPI-unusable authority raises and remains byte-identical.  First
+    publication is durable and no-replace; concurrent starts converge on the
+    winner, and no generated key is returned until persisted bytes have been
+    read back, unprotected, and compared.
     """
     p = _drk_path(data_dir)
-    p.parent.mkdir(parents=True, exist_ok=True)
-
-    if p.exists():
-        try:
-            blob = p.read_bytes()
-        except OSError:
-            blob = b""
-        if blob:
-            if os.name == "nt":
-                unwrapped = _dpapi_unprotect(blob)
-                if unwrapped is not None and len(unwrapped) == 32:
-                    return unwrapped
-                # DPAPI failed — likely user rebuilt the machine or
-                # changed account. Fall through to mint a fresh DRK.
-                # Existing wrapped data with the OLD DRK becomes
-                # unreadable; that's the lost-laptop semantics.
-            else:
-                if len(blob) == 32:
-                    return blob
+    blob = read_bytes_if_exists(
+        p,
+        label="data root key",
+        max_bytes=65536,
+        harden_path=_harden_drk_path,
+    )
+    if blob is not None:
+        return _decode_drk_blob(blob)
 
     # v0.20.7 (master-seed integration): if a master seed has been
     # provisioned, derive the DRK from it deterministically instead
@@ -400,58 +1063,41 @@ def acquire_or_create_silent_drk(data_dir: Path) -> bytes:
     # 24-word phrase on a new device gets the same DRK as the
     # original install — at-rest data unlocks transparently.
     fresh: Optional[bytes] = None
-    try:
-        from one_link import master_seed as _ms
-        seed = _ms.load_seed(data_dir)
-        if seed is not None:
-            fresh = _ms.derive_drk(seed)
-    except Exception:
-        fresh = None
+    from one_link import master_seed as _ms
+
+    seed = _ms.load_seed(data_dir)
+    if seed is not None:
+        fresh = _ms.derive_drk(seed)
     if fresh is None:
         fresh = secrets.token_bytes(32)
-    # 2026-05-22 audit Batch KK: fsync-before-rename hygiene.
-    # ``tmp.write_bytes(...)`` opens + writes + closes but does NOT
-    # fsync, so a power-loss / OS crash between write and rename can
-    # leave a zero-byte or partial DRK file. Use the same O_WRONLY +
-    # os.write + os.fsync pattern as ``master_seed.store_seed`` /
-    # ``identity._save_key`` so the rename is atomic over fully-
-    # flushed bytes.
-    def _atomic_write_bytes(target: Path, payload: bytes) -> None:
-        tmp_p = target.with_name(target.name + ".tmp." + secrets.token_hex(4))
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-        flags |= getattr(os, "O_BINARY", 0)
-        fd = os.open(str(tmp_p), flags, 0o600)
-        try:
-            os.write(fd, payload)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(tmp_p, target)
-    try:
-        if os.name == "nt":
-            wrapped = _dpapi_protect(fresh)
-            if wrapped:
-                _atomic_write_bytes(p, wrapped)
-            else:
-                # DPAPI unavailable — write raw with the same
-                # Windows-DACL hardening as identity.key.
-                _atomic_write_bytes(p, fresh)
-                from one_link.identity import _restrict_windows_acl
-                _restrict_windows_acl(p)
-        else:
-            _atomic_write_bytes(p, fresh)
-            try:
-                os.chmod(p, 0o600)
-            except OSError:
-                pass
-    except OSError:
-        # Persistence failed — return the fresh key anyway so the
-        # current process gets at-rest encryption. Next process
-        # restart will mint a new one (and orphan whatever was
-        # written under the previous DRK), which is the same
-        # failure mode as the no-lockbox case before this fix.
-        pass
-    return fresh
+    payload = _encode_drk(fresh)
+
+    def _validate(candidate: bytes) -> None:
+        if not secrets.compare_digest(_decode_drk_blob(candidate), fresh):
+            raise KeyMaterialIntegrityError(
+                "published data root key does not match generated authority"
+            )
+
+    if atomic_create_bytes(
+        p,
+        payload,
+        label="data root key",
+        validate=_validate,
+        harden_path=_harden_drk_path,
+    ):
+        return fresh
+    sync_existing_authority(p, label="data root key")
+    winner = read_bytes_if_exists(
+        p,
+        label="data root key",
+        max_bytes=65536,
+        harden_path=_harden_drk_path,
+    )
+    if winner is None:
+        raise KeyMaterialPersistenceError(
+            "concurrent data-root-key publication reported a winner but none exists"
+        )
+    return _decode_drk_blob(winner)
 
 
 def acquire_lockbox(data_dir: Path) -> "LockBox":
@@ -459,11 +1105,13 @@ def acquire_lockbox(data_dir: Path) -> "LockBox":
     by Daemon. Returns a LockBox using the strongest available key
     derivation:
 
-      - If ``ONE_LINK_PASSPHRASE`` is set: scrypt-derived from the
-        user passphrase + per-install salt. Strongest available;
-        protects against attackers who can read the keychain too
-        (e.g. a compromised user account on the same machine).
-        Requires the user to set the env var.
+      - If a passphrase-mode DEK envelope exists: authenticate its stable DEK
+        with the configured passphrase or master-seed recovery slot.  A changed
+        explicit passphrase is durably rewrapped without rewriting data.
+      - If ``ONE_LINK_PASSPHRASE`` is set on a legacy install: derive the exact
+        historical scrypt key, atomically dual-wrap it under the passphrase and
+        master seed, then keep using it as the DEK.  Existing rows remain
+        byte-for-byte readable while paper-seed recovery becomes truthful.
       - Otherwise: silent DRK from ``acquire_or_create_silent_drk``.
         DPAPI-wrapped on Windows (so a stolen disk without the
         user's login credentials cannot unwrap), file-with-strict-
@@ -474,9 +1122,83 @@ def acquire_lockbox(data_dir: Path) -> "LockBox":
     default for every install, with no UX friction. Audit C5
     silent-mode partial-auto.
     """
+    from one_link import master_seed
+
+    root = Path(data_dir)
     pw = os.environ.get(PASSPHRASE_ENV, "")
-    if pw:
-        salt = load_or_create_salt(data_dir)
-        return LockBox.from_passphrase(pw.encode("utf-8"), salt)
-    drk = acquire_or_create_silent_drk(data_dir)
+    seed = master_seed.load_seed(root)
+    with _envelope_mutation_lock(root):
+        envelope = _load_envelope(root)
+        if pw:
+            salt = load_or_create_salt(root)
+            legacy_dek = _derive_legacy_passphrase_dek(pw.encode("utf-8"), salt)
+            passphrase_key = _passphrase_wrap_key(legacy_dek)
+            if envelope is None:
+                if seed is None:
+                    # A pre-master-seed legacy install remains readable.  It is
+                    # deliberately not called recoverable until explicit seed
+                    # migration can publish the second authenticated slot.
+                    return LockBox(legacy_dek, is_silent=False)
+                envelope = _publish_new_envelope(
+                    root,
+                    _new_envelope(
+                        dek=legacy_dek,
+                        salt=salt,
+                        passphrase_key=passphrase_key,
+                        seed=seed,
+                    ),
+                )
+
+            passphrase_dek, passphrase_key = _passphrase_envelope_candidate(
+                envelope,
+                passphrase=pw,
+                salt=salt,
+            )
+            seed_dek = None
+            if seed is not None:
+                seed_dek = _decrypt_dek_slot(
+                    envelope,
+                    wrapping_key=_seed_wrap_key(seed),
+                    seed_slot=True,
+                )
+            dek = _agree_deks(passphrase_dek, seed_dek)
+            if dek is None:
+                raise KeyMaterialProtectionError(
+                    "configured ONE_LINK_PASSPHRASE and master seed cannot "
+                    "open the lockbox DEK envelope"
+                )
+            salt_changed = not secrets.compare_digest(
+                hashlib.sha256(salt).digest(), envelope.salt_digest
+            )
+            if passphrase_dek is None or (seed is not None and seed_dek is None) or salt_changed:
+                replacement = _replace_envelope_slots(
+                    envelope,
+                    dek=dek,
+                    passphrase_key=passphrase_key,
+                    seed=seed,
+                    salt=salt if salt_changed else None,
+                )
+                _replace_envelope(root, replacement)
+            return LockBox(dek, is_silent=False)
+
+        if envelope is not None:
+            if seed is None:
+                raise KeyMaterialProtectionError(
+                    "lockbox DEK envelope requires ONE_LINK_PASSPHRASE or "
+                    "its master-seed recovery authority"
+                )
+            dek = _decrypt_dek_slot(
+                envelope,
+                wrapping_key=_seed_wrap_key(seed),
+                seed_slot=True,
+            )
+            if dek is None:
+                raise KeyMaterialProtectionError(
+                    "master seed cannot authenticate the lockbox DEK envelope"
+                )
+            # is_silent=False describes the persisted data format, not which
+            # recovery slot happened to open it on this boot.
+            return LockBox(dek, is_silent=False)
+
+    drk = acquire_or_create_silent_drk(root)
     return LockBox(drk)

@@ -17,19 +17,33 @@ on:
     branches: [master, main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ruff:
     name: ruff (gate)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: install ruff
-        run: python -m pip install --upgrade pip ruff
+      - name: setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: true
+      - name: install locked tooling
+        run: uv sync --frozen --python python --extra dev
       - name: ruff check (HARD GATE)
-        run: python -m ruff check src/one_link
+        run: uv run --frozen --extra dev ruff check src/one_link
 
   mypy:
     name: mypy (gate)
@@ -41,19 +55,39 @@ jobs:
     # handled by ignore_missing_imports in pyproject.
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: install
-        run: |
-          python -m pip install --upgrade pip
-          # Install the project (for import resolution) AND mypy explicitly
-          # — the [dev] extra doesn't pin mypy, and the old `|| pip install
-          # mypy` fallback never fired when [dev] succeeded.
-          pip install -e ".[dev]"
-          # Pin mypy so the gate is reproducible (a newer mypy can add
-          # checks that turn the build red without a code change).
-          pip install "mypy==2.1.0"
+      - name: setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: true
+      - name: install locked tooling and project
+        run: uv sync --frozen --python python --extra dev
       - name: mypy (HARD GATE)
-        run: python -m mypy src/one_link
+        run: uv run --frozen --extra dev mypy src/one_link
+
+  javascript:
+    name: browser JavaScript static contracts + dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: setup pinned Node.js LTS
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.18.0"
+      - name: install exact JavaScript dependency graph
+        working-directory: tests/js
+        run: npm ci --ignore-scripts
+      - name: audit JavaScript dependencies (HARD GATE)
+        working-directory: tests/js
+        run: npm audit --audit-level=moderate
+      - name: reject undefined browser function calls (HARD GATE)
+        working-directory: tests/js
+        run: npm test

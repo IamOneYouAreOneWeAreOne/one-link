@@ -17,6 +17,10 @@ This module is the per-call runtime that:
 Pure module: no I/O. The daemon wires the HTTP action + WebSocket
 tail through here.
 
+Current limitation: those events carry control metadata/placeholders; this
+adapter does not synthesize and insert audio/video samples into browser playout.
+It is therefore instrumentation/substrate, not E2E predictive-media evidence.
+
 Companion: docs/LIVING_PRESENCE_ARCHITECTURE.md §4.7 (predictive continuity)
 """
 

@@ -22,20 +22,20 @@ const BUCKETS: usize = 4;
 const REL_STDDEV_MAX: f64 = 0.30;
 const TEST_SDP_PUBKEY: [u8; ISSUER_SDP_PUBKEY_LEN] = [0xA5; ISSUER_SDP_PUBKEY_LEN];
 
-fn time_ns<F: FnMut()>(mut f: F) -> u64 {
+fn time_ns<F: FnMut()>(mut f: F) -> f64 {
     let t0 = Instant::now();
     f();
-    let dt = t0.elapsed();
-    u64::try_from(dt.as_nanos()).unwrap_or(u64::MAX)
+    t0.elapsed().as_secs_f64() * 1_000_000_000.0
 }
 
-fn ct_summary(times: &[u64]) -> (f64, f64, f64) {
-    let n = times.len() as f64;
-    let mean = times.iter().map(|t| *t as f64).sum::<f64>() / n;
+fn ct_summary(times: &[f64]) -> (f64, f64, f64) {
+    let sample_count = u32::try_from(times.len()).expect("timing sample count fits in u32");
+    let n = f64::from(sample_count);
+    let mean = times.iter().sum::<f64>() / n;
     let var = times
         .iter()
         .map(|t| {
-            let d = (*t as f64) - mean;
+            let d = *t - mean;
             d * d
         })
         .sum::<f64>()
@@ -73,7 +73,7 @@ fn ct_attest_verify_uniform_over_invalid_sigs() {
 
     let mut bucket_means: Vec<f64> = Vec::with_capacity(BUCKETS);
     for bucket in 0..BUCKETS {
-        let mut samples: Vec<u64> = Vec::with_capacity(SAMPLES_PER_BUCKET);
+        let mut samples: Vec<f64> = Vec::with_capacity(SAMPLES_PER_BUCKET);
         for _ in 0..SAMPLES_PER_BUCKET {
             let mut doc = good.clone();
             let idx = bucket * 16;
@@ -95,7 +95,7 @@ fn ct_attest_verify_uniform_over_invalid_sigs() {
         let (mean, _, _) = ct_summary(&samples);
         bucket_means.push(mean);
     }
-    let (_, _, rel) = ct_summary(&bucket_means.iter().map(|x| *x as u64).collect::<Vec<_>>());
+    let (_, _, rel) = ct_summary(&bucket_means);
     timing_gate!(
         rel < REL_STDDEV_MAX,
         "verify_attestation rel-stddev across tamper-position buckets {rel:.4} ≥ {REL_STDDEV_MAX}"
@@ -110,7 +110,7 @@ fn ct_unseal_uniform_over_tamper_position() {
     let good = provider.seal_master(&seed).unwrap();
     let mut bucket_means: Vec<f64> = Vec::with_capacity(BUCKETS);
     for bucket in 0..BUCKETS {
-        let mut samples: Vec<u64> = Vec::with_capacity(SAMPLES_PER_BUCKET);
+        let mut samples: Vec<f64> = Vec::with_capacity(SAMPLES_PER_BUCKET);
         let pos = (bucket * 7) % good.bytes.len();
         for _ in 0..SAMPLES_PER_BUCKET {
             let mut sealed = good.clone();
@@ -123,7 +123,7 @@ fn ct_unseal_uniform_over_tamper_position() {
         let (mean, _, _) = ct_summary(&samples);
         bucket_means.push(mean);
     }
-    let (_, _, rel) = ct_summary(&bucket_means.iter().map(|x| *x as u64).collect::<Vec<_>>());
+    let (_, _, rel) = ct_summary(&bucket_means);
     timing_gate!(
         rel < REL_STDDEV_MAX,
         "unseal rel-stddev across tamper-position buckets {rel:.4} ≥ {REL_STDDEV_MAX}"

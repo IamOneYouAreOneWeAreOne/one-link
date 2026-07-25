@@ -53,11 +53,20 @@ fn bench_full_round_trip(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_keypair,
-    bench_encapsulate,
-    bench_decapsulate,
-    bench_full_round_trip,
-);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{
+        bench_decapsulate, bench_encapsulate, bench_full_round_trip, bench_keypair, criterion_group,
+    };
+
+    criterion_group!(
+        benches,
+        bench_keypair,
+        bench_encapsulate,
+        bench_decapsulate,
+        bench_full_round_trip,
+    );
+}
+criterion_main!(criterion_benchmark_harness::benches);

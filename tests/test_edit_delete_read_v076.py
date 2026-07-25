@@ -22,12 +22,10 @@ Pin the contract:
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -35,7 +33,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from one_link.daemon import Daemon, EDIT_COOLDOWN_MS
 from one_link.identity import Identity, fingerprint_of
 from one_link.state import State
-from one_link.wire import decode_msg, encode_msg, make_msg
+from one_link.wire import decode_msg, make_msg
 
 
 def _new_identity() -> Identity:

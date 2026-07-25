@@ -4,7 +4,7 @@
 //! Cross-platform determinism vectors for `ol_fec`.
 //!
 //! The Reed-Solomon parity bytes for a fixed `(plaintext, k, m)` MUST
-//! be byte-identical across x86_64 / aarch64 / RISC-V — peers
+//! be byte-identical across `x86_64` / aarch64 / RISC-V — peers
 //! interoperate by comparing bytes, not by re-deriving parity from
 //! local state. Both the scalar path AND the SSSE3 SIMD path MUST
 //! produce identical bytes (the SIMD-matches-scalar property test in
@@ -31,8 +31,8 @@ fn hex_encode_lower(bytes: &[u8]) -> String {
 /// off-by-one in indexing is immediately visible.
 fn data_shard(i: u8) -> Vec<u8> {
     let mut out = vec![0u8; 64];
-    for j in 0..63 {
-        out[j] = i.wrapping_add(j as u8);
+    for j in 0u8..63 {
+        out[usize::from(j)] = i.wrapping_add(j);
     }
     out[63] = 0xCD;
     out
@@ -42,7 +42,7 @@ fn data_shard(i: u8) -> Vec<u8> {
 fn cross_platform_rs_10_4_parity_pinned() {
     let codec = Codec::new(10, 4).unwrap();
     let data: Vec<Vec<u8>> = (0u8..10).map(data_shard).collect();
-    let data_refs: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
+    let data_refs: Vec<&[u8]> = data.iter().map(std::vec::Vec::as_slice).collect();
     let parity = codec.encode(&data_refs).unwrap();
 
     assert_eq!(parity.len(), 4);

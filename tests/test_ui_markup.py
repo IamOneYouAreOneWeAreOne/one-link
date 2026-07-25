@@ -191,7 +191,9 @@ def test_all_ui_calls_have_server_routes(html: str, server_routes: set[str]):
     # route if their parts align after collapsing both {x} and {anything}
     # to the same wildcard.
     def _norm(p: str) -> str:
-        return re.sub(r'\{[^}]+\}', '*', p)
+        # Any path segment containing a template expression is dynamic,
+        # including typed wire forms such as ``id-${session.id}``.
+        return re.sub(r'[^/]*\{[^}]+\}[^/]*', '*', p)
 
     norm_routes = {_norm(r) for r in server_routes}
     missing = []
@@ -199,7 +201,7 @@ def test_all_ui_calls_have_server_routes(html: str, server_routes: set[str]):
         if _norm(p) not in norm_routes:
             missing.append(p)
     assert not missing, (
-        f"UI calls these /api/... paths with no server route:\n"
+        "UI calls these /api/... paths with no server route:\n"
         + "\n".join(f"  - {m}" for m in missing)
     )
 

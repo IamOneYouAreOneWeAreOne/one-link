@@ -26,8 +26,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from one_link.call_sdp_signaling import (
     CALL_ICE,
     CALL_INVITE_SDP_V1,
-    SdpKind,
-    SdpPayload,
     attach_answer_to_accept,
     attach_offer_to_invite,
     build_ice_message,
@@ -77,6 +75,9 @@ class _FakeChannel:
         self.peer_ed_pub = peer_ed_pub
         self.peer_short_id = peer_short_id
         self.peer_caps = {"features": ["chat"]}
+        self.transcript_hash = blake3.blake3(
+            b"test-call-transcript-v1\x00" + peer_ed_pub
+        ).digest()
         self.sent: list[bytes] = []
 
     async def send(self, payload: bytes) -> None:
@@ -97,6 +98,10 @@ SAMPLE_ANSWER_SDP = (
     "s=-\r\n"
     "t=0 0\r\n"
     "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+)
+SAMPLE_VIDEO_SDP = SAMPLE_OFFER_SDP + (
+    "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+    "a=mid:1\r\n"
 )
 
 
@@ -187,8 +192,7 @@ def test_call_invite_with_malformed_sdp_is_dropped_gracefully(
     mom_daemon: Daemon, alice: Identity,
 ) -> None:
     """A CALL_INVITE with garbage in sdp_offer must not crash the
-    daemon. The lifecycle still advances (the FSM doesn't know about
-    SDP), but no offer event fires."""
+    daemon and must be rejected before allocating lifecycle state."""
     msg = {
         "t": "CALL_INVITE",
         "id": "m1",
@@ -206,8 +210,8 @@ def test_call_invite_with_malformed_sdp_is_dropped_gracefully(
     # No sdp_offer event because parsing failed.
     offer_events = [e for e in tail if e.get("tail_kind") == "sdp_offer"]
     assert offer_events == []
-    # But the manager still opened — lifecycle decoupled from SDP.
-    assert mom_daemon._call_registry.get("sdp-call-3") is not None
+    assert mom_daemon._call_registry.get("sdp-call-3") is None
+    assert "sdp-call-3" not in mom_daemon._call_backfill_admissions
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +438,242 @@ def test_call_ice_malformed_is_dropped_gracefully(
     assert ice_events == []
 
 
+def test_cross_peer_call_id_hijack_cannot_advance_lifecycle(
+    mom: Identity,
+    alice: Identity,
+) -> None:
+    from one_link.call_manager import ManagerEvent, ManagerEventKind
+
+    attacker = _make_identity("call-id-hijack-attacker")
+    daemon = Daemon(me=mom)
+    daemon.state = _FakeState({
+        alice.fingerprint: alice.public_bytes.hex(),
+        attacker.fingerprint: attacker.public_bytes.hex(),
+    })
+    mgr = daemon._call_registry.open(
+        call_id="peer-bound-call",
+        peer_master_vk_hex=alice.fingerprint,
+        local_role="originator",
+        local_master_vk_hex=mom.fingerprint,
+        started_at_ms=1_000,
+    )
+    mgr.handle(ManagerEvent(ManagerEventKind.USER_INITIATE_CALL, 1_000))
+    assert mgr.phase == CallPhase.INVITING
+    channel = _FakeChannel(attacker.public_bytes, attacker.short_id)
+
+    _run(daemon._on_peer_message(channel, {
+        "t": "CALL_ACCEPT",
+        "id": "hijack-accept",
+        "ts": 2_000,
+        "from": attacker.short_id,
+        "call_id": "peer-bound-call",
+    }))
+
+    assert mgr.phase == CallPhase.INVITING
+    assert daemon._call_registry.get_for_peer(
+        "peer-bound-call", alice.fingerprint,
+    ) is mgr
+
+
+def test_denied_preinvite_media_never_populates_backfill(
+    mom_daemon: Daemon,
+    alice: Identity,
+) -> None:
+    mom_daemon._call_capability_allowed = (  # type: ignore[method-assign]
+        lambda _peer, _kind: False
+    )
+    tail: list[dict] = []
+    mom_daemon._broadcast_tail = lambda event: tail.append(event)  # type: ignore[method-assign]
+    channel = _FakeChannel(alice.public_bytes, alice.short_id)
+    msg = attach_offer_to_invite({
+        "t": "CALL_SDP_OFFER",
+        "id": "denied-preinvite",
+        "ts": 0,
+        "from": alice.short_id,
+        "call_id": "denied-preinvite-call",
+    }, sdp=SAMPLE_OFFER_SDP)
+
+    _run(mom_daemon._on_peer_message(channel, msg))
+
+    assert "denied-preinvite-call" not in mom_daemon._call_sdp_backfill
+    assert "denied-preinvite-call" not in mom_daemon._call_ice_backfill
+    assert "denied-preinvite-call" not in mom_daemon._call_backfill_admissions
+    assert [e for e in tail if e.get("tail_kind") == "sdp_offer"] == []
+
+
+def test_preinvite_cache_cannot_be_overwritten_by_another_peer(
+    mom: Identity,
+    alice: Identity,
+) -> None:
+    attacker = _make_identity("preinvite-cache-attacker")
+    daemon = Daemon(me=mom)
+    daemon.state = _FakeState({
+        alice.fingerprint: alice.public_bytes.hex(),
+        attacker.fingerprint: attacker.public_bytes.hex(),
+    })
+    daemon._broadcast_tail = lambda _event: None  # type: ignore[method-assign]
+    alice_channel = _FakeChannel(alice.public_bytes, alice.short_id)
+    attacker_channel = _FakeChannel(attacker.public_bytes, attacker.short_id)
+    original = attach_offer_to_invite({
+        "t": "CALL_SDP_OFFER",
+        "id": "precache-original",
+        "ts": 0,
+        "from": alice.short_id,
+        "call_id": "precache-peer-bound",
+    }, sdp=SAMPLE_OFFER_SDP)
+    replacement_sdp = SAMPLE_OFFER_SDP.replace("o=- 1 1", "o=- 9 9")
+    replacement = attach_offer_to_invite({
+        "t": "CALL_SDP_OFFER",
+        "id": "precache-replacement",
+        "ts": 1,
+        "from": attacker.short_id,
+        "call_id": "precache-peer-bound",
+    }, sdp=replacement_sdp)
+
+    _run(daemon._on_peer_message(alice_channel, original))
+    _run(daemon._on_peer_message(attacker_channel, replacement))
+
+    assert daemon._call_sdp_backfill["precache-peer-bound"]["sdp_offer"] == (
+        SAMPLE_OFFER_SDP
+    )
+    assert daemon._call_backfill_admissions["precache-peer-bound"][0] == (
+        alice.fingerprint
+    )
+
+
+def test_preinvite_cache_is_strictly_bounded_per_peer(
+    mom_daemon: Daemon,
+    alice: Identity,
+) -> None:
+    mom_daemon.CALL_PREINVITE_CACHE_PER_PEER_MAX = 2
+    channel = _FakeChannel(alice.public_bytes, alice.short_id)
+
+    for index in range(7):
+        body = end_of_candidates(f"flood-call-{index}")
+        _run(mom_daemon._on_peer_message(channel, {
+            "t": CALL_ICE,
+            "id": f"flood-{index}",
+            "ts": index,
+            "from": alice.short_id,
+            **body,
+        }))
+
+    assert len(mom_daemon._call_backfill_admissions) == 2
+    assert len(mom_daemon._call_ice_backfill) == 2
+    assert set(mom_daemon._call_backfill_admissions) == {
+        "flood-call-0", "flood-call-1",
+    }
+
+
+def test_preinvite_cache_expires_on_monotonic_ttl(
+    mom_daemon: Daemon,
+    alice: Identity,
+    monkeypatch,
+) -> None:
+    now = [100.0]
+    monkeypatch.setattr("one_link.daemon.time.monotonic", lambda: now[0])
+    mom_daemon.CALL_PREINVITE_TTL_S = 30.0
+    channel = _FakeChannel(alice.public_bytes, alice.short_id)
+    body = end_of_candidates("expiring-preinvite")
+    _run(mom_daemon._on_peer_message(channel, {
+        "t": CALL_ICE,
+        "id": "expiring-ice",
+        "ts": 0,
+        "from": alice.short_id,
+        **body,
+    }))
+    assert "expiring-preinvite" in mom_daemon._call_ice_backfill
+
+    now[0] = 131.0
+    assert mom_daemon._prune_call_backfill_admissions() == (
+        "expiring-preinvite",
+    )
+    assert "expiring-preinvite" not in mom_daemon._call_ice_backfill
+    assert "expiring-preinvite" not in mom_daemon._call_backfill_admissions
+
+
+@pytest.mark.parametrize(
+    "call_kind,allowed_kind,expect_open",
+    [
+        ("voice", "voice", True),
+        ("video", "video", True),
+        ("voice", "video", False),
+        ("video", "voice", False),
+    ],
+)
+def test_inbound_voice_video_capability_is_enforced_before_allocation(
+    mom_daemon: Daemon,
+    alice: Identity,
+    call_kind: str,
+    allowed_kind: str,
+    expect_open: bool,
+) -> None:
+    mom_daemon._call_capability_allowed = (  # type: ignore[method-assign]
+        lambda _peer, requested: requested == allowed_kind
+    )
+    channel = _FakeChannel(alice.public_bytes, alice.short_id)
+    call_id = f"{call_kind}-cap-{allowed_kind}"
+    _run(mom_daemon._on_peer_message(channel, {
+        "t": "CALL_INVITE",
+        "id": f"invite-{call_id}",
+        "ts": 0,
+        "from": alice.short_id,
+        "call_id": call_id,
+        "call_kind": call_kind,
+    }))
+    mgr = mom_daemon._call_registry.get(call_id)
+    assert (mgr is not None) is expect_open
+    if mgr is not None:
+        assert mgr.state.call_kind == call_kind
+
+
+def test_voice_invite_cannot_smuggle_video_sdp(
+    mom_daemon: Daemon,
+    alice: Identity,
+) -> None:
+    channel = _FakeChannel(alice.public_bytes, alice.short_id)
+    msg = attach_offer_to_invite({
+        "t": "CALL_INVITE",
+        "id": "voice-video-smuggle",
+        "ts": 0,
+        "from": alice.short_id,
+        "call_id": "voice-video-smuggle-call",
+        "call_kind": "voice",
+    }, sdp=SAMPLE_VIDEO_SDP)
+    _run(mom_daemon._on_peer_message(channel, msg))
+    assert mom_daemon._call_registry.get("voice-video-smuggle-call") is None
+    assert "voice-video-smuggle-call" not in mom_daemon._call_sdp_backfill
+
+
+def test_real_capability_policy_separates_voice_and_video(
+    tmp_path,
+    mom: Identity,
+    alice: Identity,
+) -> None:
+    from one_link.capabilities import VIDEO_CALL, VOICE_CALL
+    from one_link.state import State
+
+    state = State(db_path=tmp_path / "call-policy.db")
+    try:
+        state.upsert_peer(
+            fingerprint=alice.fingerprint,
+            short_id=alice.short_id,
+            pubkey=alice.public_bytes,
+            trust_default="pinned",
+        )
+        daemon = Daemon(me=mom)
+        daemon.state = state
+        state.set_peer_capability_policy(alice.fingerprint, [VOICE_CALL])
+        assert daemon._call_capability_allowed(alice.fingerprint, "voice") is True
+        assert daemon._call_capability_allowed(alice.fingerprint, "video") is False
+
+        state.set_peer_capability_policy(alice.fingerprint, [VIDEO_CALL])
+        assert daemon._call_capability_allowed(alice.fingerprint, "voice") is False
+        assert daemon._call_capability_allowed(alice.fingerprint, "video") is True
+    finally:
+        state.close()
+
+
 # ---------------------------------------------------------------------------
 # TrustLedger consultation (audit C2 closure)
 # ---------------------------------------------------------------------------
@@ -467,6 +707,32 @@ def test_call_invite_first_contact_emits_sas_verification_required(
     assert sas_events[0].get("sas_words")
     # Manager opened.
     assert mom_daemon._call_registry.get("tofu-call-1") is not None
+
+
+def test_call_invite_first_contact_fails_closed_without_transcript_sas(
+    mom_daemon: Daemon, alice: Identity,
+) -> None:
+    msg = {
+        "t": "CALL_INVITE",
+        "id": "m7-no-transcript",
+        "ts": 0,
+        "from": alice.short_id,
+        "call_id": "tofu-call-no-transcript",
+    }
+    tail: list[dict] = []
+    mom_daemon._broadcast_tail = lambda ev: tail.append(ev)  # type: ignore
+    channel = _FakeChannel(peer_ed_pub=alice.public_bytes, peer_short_id=alice.short_id)
+    channel.transcript_hash = None  # type: ignore[assignment]
+
+    _run(mom_daemon._on_peer_message(channel, msg))
+
+    refused = [event for event in tail if event.get("tail_kind") == "call_refused"]
+    assert len(refused) == 1
+    assert "five-word verification phrase" in refused[0]["user_message"]
+    assert not any(
+        event.get("tail_kind") == "sas_verification_required" for event in tail
+    )
+    assert mom_daemon._call_registry.get("tofu-call-no-transcript") is None
 
 
 def test_call_invite_refused_by_trust_ledger(
@@ -523,6 +789,34 @@ def test_call_invite_refused_by_trust_ledger(
     assert "verify in person" in msg_text
     # No CallManager opened.
     assert mom_daemon._call_registry.get("rotated-call") is None
+
+
+def test_call_invite_refused_when_trust_verifier_unavailable_for_unpinned_peer(
+    mom_daemon: Daemon, alice: Identity,
+) -> None:
+    """Verifier outage must not turn first-contact CALL_INVITE into allow."""
+    mom_daemon.state._peers[alice.fingerprint].trust = "pending"
+    mom_daemon._trust_ledger_check_inbound = lambda _fp: None  # type: ignore[method-assign]
+    tail: list[dict] = []
+    mom_daemon._broadcast_tail = lambda ev: tail.append(ev)  # type: ignore[method-assign]
+    channel = _FakeChannel(
+        peer_ed_pub=alice.public_bytes,
+        peer_short_id=alice.short_id,
+    )
+    msg = {
+        "t": "CALL_INVITE",
+        "id": "m-verifier-down",
+        "ts": 0,
+        "from": alice.short_id,
+        "call_id": "verifier-down-call",
+    }
+
+    _run(mom_daemon._on_peer_message(channel, msg))
+
+    refused = [e for e in tail if e.get("tail_kind") == "call_refused"]
+    assert len(refused) == 1
+    assert "temporarily unavailable" in refused[0]["user_message"]
+    assert mom_daemon._call_registry.get("verifier-down-call") is None
 
 
 def test_trust_ledger_lazy_constructed_on_first_inbound(

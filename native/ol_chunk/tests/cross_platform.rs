@@ -8,7 +8,7 @@
 //! The fixture below pins:
 //!   - A deterministic 1 MiB pseudo-random buffer (xorshift seed = the
 //!     value below).
-//!   - The expected boundary offsets the FastCDC + Gear-256 kernel must
+//!   - The expected boundary offsets the `FastCDC` + Gear-256 kernel must
 //!     produce on that buffer for the default ADR-0001 parameters
 //!     (8 KiB / 64 KiB / 256 KiB).
 //!
@@ -24,7 +24,7 @@ use ol_chunk::{scan_to_vec, Boundary};
 fn pseudo_random_buf(seed: u64, len: usize) -> Vec<u8> {
     let mut state = seed;
     let mut buf = vec![0u8; len];
-    for byte in buf.iter_mut() {
+    for byte in &mut buf {
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;

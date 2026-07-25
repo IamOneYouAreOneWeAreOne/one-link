@@ -1,10 +1,12 @@
+//! Criterion benchmarks for mesh homology analysis.
+
 use std::collections::HashMap;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_main, BenchmarkId, Criterion};
 use ol_homology::{components_of, fragility_score};
 
 fn build_chain(n: usize) -> (Vec<String>, Vec<(String, String)>) {
-    let nodes: Vec<String> = (0..n).map(|i| format!("c{}", i)).collect();
+    let nodes: Vec<String> = (0..n).map(|i| format!("c{i}")).collect();
     let edges: Vec<(String, String)> = (0..n.saturating_sub(1))
         .map(|i| (nodes[i].clone(), nodes[i + 1].clone()))
         .collect();
@@ -40,5 +42,10 @@ fn bench_fragility(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_components, bench_fragility);
-criterion_main!(benches);
+fn benchmarks() {
+    let mut criterion = Criterion::default().configure_from_args();
+    bench_components(&mut criterion);
+    bench_fragility(&mut criterion);
+}
+
+criterion_main!(benchmarks);

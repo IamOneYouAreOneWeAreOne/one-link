@@ -94,7 +94,7 @@ def test_perf_gate_receiver_rss_under_cap(tmp_path: Path) -> None:
                 break
             time.sleep(0.05)
 
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         t = threading.Thread(target=sample, args=(p.b.proc.pid,), daemon=True)
         t.start()
         res = request(p.a.control_port, cmd="send_file",
@@ -133,7 +133,7 @@ def test_perf_gate_throughput_16mib_floor(tmp_path: Path) -> None:
     src = tmp_path / "perf_throughput.bin"
     src.write_bytes(payload)
 
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         t0 = time.time()
         res = request(p.a.control_port, cmd="send_file",
                       peer=p.b.short_id, path=str(src), timeout=60)

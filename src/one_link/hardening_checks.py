@@ -33,6 +33,7 @@ SENSITIVE_FILE_NAMES = (
     "state.db-wal",
     "state.db-shm",
     "ui.token",
+    "control.secret",
     "data-root-key.bin",
     "cap_root.key",
     "courier.json",
@@ -67,18 +68,19 @@ def check_file_permissions(data_dir: Path) -> list[Finding]:
     world / group readable. Best-effort across OS:
 
       POSIX  → stat().st_mode bits — flag if group/other read are set
-      Windows → no st_mode equivalent; we can't enforce ACL semantics
-                from stdlib alone, so we surface 'permissions check not
-                supported on Windows' INFO + recommend FileVault /
-                BitLocker as the right answer
+      Windows → the privileged ``control.secret`` has a separate fail-closed,
+                protected current-user DACL gate during daemon startup.  This
+                broad advisory check cannot yet attest every legacy data file,
+                so it reports that narrower limitation explicitly.
     """
     findings: list[Finding] = []
     if os.name == "nt":
         findings.append(Finding(
             "info", "file_permissions",
-            "Windows: per-file owner-only ACLs aren't checked here. "
-            "Rely on full-disk encryption (BitLocker) for at-rest "
-            "protection of the data directory.",
+            "Windows: control.secret is enforced with a protected, "
+            "current-user-only DACL before the daemon opens control IPC. "
+            "ACLs for the remaining legacy data files are not attested by "
+            "this advisory check; use BitLocker for defense in depth.",
         ))
         return findings
     for name in SENSITIVE_FILE_NAMES:
@@ -154,13 +156,12 @@ def check_cloud_sync_colocation(data_dir: Path) -> list[Finding]:
 
 
 def check_network_bind(bind_host: str, lan_explicit: bool) -> list[Finding]:
-    """Report the current bind posture honestly. The daemon default is
-    0.0.0.0 (LAN-reachable so a phone can pair) — that's NOT a
-    misconfig because every mutating endpoint is bearer-token AND
-    CSRF gated, and Windows scopes the daemon's firewall rule to
-    Private networks. The check just tells the operator what the
-    daemon answers on so they can choose loopback-only if they want
-    truly air-gapped operation."""
+    """Report the current bind posture honestly.
+
+    Loopback is the safe default. An explicit LAN bind exposes only public
+    pairing flows over plain HTTP; owner bearer/session credentials are
+    accepted from loopback sources or over HTTPS, never remote cleartext.
+    """
     findings: list[Finding] = []
     loopback_hosts = {"127.0.0.1", "::1", "localhost"}
     if bind_host in loopback_hosts:
@@ -174,10 +175,10 @@ def check_network_bind(bind_host: str, lan_explicit: bool) -> list[Finding]:
     if bind_host == "0.0.0.0":
         findings.append(Finding(
             "info", "network_bind",
-            f"Bound to {bind_host} (default — LAN-reachable for phone "
-            f"pairing). Every mutating endpoint is bearer-token + "
-            f"CSRF gated. Set ONE_LINK_BIND_HOST=127.0.0.1 to "
-            f"restrict to this machine only.",
+            f"Bound to {bind_host} (explicit LAN pairing mode). Remote "
+            f"plain HTTP cannot use owner bearer/session credentials; use "
+            f"the short-lived pairing flow or HTTPS. Set "
+            f"ONE_LINK_BIND_HOST=127.0.0.1 to restrict to this machine only.",
         ))
         return findings
     # Anything OTHER than loopback or 0.0.0.0 is a custom value the

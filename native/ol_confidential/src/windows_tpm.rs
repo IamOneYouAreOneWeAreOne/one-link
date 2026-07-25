@@ -3,16 +3,20 @@
 //!
 //! ## What this module gives us
 //!
-//! - A **TPM-resident ECDSA-P256 signing key** that the kernel guards.
-//!   Key material NEVER leaves the TPM; signing happens inside the
-//!   chip. Useful for: peer-verifiable "this attestation was minted
-//!   on the same physical box that holds the TPM" guarantee.
+//! - An ECDSA-P256 signing key requested from Windows' Microsoft Platform
+//!   Crypto Provider. On a correctly configured supported host, private-key
+//!   operations are intended to be TPM-backed and private material is not
+//!   exportable through this API.
+//! - The current wire envelope exports a CNG public blob and signature but no
+//!   EK/vendor certificate or standard TPM quote. A remote verifier therefore
+//!   proves possession/continuity of that ECDSA key, not TPM residency or a
+//!   specific physical host, unless an external enrollment validates and pins
+//!   hardware provenance.
 //! - A way to **anchor the `platform_quote` field** of
 //!   [`crate::AttestationDoc`] in real hardware. The master sig still
 //!   covers the entire transcript including `platform_quote` bytes, so
-//!   the two-layer binding (software hybrid sig + TPM ECDSA sig over
-//!   a sub-transcript) makes the doc bound to BOTH the master and
-//!   the specific TPM.
+//!   the two signatures bind the document to the master key and included
+//!   platform public key. Hardware provenance remains a separate gate.
 //!
 //! ## What it does NOT give us (yet)
 //!
@@ -53,8 +57,7 @@ const ECC_PUBLIC_BLOB: &str = "ECCPUBLICBLOB";
 /// exist in the keyset yet. HRESULT values are 32-bit signed
 /// integers in Windows headers, but the canonical hex form is
 /// unsigned; the cast preserves the bit pattern.
-#[allow(clippy::cast_possible_wrap)]
-const NTE_BAD_KEYSET: i32 = 0x8009_0016_u32 as i32;
+const NTE_BAD_KEYSET: i32 = i32::from_ne_bytes(0x8009_0016_u32.to_ne_bytes());
 
 /// Wide-string helper. `NCrypt` APIs take `PCWSTR` (null-terminated
 /// UTF-16). The vector must outlive the FFI call.
@@ -287,6 +290,21 @@ pub fn produce_platform_quote(
 /// gone too.
 pub use crate::platform_quote::parse_platform_quote;
 
+/// Caller-supplied claims bound into one TPM-backed attestation.
+#[derive(Debug, Clone, Copy)]
+pub struct TpmAttestationClaims<'a> {
+    /// Fresh challenge supplied by the verifying peer.
+    pub peer_nonce: crate::AttestationNonce,
+    /// Issuance time as Unix seconds.
+    pub issued_unix: u64,
+    /// Expiration deadline as Unix seconds.
+    pub deadline_unix: u64,
+    /// Optional field-witness digest input.
+    pub field_witness: Option<&'a [u8; 32]>,
+    /// Session-description public key bound to the attestation.
+    pub issuer_sdp_pubkey: crate::attestation::IssuerSdpPubkey,
+}
+
 /// Produce a fully TPM-rooted [`crate::AttestationDoc`].
 ///
 /// Flow:
@@ -309,14 +327,18 @@ pub fn attest_with_tpm(
     provider: &crate::SoftwareProvider,
     sealed_master: &crate::SealedKey,
     tpm: &TpmAttestationKey,
-    peer_nonce: crate::AttestationNonce,
-    issued_unix: u64,
-    deadline_unix: u64,
-    field_witness: Option<&[u8; 32]>,
-    issuer_sdp_pubkey: crate::attestation::IssuerSdpPubkey,
+    claims: TpmAttestationClaims<'_>,
 ) -> ConfidentialResult<crate::AttestationDoc> {
     use crate::attestation::{canonical_attestation_transcript, AttestationDoc};
     use crate::ProviderTag;
+
+    let TpmAttestationClaims {
+        peer_nonce,
+        issued_unix,
+        deadline_unix,
+        field_witness,
+        issuer_sdp_pubkey,
+    } = claims;
 
     // Single unseal of the master — used for both verifying-key
     // derivation and final hybrid signature. Replaces the earlier

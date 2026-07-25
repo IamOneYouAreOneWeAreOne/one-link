@@ -2,15 +2,16 @@
 
 The runtime can self-build into the user cache when a compiler exists, but
 release binaries should not depend on the user's machine having GCC/clang/MSVC.
-This script compiles the scanner into ``src/one_link/native/<platform>/`` so
-setuptools/PyInstaller can bundle it.
+By default this script compiles the scanner into
+``src/one_link/native/<platform>/`` for backward compatibility. Packaging uses
+``--output-dir`` to stage fresh release inputs under ``build/`` without
+rewriting tracked package assets.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import os
 import sys
 from pathlib import Path
 
@@ -29,6 +30,16 @@ def main() -> int:
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--required", action="store_true", help="fail if no native library can be built")
+    ap.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help=(
+            "directory that receives the generated C source, native library, "
+            "and SHA-256 sidecar; defaults to the package's historical "
+            "src/one_link/native/<platform> directory"
+        ),
+    )
     ns = ap.parse_args()
 
     compiler = _find_c_compiler()
@@ -37,7 +48,11 @@ def main() -> int:
         print(msg)
         return 2 if ns.required else 0
 
-    out_dir = repo / "src" / "one_link" / "native" / native_platform_tag()
+    out_dir = (
+        ns.output_dir.expanduser().resolve()
+        if ns.output_dir is not None
+        else repo / "src" / "one_link" / "native" / native_platform_tag()
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     src = out_dir / "ol_native_cdc.c"
     lib = out_dir / native_library_name()

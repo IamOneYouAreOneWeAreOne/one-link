@@ -5,6 +5,15 @@
 > [COHERENCE_TRANSFER_BRAIN.md](COHERENCE_TRANSFER_BRAIN.md), and [SOVEREIGNTY.md](SOVEREIGNTY.md).
 > Ordered by dependency, NOT by calendar — phases ship when their acceptance gate passes.
 
+> **Truth note (2026-07-22):** crate-level implementation and a local harness
+> are not equivalent to an application capability or production release. The
+> macOS FSKit and Windows WinFsp/Dokan adapters are unimplemented. Linux release
+> wheels now enable the callback-backed libfuse binding and the daemon validates
+> every manifest/CAS object before mounting a bounded read-only view. Packaged
+> `/dev/fuse` qualification and the 24-hour hardware soak remain release
+> blockers. Any older “shipped” label in this plan must be read at its narrower
+> source/harness scope.
+
 ---
 
 ## Honest Status Scorecard (updated 2026-05-11)
@@ -19,17 +28,17 @@ This table tracks what is **shipped + verified** vs **shipped but unverified** v
 | `ol_chunk_store` | shipped | LSM + WAL + bloom; both-address ready (raw + convergent) |
 | `ol_aead` | shipped | AES-NI + ChaCha20-Poly1305 via ring |
 | `ol_wal` | shipped | crash-only WAL with CRC32C |
-| `ol_quic` | shipped (not yet wired) | quinn-based transport; daemon still on WebRTC |
+| `ol_quic` | shipped; runtime-gated file lanes | quinn-based identity-bound transport; capable native daemons negotiate QUIC file lanes, while authenticated control and browser peers retain their existing paths |
 | `ol_capability` | shipped | Macaroon-style caps with attenuation gate |
 | `ol_crdt` | shipped | lattice + OR-set + vector clock + folder |
 | `ol_canon` | shipped (2026-05-11) | self-describing canonical encoder + 1M-iter byte-equiv gate |
-| `ol_fountain` | shipped | RaptorQ codec |
+| `ol_fountain` | shipped | LT (Luby Transform) codec per ADR-0015; RaptorQ remains deferred pending IPR review and a versioned wire-format upgrade |
 | `ol_netcode` | shipped (2026-05-11) | XOR coded packets + tampered-manifest integrity gate |
 | `ol_fec` | shipped | Reed-Solomon (10,4) |
 | `ol_erasure` | shipped | stripe layout + encode/decode |
-| `ol_fuse` | shipped + verified | Linux mount round-trip verified end-to-end via `scripts/wsl_fuse_mount_test.sh` on Ubuntu 24.04 WSL2 (libfuse3 / fusermount3). Adapter routes kernel read/getattr/lookup to MemoryBackend; READ returns plaintext written from userland; UNMOUNT clean. 24h fsx-linux fuzz is a separate hardware-soak item. |
-| `ol_fskit` | shipped scaffold (2026-05-11) | Trait surface live; Swift/FSKit bridge pending |
-| `ol_winfs` | shipped scaffold (2026-05-11) | WinFSP-preferred / Dokan fallback; adapters pending |
+| `ol_fuse` | partial; Linux app binding implemented | Linux release wheels enable the real `fuser` adapter and Python/daemon callback binding with read-only CAS-backed reads and owned unmount. Packaged `/dev/fuse`, kill/restart, distro and 24-hour hardware evidence remain open; non-Linux adapters stay unavailable. |
+| `ol_fskit` | scaffold only | Trait surface exists; Swift/FSKit app-extension adapter is unimplemented. |
+| `ol_winfs` | scaffold only | Trait surface exists; WinFsp and Dokan adapters are unimplemented. |
 | `ol_routing` | shipped | τ_c-weighted Dijkstra |
 | `ol_homology` | shipped | persistent-homology fragility detector |
 | `ol_grammar` | shipped | Re-Pair compression |
@@ -53,15 +62,15 @@ This table tracks what is **shipped + verified** vs **shipped but unverified** v
 | QUIC stream throughput | within 10% of TCP on tuned LAN | **Scaffold shipped (`scripts/quic_measurement_scaffold.py --mode throughput`); loopback encode 29.8 GiB/s. LAN run pending real hardware.** |
 | 0-RTT resume latency | < 50ms warm cache | **Scaffold shipped (`--mode resume`); loopback handshake is µs. LAN run pending real hardware.** |
 | Cellular ↔ WiFi migration | zero application-visible drop | **Scaffold documents setup (`--mode migration`). Cannot run from a single dev workstation; needs real cellular + WiFi device.** |
-| Daemon cutover | daemon ↔ daemon over QUIC | **Not wired — daemon still uses WebRTC. Multi-day feature implementation; not in current arc.** |
+| Daemon cutover | daemon ↔ daemon over QUIC | **Partial:** authenticated native QUIC file lanes are runtime-advertised only after ABI self-test. This is not a universal whole-session cutover; browser peers remain WebRTC and control/legacy paths retain their existing channel. |
 
 ### Phase B acceptance gates
 
 | Gate | Plan target | Status |
 |---|---|:-:|
 | Bloom-init savings | ≥ 90% bytes-on-wire on 80% known | **Measured honestly via `scripts/bloom_init_savings_measure.py`: 79% @ 80% known (10% FP), 93% @ 95% known (5% FP). Plan's "90% @ 80%" claim mathematically unreachable — missing 20% × 32-byte chunk-ids dominates filter size. Honest gate: ≥ 75% @ 80% known + ≥ 90% @ 95% known — MET.** |
-| RaptorQ decode | K=1024 at 5% loss, ≥ 1000 seeds | **Met. `MAX_ENCODED_PER_CHUNK` raised 1024 → 2048 to give K=1024 a 2× headroom; `scripts/fountain_k1024_stress.py --seeds 1000 --loss 0.05` returns 1000/1000 success at 1.13× median overhead. 29/29 fountain unit tests green at the new cap.** |
-| FUSE survives fsx-linux 24h | yes | **Mount round-trip verified on Ubuntu 24.04 WSL2: READ + UNMOUNT clean (`scripts/wsl_fuse_mount_test.sh`). 24h fsx-linux soak is a separate hardware-time item (not blockable in dev env).** |
+| LT fountain decode | K=1024 at 5% loss, ≥ 1000 seeds | **Met for the shipped LT codec. `MAX_ENCODED_PER_CHUNK` raised 1024 → 2048 to give K=1024 a 2× headroom; `scripts/fountain_k1024_stress.py --seeds 1000 --loss 0.05` returns 1000/1000 success at 1.13× median overhead. 29/29 fountain unit tests green at the new cap. This is not a RaptorQ result.** |
+| FUSE survives fsx-linux 24h | yes | **Not met. A bounded Linux primitive/harness is not the packaged app binding, and no 24-hour hardware-soak evidence is recorded.** |
 | Convergent encryption | N senders → identical CT for raw media | **Met + wired. `NativeTransferSession.encrypt_chunk_bytes(plaintext, address_kind=...)` is the daemon ingest API; daemon `send_file` computes `address_kind = NativeTransferSession._resolve_address_kind(path)` once per send and passes it on every chunk. Raw-media extensions (mp4/jpg/etc) get convergent IDs → cross-sender dedup; everything else stays raw. Acceptance: identical plaintext from two senders with DIFFERENT shared secrets produces IDENTICAL chunk_id under convergent + DIFFERENT chunk_id under raw (different domain). 6 acceptance tests in `test_convergent_encryption_wiring.py`.** |
 | Format-aware chunking | GOP / ZIP / audio | **ZIP + MP4 top-level + WAV data + H.264 Annex B IDR/SPS scanner (`h264_keyframe_offsets`). All four shipped with unit tests.** |
 
@@ -70,7 +79,7 @@ This table tracks what is **shipped + verified** vs **shipped but unverified** v
 | Gate | Plan target | Status |
 |---|---|:-:|
 | RS (10,4) erasure recovery | 100% across 10,000 seeds | **Met** |
-| Bandit converges within 200 interactions | yes | **Met** |
+| Bandit route selector converges within 200 interactions | yes | **Met for route arms; other proposed knob controllers are not production-active** |
 | Macaroon attenuation | property test 1M random delegation chains | **Met** |
 | ML-KEM-768 + X25519 hybrid | handshake at PQ params | **Met** |
 | Constant-time check | < 1% timing variance | **Met (ratchet 1.0103×, duress 1.014×)** |
@@ -84,7 +93,7 @@ This table tracks what is **shipped + verified** vs **shipped but unverified** v
 | Persistent-homology detector | ≤ 5% FP, partition flag in ≤ N rounds | **Met: 0% FP, 1-round detection** |
 | Active inference cold-start | bandit-equivalent within ≤ 50 transfers | **Met: cohort prior 1-iter, cold 50-iter** |
 | Plausibly deniable | duress key unlocks decoy, no observable disk pattern | **Met: gate-side timing 1.014×** |
-| TLA+ formal model | no double-grant / key reuse / downgrade / replay | **Met: `docs/formal/capability.tla` + `.cfg`** |
+| TLA+ formal model | no double-grant / key reuse / downgrade / replay | **Met: `docs/formal/Capability.tla` + `.cfg`** |
 
 ### Phase E acceptance gates — Coherence Field Substrate (NEW)
 
@@ -136,7 +145,13 @@ Still requires real hardware to run:
 
 ## Context
 
-**Problem.** One Link's current file engine (Python BlobStore + Python CDC at ~8 MiB/s + WebRTC/DTLS-SRTP transport + Ed25519-signed grant capabilities + EMA-based transfer brain) is solid for chat-class transfers but is not capable of becoming the world's best file-sharing engine. The strategic wedge requires the engine itself to be insanely advanced — line-rate throughput, hard durability guarantees, content-addressed dedup approaching the information-theoretic floor, fountain-coded swarm transfer, filesystem-native surface, capability-secured shares with provenance + revocation, and frontier-grade resilience under any failure mode.
+**Historical problem statement.** The older engine was Python BlobStore +
+Python CDC with WebRTC/peer-channel transport, Ed25519 grants, and EMA route
+selection. Current capable builds also have indexed native transfer, exact
+Bloom corrections, crash-safe receipts, and negotiated native QUIC file lanes.
+The remaining strategic target is line-rate, physically qualified performance,
+filesystem-native surfaces, and frontier resilience without overstating the
+implemented source as a release SLA.
 
 **What prompted this.** The market wedge is a sovereign file-delivery engine for individuals and small ops (contractors, podcast/video teams, repair shops, small offices, creators, nonprofits) who feel cloud-bill pain, upload-cap pain, and sovereignty pain. No competitor combines AirDrop UX, BitTorrent-class swarm depth, Syncthing-class durability, and Signal-class metadata privacy in one engine. Building it requires architectural rebuild, not feature accretion.
 
@@ -152,7 +167,7 @@ The split is performance-driven, not ideological. Existing Python orchestration 
 | WebRTC signaling (handshake-rate, not chunk-rate) | Per-chunk AEAD pipeline |
 | Pairing flow / browser-as-peer onboarding | QUIC transport (per-packet) |
 | Settings + configuration | FUSE / FSKit / Dokan filesystem surface (per-syscall) |
-| Outbox queue management | Bloom-filter init / RaptorQ / XOR network coding / RS FEC |
+| Outbox queue management | Bloom-filter init / LT fountain coding / XOR network coding / RS FEC |
 | Daemon lifecycle, mDNS discovery, CLI | Erasure coding + integrity scrubbing |
 | Logging, telemetry, dev tools | Per-chunk forward-secret ratchet |
 
@@ -171,9 +186,14 @@ The split is performance-driven, not ideological. Existing Python orchestration 
 
 ---
 
-## Single Load-Bearing Insight
+## Target Single Load-Bearing Insight
 
-> Every byte is content-addressed; every operation is capability-bound; every state change is CRDT-mergeable; every connection is auto-detected; every chunk is independently routable; every transfer is information-theoretically minimized.
+> Target invariant: every byte is content-addressed; every operation is
+> capability-bound; every state change is CRDT-mergeable; every connection is
+> auto-detected; every chunk is independently routable; every transfer is
+> minimized against an explicit receiver-wants/content-availability model, with
+> the model and any false-positive correction measured rather than described as
+> an information-theoretic optimum.
 
 Each clause is one architectural primitive. The same primitive serves every quality axis. Nothing is layered on top as an afterthought because nothing needs to be — the core doctrine is enough.
 
@@ -299,10 +319,10 @@ This is the literal software expression of the theory's central claim.
 | 2. Crypto pipeline | Per-chunk AEAD + per-chunk forward-secret ratchet + PQ-hybrid (ML-KEM-768 + X25519) + selective convergent encryption + constant-time everywhere | **Rust** (`ol_aead`, `ol_ratchet`) | Existing `src/one_link/double_ratchet.py` + `pq_hybrid.py`; `OneField/onefield/radio/crypto/reciprocity.cl` |
 | 3. Identity & capability | Hardware-bound keys (TOFU-degrading) + Merkle revocation log + Macaroon-style caps with provenance/attenuation/revocation/audit | **Rust** (`ol_capability`, `ol_revoke`); Python orchestration unchanged for share-link UI | `coherence_lang/std/capability/{cap, delegate, grant, revoke}.cl`; `OneField/onefield/privacy/{zk_prover, no_reconstruct_proof}.cl` |
 | 4. Transport | QUIC primary (multi-stream + multi-path + 0-RTT + connection migration) + topology auto-detection (shm / unix / LAN-QUIC / WAN-QUIC / relay) + BBR pacing | **Rust** (`ol_quic` via `quinn`); existing `peer_rtc.py` retained for browser-as-peer signaling | `OneField/onefield/transport/{quic_congestion, mptcp, parallel}.cl` |
-| 5. Information layer | Bloom-filter transfer init + RaptorQ fountain codes + XOR network coding + Reed-Solomon FEC | **Rust** (`ol_fountain`, `ol_netcode`, `ol_fec`) | `OneField/onefield/transport/udp_fec.cl` |
+| 5. Information layer | Bloom-filter transfer init + LT fountain codes + XOR network coding + Reed-Solomon FEC | **Rust** (`ol_fountain`, `ol_netcode`, `ol_fec`) | `OneField/onefield/transport/udp_fec.cl` |
 | 6. Routing — graph limit | τ_c-weighted Dijkstra + persistent-homology fragility detection + Byzantine-tolerant tau measurement | **Rust** (`ol_routing`, `ol_homology`) | `OneField/onefield/mesh/{routing, byzantine}.cl` (production τ_c routing); `forge_shootouts/tau_field_lib.py` |
 | 6.5. Coherence field — full theory | Real scalar coherence field τ_c(x) over peer graph: reaction-diffusion + Green-function nonlocal kernel + BE-RAR α=1/2 interpolation + apparent-horizon anchor + three-operator stack (transport + alignment + boundary). Shared crate with OneField + BioMesh. | **Rust** (`ol_coherence_field`) | S_ONE_DERIVATION_STORY.md + UFT.md (canonical theorem stack); ONE Docs identity-sector dual sourcing; `forge_shootouts/tau_field_lib.py` (FEM design ref) |
-| 7. Adaptation | Active inference prefetch + multi-armed bandit per peer-pair + self-pacing under host stress | **Rust** core (`ol_active_inference`); Python `transfer_brain.py` shim during migration | `forge_shootouts/hardened_active_inference.py`; `OneField/onefield/sensing/bayesian_fusion.cl` |
+| 7. Adaptation | Active inference prefetch + route-arm bandit + self-pacing under host stress; per-knob bandit controllers remain deferred | **Rust** primitive (`ol_bandit`) with Python `transfer_brain.py` route integration; other control loops require separate production wiring | `forge_shootouts/hardened_active_inference.py`; `OneField/onefield/sensing/bayesian_fusion.cl` |
 | 8. Shared state | Folder = CRDT (lattice merge); Manifest = chunk-ref list with format-aware metadata; Capability = the share link itself | **Rust** (`ol_crdt`, `ol_manifest`); existing `foldersync.py` Python orchestration retained for watchdog file events | `coherence_lang/std/crdt/{lattice, causality, vector_clock, sync}.cl` |
 | 9. Filesystem surface | FUSE on Linux; FSKit on macOS (NOT macFUSE); Dokan/WinFSP on Windows | **Rust** (`ol_fuse`, `ol_fskit`, `ol_winfs`) | (no .cl analog; native platform APIs) |
 | 10. Operability | Crash-only WAL recovery + integrity scrubbing + threshold-of-N social recovery + BIP-39 anchor + reproducible signed builds + one-actionable-alert | **Rust** for WAL/scrubbing/Shamir; Python orchestration for one-alert UI surface and CLI | `OneField/onefield/{mesh/{dtn, disaster_bootstrap}, privacy/sharding}.cl` |
@@ -350,7 +370,12 @@ Internal order (each item depends on the one before):
 
 ### Phase A2: Transport upgrade (requires A1 acceptance gate)
 
-10. **QUIC transport** using `quinn` (Rust, MIT/Apache, no Microsoft dependency) — multi-stream, multi-path, 0-RTT, connection migration. Replaces WebRTC/DTLS-SRTP for daemon↔daemon; WebRTC retained for browser-as-peer.
+10. **QUIC transport target** using `quinn` (Rust, MIT/Apache, no
+    Microsoft dependency) — multi-stream operation with 0-RTT and connection
+    migration as separately qualified transport properties. **Current
+    boundary:** capable native daemons negotiate identity-bound QUIC file
+    lanes; this has not replaced the daemon control/message channel or browser
+    WebRTC, and physical connection-migration qualification remains open.
 
 (Phase A1 ships independently as a complete file-sync engine before A2 starts. WebRTC stays as transport during A1.)
 
@@ -359,7 +384,7 @@ Internal order (each item depends on the one before):
 Convergent encryption MUST land in the same cut as Bloom-init (or chunk store carries both addresses from A1). Decision: **chunk store stores both raw-BLAKE3 and convergent-BLAKE3 from A1**, so B can flip the Bloom default without breaking existing manifests.
 
 1. **Bloom-filter transfer init** — receiver sends Bloom of chunk hashes; sender XORs against manifest; sends only true delta. Unifies fresh / resume / dedup. Three code paths remain (manifest fetch, capability check, partial-chunk-resume mid-AEAD-frame); Bloom is the inner loop.
-2. **RaptorQ fountain codes** — encode each chunk as infinite encoded packets; any K reconstructs. Validate Qualcomm IPR grant before shipping; if blocked, use LT codes or RFC-5053 Raptor codes (older, expired patents).
+2. **LT fountain codes (shipped)** — encode each chunk as a rateless stream of symbols and reconstruct after enough independent symbols arrive (normally K plus LT overhead). RaptorQ is a deferred Phase B-2 candidate only; it requires resolved Qualcomm IPR terms and a versioned wire-format upgrade before implementation or release claims can change.
 3. **XOR network coding for relay** — peers serve A⊕B; recipients with A reconstruct B. Cipher-only (sovereignty preserved).
 4. **Format-aware chunking** — recognize structural boundaries (video GOP, ZIP entries, Premiere asset references, audio sample blocks). Augments CDC, doesn't replace it.
 5. **Convergent encryption (selective)** — derive chunk key from BLAKE3(plaintext) for content-types whose well-known plaintexts are not a privacy concern (raw media). Per-recipient keys for everything else (project files, docs).
@@ -371,7 +396,7 @@ Convergent encryption MUST land in the same cut as Bloom-init (or chunk store ca
 2. **Erasure-coded durability** — Reed-Solomon over CDC chunks, ≥1.5× redundancy across user's own devices + trusted peers. Stripe layout was already decided in A1. Dedup is on data shards only; parity is per-storer.
 3. **Capability layer wiring** — `coherence_lang/std/capability/{cap, delegate, grant, revoke}.cl` becomes authoritative; existing Ed25519 grants migrated. Macaroon-style caveats (time-bound, scope-bound, attenuable, audit-tagged, delegatable). Replaces `src/one_link/{capabilities, cap_store, caps_grants}.py`.
 4. **CRDT shared folders** — `coherence_lang/std/crdt/{lattice, causality, vector_clock, sync}.cl` as authoritative. Folder = CRDT lattice. Manifest = chunk-ref list. Replaces existing vector-clock manifest in `src/one_link/foldersync.py`.
-5. **Multi-armed bandit auto-tuning** — per peer-pair, per knob (chunk size, parallelism, FEC ratio, prefetch window, pacing, compression threshold). MUST explicitly subsume or replace existing `transfer_brain.py` EMA route memory; two policies cannot coexist.
+5. **Multi-armed bandit route selection (production-active scope)** — `ol_bandit` supplies the generic Thompson-sampling primitive and `AdaptiveTransferBrain.decide()` uses route names as arms. Chunk size, parallelism, FEC ratio, prefetch window, pacing, and compression-threshold controllers remain future work and are not production-active. The bandit replaces EMA ranking only for the route-choice axis; EMA route statistics remain cost/reliability inputs and the explicit rollback path.
 6. **Per-chunk forward-secret ratchet** — extends `src/one_link/double_ratchet.py` from per-message to per-chunk. Compromise of one key reveals one chunk; self-healing within one round-trip.
 7. **PQ-hybrid by default** — replace `pq_hybrid.NullKEM` with ML-KEM-768. Default-on, not opt-in.
 8. **Hardware-bound keys (TOFU-degrading)** — "hardware-bound with optional vendor attestation, gracefully degrading to TOFU." Apple Secure Enclave / Android StrongBox / Windows TPM bind keys; vendor attestation chain is optional.
@@ -482,7 +507,7 @@ These are NOT line-rate implementations. Reimplement the proven algorithm in Rus
 | `src/one_link/pq_hybrid.py` | C | NullKEM replaced with ML-KEM-768 |
 | `src/one_link/{capabilities, cap_store, caps_grants}.py` | C | Replaced by `ol_capability` Rust crate (hand-ported from `std.capability.*` design spec; existing share-link UI orchestration in Python stays) |
 | `src/one_link/foldersync.py` | C | CRDT data layer replaced by `ol_crdt` Rust crate (hand-ported from `std.crdt.*` design spec); watchdog file-event loop + UI surface remain Python |
-| `src/one_link/transfer_brain.py` | C+D | Bandit replaces EMA route memory; Phase D adds active inference layer on top |
+| `src/one_link/transfer_brain.py` | C+D | Bandit replaces EMA ranking on the route-choice axis; EMA metrics and rollback remain; other knob controllers are deferred |
 | `src/one_link/transfer_doctor.py` | A1 | Stays; diagnosis output layer on top of new chunk store |
 | `src/one_link/peer_rtc.py` | A2 | Daemon-side WebRTC retained for browser-as-peer; daemon↔daemon path swaps to QUIC |
 | `src/one_link/perf_lab.py` | A1+ | Extended ruthlessly: every PR gates on benchmark non-regression |
@@ -499,7 +524,7 @@ native/                              (currently has C ext, becomes Rust workspac
 ├── ol_capability/                  # Phase C: hand-ported from std.capability spec; property tests encode caveat algebra
 ├── ol_crdt/                        # Phase C: hand-ported from std.crdt spec; property tests encode lattice laws
 ├── ol_canon/                       # Phase 0: hand-ported from std.codec.canon spec; property tests encode determinism law
-├── ol_fountain/                    # Phase B: RaptorQ
+├── ol_fountain/                    # Phase B: LT fountain coding (RaptorQ deferred)
 ├── ol_netcode/                     # Phase B: XOR network coding
 ├── ol_fec/                         # Phase C: Reed-Solomon
 ├── ol_erasure/                     # Phase C: durability coding
@@ -581,7 +606,7 @@ Every phase ships when its falsifiable acceptance number passes, not when "imple
 
 ### Phase B acceptance gate
 
-- RaptorQ decode succeeds with K=1024 source symbols at 5% loss across ≥1000 random seeds
+- LT fountain decode succeeds with K=1024 source symbols at 5% loss across ≥1000 random seeds
 - Bloom-init reduces bytes-on-wire by ≥90% on workload where receiver has ≥80% of chunks
 - FUSE survives `fsx-linux` for ≥24h fuzz; FSKit on macOS passes `fsx`-equivalent
 - Convergent encryption: identical plaintext from N senders produces identical ciphertext; per-recipient mode falsifies for non-eligible content types
@@ -589,7 +614,7 @@ Every phase ships when its falsifiable acceptance number passes, not when "imple
 ### Phase C acceptance gate
 
 - Reed-Solomon (10,4) survives any 4-shard erasure with 100% recovery across ≥10,000 seeds
-- Bandit converges on known-optimum peer-pair within ≤200 interactions in simulation
+- Bandit route selector converges on a known-optimum route arm within ≤200 interactions in simulation
 - Macaroon attenuation: property test that no derived cap exceeds parent rights across ≥1M random delegation chains
 - ML-KEM-768 + X25519 hybrid completes handshake at PQ-conservative parameters
 - Constant-time check: timing variance across cap-validity / crypto-input-validity < 1% of mean
@@ -645,7 +670,7 @@ Every phase ships when its falsifiable acceptance number passes, not when "imple
 | Apple Secure Enclave attestation chain | Requires Apple's CA online for verification | Hardware-bound keys are TOFU-degrading; vendor attestation is optional. |
 | Android StrongBox attestation chain | Requires Google CA | Same TOFU-degrading mitigation. |
 | Windows TPM AIK enrollment | Requires CA | Same TOFU-degrading mitigation. |
-| RaptorQ (RFC 6330) | Qualcomm IPR declarations | Verify patent grant before shipping. If blocked, fallback to LT codes or RFC-5053 Raptor (older, expired patents). |
+| RaptorQ (RFC 6330) | Qualcomm IPR declarations | **Deferred and not shipped.** LT codes are the production codec. Reconsider RaptorQ only after IPR review and a versioned wire-format upgrade. |
 | BLAKE3 SIMD on ARM64/RISC-V | Reference impl is fine; SIMD acceleration partial on non-x86 | Acceptable. Ship reference for unsupported archs; performance penalty understood. |
 | `qrcode` / `aiortc` / `cryptography` | Existing One Link deps | Acceptable. All open-source, no monthly bills. |
 

@@ -1,4 +1,4 @@
-//! Property tests for ol_pair_qr primitives.
+//! Property tests for `ol_pair_qr` primitives.
 //!
 //! Mirrors F1.x bar: 1M iters CI default, 5M nightly.
 
@@ -97,7 +97,9 @@ proptest! {
         let mut nonce = [0u8; INVITE_NONCE_LEN];
         let mut s = nonce_seed;
         for b in &mut nonce {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             *b = ((s >> 33) & 0xFF) as u8;
         }
         // Derive a real ephemeral x25519 pubkey to avoid the small-

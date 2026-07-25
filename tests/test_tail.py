@@ -9,7 +9,8 @@ import time
 
 import pytest
 
-from tests.harness import daemon_pair, request
+from one_link import control_ipc
+from tests.harness import _CONTROL_SECRETS, daemon_pair, request
 
 
 pytestmark = pytest.mark.timeout(120)
@@ -21,28 +22,37 @@ def _open_tail(control_port: int) -> tuple[socket.socket, list[dict]]:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(30)
     s.connect(("127.0.0.1", control_port))
-    s.sendall((json.dumps({"cmd": "tail"}) + "\n").encode("utf-8"))
+    credential, exchange = control_ipc.begin_authenticated_request(
+        s,
+        {"cmd": "tail"},
+        secret=_CONTROL_SECRETS[control_port],
+    )
+    stream = s.makefile("rb")
+    first = stream.readline(control_ipc.CONTROL_RESPONSE_MAX_BYTES + 2)
+    envelope = json.loads(first.decode("utf-8"))
+    ack = control_ipc.verify_server_response(envelope, credential, exchange)
 
-    events: list[dict] = []
+    events: list[dict] = [ack]
 
     def reader():
-        buf = b""
         try:
             while True:
-                chunk = s.recv(65536)
-                if not chunk:
+                line = stream.readline(control_ipc.CONTROL_RESPONSE_MAX_BYTES + 2)
+                if not line:
                     break
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    if not line.strip():
-                        continue
-                    try:
-                        events.append(json.loads(line.decode("utf-8")))
-                    except json.JSONDecodeError:
-                        events.append({"raw": line.decode("utf-8", "replace")})
+                if len(line) > control_ipc.CONTROL_RESPONSE_MAX_BYTES:
+                    events.append({"error": "oversized tail event"})
+                    break
+                if not line.strip():
+                    continue
+                try:
+                    events.append(json.loads(line.decode("utf-8")))
+                except json.JSONDecodeError:
+                    events.append({"raw": line.decode("utf-8", "replace")})
         except OSError:
             pass
+        finally:
+            stream.close()
 
     t = threading.Thread(target=reader, daemon=True)
     t.start()
@@ -50,7 +60,7 @@ def _open_tail(control_port: int) -> tuple[socket.socket, list[dict]]:
 
 
 def test_tail_receives_incoming_messages():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         sock, events = _open_tail(p.b.control_port)
         try:
             time.sleep(0.3)  # let tail subscription establish
@@ -71,7 +81,7 @@ def test_tail_receives_incoming_messages():
 
 
 def test_multiple_tail_subscribers_all_receive():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         s1, ev1 = _open_tail(p.b.control_port)
         s2, ev2 = _open_tail(p.b.control_port)
         try:
@@ -101,7 +111,7 @@ def test_multiple_tail_subscribers_all_receive():
 def test_tail_subscriber_disconnect_does_not_break_others():
     """If one tail subscriber drops, remaining subscribers must keep
     receiving and the daemon must not error."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         s1, ev1 = _open_tail(p.b.control_port)
         s2, ev2 = _open_tail(p.b.control_port)
         time.sleep(0.3)

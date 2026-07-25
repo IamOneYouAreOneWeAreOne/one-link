@@ -63,15 +63,23 @@ fn take_caveat(input: &mut &[u8]) -> Option<Caveat> {
 
 fuzz_target!(|data: &[u8]| {
     let mut input = data;
-    let Some(root_arr) = take_array::<32>(&mut input) else { return };
-    let Some(id) = take_array::<32>(&mut input) else { return };
+    let Some(root_arr) = take_array::<32>(&mut input) else {
+        return;
+    };
+    let Some(id) = take_array::<32>(&mut input) else {
+        return;
+    };
     let root = Zeroizing::new(root_arr);
     let mut cap = Capability::root(id, &root);
 
     let n_caveats = (take_u32(&mut input).unwrap_or(0) % 8) as usize;
     for _ in 0..n_caveats {
-        let Some(cav) = take_caveat(&mut input) else { return };
-        cap = cap.attenuate(cav);
+        let Some(cav) = take_caveat(&mut input) else {
+            return;
+        };
+        cap = cap
+            .attenuate(cav)
+            .expect("fuzzer constructs only bounded caveats");
     }
 
     let wire = cap.encode();

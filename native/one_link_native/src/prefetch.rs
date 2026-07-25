@@ -7,7 +7,11 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
-#[pyclass(name = "Predictor", module = "one_link_native.prefetch")]
+#[pyclass(
+    from_py_object,
+    name = "Predictor",
+    module = "one_link_native.prefetch"
+)]
 #[derive(Debug, Clone)]
 pub struct PyPredictor {
     inner: RustPredictor,
@@ -35,7 +39,7 @@ impl PyPredictor {
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
-    /// Record one access: peer P accessed file F at time t_ms.
+    /// Record one access: peer P accessed file F at time `t_ms`.
     fn observe(&mut self, peer: &[u8], file_id: &[u8], t_ms: u64) -> PyResult<()> {
         let p = bytes_to_32(peer, "peer")?;
         let f = bytes_to_32(file_id, "file_id")?;
@@ -53,13 +57,13 @@ impl PyPredictor {
     ) -> PyResult<Bound<'py, PyList>> {
         let p = bytes_to_32(peer, "peer")?;
         let preds = self.inner.predict_top_n(&p, n);
-        let out = PyList::empty_bound(py);
+        let out = PyList::empty(py);
         for Prediction {
             file_id,
             confidence,
         } in preds
         {
-            let fid_py = PyBytes::new_bound(py, &file_id);
+            let fid_py = PyBytes::new(py, &file_id);
             out.append((fid_py, confidence))?;
         }
         Ok(out)

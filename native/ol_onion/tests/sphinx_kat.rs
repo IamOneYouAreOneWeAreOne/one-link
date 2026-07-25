@@ -2,14 +2,15 @@
 //!
 //! Pins:
 //! - Filler output for 2-relay + 3-relay seeded keys.
-//! - HopKeys derivation for fixed (shared, alpha).
-//! - Field-bound HopKeys for fixed witness.
+//! - `HopKeys` derivation for fixed (shared, alpha).
+//! - Field-bound `HopKeys` for fixed witness.
 //! - End-to-end Sphinx outer packet bytes + delivered payload.
 //!
 //! Regenerate with `OL_SPHINX_KAT_REGEN=1` when the wire format
 //! intentionally changes.
 
 use rand::SeedableRng;
+use std::fmt::Write as _;
 
 use ol_onion::sphinx::core::{
     build_sphinx_onion, generate_static_keypair, peel_sphinx_layer, SphinxHop, SphinxPeelOutcome,
@@ -37,7 +38,7 @@ const EXPECTED_DELIVERED_PAYLOAD_HEX: &str = "6b61742d70617964";
 fn hex(b: &[u8]) -> String {
     let mut s = String::with_capacity(b.len() * 2);
     for &byte in b {
-        s.push_str(&format!("{:02x}", byte));
+        write!(&mut s, "{byte:02x}").expect("writing to String is infallible");
     }
     s
 }
@@ -49,9 +50,10 @@ fn maybe_regen() -> bool {
 fn assert_or_regen_str(name: &str, expected: &str, actual: &str) {
     if expected.is_empty() || maybe_regen() {
         eprintln!("KAT regen: const EXPECTED_{name} = \"{actual}\";");
-        if expected.is_empty() && !maybe_regen() {
-            panic!("EXPECTED_{name} is empty; run with OL_SPHINX_KAT_REGEN=1 to populate");
-        }
+        assert!(
+            !expected.is_empty() || maybe_regen(),
+            "EXPECTED_{name} is empty; run with OL_SPHINX_KAT_REGEN=1 to populate"
+        );
         return;
     }
     assert_eq!(
@@ -126,16 +128,16 @@ fn kat_header_mac() {
 fn kat_sphinx_one_hop_end_to_end() {
     // Deterministic seeded RNG.
     let mut rng = rand_chacha::ChaCha20Rng::from_seed([0xDDu8; 32]);
-    let (dest_sk, dest_pk) = generate_static_keypair(&mut rng);
+    let (destination_secret, destination_public) = generate_static_keypair(&mut rng);
     let dest = SphinxHop {
         id: HopId::from_bytes([0x33u8; HOP_ID_LEN]),
-        static_pk: dest_pk,
+        static_pk: destination_public,
     };
     let (eph_sk, _) = generate_static_keypair(&mut rng);
     let payload = b"kat-payd";
     let packet = build_sphinx_onion(&eph_sk, &[dest], payload, &mut rng).unwrap();
     assert_eq!(packet.as_bytes().len(), EXPECTED_SPHINX_PACKET_LEN);
-    let outcome = peel_sphinx_layer(&dest_sk, &packet).unwrap();
+    let outcome = peel_sphinx_layer(&destination_secret, &packet).unwrap();
     match outcome {
         SphinxPeelOutcome::Deliver { payload: out } => {
             assert_or_regen_str(
@@ -155,27 +157,30 @@ fn kat_sphinx_three_hop_round_trip() {
     // Deterministic — verifies that the 3-hop path delivers the same
     // pinned payload byte-for-byte.
     let mut rng = rand_chacha::ChaCha20Rng::from_seed([0xEEu8; 32]);
-    let (r1_sk, r1_pk) = generate_static_keypair(&mut rng);
-    let (r2_sk, r2_pk) = generate_static_keypair(&mut rng);
-    let (dest_sk, dest_pk) = generate_static_keypair(&mut rng);
+    let (relay_one_secret, relay_one_public) = generate_static_keypair(&mut rng);
+    let (relay_two_secret, relay_two_public) = generate_static_keypair(&mut rng);
+    let (destination_secret, destination_public) = generate_static_keypair(&mut rng);
     let circuit = vec![
         SphinxHop {
             id: HopId::from_bytes([0x10; HOP_ID_LEN]),
-            static_pk: r1_pk,
+            static_pk: relay_one_public,
         },
         SphinxHop {
             id: HopId::from_bytes([0x20; HOP_ID_LEN]),
-            static_pk: r2_pk,
+            static_pk: relay_two_public,
         },
         SphinxHop {
             id: HopId::from_bytes([0x30; HOP_ID_LEN]),
-            static_pk: dest_pk,
+            static_pk: destination_public,
         },
     ];
     let (eph_sk, _) = generate_static_keypair(&mut rng);
     let payload = b"kat-3hop";
     let mut packet = build_sphinx_onion(&eph_sk, &circuit, payload, &mut rng).unwrap();
-    for (i, sk) in [&r1_sk, &r2_sk, &dest_sk].iter().enumerate() {
+    for (i, sk) in [&relay_one_secret, &relay_two_secret, &destination_secret]
+        .iter()
+        .enumerate()
+    {
         match peel_sphinx_layer(sk, &packet).unwrap() {
             SphinxPeelOutcome::Forward { next_packet, .. } => {
                 packet = next_packet;

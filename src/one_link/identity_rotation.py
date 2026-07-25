@@ -69,7 +69,6 @@ exact bytes the signature covers.
 """
 from __future__ import annotations
 
-import contextlib
 import enum
 import json
 import time
@@ -86,6 +85,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 CERT_VERSION = 1
 CERT_KEYS = ("v", "old_fp", "new_fp", "new_pub_hex", "ts_ms", "reason")
+WIRE_KEYS = frozenset({"cert_json", "sig_hex"})
+MAX_CERT_JSON_BYTES = 2048
+MAX_CERT_TIMESTAMP_MS = 2**63 - 1
 
 
 class RotationReason(str, enum.Enum):
@@ -115,6 +117,7 @@ class RotationCertificate:
     def to_wire_dict(self) -> dict[str, Any]:
         """The shape that goes on the wire OR into persistent state.
         Caller base64s the binary fields when transporting."""
+        _validate_certificate_object(self)
         return {
             "cert_json": self.canonical_bytes.decode("ascii"),
             "sig_hex": self.signature.hex(),
@@ -122,17 +125,30 @@ class RotationCertificate:
 
     @classmethod
     def from_wire_dict(cls, d: dict[str, Any]) -> "RotationCertificate":
+        if not isinstance(d, dict):
+            raise ValueError("wire cert must be an object")
+        keys = frozenset(d)
+        missing = WIRE_KEYS - keys
+        extra = keys - WIRE_KEYS
+        if missing:
+            raise ValueError(f"wire cert missing fields: {', '.join(sorted(missing))}")
+        if extra:
+            raise ValueError(f"wire cert has unknown fields: {', '.join(sorted(extra))}")
         cert_raw = d.get("cert_json")
         sig_raw = d.get("sig_hex")
         if not isinstance(cert_raw, str) or not isinstance(sig_raw, str):
             raise ValueError("wire cert missing cert_json or sig_hex")
+        if len(sig_raw) != 128:
+            raise ValueError("signature must be 64 bytes")
+        if any(ch not in "0123456789abcdef" for ch in sig_raw):
+            raise ValueError("sig_hex must be canonical lowercase hex")
+        sig = bytes.fromhex(sig_raw)
         try:
-            sig = bytes.fromhex(sig_raw)
-        except ValueError as e:
-            raise ValueError(f"sig_hex not valid hex: {e}") from None
-        if len(sig) != 64:
-            raise ValueError(f"signature must be 64 bytes, got {len(sig)}")
-        canonical = cert_raw.encode("ascii")
+            canonical = cert_raw.encode("ascii")
+        except UnicodeEncodeError:
+            raise ValueError("cert body must be ASCII") from None
+        if not canonical or len(canonical) > MAX_CERT_JSON_BYTES:
+            raise ValueError("cert body size is invalid")
         body = _parse_canonical_cert(canonical)
         return cls(
             version=body["v"],
@@ -187,18 +203,22 @@ def _parse_canonical_cert(canonical: bytes) -> dict[str, Any]:
     missing = set(CERT_KEYS) - set(obj.keys())
     if missing:
         raise ValueError(f"cert missing keys: {sorted(missing)}")
+    if isinstance(obj["v"], bool) or not isinstance(obj["v"], int):
+        raise ValueError("cert.v must be an int")
     if obj["v"] != CERT_VERSION:
         raise ValueError(f"unsupported cert version {obj['v']}")
     for k in ("old_fp", "new_fp", "new_pub_hex", "reason"):
         if not isinstance(obj[k], str):
             raise ValueError(f"cert.{k} must be a string")
-    if not isinstance(obj["ts_ms"], int):
+    if isinstance(obj["ts_ms"], bool) or not isinstance(obj["ts_ms"], int):
         raise ValueError("cert.ts_ms must be an int")
+    if not 0 <= obj["ts_ms"] <= MAX_CERT_TIMESTAMP_MS:
+        raise ValueError("cert.ts_ms is out of range")
     if obj["reason"] not in VALID_REASONS:
         raise ValueError(
             f"cert.reason {obj['reason']!r} not in {sorted(VALID_REASONS)}"
         )
-    # Fingerprints are SHA-256 hex; 64 lowercase hex chars.
+    # Fingerprints are BLAKE3 hex; 64 lowercase hex chars.
     for k in ("old_fp", "new_fp"):
         v = obj[k]
         if len(v) != 64 or any(c not in "0123456789abcdef" for c in v):
@@ -207,7 +227,7 @@ def _parse_canonical_cert(canonical: bytes) -> dict[str, Any]:
     pub_hex = obj["new_pub_hex"]
     if len(pub_hex) != 64 or any(c not in "0123456789abcdef" for c in pub_hex):
         raise ValueError("cert.new_pub_hex must be 64 lowercase hex chars")
-    # Consistency: new_fp must equal sha256(new_pubkey).hex(). Otherwise
+    # Consistency: new_fp must equal BLAKE3(new_pubkey).hex(). Otherwise
     # an attacker could craft a cert whose new_fp lies about the pubkey.
     try:
         derived_new_fp = fingerprint_for_pubkey(bytes.fromhex(pub_hex))
@@ -215,9 +235,11 @@ def _parse_canonical_cert(canonical: bytes) -> dict[str, Any]:
         raise ValueError(f"cert.new_pub_hex not parseable: {e}") from None
     if derived_new_fp != obj["new_fp"]:
         raise ValueError(
-            "cert.new_fp does not match SHA-256(new_pub_hex); cert is "
+            "cert.new_fp does not match BLAKE3(new_pub_hex); cert is "
             "internally inconsistent"
         )
+    if _canonicalize_cert_body(obj) != canonical:
+        raise ValueError("cert body is not canonical JSON")
     return obj
 
 
@@ -249,13 +271,19 @@ def mint_certificate(
         raise ValueError(f"reason must be one of {sorted(VALID_REASONS)}")
     if ts_ms is None:
         ts_ms = int(time.time() * 1000)
+    if (
+        isinstance(ts_ms, bool)
+        or not isinstance(ts_ms, int)
+        or not 0 <= ts_ms <= MAX_CERT_TIMESTAMP_MS
+    ):
+        raise ValueError("ts_ms is out of range")
     old_pub = old_priv.public_key().public_bytes_raw()
     body = {
         "v": CERT_VERSION,
         "old_fp": fingerprint_for_pubkey(old_pub),
         "new_fp": fingerprint_for_pubkey(bytes(new_pub)),
         "new_pub_hex": bytes(new_pub).hex(),
-        "ts_ms": int(ts_ms),
+        "ts_ms": ts_ms,
         "reason": reason,
     }
     canonical = _canonicalize_cert_body(body)
@@ -267,7 +295,7 @@ def mint_certificate(
         old_fp=fingerprint_for_pubkey(old_pub),
         new_fp=fingerprint_for_pubkey(bytes(new_pub)),
         new_pub_hex=bytes(new_pub).hex(),
-        ts_ms=int(ts_ms),
+        ts_ms=ts_ms,
         reason=reason,
         canonical_bytes=canonical,
         signature=signature,
@@ -298,7 +326,7 @@ def verify_certificate(
     if the cert is bogus; returns None on success.
 
     Callers should pass the pubkey they have pinned for old_fp - if the
-    cert's old_fp doesn't match SHA-256(expected_old_pubkey), the cert
+    cert's old_fp doesn't match BLAKE3(expected_old_pubkey), the cert
     is for a different peer and we refuse (defense against cert
     misrouting).
     """
@@ -307,7 +335,7 @@ def verify_certificate(
     derived_old_fp = fingerprint_for_pubkey(bytes(expected_old_pubkey))
     if cert.old_fp != derived_old_fp:
         raise CertVerifyError(
-            f"cert.old_fp {cert.old_fp!r} does not match SHA-256(expected_old_pubkey) "
+            f"cert.old_fp {cert.old_fp!r} does not match BLAKE3(expected_old_pubkey) "
             f"{derived_old_fp!r}; cert is for a different identity"
         )
     # Re-parse the canonical bytes in case the caller built the cert
@@ -315,7 +343,7 @@ def verify_certificate(
     # Surface schema errors as CertVerifyError so a single except
     # clause in the daemon handler catches every failure mode.
     try:
-        _parse_canonical_cert(cert.canonical_bytes)
+        _validate_certificate_object(cert)
     except ValueError as e:
         raise CertVerifyError(f"cert body failed schema check: {e}") from None
     try:
@@ -325,8 +353,38 @@ def verify_certificate(
         raise CertVerifyError(
             "cert signature does not verify against the pinned old pubkey"
         ) from e
-    except Exception as e:
+    except (TypeError, ValueError) as e:
         raise CertVerifyError(f"signature verification failed: {e}") from None
+
+
+def _validate_certificate_object(cert: RotationCertificate) -> None:
+    if not isinstance(cert, RotationCertificate):
+        raise ValueError("cert must be a RotationCertificate")
+    if not isinstance(cert.canonical_bytes, bytes):
+        raise ValueError("cert canonical_bytes must be bytes")
+    if len(cert.canonical_bytes) > MAX_CERT_JSON_BYTES:
+        raise ValueError("cert body size is invalid")
+    if not isinstance(cert.signature, bytes) or len(cert.signature) != 64:
+        raise ValueError("cert signature must be 64 bytes")
+    body = _parse_canonical_cert(cert.canonical_bytes)
+    expected_fields = (
+        cert.version,
+        cert.old_fp,
+        cert.new_fp,
+        cert.new_pub_hex,
+        cert.ts_ms,
+        cert.reason,
+    )
+    body_fields = (
+        body["v"],
+        body["old_fp"],
+        body["new_fp"],
+        body["new_pub_hex"],
+        body["ts_ms"],
+        body["reason"],
+    )
+    if expected_fields != body_fields:
+        raise ValueError("certificate fields do not match its signed body")
 
 
 # ── apply ───────────────────────────────────────────────────────────
@@ -398,11 +456,12 @@ def apply_certificate_to_peer(
 
 @dataclass(frozen=True)
 class LocalRotationResult:
-    """What perform_local_rotation returns to the HTTP handler. The
-    handler ships ``new_phrase`` back to the UI for paper backup and
-    sets ``restart_required=True`` in the response."""
+    """A signed rotation durably staged for boot-time application."""
     new_phrase: str
     cert: RotationCertificate
+    staged_peer_count: int
+    # Backward-compatible response datum: no announcement is in the live
+    # State queue until boot replay atomically commits the complete snapshot.
     queued_peer_count: int
     old_fp: str
     new_fp: str
@@ -417,39 +476,35 @@ def perform_local_rotation(
     state=None,
     ts_ms: Optional[int] = None,
 ) -> LocalRotationResult:
-    """Run a complete local rotation:
+    """Prepare and durably journal a local rotation without live mutation.
 
       1. Generate a fresh master seed (32 bytes from os CSPRNG).
       2. Derive the new Ed25519 identity from that seed.
       3. Mint a rotation certificate signed by the OLD private key.
-      4. Persist the new seed atomically (master_seed.store_seed).
-      5. Clear identity.key + DRK so the daemon's NEXT start
-         re-derives them from the new seed.
-      6. Queue one row per pinned peer in
-         pending_rotation_announcements (when ``state`` provided).
-      7. Encode the new seed as a 24-word BIP-39 phrase and return
+      4. Commit the protected seed, certificate, and exact pinned-peer
+         snapshot to the recovery journal, publishing the intent last.
+      5. Encode the new seed as a 24-word BIP-39 phrase and return
          it so the UI can prompt the user to back it up.
 
-    The CALLER is responsible for telling the user to restart the
-    daemon - we don't shut down here. We DO clear the old identity
-    files because the new daemon must derive its identity from the
-    seed; leaving stale identity.key would cause the next start to
-    keep using the OLD identity (the file wins over the seed when
-    both are present).
-
-    Crypto property: the cert is signed by ``old_priv``, which is
-    the identity the running daemon was loaded with. Once we return,
-    the seed on disk no longer matches the in-memory identity; the
-    handler MUST tell the user to restart and the running daemon
-    must NOT use the old identity to sign anything else.
+    No current seed, identity key, data-root key, database, or live queue row
+    is changed here. On restart the daemon owns its singleton lock, converges
+    all new authority, opens State, then commits every announcement in one
+    FULL-synchronous transaction. The journal is retired only after exact
+    read-back. ``state`` remains an accepted compatibility argument but is
+    deliberately not mutated.
     """
-    from pathlib import Path as _Path
-    from one_link import master_seed, mnemonic
-    from one_link import paths
+    from one_link import master_seed, mnemonic, paths, recovery_api
+
     if not isinstance(old_priv, Ed25519PrivateKey):
         raise TypeError("old_priv must be Ed25519PrivateKey")
     if reason not in VALID_REASONS:
         raise ValueError(f"reason must be one of {sorted(VALID_REASONS)}")
+    if not isinstance(pinned_peer_fingerprints, list):
+        raise TypeError("pinned_peer_fingerprints must be a list")
+    # Explicitly sever the old live-write contract. Retaining the argument
+    # avoids a hard API break for extensions while making its safety semantics
+    # unambiguous.
+    _ = state
 
     # Step 1+2: new seed + new identity.
     new_seed = mnemonic.generate_seed()
@@ -461,40 +516,21 @@ def perform_local_rotation(
         old_priv=old_priv, new_pub=new_pub, reason=reason, ts_ms=ts_ms,
     )
 
-    # Step 4+5: persist new seed + clear identity.key + DRK.
-    # store_seed is atomic (tmp + rename); persist BEFORE clearing
-    # the old identity so a crash in the middle still leaves a
-    # bootable daemon (either the old identity wins, or the new
-    # seed wins; never both gone).
-    master_seed.store_seed(_Path(data_dir), new_seed)
-    for f in (paths.key_path(), _Path(data_dir) / "data-root-key.bin"):
-        with contextlib.suppress(OSError):
-            _Path(f).unlink()
-
-    # Best-effort seed wipe in our reference; the on-disk copy is
-    # the canonical source going forward.
     try:
-        # Step 6: queue per-peer announcements.
-        queued = 0
-        if state is not None:
-            wire = cert.to_wire_dict()
-            for peer_fp in pinned_peer_fingerprints:
-                with contextlib.suppress(Exception):
-                    state.queue_rotation_announcement(
-                        peer_fp=peer_fp,
-                        old_fp=cert.old_fp,
-                        new_fp=cert.new_fp,
-                        cert_json=wire["cert_json"],
-                        sig_hex=wire["sig_hex"],
-                    )
-                    queued += 1
-
-        # Step 7: encode the phrase for the UI.
+        staged = recovery_api.stage_rotation_authority_replacement(
+            data_dir=data_dir,
+            seed=new_seed,
+            old_priv=old_priv,
+            cert=cert,
+            pinned_peer_fingerprints=pinned_peer_fingerprints,
+            identity_path=paths.key_path(),
+        )
         new_phrase = mnemonic.encode(new_seed)
         return LocalRotationResult(
             new_phrase=new_phrase,
             cert=cert,
-            queued_peer_count=queued,
+            staged_peer_count=int(staged["staged_peer_count"]),
+            queued_peer_count=0,
             old_fp=cert.old_fp,
             new_fp=cert.new_fp,
         )

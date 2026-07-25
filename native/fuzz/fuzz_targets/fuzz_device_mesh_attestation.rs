@@ -3,9 +3,7 @@
 //! attestation bytes must never panic; verify returns a typed error.
 
 use libfuzzer_sys::fuzz_target;
-use ol_device_mesh::{
-    mint_subkey, DeviceClass, MasterIdentity, SubkeyAttestation,
-};
+use ol_device_mesh::{mint_subkey, DeviceClass, MasterIdentity, SubkeyAttestation};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
@@ -13,8 +11,7 @@ fuzz_target!(|data: &[u8]| {
     // Deterministic master so fuzz runs are reproducible.
     let mut rng = ChaCha20Rng::from_seed([0xA1u8; 32]);
     let master = MasterIdentity::generate(&mut rng);
-    let (_sk, mut att) =
-        mint_subkey(&master, DeviceClass::Phone, [0x55; 16], 0, 365).unwrap();
+    let (_sk, mut att) = mint_subkey(&master, DeviceClass::Phone, [0x55; 16], 0, 365).unwrap();
 
     // Mutate the attestation with the fuzz input.
     if !data.is_empty() {

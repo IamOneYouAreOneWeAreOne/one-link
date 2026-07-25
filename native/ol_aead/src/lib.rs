@@ -2,10 +2,10 @@
 //!
 //! Implements [ADR-0002](../../../docs/decisions/0002-aead-frame.md):
 //!
-//! - **Primary cipher**: AES-256-GCM via the RustCrypto `aes-gcm` crate.
-//!   Hardware-accelerated by AES-NI / VAES on x86 and ARMv8 cryptography
+//! - **Primary cipher**: AES-256-GCM via the `RustCrypto` `aes-gcm` crate.
+//!   Hardware-accelerated by AES-NI / VAES on x86 and `ARMv8` cryptography
 //!   extensions on ARM64. ~5 GiB/s/core sustained on modern hardware.
-//! - **Fallback cipher**: ChaCha20-Poly1305 via the RustCrypto
+//! - **Fallback cipher**: ChaCha20-Poly1305 via the `RustCrypto`
 //!   `chacha20poly1305` crate. Constant-time by construction in software;
 //!   used when the runtime detects no hardware AES support. ~3 GiB/s/core.
 //! - **Frame layout**: a CDC chunk (8-256 KiB per [ADR-0001]) is divided
@@ -14,19 +14,21 @@
 //!   frame containing the requested offset, capping read amplification at
 //!   16-32 KiB.
 //! - **Nonce construction**: 96-bit nonce = `chunk_id_lo64 || frame_index_u32`.
-//!   chunk_id_lo64 derives from the BLAKE3 chunk address (raw or
-//!   convergent per [ADR-0006]). frame_index distinguishes frames within
-//!   a chunk. Reuse-impossible by construction.
+//!   `chunk_id_lo64` derives from the BLAKE3 chunk address (raw or
+//!   convergent per [ADR-0006]). `frame_index` distinguishes frames within
+//!   a chunk. Because only a 64-bit hash prefix is used, collision/reuse is
+//!   not mathematically impossible; the storage/transfer layer must reject
+//!   prefix collisions under a reused key or derive an independent key.
 //! - **AAD binding**: each frame's authenticated additional data is the
-//!   full 32-byte BLAKE3 chunk_id, so a tampered chunk_id invalidates
+//!   full 32-byte BLAKE3 `chunk_id`, so a tampered `chunk_id` invalidates
 //!   the auth tag.
-//! - **Per-chunk forward-secret keys**: callers derive keys via
+//! - **Per-chunk derived keys**: callers derive keys via
 //!   `ol_chunk::blake3_wrap::derive_aead_key` from a ratchet chain key
-//!   plus the chunk_id. This crate accepts a 32-byte key and does not
+//!   plus the `chunk_id`. This crate accepts a 32-byte key and does not
 //!   manage ratchet state itself; ratchet machinery lives in `ol_ratchet`
 //!   (Phase C).
 //! - **Constant-time tag compare**: handled by the underlying
-//!   RustCrypto AEAD trait (uses `subtle::ConstantTimeEq`).
+//!   `RustCrypto` AEAD trait (uses `subtle::ConstantTimeEq`).
 //! - **Zeroize**: all key material wraps in `Zeroizing` so dropping a
 //!   key clears the memory. Side-channel hardening per [ADR-0002].
 //!
@@ -78,7 +80,8 @@ pub use convergent::{
 pub use error::AeadError;
 pub use frame::{
     decrypt_chunk, decrypt_chunks_par, decrypt_frame, encrypt_chunk, encrypt_chunks_par,
-    encrypt_frame, FrameRef,
+    encrypt_frame, FrameRef, MAX_CHUNK_CIPHERTEXT_LEN, MAX_CHUNK_PLAINTEXT_LEN,
+    MAX_PARALLEL_CHUNKS, MAX_PARALLEL_INPUT_BYTES,
 };
 pub use key::{ChunkAeadKey, FRAME_KEY_LEN};
 pub use nonce::{frame_nonce, FRAME_NONCE_LEN};

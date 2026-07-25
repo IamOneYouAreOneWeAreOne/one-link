@@ -10,15 +10,16 @@
 
 [ADR-0025](0025-chunk-store-transport-pipeline.md) shipped the composed `NativeTransferSession` pipeline and the `Channel.establish_native_transfer()` integration helper. The daemon could *construct* a native session, but `send_file()` still emitted legacy `FILE_CHUNK` / `FILE_BIN_CHUNK` messages — the wire-format swap was deferred.
 
-This ADR records the final production cutover: a `NATIVE_TRANSFER_V1` capability advertised in the CAPS frame, a new `FILE_NATIVE_CHUNK` message type, and the sender-side opt-in flag that gates the cutover in production.
+This ADR records the production cutover and its indexed-wire follow-up: `NATIVE_TRANSFER_V1` and `NATIVE_TRANSFER_INDEXED_V1` capabilities, the `FILE_NATIVE_CHUNK` message type, direction-separated session roots, and an explicit rollback switch.
 
 ## Decision
 
-**Add a `NATIVE_TRANSFER_V1` capability and a `FILE_NATIVE_CHUNK` wire message. Both peers must advertise the capability; the sender additionally opts in via `ONE_LINK_NATIVE_TRANSFER=1`. Legacy peers (no capability) keep using `FILE_CHUNK` / `FILE_BIN_CHUNK` transparently — no version bump.**
+**Use `FILE_NATIVE_CHUNK` only when both peers negotiate `NATIVE_TRANSFER_INDEXED_V1`. Native transfer is default-on for that safe indexed format; `ONE_LINK_NATIVE_TRANSFER=0` is an explicit incident rollback. Legacy or unindexed peers keep using `FILE_CHUNK` / `FILE_BIN_CHUNK` transparently — no version bump.**
 
 ### Capability negotiation
 
 - `one_link.capabilities.NATIVE_TRANSFER_V1 = "native_transfer_v1"`.
+- `one_link.capabilities.NATIVE_TRANSFER_INDEXED_V1 = "native_transfer_indexed_v1"` prevents nonce/ratchet drift with older envelopes that lacked a session-global chunk index.
 - Added to `LOCAL_CAPABILITIES` and `TRANSPORT_LAYER_CAPS` (i.e. transport-layer, not user-prompt-required).
 - `Channel.note_caps_received()` sets `_peer_native_transfer_capable = "native_transfer_v1" in features` alongside the existing DR capability detection.
 - `Channel.peer_native_transfer_capable` exposes the flag as a read-only property.
@@ -33,6 +34,7 @@ This ADR records the final production cutover: a `NATIVE_TRANSFER_V1` capability
   "from": <sender_short_id>,
   "blob": <hex blob hash>,
   "seq": <int chunk index>,
+  "chunk_index": <monotonic session-global ratchet index>,
   "chunk_id": <hex 32B BLAKE3 content address>,
   "plaintext_len": <int>,
   "data": <base64 of native AEAD ciphertext>,
@@ -40,7 +42,7 @@ This ADR records the final production cutover: a `NATIVE_TRANSFER_V1` capability
 }
 ```
 
-The native AEAD ciphertext authenticates `chunk_id` as AAD — a swap or tamper raises before plaintext is exposed.
+The native AEAD ciphertext authenticates `chunk_id` as AAD. After decryption, the receiver also recomputes the protocol content address (raw or convergent BLAKE3) and rejects a validly encrypted but falsely labeled chunk before persistence. `chunk_index` is replay-window checked and bound to direction-separated traffic roots.
 
 ### Sender path
 
@@ -48,8 +50,8 @@ In `daemon.send_file()`'s stream chunk loop:
 
 ```python
 native_transfer_used = (
-    NATIVE_TRANSFER_V1 in peer_feature_set
-    and os.environ.get("ONE_LINK_NATIVE_TRANSFER") == "1"
+    NATIVE_TRANSFER_INDEXED_V1 in peer_feature_set
+    and os.environ.get("ONE_LINK_NATIVE_TRANSFER", "1") != "0"
 )
 native_session = (
     channel.get_or_create_native_transfer_session()
@@ -62,6 +64,7 @@ if native_transfer_used and native_session is not None:
     chunk_msg = make_msg(
         "FILE_NATIVE_CHUNK", self.me.short_id,
         blob=blob_hex, seq=seq,
+        chunk_index=record.chunk_index,
         chunk_id=record.chunk_id.hex(),
         plaintext_len=record.plaintext_len,
         data=base64.b64encode(record.ciphertext).decode("ascii"),
@@ -87,11 +90,9 @@ Failures to construct the native session fall back to the legacy path with a war
 6. AEAD failure aborts the transfer with `native_chunk_decrypt_failed` ACK.
 7. Plaintext goes through the same `f.handle.write(data) + f.hasher.update(data)` path as legacy chunks.
 
-### Why env-flag opt-in instead of default-on
+### Default-on cutover and rollback
 
-Production reliability. The legacy `FILE_CHUNK` / `FILE_BIN_CHUNK` path has 2,952 daemon regression tests covering it. The native path has full unit coverage and the integration tests at `tests/unit/test_native_transfer_cutover.py`, but no live multi-daemon socket coverage yet. `ONE_LINK_NATIVE_TRANSFER=1` is the operator opt-in: production deployments stay on legacy until operators flip the flag to try the new transport. When confidence is high we flip the default in a follow-up commit.
-
-This is the same shadow-→-authoritative posture as [ADR-0024](0024-phase-c3-wiring-status.md): a tested code path lands first, the cutover commit (default flip) is a one-line follow-up.
+The original shadow period required `ONE_LINK_NATIVE_TRANSFER=1`. The follow-up cutover is now complete: indexed-capable peers use native transfer by default. Operators retain `ONE_LINK_NATIVE_TRANSFER=0` as a fail-safe rollback during a production incident. Capability negotiation remains the interoperability boundary, and all failures to construct the native session degrade explicitly to the legacy path with diagnostics.
 
 ## Verification
 
@@ -102,7 +103,7 @@ This is the same shadow-→-authoritative posture as [ADR-0024](0024-phase-c3-wi
   - `FILE_NATIVE_CHUNK` wire envelope round trips through paired sessions.
   - AEAD AAD binding rejects `chunk_id` swap.
   - 8-chunk multi-chunk round trip matches the daemon's send_file loop shape.
-  - Env-flag default-off + explicit opt-in semantics.
+  - Default-on indexed negotiation + explicit `=0` rollback semantics.
 - **2,952 daemon regression tests pass / 0 failures** after the cutover wiring landed.
 - 77 total unit tests pass.
 
@@ -111,15 +112,13 @@ This is the same shadow-→-authoritative posture as [ADR-0024](0024-phase-c3-wi
 Legacy peers continue to interoperate transparently:
 
 - Old peer ↔ new peer: old peer doesn't advertise `NATIVE_TRANSFER_V1`, new peer's `peer_native_transfer_capable` stays False, send_file emits FILE_CHUNK / FILE_BIN_CHUNK as before.
-- New peer ↔ new peer with opt-in: both advertise the capability AND the sender has `ONE_LINK_NATIVE_TRANSFER=1`, sender emits FILE_NATIVE_CHUNK, receiver dispatches to `_handle_file_native_chunk`.
-- New peer ↔ new peer without opt-in: capability is advertised but sender's env flag isn't set, sender stays on legacy. Receiver still has the FILE_NATIVE_CHUNK handler ready for whenever the sender flips the flag.
+- New indexed peer ↔ new indexed peer: sender emits `FILE_NATIVE_CHUNK` by default; receiver dispatches to `_handle_file_native_chunk`.
+- Operator rollback: setting `ONE_LINK_NATIVE_TRANSFER=0` keeps the sender on the legacy path without changing peer state or the wire version.
+- Peers advertising only the original unindexed capability remain on the legacy path.
 
 ## Follow-up
 
-Once production traffic on `ONE_LINK_NATIVE_TRANSFER=1` reports zero divergence:
-
-1. Flip the sender default: emit `FILE_NATIVE_CHUNK` whenever the peer advertises the capability, without the env-flag gate.
-2. Eventually deprecate `FILE_CHUNK` / `FILE_BIN_CHUNK` (after a long deprecation window — those messages must remain decodable for backwards compatibility with legacy peers indefinitely).
+Retain `FILE_CHUNK` / `FILE_BIN_CHUNK` decoding indefinitely for backwards compatibility. QUIC chunk carriage remains separately gated until its authenticated-receipt path has live multi-daemon evidence; native AEAD does not imply QUIC readiness.
 
 ## References
 

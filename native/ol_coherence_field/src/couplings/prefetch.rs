@@ -1,4 +1,4 @@
-//! τ_c × active-inference prefetch coupling.
+//! `τ_c` × active-inference prefetch coupling.
 //!
 //! `ol_prefetch` ships a cohort-prior + time-weighted co-occurrence
 //! predictor that emits the next-likely-chunks for each peer-pair.
@@ -44,7 +44,7 @@ pub struct PrefetchPriority {
 /// Rank holders by their field-induced cost to pre-position a chunk
 /// for `requester`. Returns a sorted list (best first).
 ///
-/// `field` is the recovered δτ_c at every peer (output of
+/// `field` is the recovered `δτ_c` at every peer (output of
 /// `solve_helmholtz`). `requester` is the peer we expect to soon
 /// request the chunk; the holders are the peers currently holding
 /// it. We pick holders that sit on high-coherence paths to the
@@ -63,8 +63,8 @@ pub fn prefetch_priorities(
     if field.is_empty() || requester >= field.len() {
         return Vec::new();
     }
-    let f_min = field.iter().cloned().fold(f64::INFINITY, f64::min);
-    let f_max = field.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let f_min = field.iter().copied().fold(f64::INFINITY, f64::min);
+    let f_max = field.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let span = (f_max - f_min).max(1e-9);
     let requester_field = field[requester];
 

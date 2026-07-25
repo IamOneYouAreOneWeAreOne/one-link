@@ -1,8 +1,10 @@
-//! Pinned known-answer test vectors for ol_pqsig.
+//! Pinned known-answer test vectors for `ol_pqsig`.
 //!
 //! Bricks against silent regression in BLAKE3 / Ed25519 / ML-DSA-65
 //! crate updates. Regenerate via `OL_PQSIG_KAT_REGEN=1` when the
 //! wire format intentionally changes.
+
+use std::fmt::Write as _;
 
 use ol_pqsig::{
     HybridSigningKey, HybridVerifyingKey, HYBRID_SIG_LEN, HYBRID_SK_LEN, HYBRID_VK_LEN,
@@ -23,7 +25,7 @@ fn maybe_regen() -> bool {
 fn hex(b: &[u8]) -> String {
     let mut s = String::with_capacity(b.len() * 2);
     for &byte in b {
-        s.push_str(&format!("{:02x}", byte));
+        write!(&mut s, "{byte:02x}").expect("writing to String cannot fail");
     }
     s
 }
@@ -32,9 +34,10 @@ fn assert_or_regen(name: &str, expected: &str, actual_bytes: &[u8]) {
     let actual = hex(actual_bytes);
     if expected.is_empty() || maybe_regen() {
         eprintln!("KAT regen: const EXPECTED_{name} = \"{actual}\";");
-        if expected.is_empty() && !maybe_regen() {
-            panic!("EXPECTED_{name} is empty; run with OL_PQSIG_KAT_REGEN=1 to populate");
-        }
+        assert!(
+            !expected.is_empty() || maybe_regen(),
+            "EXPECTED_{name} is empty; run with OL_PQSIG_KAT_REGEN=1 to populate"
+        );
         return;
     }
     assert_eq!(

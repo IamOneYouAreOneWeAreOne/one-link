@@ -158,12 +158,12 @@ mod tests {
 
         // r1 peels first
         let outcome = peel_one_layer(&r1_sk, &packet).unwrap();
-        let (next_hop, inner_bytes) = match outcome {
-            PeelOutcome::Forward {
-                next_hop,
-                inner_packet_bytes,
-            } => (next_hop, inner_packet_bytes),
-            _ => panic!("expected Forward"),
+        let PeelOutcome::Forward {
+            next_hop,
+            inner_packet_bytes: inner_bytes,
+        } = outcome
+        else {
+            panic!("expected Forward");
         };
         assert_eq!(next_hop, r2.id);
         // r2 peels next
@@ -171,7 +171,7 @@ mod tests {
         let outcome = peel_one_layer(&r2_sk, &inner).unwrap();
         match outcome {
             PeelOutcome::Deliver { payload } => assert_eq!(payload, b"two-hop"),
-            _ => panic!("expected Deliver"),
+            PeelOutcome::Forward { .. } => panic!("expected Deliver"),
         }
     }
 
@@ -186,34 +186,34 @@ mod tests {
 
         // r1 → r2
         let o1 = peel_one_layer(&r1_sk, &packet).unwrap();
-        let (nh1, b1) = match o1 {
-            PeelOutcome::Forward {
-                next_hop,
-                inner_packet_bytes,
-            } => (next_hop, inner_packet_bytes),
-            _ => panic!(),
+        let PeelOutcome::Forward {
+            next_hop: nh1,
+            inner_packet_bytes: b1,
+        } = o1
+        else {
+            panic!();
         };
         assert_eq!(nh1, r2.id);
         // r2 → r3
         let p2 = OnionPacket::decode(&b1).unwrap();
         let o2 = peel_one_layer(&r2_sk, &p2).unwrap();
-        let (nh2, b2) = match o2 {
-            PeelOutcome::Forward {
-                next_hop,
-                inner_packet_bytes,
-            } => (next_hop, inner_packet_bytes),
-            _ => panic!(),
+        let PeelOutcome::Forward {
+            next_hop: nh2,
+            inner_packet_bytes: b2,
+        } = o2
+        else {
+            panic!();
         };
         assert_eq!(nh2, r3.id);
         // r3 → dest
         let p3 = OnionPacket::decode(&b2).unwrap();
         let o3 = peel_one_layer(&r3_sk, &p3).unwrap();
-        let (nh3, b3) = match o3 {
-            PeelOutcome::Forward {
-                next_hop,
-                inner_packet_bytes,
-            } => (next_hop, inner_packet_bytes),
-            _ => panic!(),
+        let PeelOutcome::Forward {
+            next_hop: nh3,
+            inner_packet_bytes: b3,
+        } = o3
+        else {
+            panic!();
         };
         assert_eq!(nh3, dest.id);
         // dest delivers
@@ -221,7 +221,7 @@ mod tests {
         let o4 = peel_one_layer(&dest_sk, &p4).unwrap();
         match o4 {
             PeelOutcome::Deliver { payload } => assert_eq!(payload, b"three-hop test"),
-            _ => panic!(),
+            PeelOutcome::Forward { .. } => panic!(),
         }
     }
 

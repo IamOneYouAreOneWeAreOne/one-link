@@ -1,10 +1,12 @@
-"""Optional native CDC boundary scanner.
+"""Native CDC boundary scanner with a source-install fallback.
 
 One Link's Python CDC implementation is intentionally simple and correct, but
 the byte-by-byte rolling-hash scan is the current large-file bottleneck. This
-module provides a tiny self-contained C scanner loaded through ``ctypes`` when
-a local C compiler is available. If anything goes wrong, callers keep using the
-Python path with identical chunk semantics.
+module provides a tiny self-contained C scanner loaded through ``ctypes``.
+Editable/source installs may compile locally and fall back to Python if native
+initialization fails. Frozen stable artifacts are different: their bundled
+library, exact SHA-256 sidecar, and ABI known vector are mandatory and failure
+is fatal to the native feature/release gates.
 """
 
 from __future__ import annotations
@@ -14,9 +16,9 @@ import hashlib
 import logging
 import os
 import platform
-import shutil
 import subprocess
 import sys
+import stat
 from dataclasses import dataclass
 from importlib import resources
 
@@ -26,7 +28,14 @@ from typing import Iterable
 
 from platformdirs import user_cache_dir
 
+from one_link.fault_observability import report_best_effort_failure
 from one_link.platform_guard import install_windows_platform_fastpath
+from one_link.process_security import (
+    hidden_creationflags,
+    resolve_explicit_executable,
+    resolve_system_executable,
+    trusted_process_env,
+)
 
 install_windows_platform_fastpath()
 
@@ -194,38 +203,108 @@ def get_native_cdc_scanner() -> NativeCdcScanner | None:
         return None
 
 
-def _verify_bundled_library(p: Path) -> bool:
-    """v0.20.7 (security audit M25): verify the bundled native CDC
-    binary's SHA-256 against a sidecar ``<name>.sha256`` file
-    shipped alongside it. Returns True iff the hash matches OR no
-    sidecar is present (backward compat for older builds).
+def validate_native_cdc_library(library: Path) -> None:
+    """Load *library* and prove its exported scanner against a known vector.
 
-    The sidecar file format follows ``shasum -a 256`` output:
-        ``<lowercase 64-hex>  <basename>``
-    Whitespace before the basename is one or more spaces. We only
-    consume the first whitespace-delimited token (the hex), so
-    files written via ``hashlib.sha256().hexdigest()`` (no
-    basename) also work.
+    A successful ``ctypes.CDLL`` is not enough: an ABI-compatible but stale or
+    malicious library can export ``ol_cdc_scan`` and still return incorrect
+    boundaries.  This deterministic vector compares the native result to a
+    small implementation of the canonical gear-hash state machine, including
+    non-zero carry state across a buffer boundary.
+    """
+    from .cdc import _GEAR
 
-    On mismatch we log + refuse the bundled binary; the caller
-    falls through to the compile-from-source path. This raises
-    the bar from "swap one DLL post-install" to "swap two files
-    consistently" — and provides the foundation for full signed-
-    distribution once the release-signing pipeline ships."""
-    sidecar = p.with_suffix(p.suffix + ".sha256")
-    if not sidecar.is_file():
-        # Backward compat: builds that don't ship the sidecar are
-        # treated as trust-on-first-use. Future bundled releases
-        # MUST ship the sidecar (build_native_cdc.py writes it).
-        return True
+    payload = bytearray(bytes(range(256)) * 17 + b"one-link-native-cdc-known-vector")
+    initial_rolling = 0x0123_4567_89AB_CDEF
+    initial_chunk_len = 29
+    min_chunk = 64
+    max_chunk = 257
+    boundary_mask = 0x7F
+    expected_cuts: list[int] = []
+    rolling = initial_rolling
+    chunk_len = initial_chunk_len
+    for offset, value in enumerate(payload, start=1):
+        rolling = ((rolling << 1) + int(_GEAR[value])) & ((1 << 64) - 1)
+        chunk_len += 1
+        if chunk_len >= min_chunk and (
+            chunk_len >= max_chunk or (rolling & boundary_mask) == 0
+        ):
+            expected_cuts.append(offset)
+            rolling = 0
+            chunk_len = 0
+
+    scanner = NativeCdcScanner(library, _GEAR)
+    actual = scanner.scan(
+        payload,
+        length=len(payload),
+        initial_rolling=initial_rolling,
+        initial_chunk_len=initial_chunk_len,
+        min_chunk=min_chunk,
+        max_chunk=max_chunk,
+        boundary_mask=boundary_mask,
+    )
+    expected = (expected_cuts, rolling, chunk_len)
+    if actual != expected:
+        raise RuntimeError(
+            "native CDC known-vector mismatch: "
+            f"actual={actual!r}, expected={expected!r}"
+        )
+
+
+def _is_link_like_path(path: Path) -> bool:
     try:
-        line = sidecar.read_text(encoding="ascii", errors="replace").strip()
-        if not line:
-            return False
-        expected = line.split()[0].lower()
-        if len(expected) != 64 or not all(c in "0123456789abcdef" for c in expected):
-            return False
+        metadata = path.lstat()
+    except OSError:
+        return False
+    attributes = int(getattr(metadata, "st_file_attributes", 0))
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag)
+
+
+def _bundled_sidecar_path(library: Path) -> Path | None:
+    """Locate the signed-hash sidecar in onedir and macOS BUNDLE layouts."""
+    adjacent = library.with_suffix(library.suffix + ".sha256")
+    if adjacent.is_file():
+        return adjacent
+
+    # PyInstaller places binaries in Contents/Frameworks but data files in
+    # Contents/Resources.  ``sys._MEIPASS`` points at Frameworks for a macOS
+    # app, so an adjacent-only lookup silently disabled verification there.
+    executable = Path(sys.executable).resolve(strict=False)
+    if (
+        executable.parent.name == "MacOS"
+        and executable.parent.parent.name == "Contents"
+    ):
+        resources_root = executable.parent.parent / "Resources"
+        candidate = (
+            resources_root
+            / "one_link"
+            / "native"
+            / native_platform_tag()
+            / (native_library_name() + ".sha256")
+        )
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _verify_bundled_library(p: Path) -> bool:
+    """Verify the native CDC payload against its mandatory exact sidecar.
+
+    The accepted format is exactly ``<lowercase 64-hex>  <basename>\n``.
+    Frozen applications fail closed when either
+    file is missing, link-like, malformed, or mismatched; editable/source
+    installs may subsequently use their compiler fallback.
+    """
+    sidecar = _bundled_sidecar_path(p)
+    if sidecar is None:
+        return False
+    if _is_link_like_path(p) or _is_link_like_path(sidecar):
+        return False
+    try:
+        line = sidecar.read_text(encoding="ascii")
         actual = hashlib.sha256(p.read_bytes()).hexdigest().lower()
+        expected_line = f"{actual}  {p.name}\n"
     except Exception as e:
         log.warning(
             "native CDC: integrity-check error for %s (%s); "
@@ -233,11 +312,10 @@ def _verify_bundled_library(p: Path) -> bool:
             p, e,
         )
         return False
-    if expected != actual:
+    if line != expected_line:
         log.warning(
-            "native CDC: integrity-check FAIL for %s "
-            "(expected %s, got %s); falling back to compile-from-source",
-            p, expected, actual,
+            "native CDC: integrity-check FAIL for %s; refusing bundled binary",
+            p,
         )
         return False
     return True
@@ -245,8 +323,14 @@ def _verify_bundled_library(p: Path) -> bool:
 
 def _ensure_library() -> Path:
     bundled = _bundled_library()
-    if bundled is not None and _verify_bundled_library(bundled):
-        return bundled
+    if bundled is not None:
+        if _verify_bundled_library(bundled):
+            validate_native_cdc_library(bundled)
+            return bundled
+        if getattr(sys, "frozen", False):
+            raise RuntimeError("bundled native CDC integrity verification failed")
+    elif getattr(sys, "frozen", False):
+        raise RuntimeError("frozen application is missing its native CDC library")
 
     # Keep the native build cache space-free. MSYS GCC can hand paths with
     # spaces to internal tools poorly on Windows, which makes compilation fail
@@ -257,7 +341,12 @@ def _ensure_library() -> Path:
     suffix = ".dll" if os.name == "nt" else ".dylib" if platform.system() == "Darwin" else ".so"
     lib = cache / f"ol_native_cdc_{digest}{suffix}"
     if lib.is_file():
-        return lib
+        try:
+            validate_native_cdc_library(lib)
+            return lib
+        except Exception as exc:
+            log.warning("native CDC: cached library failed ABI validation: %s", exc)
+            lib.unlink(missing_ok=True)
 
     src = cache / f"ol_native_cdc_{digest}.c"
     src.write_text(_SOURCE, encoding="utf-8")
@@ -265,6 +354,11 @@ def _ensure_library() -> Path:
     if compiler is None:
         raise RuntimeError("no C compiler found for native CDC")
     _compile(compiler, src, lib)
+    try:
+        validate_native_cdc_library(lib)
+    except Exception:
+        lib.unlink(missing_ok=True)
+        raise
     return lib
 
 
@@ -277,6 +371,52 @@ def native_platform_tag() -> str:
     system = platform.system().lower() or "unknown"
     machine = platform.machine().lower().replace("amd64", "x86_64")
     return f"{system}-{machine}"
+
+
+def _compile_command(
+    compiler: str,
+    src: Path,
+    lib: Path,
+    *,
+    target_os_name: str | None = None,
+) -> list[str]:
+    """Build a deterministic native-CDC compiler command.
+
+    GNU PE linkers otherwise stamp the current wall clock into the DLL header,
+    making two ``SOURCE_DATE_EPOCH`` release builds differ despite identical
+    source. MSVC receives the corresponding reproducible-link switch.
+    """
+    os_name = os.name if target_os_name is None else target_os_name
+    name = Path(compiler).name.lower()
+    if name in {"cl.exe", "cl"}:
+        return [
+            compiler,
+            "/nologo",
+            "/O2",
+            "/LD",
+            str(src),
+            f"/Fe:{lib}",
+            "/link",
+            "/Brepro",
+        ]
+    command = [
+        compiler,
+        "-O3",
+        "-std=c99",
+        "-shared",
+        "-o",
+        str(lib),
+        str(src),
+    ]
+    if os_name == "nt":
+        command.insert(4, "-Wl,--no-insert-timestamp")
+        # GNU ld derives a DLL's default preferred image base from its output
+        # path, which defeats byte-identical rebuilds in different checkouts.
+        # Relocations/ASLR remain enabled; this only fixes the preferred base.
+        command.insert(5, "-Wl,--image-base,0x180000000")
+    else:
+        command.insert(3, "-fPIC")
+    return command
 
 
 def _bundled_library() -> Path | None:
@@ -294,65 +434,67 @@ def _bundled_library() -> Path | None:
         with resources.as_file(candidate) as p:
             if p.is_file():
                 return p
-    except Exception:
-        pass
+    except (FileNotFoundError, OSError, TypeError, ValueError) as exc:
+        report_best_effort_failure(
+            log,
+            "bundled_native_cdc_lookup",
+            exc,
+            level=logging.DEBUG,
+        )
 
     return None
 
 
 def _find_c_compiler() -> str | None:
-    env = os.environ.get("CC")
-    candidates = []
-    if env:
-        candidates.append(env)
-    candidates.extend([
-        "gcc",
-        "clang",
-        "cl",
+    env_compiler = str(os.environ.get("CC") or "").strip()
+    if env_compiler:
+        try:
+            if Path(env_compiler).is_absolute():
+                return resolve_explicit_executable(env_compiler)
+            # A bare CC name is accepted only when it names an OS-owned tool;
+            # flags and relative paths are deliberately rejected.
+            return resolve_system_executable(env_compiler)
+        except (OSError, ValueError):
+            return None
+    for name in ("gcc", "clang", "cl"):
+        try:
+            return resolve_system_executable(name)
+        except (OSError, ValueError):
+            continue
+    for candidate in (
         r"C:\msys64\ucrt64\bin\gcc.exe",
         r"C:\msys64\mingw64\bin\gcc.exe",
-    ])
-    for c in candidates:
-        if "\\" in c or "/" in c:
-            if Path(c).is_file():
-                return c
-        elif shutil.which(c):
-            return c
+        r"C:\Program Files\LLVM\bin\clang.exe",
+    ):
+        try:
+            return resolve_explicit_executable(candidate)
+        except (OSError, ValueError):
+            continue
     return None
 
 
 def _compile(compiler: str, src: Path, lib: Path) -> None:
-    name = Path(compiler).name.lower()
-    env = dict(os.environ)
+    compiler = resolve_explicit_executable(compiler)
+    env = trusted_process_env()
     compiler_dir = str(Path(compiler).parent)
     if compiler_dir and compiler_dir != ".":
-        env["PATH"] = compiler_dir + os.pathsep + env.get("PATH", "")
-    if name == "cl.exe" or name == "cl":
-        cmd = [
-            compiler,
-            "/nologo",
-            "/O2",
-            "/LD",
-            str(src),
-            f"/Fe:{lib}",
-        ]
-    else:
-        cmd = [
-            compiler,
-            "-O3",
-            "-std=c99",
-            "-shared",
-            "-o",
-            str(lib),
-            str(src),
-        ]
-        if os.name != "nt":
-            cmd.insert(3, "-fPIC")
+        env["PATH"] = compiler_dir + os.pathsep + env["PATH"]
+    cmd = _compile_command(compiler, src, lib)
     # 2026-06-04: 30s was too tight for a cold CI runner (first gcc
     # invocation on a fresh image, no warm caches) and intermittently
     # timed out, hard-failing the whole installer build. 120s gives
     # the cold path room while still bounding a genuinely hung compile.
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
+        cwd=compiler_dir,
+        check=False,
+        creationflags=hidden_creationflags(),
+        shell=False,
+    )
     if proc.returncode != 0 or not lib.is_file():
         stderr = (proc.stderr or proc.stdout or "").strip()
         raise RuntimeError(f"native CDC compile failed: {stderr[:500]}")

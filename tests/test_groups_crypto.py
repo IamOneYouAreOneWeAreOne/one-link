@@ -24,7 +24,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from one_link.groups_crypto import (
     CHAIN_KEY_BYTES,
     MAX_MESSAGE_PLAINTEXT_BYTES,
-    PROTOCOL_VERSION,
     ReceivingChain,
     SenderChain,
     advance_chain_key,
@@ -295,12 +294,23 @@ def test_signature_catches_forgery_from_chain_holder():
     # Eve forges a message claiming to be Alice. She has
     # alice_chain.chain_key. She uses Eve's signing key to sign.
     wire, _ = encrypt_message(
-        plaintext=b"forged",
-        chain=alice_chain,
-        private_key=sk_eve,  # ← wrong signer
+        plaintext=b"forged", chain=alice_chain, private_key=sk_alice,
     )
+    # A malicious chain holder can replace the honest signature with one made
+    # by their own identity, but the receiver verifies against Alice's key.
+    wire["signature_b64"] = base64.urlsafe_b64encode(
+        sk_eve.sign(b"not Alice's transcript")
+    ).rstrip(b"=").decode("ascii")
     with pytest.raises(ValueError, match="signature"):
         decrypt_message(wire=wire, chain=receiver)
+
+
+def test_encrypt_rejects_mismatched_signing_identity_early():
+    sk_alice, pk_alice = _new_keypair()
+    sk_eve, _ = _new_keypair()
+    sender = _make_sender(sk_alice, pk_alice, _new_group_id())
+    with pytest.raises(ValueError, match="does not match"):
+        encrypt_message(plaintext=b"forged", chain=sender, private_key=sk_eve)
 
 
 def test_signature_tampering_rejects():
@@ -624,5 +634,130 @@ def test_three_recipients_all_decrypt_in_lockstep():
         pt3, rcv3 = decrypt_message(wire=wire, chain=rcv3)
         assert pt1 == pt2 == pt3 == f"#{i}".encode()
     # All three converged to the same chain state.
-    assert rcv1.chain_key == rcv2.chain_key == rcv3.chain_key
+    assert rcv1.chain_key == rcv2.chain_key == rcv3.chain_key  # gitleaks:allow - attribute
     assert rcv1.counter == rcv2.counter == rcv3.counter == 10
+
+
+# ─── hostile wire-boundary and lifetime bounds ─────────────────────
+
+@pytest.mark.parametrize(
+    "field",
+    ["group_id_b64", "sender_pubkey_b64", "nonce_salt_b64", "signature_b64"],
+)
+def test_decrypt_rejects_padded_base64_aliases(field: str):
+    sk, pk = _new_keypair()
+    sender = _make_sender(sk, pk, _new_group_id())
+    receiver = _make_receiver_for(sender)
+    wire, _ = encrypt_message(plaintext=b"x", chain=sender, private_key=sk)
+    wire[field] += "="
+    with pytest.raises(ValueError, match="canonical base64url|too large"):
+        decrypt_message(wire=wire, chain=receiver)
+
+
+def test_decrypt_rejects_unknown_and_missing_fields():
+    sk, pk = _new_keypair()
+    sender = _make_sender(sk, pk, _new_group_id())
+    receiver = _make_receiver_for(sender)
+    wire, _ = encrypt_message(plaintext=b"x", chain=sender, private_key=sk)
+    wire["future_confusion"] = "ignored-by-old-parser"
+    with pytest.raises(ValueError, match="unknown fields"):
+        decrypt_message(wire=wire, chain=receiver)
+    wire.pop("future_confusion")
+    wire.pop("nonce_salt_b64")
+    with pytest.raises(ValueError, match="missing fields"):
+        decrypt_message(wire=wire, chain=receiver)
+
+
+@pytest.mark.parametrize("field,bad", [("epoch", True), ("epoch", 0),
+                                         ("counter", -1), ("counter", 2**32)])
+def test_decrypt_rejects_non_u32_coordinates(field: str, bad):
+    sk, pk = _new_keypair()
+    sender = _make_sender(sk, pk, _new_group_id())
+    receiver = _make_receiver_for(sender)
+    wire, _ = encrypt_message(plaintext=b"x", chain=sender, private_key=sk)
+    wire[field] = bad
+    with pytest.raises(ValueError, match=field):
+        decrypt_message(wire=wire, chain=receiver)
+
+
+def test_decrypt_rejects_oversized_ciphertext_before_crypto():
+    from one_link import groups_crypto as gc
+    sk, pk = _new_keypair()
+    sender = _make_sender(sk, pk, _new_group_id())
+    receiver = _make_receiver_for(sender)
+    wire, _ = encrypt_message(plaintext=b"x", chain=sender, private_key=sk)
+    wire["ciphertext_b64"] = "A" * (
+        ((gc.MAX_MESSAGE_CIPHERTEXT_BYTES * 4 + 2) // 3) + 1
+    )
+    with pytest.raises(ValueError, match="too large"):
+        decrypt_message(wire=wire, chain=receiver)
+
+
+def test_replay_bookkeeping_is_lifetime_bounded():
+    from one_link.groups_crypto import MAX_SKIP_KEYS_GROUP
+    sk, pk = _new_keypair()
+    sender = _make_sender(sk, pk, _new_group_id())
+    receiver = _make_receiver_for(sender)
+    for _ in range(MAX_SKIP_KEYS_GROUP * 3):
+        wire, sender = encrypt_message(
+            plaintext=b"bounded", chain=sender, private_key=sk,
+        )
+        _, receiver = decrypt_message(wire=wire, chain=receiver)
+        assert len(receiver.seen_counters) <= MAX_SKIP_KEYS_GROUP
+
+
+def test_current_v3_authentication_failure_is_oracle_safe():
+    from one_link import groups_crypto as gc
+    sk, pk = _new_keypair()
+    sender = _make_sender(sk, pk, _new_group_id())
+    receiver = _make_receiver_for(sender)
+    wire, _ = encrypt_message(plaintext=b"secret", chain=sender, private_key=sk)
+    ciphertext = bytearray(gc._b64d(wire["ciphertext_b64"]))
+    ciphertext[-1] ^= 1
+    tampered = bytes(ciphertext)
+    wire["ciphertext_b64"] = gc._b64(tampered)
+    salt = gc._b64d(wire["nonce_salt_b64"])
+    sig_input = (
+        b"OL-GROUP-SIG-3"
+        + sender.group_id
+        + sender.sender_pubkey
+        + sender.epoch.to_bytes(4, "big")
+        + sender.counter.to_bytes(4, "big")
+        + salt
+        + tampered
+    )
+    wire["signature_b64"] = gc._b64(sk.sign(sig_input))
+    with pytest.raises(ValueError, match="^message authentication failed$"):
+        decrypt_message(wire=wire, chain=receiver)
+
+
+def test_v2_frame_remains_decryptable_during_rolling_upgrade():
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+    from one_link import groups_crypto as gc
+    sk, pk = _new_keypair()
+    sender = _make_sender(sk, pk, _new_group_id())
+    receiver = _make_receiver_for(sender)
+    salt = b"salt"
+    msg_key = derive_message_key(sender.chain_key)
+    nonce = gc._build_nonce_v2(sender.epoch, sender.counter, salt)
+    aad = gc._aad_v2(
+        sender.group_id, sender.sender_pubkey, sender.epoch, sender.counter, salt
+    )
+    ciphertext = ChaCha20Poly1305(msg_key).encrypt(nonce, b"v2 traveler", aad)
+    coordinates = sender.epoch.to_bytes(4, "big") + sender.counter.to_bytes(4, "big")
+    signature = sk.sign(
+        sender.group_id + sender.sender_pubkey + coordinates + salt + ciphertext
+    )
+    wire = {
+        "v": gc.SALTED_LEGACY_PROTOCOL_VERSION,
+        "group_id_b64": gc._b64(sender.group_id),
+        "sender_pubkey_b64": gc._b64(sender.sender_pubkey),
+        "epoch": sender.epoch,
+        "counter": sender.counter,
+        "nonce_salt_b64": gc._b64(salt),
+        "ciphertext_b64": gc._b64(ciphertext),
+        "signature_b64": gc._b64(signature),
+    }
+    plaintext, advanced = decrypt_message(wire=wire, chain=receiver)
+    assert plaintext == b"v2 traveler"
+    assert advanced.counter == 1

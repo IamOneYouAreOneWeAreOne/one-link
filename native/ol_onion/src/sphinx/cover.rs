@@ -1,17 +1,17 @@
 //! Row 6 — cover traffic primitive for Sphinx Coherence.
 //!
-//! Sphinx alone defeats SPATIAL correlation across relays (alpha
-//! blinding makes same-circuit packets pairwise indistinguishable
-//! at every hop). It does NOT defeat TEMPORAL correlation: a global
-//! passive adversary watching every relay's timeline can correlate
-//! "packet ingress at R1 at time T" with "packet egress from R2 at
-//! T+δ" for the same circuit.
+//! Sphinx alpha blinding changes the packet's visible group element at
+//! each hop. That narrow byte-level property does not defeat spatial
+//! or temporal correlation: a global passive adversary can still use
+//! sockets, topology, direction, timing, and packet volume to correlate
+//! ingress and egress across relays.
 //!
-//! Cover traffic closes this gap. Each daemon emits "cover" Sphinx
-//! packets at random intervals along random circuits. On the wire,
-//! cover packets are indistinguishable from real packets (same
-//! size, same encryption, same structure). An observer cannot tell
-//! which packets carry real user data and which are cover.
+//! This module supplies cover-packet and scheduling primitives. It does
+//! not close that correlation gap. Cover and equally sized real Sphinx
+//! packets share an encoded layout, and the encrypted sentinel is not
+//! directly visible to an on-path observer. Real traffic is not shaped
+//! here, however, and timing, destination, route, volume, and scheduler
+//! state can still distinguish traffic classes in a complete system.
 //!
 //! ## Design
 //!
@@ -19,15 +19,13 @@
 //!   for a "self-mesh" destination (the sender's own pubkey) or a
 //!   trusted-relay pool. The destination decrypts to discover the
 //!   payload is the cover sentinel + drops it.
-//! - **Poisson scheduler**: the daemon emits cover packets according
-//!   to a Poisson process with configurable rate λ. The
-//!   exponentially-distributed inter-arrival times make the cover
-//!   traffic indistinguishable from "burst-then-idle" patterns of
-//!   real traffic.
+//! - **Poisson scheduler**: yields exponentially distributed wait
+//!   samples for a configurable rate λ. This is a distributional
+//!   building block, not proof that its output matches real traffic.
 //! - **Cover sentinel**: a fixed magic prefix (8 bytes) in the
 //!   payload tells the destination "this is cover, discard." The
-//!   sentinel is encrypted inside the onion so observers can't
-//!   distinguish cover from real on the wire.
+//!   sentinel is encrypted inside the onion, so it is not a plaintext
+//!   discriminator on the packet path.
 //!
 //! ## What this layer is NOT
 //!
@@ -37,10 +35,11 @@
 //! - A scheduler that yields wait-times.
 //!
 //! It does NOT provide:
-//! - Active-inference cover (Tier 2 item 6) — adaptive rate that
-//!   maximizes observer entropy. That's a future polish.
+//! - A proved active-inference or observer-entropy defense.
 //! - Loop circuits + reply-block (SURB) integration — separate ship.
-//! - Daemon-level wiring (the actual "emit a packet now" call).
+//! - Deployment-wide real-traffic shaping, mixing/delay, or an anonymity
+//!   claim. Daemon wiring elsewhere does not add those properties by
+//!   merely calling this primitive.
 //!
 //! ## References
 //!
@@ -55,7 +54,7 @@
 //! use ol_onion::sphinx::cover::{CoverScheduler, RateEqualizer};
 //!
 //! // Aim for 5 packets/sec on the wire regardless of real traffic.
-//! let mut eq = RateEqualizer::new(5.0);
+//! let mut eq = RateEqualizer::new(5.0).unwrap();
 //! eq.observe_real_emission(1_000);
 //! eq.observe_real_emission(1_500);
 //! eq.observe_real_emission(2_000);
@@ -64,7 +63,7 @@
 //! assert!(cover_rate > 0.0 && cover_rate <= 5.0);
 //!
 //! // Schedule the next cover packet using an Exp(λ) sample.
-//! let mut sched = CoverScheduler::new(cover_rate.max(0.001), [0x42; 32]);
+//! let mut sched = CoverScheduler::new(cover_rate.max(0.001), [0x42; 32]).unwrap();
 //! let wait_ms = sched.next_wait_ms();
 //! assert!(wait_ms < 60_000, "wait sample bounded under normal rates");
 //! ```
@@ -72,6 +71,8 @@
 use blake3::Hasher;
 use curve25519_dalek::scalar::Scalar;
 use rand_core::{CryptoRng, RngCore};
+use std::time::Duration;
+
 use subtle::ConstantTimeEq;
 
 use crate::errors::{OnionError, OnionResult};
@@ -107,7 +108,7 @@ pub const COVER_PAYLOAD_MIN: usize = 64;
 
 /// Default Poisson rate λ for the cover-traffic scheduler, in
 /// packets per second. Higher = more cover, more bandwidth cost.
-/// Loopix paper suggests λ_loop ≈ 1 pkt/sec; daemon can tune up or
+/// Loopix paper suggests `λ_loop` ≈ 1 pkt/sec; daemon can tune up or
 /// down based on bandwidth budget.
 pub const COVER_DEFAULT_RATE_HZ: f64 = 1.0;
 
@@ -169,7 +170,7 @@ pub fn is_cover_payload_authenticated(shared_key: &[u8; 32], payload: &[u8]) -> 
     bool::from(expected.ct_eq(actual_tag))
 }
 
-/// Identify whether a delivered payload carries the COVER_SENTINEL
+/// Identify whether a delivered payload carries the `COVER_SENTINEL`
 /// prefix (FAST PATH; does NOT authenticate).
 ///
 /// **Pre-M4 callers using this for cover detection are insecure** —
@@ -208,7 +209,10 @@ pub fn is_cover_payload(payload: &[u8]) -> bool {
 /// constant-time-compares against the trailer. Only a packet from a
 /// sender who knows the destination's static pubkey (and chose this
 /// circuit) can produce a valid trailer — the MAC binds cover
-/// status to the circuit's secret session material.
+/// status to the circuit's shared material. This authenticates the
+/// cover marker against in-path bit flips; it does not authenticate a
+/// user identity, because a party that can construct a fresh circuit to
+/// the destination can derive its own circuit shared key.
 pub fn build_cover_packet<R: RngCore + CryptoRng>(
     sender_eph_sk: &Scalar,
     circuit: &[SphinxHop],
@@ -246,7 +250,7 @@ pub fn build_cover_packet<R: RngCore + CryptoRng>(
 /// ## Usage
 ///
 /// ```ignore
-/// let mut sched = CoverScheduler::new(rate_hz, seed);
+/// let mut sched = CoverScheduler::new(rate_hz, seed)?;
 /// loop {
 ///     let wait_ms = sched.next_wait_ms();
 ///     sleep(wait_ms);
@@ -262,21 +266,53 @@ pub struct CoverScheduler {
     seed: [u8; 32],
 }
 
+/// Minimum accepted cover rate. Slower schedules effectively disable
+/// cover traffic and can overflow practical timer horizons.
+pub const COVER_MIN_RATE_HZ: f64 = 0.000_001;
+/// Maximum accepted cover rate, bounding CPU/network amplification.
+pub const COVER_MAX_RATE_HZ: f64 = 1_000.0;
+/// Maximum EWMA half-life (one year).
+pub const RATE_EQ_MAX_HALF_LIFE_SEC: f64 = 31_536_000.0;
+
+fn validate_positive_rate(rate_hz: f64) -> OnionResult<()> {
+    if !rate_hz.is_finite() || !(COVER_MIN_RATE_HZ..=COVER_MAX_RATE_HZ).contains(&rate_hz) {
+        return Err(OnionError::InvalidParameter(
+            "rate must be finite and within the cover-rate safety envelope",
+        ));
+    }
+    Ok(())
+}
+
+/// Convert an integer to the nearest representable `f64` without an
+/// unchecked precision-losing cast. Splitting at the 32-bit boundary
+/// makes both component conversions exact before the final IEEE-754
+/// rounding step.
+fn u64_as_f64(value: u64) -> f64 {
+    let bytes = value.to_le_bytes();
+    let low = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let high = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    f64::from(high).mul_add(4_294_967_296.0, f64::from(low))
+}
+
 impl CoverScheduler {
     /// New scheduler with rate `rate_hz` (packets per second) seeded
     /// by `seed`. Different seeds give independent emission patterns.
-    pub fn new(rate_hz: f64, seed: [u8; 32]) -> Self {
-        assert!(rate_hz > 0.0, "rate must be positive");
-        Self {
+    pub fn new(rate_hz: f64, seed: [u8; 32]) -> OnionResult<Self> {
+        validate_positive_rate(rate_hz)?;
+        Ok(Self {
             rate_hz,
             counter: 0,
             seed,
-        }
+        })
     }
 
     /// Construct with the default rate ([`COVER_DEFAULT_RATE_HZ`]).
     pub fn with_default_rate(seed: [u8; 32]) -> Self {
-        Self::new(COVER_DEFAULT_RATE_HZ, seed)
+        Self {
+            rate_hz: COVER_DEFAULT_RATE_HZ,
+            counter: 0,
+            seed,
+        }
     }
 
     /// Sample the next inter-arrival time in milliseconds from the
@@ -298,14 +334,14 @@ impl CoverScheduler {
         ]);
         // Avoid raw == 0 to keep u > 0.
         let raw_nonzero = raw.max(1);
-        let u = (raw_nonzero as f64) / (u64::MAX as f64);
+        let u = u64_as_f64(raw_nonzero) / u64_as_f64(u64::MAX);
         // Exponential sample: -ln(u) / λ in seconds. u ∈ (0, 1] →
         // ln(u) ≤ 0 → wait_sec ≥ 0 by construction, so sign-loss
         // is impossible. Clamp to u64::MAX as defense-in-depth.
         let wait_sec = -(u.ln()) / self.rate_hz;
-        let wait_ms_f = (wait_sec * 1000.0).clamp(0.0, u64::MAX as f64);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let wait_ms = wait_ms_f as u64;
+        let wait_ms = Duration::try_from_secs_f64(wait_sec).map_or(u64::MAX, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        });
         self.counter = self.counter.wrapping_add(1);
         wait_ms
     }
@@ -319,36 +355,39 @@ impl CoverScheduler {
     /// throttle during low-bandwidth conditions). Future polish:
     /// Tier 2 active-inference will set this from observer-entropy
     /// minimization.
-    pub fn set_rate_hz(&mut self, rate_hz: f64) {
-        assert!(rate_hz > 0.0, "rate must be positive");
+    pub fn set_rate_hz(&mut self, rate_hz: f64) -> OnionResult<()> {
+        validate_positive_rate(rate_hz)?;
         self.rate_hz = rate_hz;
+        Ok(())
     }
 }
 
 /// Adaptive rate equalizer for cover traffic.
 ///
-/// Maintains a CONSTANT total emission rate (cover + real) regardless
-/// of the real-traffic load. When real traffic spikes, cover rate
-/// drops; when real traffic is idle, cover rate rises to fill the
-/// gap. An observer sees a uniform-rate output stream and cannot
-/// infer "is there real traffic now?" from packet timing alone.
+/// Estimates a cover rate intended to fill the difference between a
+/// target rate and an EWMA of observed real emissions. When real traffic
+/// spikes, the estimate drops; when traffic becomes idle, it rises.
+/// This estimator neither emits packets nor makes the combined process
+/// constant-rate: EWMA lag, scheduling jitter, bursts above the target,
+/// loss, route choice, and callers' emission behavior remain observable.
 ///
 /// ## How it differs from plain Poisson cover
 ///
-/// - Plain Poisson: cover at fixed λ. Total observed rate = real_rate + λ.
-///   An observer can subtract λ to estimate real_rate.
-/// - Equalized: cover_rate = max(0, target_total - real_rate). Total
-///   observed rate = target_total constant. Observer sees no signal.
+/// - Plain Poisson: cover at fixed λ. Total observed rate = `real_rate` + λ.
+///   An observer can subtract λ to estimate `real_rate`.
+/// - Equalized estimate: `cover_rate = max(0, target_total - real_rate)`.
+///   A caller can use that estimate as one input to a scheduler; no
+///   observer-indistinguishability property follows from the arithmetic.
 ///
 /// ## Usage
 ///
 /// ```ignore
-/// let mut eq = RateEqualizer::new(target_total_hz=5.0);
+/// let mut eq = RateEqualizer::new(5.0)?;
 /// // Daemon updates observed real rate every time it emits a real packet.
 /// eq.observe_real_emission(now_ms);
 /// // Daemon queries current cover rate when scheduling next cover packet.
 /// let cover_rate = eq.current_cover_rate();
-/// scheduler.set_rate_hz(cover_rate.max(0.001)); // floor to avoid stall
+/// scheduler.set_rate_hz(cover_rate.max(0.001))?; // floor to avoid stall
 /// ```
 #[derive(Debug, Clone)]
 pub struct RateEqualizer {
@@ -369,21 +408,28 @@ pub const RATE_EQ_DEFAULT_HALF_LIFE_SEC: f64 = 30.0;
 impl RateEqualizer {
     /// Construct an equalizer targeting `target_total_hz` packets per
     /// second on the wire. Cover fills whatever real doesn't supply.
-    pub fn new(target_total_hz: f64) -> Self {
-        assert!(target_total_hz > 0.0, "target rate must be positive");
-        Self {
+    pub fn new(target_total_hz: f64) -> OnionResult<Self> {
+        validate_positive_rate(target_total_hz)?;
+        Ok(Self {
             target_total_hz,
             observed_real_rate: 0.0,
             half_life_sec: RATE_EQ_DEFAULT_HALF_LIFE_SEC,
             last_emit_ms: 0,
-        }
+        })
     }
 
     /// Set the EWMA half-life. Smaller = react faster to bursts;
     /// larger = smoother but slower to adapt.
-    pub fn set_half_life_sec(&mut self, half_life_sec: f64) {
-        assert!(half_life_sec > 0.0, "half_life must be positive");
+    pub fn set_half_life_sec(&mut self, half_life_sec: f64) -> OnionResult<()> {
+        if !half_life_sec.is_finite()
+            || !(f64::EPSILON..=RATE_EQ_MAX_HALF_LIFE_SEC).contains(&half_life_sec)
+        {
+            return Err(OnionError::InvalidParameter(
+                "half_life must be finite, positive, and at most one year",
+            ));
+        }
         self.half_life_sec = half_life_sec;
+        Ok(())
     }
 
     /// Notify the equalizer that a real packet was emitted at
@@ -395,7 +441,7 @@ impl RateEqualizer {
             self.last_emit_ms = now_ms;
             return;
         }
-        let dt_sec = (now_ms.saturating_sub(self.last_emit_ms)) as f64 / 1000.0;
+        let dt_sec = u64_as_f64(now_ms.saturating_sub(self.last_emit_ms)) / 1000.0;
         if dt_sec <= 0.0 {
             return;
         }
@@ -409,14 +455,14 @@ impl RateEqualizer {
     }
 
     /// Notify that wall-clock time has advanced even without real
-    /// emissions. Used to DECAY the observed_real_rate toward zero
+    /// emissions. Used to DECAY the `observed_real_rate` toward zero
     /// during idle periods so cover rate rises to fill the gap.
     pub fn observe_idle_tick(&mut self, now_ms: u64) {
         if self.last_emit_ms == 0 {
             self.last_emit_ms = now_ms;
             return;
         }
-        let dt_sec = (now_ms.saturating_sub(self.last_emit_ms)) as f64 / 1000.0;
+        let dt_sec = u64_as_f64(now_ms.saturating_sub(self.last_emit_ms)) / 1000.0;
         if dt_sec <= 0.0 {
             return;
         }
@@ -525,9 +571,10 @@ mod tests {
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
         let mut packet = build_cover_packet(&eph_sk, &[r1, r2, dest], 256, &mut OsRng).unwrap();
 
-        // Cover packets are indistinguishable from real packets at
-        // every relay (same size, same blinding, Forward at intermediates).
-        // The destination's peel returns Cover (audit M4).
+        // Intermediate hops produce the normal Forward outcome for this
+        // cover packet. This test does not compare traffic distributions
+        // or establish observer indistinguishability. The destination's
+        // peel returns Cover (audit M4).
         for sk in [&r1_sk, &r2_sk, &dest_sk] {
             match peel_sphinx_layer(sk, &packet).unwrap() {
                 SphinxPeelOutcome::Forward { next_packet, .. } => packet = next_packet,
@@ -576,8 +623,8 @@ mod tests {
 
     #[test]
     fn scheduler_deterministic_per_seed() {
-        let mut s1 = CoverScheduler::new(1.0, [0x42; 32]);
-        let mut s2 = CoverScheduler::new(1.0, [0x42; 32]);
+        let mut s1 = CoverScheduler::new(1.0, [0x42; 32]).unwrap();
+        let mut s2 = CoverScheduler::new(1.0, [0x42; 32]).unwrap();
         for _ in 0..100 {
             assert_eq!(s1.next_wait_ms(), s2.next_wait_ms());
         }
@@ -585,8 +632,8 @@ mod tests {
 
     #[test]
     fn scheduler_different_seeds_yield_different_sequences() {
-        let mut s1 = CoverScheduler::new(1.0, [0x42; 32]);
-        let mut s2 = CoverScheduler::new(1.0, [0x43; 32]);
+        let mut s1 = CoverScheduler::new(1.0, [0x42; 32]).unwrap();
+        let mut s2 = CoverScheduler::new(1.0, [0x43; 32]).unwrap();
         let mut any_diff = false;
         for _ in 0..50 {
             if s1.next_wait_ms() != s2.next_wait_ms() {
@@ -602,13 +649,13 @@ mod tests {
     /// expected mean is 1000 ms ± a few %.
     #[test]
     fn scheduler_mean_matches_poisson_rate() {
-        let mut sched = CoverScheduler::new(1.0, [0xAB; 32]);
-        let n = 10_000;
+        let mut sched = CoverScheduler::new(1.0, [0xAB; 32]).unwrap();
+        let n: u32 = 10_000;
         let mut sum_ms = 0u64;
         for _ in 0..n {
             sum_ms += sched.next_wait_ms();
         }
-        let mean_ms = sum_ms as f64 / n as f64;
+        let mean_ms = u64_as_f64(sum_ms) / f64::from(n);
         let expected_ms = 1000.0;
         let pct_err = (mean_ms - expected_ms).abs() / expected_ms;
         eprintln!("scheduler mean inter-arrival = {mean_ms:.1} ms (expected {expected_ms:.0} ms), err = {:.2}%", pct_err * 100.0);
@@ -620,20 +667,21 @@ mod tests {
     #[test]
     fn scheduler_rate_scaling() {
         // At rate 10 Hz, mean inter-arrival should be ~100 ms.
-        let mut sched = CoverScheduler::new(10.0, [0xCD; 32]);
-        let n = 5_000;
+        let mut sched = CoverScheduler::new(10.0, [0xCD; 32]).unwrap();
+        let n: u32 = 5_000;
         let mut sum_ms = 0u64;
         for _ in 0..n {
             sum_ms += sched.next_wait_ms();
         }
-        let mean_ms = sum_ms as f64 / n as f64;
+        let mean_ms = u64_as_f64(sum_ms) / f64::from(n);
         let pct_err = (mean_ms - 100.0).abs() / 100.0;
         assert!(pct_err < 0.15, "10 Hz mean = {mean_ms}, expected ~100");
     }
 
     #[test]
-    fn cover_packet_indistinguishable_size_from_real() {
-        // Cover packets are SPHINX_PACKET_LEN bytes — same as real.
+    fn cover_packet_has_same_encoded_size_as_real() {
+        // This proves encoded-length equality only, not wire-traffic
+        // indistinguishability under timing, volume, or route observation.
         use crate::sphinx::core::{build_sphinx_onion, SPHINX_PACKET_LEN};
         let (_, dest) = make_relay();
         let (eph_sk, _) = generate_static_keypair(&mut OsRng);
@@ -648,16 +696,16 @@ mod tests {
 
     #[test]
     fn rate_equalizer_fresh_starts_with_full_cover_rate() {
-        let eq = RateEqualizer::new(5.0);
+        let eq = RateEqualizer::new(5.0).unwrap();
         // No observations → observed real rate is 0 → cover fills all.
-        assert_eq!(eq.target_total_hz(), 5.0);
-        assert_eq!(eq.current_cover_rate(), 5.0);
-        assert_eq!(eq.observed_real_rate(), 0.0);
+        assert!((eq.target_total_hz() - 5.0).abs() < f64::EPSILON);
+        assert!((eq.current_cover_rate() - 5.0).abs() < f64::EPSILON);
+        assert!(eq.observed_real_rate().abs() < f64::EPSILON);
     }
 
     #[test]
     fn rate_equalizer_real_emissions_reduce_cover_rate() {
-        let mut eq = RateEqualizer::new(5.0);
+        let mut eq = RateEqualizer::new(5.0).unwrap();
         // First emission seeds at 1.0.
         eq.observe_real_emission(1_000);
         assert!(eq.observed_real_rate() > 0.0);
@@ -677,21 +725,21 @@ mod tests {
 
     #[test]
     fn rate_equalizer_burst_doesnt_send_cover_negative() {
-        let mut eq = RateEqualizer::new(1.0);
-        eq.set_half_life_sec(5.0);
+        let mut eq = RateEqualizer::new(1.0).unwrap();
+        eq.set_half_life_sec(5.0).unwrap();
         // Burst of real emissions at 10 Hz (100 ms gaps), far exceeding target.
         for i in 0..20 {
             eq.observe_real_emission(100 + i * 100);
         }
         // Observed real should be near 10 Hz; cover should floor at 0.
         assert!(eq.observed_real_rate() > 1.0);
-        assert_eq!(eq.current_cover_rate(), 0.0);
+        assert!(eq.current_cover_rate().abs() < f64::EPSILON);
     }
 
     #[test]
     fn rate_equalizer_idle_decays_observed_to_zero() {
-        let mut eq = RateEqualizer::new(5.0);
-        eq.set_half_life_sec(1.0);
+        let mut eq = RateEqualizer::new(5.0).unwrap();
+        eq.set_half_life_sec(1.0).unwrap();
         // Push some real emissions.
         for i in 0..10 {
             eq.observe_real_emission(i * 500); // 2 Hz
@@ -708,5 +756,46 @@ mod tests {
         );
         // Cover fills back to full target.
         assert!((eq.current_cover_rate() - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn scheduler_rejects_non_finite_and_out_of_envelope_rates_without_mutating() {
+        for invalid in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            -1.0,
+            COVER_MIN_RATE_HZ / 2.0,
+            COVER_MAX_RATE_HZ + 1.0,
+        ] {
+            assert!(CoverScheduler::new(invalid, [0u8; 32]).is_err());
+        }
+
+        let mut scheduler = CoverScheduler::new(2.0, [0u8; 32]).unwrap();
+        for invalid in [f64::NAN, f64::INFINITY, 0.0, COVER_MAX_RATE_HZ + 1.0] {
+            assert!(scheduler.set_rate_hz(invalid).is_err());
+            assert!((scheduler.rate_hz() - 2.0).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn rate_equalizer_rejects_invalid_target_and_half_life_without_mutating() {
+        for invalid in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
+            assert!(RateEqualizer::new(invalid).is_err());
+        }
+
+        let mut equalizer = RateEqualizer::new(5.0).unwrap();
+        for invalid in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            -1.0,
+            RATE_EQ_MAX_HALF_LIFE_SEC + 1.0,
+        ] {
+            assert!(equalizer.set_half_life_sec(invalid).is_err());
+        }
+        assert!((equalizer.half_life_sec - RATE_EQ_DEFAULT_HALF_LIFE_SEC).abs() < f64::EPSILON);
     }
 }

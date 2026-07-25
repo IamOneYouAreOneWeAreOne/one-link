@@ -16,8 +16,8 @@ Covers:
 from __future__ import annotations
 
 import threading
-import time
 
+import blake3
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -34,6 +34,7 @@ from one_link.provenance_wiring import (
     FRAME_PROVENANCE_CAP,
     PROVENANCE_MSG_TYPE,
     ProvenanceStore,
+    build_provenance_for_hash,
     build_provenance_for_file,
     handle_inbound_provenance,
     make_send_provenance_msg,
@@ -94,9 +95,8 @@ def voice_blob() -> bytes:
 
 @pytest.fixture
 def voice_blob_hex(voice_blob: bytes) -> str:
-    """The SHA256 hex the daemon uses for content addressing."""
-    import hashlib
-    return hashlib.sha256(voice_blob).hexdigest()
+    """The canonical BLAKE3-256 used by ``FILE_OFFER.blob``."""
+    return blake3.blake3(voice_blob).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +119,30 @@ def test_build_provenance_for_file_signs_with_identity_key(
     assert len(p.signature) == 64
 
 
+def test_build_provenance_for_hash_reuses_canonical_content_digest(
+    sender_identity: Identity, voice_blob: bytes
+) -> None:
+    digest = blake3.blake3(voice_blob).digest()
+    provenance = build_provenance_for_hash(
+        identity=sender_identity,
+        segment_hash=digest,
+        path_class=PathClass.RELAY,
+    )
+    assert provenance.segment_hash == digest
+    assert provenance.path_class == PathClass.RELAY
+
+
+@pytest.mark.parametrize("digest", [b"", b"x" * 31, b"x" * 33])
+def test_build_provenance_for_hash_rejects_non_blake3_lengths(
+    sender_identity: Identity, digest: bytes
+) -> None:
+    with pytest.raises(ValueError, match="32-byte BLAKE3"):
+        build_provenance_for_hash(
+            identity=sender_identity,
+            segment_hash=digest,
+        )
+
+
 def test_make_send_provenance_msg_envelope(
     sender_identity: Identity, voice_blob: bytes, voice_blob_hex: str
 ) -> None:
@@ -134,6 +158,21 @@ def test_make_send_provenance_msg_envelope(
     assert "ts" in msg
     assert "id" in msg
     assert msg["prov"] == to_wire_dict(p)
+
+
+def test_make_send_provenance_msg_rejects_cross_blob_association(
+    sender_identity: Identity, voice_blob: bytes
+) -> None:
+    provenance = build_provenance_for_file(
+        identity=sender_identity,
+        file_bytes=voice_blob,
+    )
+    with pytest.raises(ValueError, match="must match FILE_OFFER blob"):
+        make_send_provenance_msg(
+            sender_short_id=sender_identity.short_id,
+            blob_hex=blake3.blake3(b"different file").hexdigest(),
+            provenance=provenance,
+        )
 
 
 def test_send_provenance_msg_round_trips_through_wire_encoder(
@@ -171,6 +210,28 @@ def test_parse_inbound_provenance_msg_round_trip(
     parsed = parse_inbound_provenance_msg(msg)
     assert parsed.blob_hex == voice_blob_hex
     assert parsed.provenance == p
+
+
+def test_parse_rejects_signed_provenance_replayed_for_another_blob(
+    sender_identity: Identity, voice_blob: bytes, voice_blob_hex: str
+) -> None:
+    provenance = build_provenance_for_file(
+        identity=sender_identity,
+        file_bytes=voice_blob,
+    )
+    # Construct the outer envelope manually: the normal send helper refuses
+    # this association before it can reach the wire.
+    msg = {
+        "t": PROVENANCE_MSG_TYPE,
+        "id": "replay123",
+        "ts": 1,
+        "from": sender_identity.short_id,
+        "blob": blake3.blake3(b"different file").hexdigest(),
+        "prov": to_wire_dict(provenance),
+    }
+    assert msg["blob"] != voice_blob_hex
+    with pytest.raises(ValueError, match="does not match offered blob"):
+        parse_inbound_provenance_msg(msg)
 
 
 def test_parse_rejects_wrong_message_type() -> None:

@@ -27,7 +27,7 @@ def test_concurrent_pin_peer_idempotent() -> None:
     """Two simultaneous pin_peer requests for the same peer must
     both succeed AND end with the peer trusted exactly once. No
     double-broadcast amplification, no inconsistent state."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         results: list[dict] = []
         errors: list[BaseException] = []
 
@@ -68,7 +68,7 @@ def test_concurrent_send_file_and_chat() -> None:
     holds the per-peer session lock for the duration of the
     transfer; chat sends should queue behind it cleanly."""
     payload = b"concurrent-payload" * 1024  # ~18 KiB
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         import tempfile
         with tempfile.TemporaryDirectory() as td:
             src = Path(td) / "concurrent.bin"
@@ -126,7 +126,7 @@ def test_concurrent_quic_ping_under_load() -> None:
     peer must all succeed without deadlocking on the per-peer
     dial lock. The lock prevents duplicate dials but should
     allow concurrent USAGE of the cached connection."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         # Set up pinning so QUIC fires.
         a_pin = request(p.a.control_port, cmd="pin_peer",
                         peer=p.b.short_id)

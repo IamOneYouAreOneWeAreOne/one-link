@@ -50,6 +50,9 @@ from __future__ import annotations
 from . import ratchet_native
 
 
+MAX_SKIP_KEYS = 1024
+
+
 class ChunkRatchet:
     """Per-chunk forward-secret key source backed by ``ol_ratchet``.
 
@@ -113,6 +116,13 @@ class ChunkRatchet:
         # ES-18: explicit raise, not assert (python -O strips asserts).
         if self._chain is None:
             raise RuntimeError("ChunkRatchet not initialized")
+        if target_idx < 0:
+            raise ValueError("target_idx must be non-negative")
+        if target_idx > self._next_idx + MAX_SKIP_KEYS:
+            raise ValueError(
+                f"target_idx {target_idx} exceeds MAX_SKIP_KEYS "
+                f"window from {self._next_idx}"
+            )
         if target_idx == self._next_idx:
             key, _ = self.next_key()
             return key

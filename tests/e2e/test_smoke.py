@@ -4,7 +4,6 @@ If THIS test fails, every other E2E test will fail too. Run first
 when debugging the harness."""
 from __future__ import annotations
 
-import pytest
 
 
 def test_live_daemon_boots_and_serves_index(live_daemon):

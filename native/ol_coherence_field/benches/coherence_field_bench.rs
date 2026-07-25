@@ -16,9 +16,7 @@
 //!
 //! Run: `cargo bench -p ol_coherence_field`
 
-#![allow(missing_docs)] // criterion_group! emits a fn that we can't doc
-
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{black_box, criterion_main, BenchmarkId, Criterion, Throughput};
 use ol_coherence_field::{
     anchor::ApparentHorizonInputs,
     apparent_horizon_anchor, be_rar,
@@ -28,6 +26,10 @@ use ol_coherence_field::{
     prefetch_priorities, rotation_cadence_multiplier, screening_length, solve_helmholtz,
     FragilityEvent, GraphLaplacian, HelmholtzSolver, HelmholtzSolverF32,
 };
+
+fn bench_index_as_f64(index: usize) -> f64 {
+    f64::from(u32::try_from(index).expect("benchmark dimensions fit u32"))
+}
 
 // ── Scalar / per-tick microbenches ──────────────────────────────────
 
@@ -100,7 +102,7 @@ fn bench_matvec(c: &mut Criterion) {
     for &n in &[1_000usize, 10_000, 50_000] {
         let g = build_ring_chord(n);
         g.freeze(); // amortise CSR build out of the timed loop
-        let x: Vec<f64> = (0..n).map(|i| (i as f64) * 1e-3).collect();
+        let x: Vec<f64> = (0..n).map(|i| bench_index_as_f64(i) * 1e-3).collect();
         let mut y = vec![0.0_f64; n];
         group.throughput(Throughput::Elements(n as u64));
         group.bench_function(BenchmarkId::new("L*x", n), |b| {
@@ -152,8 +154,8 @@ fn bench_helmholtz_solve(c: &mut Criterion) {
 fn bench_sources(c: &mut Criterion) {
     let mut group = c.benchmark_group("source_functionals");
     for &n in &[1_000usize, 10_000] {
-        let density: Vec<f64> = (0..n).map(|i| (i as f64).sin().abs()).collect();
-        let flux: Vec<f64> = (0..n).map(|i| (i as f64).cos().abs()).collect();
+        let density: Vec<f64> = (0..n).map(|i| bench_index_as_f64(i).sin().abs()).collect();
+        let flux: Vec<f64> = (0..n).map(|i| bench_index_as_f64(i).cos().abs()).collect();
         group.throughput(Throughput::Elements(n as u64));
         group.bench_function(BenchmarkId::new("linear_source", n), |b| {
             b.iter(|| {
@@ -183,7 +185,10 @@ fn bench_couplings(c: &mut Criterion) {
     let mut group = c.benchmark_group("couplings");
     for &n in &[100usize, 1_000, 10_000] {
         // Field array.
-        let field: Vec<f64> = (0..n).map(|i| 0.1 + (i as f64) / (n as f64)).collect();
+        let node_count = bench_index_as_f64(n);
+        let field: Vec<f64> = (0..n)
+            .map(|i| 0.1 + bench_index_as_f64(i) / node_count)
+            .collect();
         // Fragility events: 5% of nodes flagged in a single cycle.
         let events: Vec<FragilityEvent> = (0..n / 20)
             .map(|k| FragilityEvent {
@@ -378,15 +383,17 @@ fn bench_helmholtz_f32_vs_f64(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_scalar_ops,
-    bench_matvec,
-    bench_helmholtz_solve,
-    bench_sources,
-    bench_couplings,
-    bench_end_to_end_topology_change,
-    bench_solver_warm_start,
-    bench_helmholtz_f32_vs_f64,
-);
+/// Run the complete Criterion benchmark group for the coherence-field package.
+pub fn benches() {
+    let mut criterion = Criterion::default().configure_from_args();
+    bench_scalar_ops(&mut criterion);
+    bench_matvec(&mut criterion);
+    bench_helmholtz_solve(&mut criterion);
+    bench_sources(&mut criterion);
+    bench_couplings(&mut criterion);
+    bench_end_to_end_topology_change(&mut criterion);
+    bench_solver_warm_start(&mut criterion);
+    bench_helmholtz_f32_vs_f64(&mut criterion);
+}
+
 criterion_main!(benches);

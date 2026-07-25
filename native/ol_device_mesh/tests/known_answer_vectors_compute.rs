@@ -7,6 +7,7 @@ use ol_device_mesh::compute::{
 };
 use ol_device_mesh::distributed_fs::FILE_ID_LEN;
 use ol_device_mesh::DEVICE_ID_LEN;
+use std::fmt::Write as _;
 
 fn check_regen<F: FnOnce()>(label: &str, dump: F) {
     if std::env::var("OL_COMPUTE_KAT_REGEN").as_deref() == Ok("1") {
@@ -16,7 +17,11 @@ fn check_regen<F: FnOnce()>(label: &str, dump: F) {
 }
 
 fn to_hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    let mut hex = String::with_capacity(b.len() * 2);
+    for byte in b {
+        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
 }
 
 #[test]
@@ -52,6 +57,15 @@ fn kat_capability_tags_pinned() {
 
 #[test]
 fn kat_capability_attestation_canonical_transcript_pinned() {
+    const EXPECTED_HEX: &str = concat!(
+        "4f4c2d6d6573682d6361706162696c6974792d6174746573746174696f6e2d7631", // domain
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",                                   // device_id
+        "0002",                                                               // count = 2
+        "4f4c2d43502d4750",                                                   // OL-CP-GP
+        "4f4c2d43502d4348",                                                   // OL-CP-CH
+        "0000000000000007",                                                   // mint_day = 7
+        "000000000000016d",                                                   // expiry_day = 365
+    );
     let bytes = CapabilityAttestation::canonical_transcript(
         &[0xAA; DEVICE_ID_LEN],
         &[DeviceCapability::Gpu, DeviceCapability::CpuHeavy],
@@ -64,20 +78,20 @@ fn kat_capability_attestation_canonical_transcript_pinned() {
     check_regen("capability-attestation canonical_transcript", || {
         eprintln!("    EXPECTED_HEX = \"{hex}\"");
     });
-    const EXPECTED_HEX: &str = concat!(
-        "4f4c2d6d6573682d6361706162696c6974792d6174746573746174696f6e2d7631", // domain
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",                                   // device_id
-        "0002",                                                               // count = 2
-        "4f4c2d43502d4750",                                                   // OL-CP-GP
-        "4f4c2d43502d4348",                                                   // OL-CP-CH
-        "0000000000000007",                                                   // mint_day = 7
-        "000000000000016d",                                                   // expiry_day = 365
-    );
     assert_eq!(hex, EXPECTED_HEX, "capability-attestation transcript drift");
 }
 
 #[test]
 fn kat_task_result_canonical_transcript_pinned() {
+    const EXPECTED_HEX: &str = concat!(
+        "4f4c2d6d6573682d7461736b2d726573756c742d7631", // domain
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", // task_request_id
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",             // executor
+        "0000000000000003",                             // day = 3
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // output_file_id
+        "0000000000002000",                             // output_byte_size = 8192
+        "000000006553f100",                             // completed_unix = 1_700_000_000
+    );
     let bytes = TaskResult::canonical_transcript(
         &[0xEE; 32],
         &[0xAA; DEVICE_ID_LEN],
@@ -92,15 +106,6 @@ fn kat_task_result_canonical_transcript_pinned() {
     check_regen("task-result canonical_transcript", || {
         eprintln!("    EXPECTED_HEX = \"{hex}\"");
     });
-    const EXPECTED_HEX: &str = concat!(
-        "4f4c2d6d6573682d7461736b2d726573756c742d7631", // domain
-        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", // task_request_id
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",             // executor
-        "0000000000000003",                             // day = 3
-        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // output_file_id
-        "0000000000002000",                             // output_byte_size = 8192
-        "000000006553f100",                             // completed_unix = 1_700_000_000
-    );
     assert_eq!(hex, EXPECTED_HEX, "task-result transcript drift");
 }
 

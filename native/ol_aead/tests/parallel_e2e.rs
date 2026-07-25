@@ -15,7 +15,7 @@ fn round_trip_64_chunks_parallel() {
         // 64 KiB chunk
         plaintexts.push(
             (0..(64 * 1024u32))
-                .map(|j| (j.wrapping_mul(i.wrapping_add(1))) as u8)
+                .map(|j| j.wrapping_mul(i.wrapping_add(1)).to_le_bytes()[0])
                 .collect(),
         );
     }

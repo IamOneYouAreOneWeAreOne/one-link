@@ -1,4 +1,4 @@
-//! Stage 3: information reconciliation via syndrome.
+//! Stage 3 research parity alignment.
 //!
 //! Both sides ran `quantize_observations` and got nearly-identical
 //! bit strings. To reconcile the differences without revealing the
@@ -10,17 +10,17 @@
 //!
 //! 2. The other side (Bob) computes its own syndrome on the same
 //!    block structure. Where Alice's and Bob's syndrome bits differ,
-//!    Bob's block contains an odd number of bit-errors. Bob can
-//!    locate + flip the differing bit via binary search within the
-//!    block (CASCADE protocol — port simplified).
+//!    Bob's block contains an odd number of bit-errors. This implementation
+//!    cannot locate the error: it flips the first position in the block.
 //!
-//! 3. The reconciled output is Bob's now-aligned bit string.
+//! 3. The output has matching block parity but is not necessarily Bob's bit
+//!    string. Treat it only as an experimental intermediate.
 //!
 //! Each syndrome bit leaks 1 bit of secret to an eavesdropper, so
 //! we want as few blocks as possible — but smaller blocks reconcile
-//! faster. OneField uses block size 8, which leaks 1/8 of the input.
+//! faster. `OneField` uses block size 8, which leaks 1/8 of the input.
 
-/// Default block size in bits. OneField uses 8.
+/// Default block size in bits. `OneField` uses 8.
 pub const SYNDROME_BLOCK_BITS_DEFAULT: usize = 8;
 
 /// Compute the syndrome of `bits` with the given block size.
@@ -53,11 +53,12 @@ pub fn block_syndrome(bits: &[u8], block_bits: usize) -> Vec<u8> {
 /// For each block where my parity differs from the peer's, flip the
 /// FIRST bit of the block. This is a simplified one-pass CASCADE:
 /// it doesn't bisect to find the precise error position, just flips
-/// representatively. With small (~8-bit) blocks and a low error rate,
-/// this converges to the peer's bit string with high probability.
+/// representatively. Matching parity does not imply matching bits, and this
+/// helper does not implement CASCADE bisection.
 ///
 /// Bits leaked to an eavesdropper: `peer_syndrome.len()` bits (one
-/// per syndrome byte). Privacy amplification removes these.
+/// per syndrome byte). Hashing the result does not by itself prove that all
+/// leakage was removed.
 #[must_use]
 pub fn reconcile_with_syndrome(my_bits: &[u8], peer_syndrome: &[u8], block_bits: usize) -> Vec<u8> {
     if block_bits == 0 || my_bits.is_empty() {

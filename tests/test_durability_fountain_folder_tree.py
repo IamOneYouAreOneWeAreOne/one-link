@@ -10,7 +10,6 @@ May 15 2026:
 """
 from __future__ import annotations
 
-import pathlib
 import tempfile
 from pathlib import Path
 
@@ -300,7 +299,6 @@ async def test_folder_tree_endpoint_basic(tmp_path, daemon_with_seed):
             vclock={"local": 1},
         )
         # Call the server method directly.
-        from aiohttp import web
         req = _mock_request(daemon, name="test_folder")
         resp = await daemon.ui_server.api_folder_tree(req)
         assert resp.status == 200

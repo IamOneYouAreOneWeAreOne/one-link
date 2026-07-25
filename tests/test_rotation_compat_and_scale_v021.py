@@ -20,7 +20,6 @@ import statistics
 import time
 from pathlib import Path
 
-import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
@@ -40,7 +39,6 @@ def test_rotation_cert_dispatch_uses_silent_fallthrough_pattern():
     would break interop with every peer running an older OR newer
     protocol version.
     """
-    from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "daemon.py").read_text(encoding="utf-8")
     # Locate the dispatcher branch immediately after _TRUST_SYNC_WIRE_TYPE.
     idx = src.find("elif t == _TRUST_SYNC_WIRE_TYPE:")
@@ -73,7 +71,6 @@ def test_v0_20_peer_payload_shape_does_not_collide_with_rotation_cert():
     ('ROTATION_CERT', 'ROTATION_CERT_ACK') by coincidence - we
     chose names that no prior version emitted. Pin this by
     grepping the prior message-type names to confirm no overlap."""
-    from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "daemon.py").read_text(encoding="utf-8")
     # If "ROTATION_CERT" appears in any string literal that is NOT
     # part of our v0.21.x rotation handling, that is a collision.

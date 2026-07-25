@@ -1,8 +1,8 @@
-//! THE alien-tech byte-identical acceptance gate.
+//! Restricted Hamming(127,120) SEC correctness fixture.
 //!
-//! With real Hamming(127,120) SEC reconciliation, two co-located
-//! devices derive BYTE-IDENTICAL Factor-2 secrets — usable as
-//! Double Ratchet seed. This is the property F1.4-polish unlocks.
+//! Two synthetic inputs derive byte-identical candidates only under the
+//! one-error-per-block model. This does not establish real-world agreement,
+//! entropy, proximity, or suitability as a Double Ratchet seed.
 
 use ol_proximity_pair::{
     hamming_reconcile, parity_bits_for_string, privacy_amplify, quantize_observations,
@@ -10,14 +10,18 @@ use ol_proximity_pair::{
 };
 
 fn co_located_observations(seed: u64) -> (Vec<u8>, Vec<u8>) {
+    let seed32 = u32::try_from(seed).expect("test seed fits in u32");
     let base: Vec<u8> = (0..1024u32)
-        .map(|i| ((i.wrapping_mul(seed as u32 + 7919)) % 256) as u8)
+        .map(|i| {
+            u8::try_from((i.wrapping_mul(seed32.wrapping_add(7_919))) % 256)
+                .expect("value is reduced modulo 256")
+        })
         .collect();
     let mut rng_a = seed.wrapping_mul(31);
     let mut rng_b = seed.wrapping_mul(37);
     let perturb = |v: u8, rng: u64| -> u8 {
         let r = (rng >> 32) & 0xFF;
-        let s = v as i16;
+        let s = i16::from(v);
         let n = if r < 6 {
             s - 1
         } else if r > 250 {
@@ -25,19 +29,23 @@ fn co_located_observations(seed: u64) -> (Vec<u8>, Vec<u8>) {
         } else {
             s
         };
-        n.clamp(0, 255) as u8
+        u8::try_from(n.clamp(0, 255)).expect("clamped sample fits in u8")
     };
     let alice: Vec<u8> = base
         .iter()
         .map(|&v| {
-            rng_a = rng_a.wrapping_mul(6364136223846793005).wrapping_add(1);
+            rng_a = rng_a
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             perturb(v, rng_a)
         })
         .collect();
     let bob: Vec<u8> = base
         .iter()
         .map(|&v| {
-            rng_b = rng_b.wrapping_mul(6364136223846793005).wrapping_add(1);
+            rng_b = rng_b
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             perturb(v, rng_b)
         })
         .collect();
@@ -45,7 +53,7 @@ fn co_located_observations(seed: u64) -> (Vec<u8>, Vec<u8>) {
 }
 
 #[test]
-fn alien_tech_pipeline_runs_end_to_end() {
+fn restricted_hamming_pipeline_runs_end_to_end() {
     // Full pipeline runs without panic; produces a 32-byte key.
     // Note: my synthetic noise produces ~15% bit-error rate (a
     // pathological worst case — real proximity scenarios are 1-3%).
@@ -76,7 +84,9 @@ fn hamming_byte_identical_with_low_error_rate() {
     // Hand-crafted: 3 errors total spread across blocks so each
     // block has at most 1 error. Hamming reconciliation should
     // produce byte-identical output.
-    let peer_bits: Vec<u8> = (0..256).map(|i| ((i * 11 + 5) & 1) as u8).collect();
+    let peer_bits: Vec<u8> = (0..256)
+        .map(|i| u8::from(((i * 11 + 5) & 1) != 0))
+        .collect();
     let mut my_bits = peer_bits.clone();
     my_bits[20] ^= 1; // block 0 (positions 0..120)
     my_bits[150] ^= 1; // block 1 (positions 120..240)
@@ -95,7 +105,7 @@ fn hamming_single_error_per_block_byte_identical() {
     // The honest scope of plain Hamming(127,120) SEC: ONE error per
     // 120-bit block, byte-identical output. This is the property
     // proven by the exhaustive single-error-location unit test.
-    let peer_bits: Vec<u8> = (0..360).map(|i| ((i * 7) & 1) as u8).collect();
+    let peer_bits: Vec<u8> = (0..360).map(|i| u8::from(((i * 7) & 1) != 0)).collect();
     let mut my_bits = peer_bits.clone();
     my_bits[10] ^= 1; // block 0
     my_bits[150] ^= 1; // block 1

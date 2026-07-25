@@ -179,7 +179,8 @@ build. Check `/api/status` → `app_version` + `native_status` →
 | Fragile-swarm gate | `scripts/phase_e_live_demo.py` | ≥ 80% chunk-loss reduction |
 | Cross-domain demo | `scripts/phase_e_cross_domain_demo.py` | All 3 domains converge |
 | Adversarial fuzz | `scripts/adversarial_field_fuzz.py --quick` | 8/8 regimes pass |
-| Per-PR perf gate | `scripts/coherence_field_perf_snapshot.py` + `bench_gate.py` | ≤ 5% regression vs baseline |
+| Portable Python-FFI SLO | `scripts/coherence_field_perf_snapshot.py` + `coherence_field_slo_gate.py` | 5,000-peer solve <= 10 ms; all operation budgets pass |
+| Dedicated-runner regression lab | `scripts/bench_gate.py` + `bench_baselines/coherence_field.json` | Environment-qualified comparison only |
 | Bandit-field consistency | `pytest tests/unit/test_phase_e_demos.py` | both demos green |
 | Subprocess smoke | `pytest tests/test_phase_e_subprocess_smoke.py` | daemon pair reports field |
 

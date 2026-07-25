@@ -12,15 +12,16 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.rendezvous_proto import (
     MAX_ADVERTISED_ENDPOINTS,
+    MAX_CAPABILITIES,
+    MAX_CAPABILITY_LENGTH,
+    MAX_HOST_LENGTH,
     MAX_REGISTRATION_TTL_S,
-    PROTOCOL_VERSION,
     REPLAY_WINDOW_MS,
     Endpoint,
     LookupAck,
     RegisterAck,
     RegisterReq,
     RevokeReq,
-    now_ms,
     sign_register,
     sign_revoke,
     timestamp_within_replay_window,
@@ -221,9 +222,9 @@ def test_register_rejects_wrong_type_field():
 
 
 def test_register_rejects_pubkey_wrong_length():
-    sk, _pk = _new_key()
+    sk, pk = _new_key()
     req = sign_register(
-        private_key=sk, pubkey=b"\x00" * 32, ttl_s=60,
+        private_key=sk, pubkey=pk, ttl_s=60,
         advertised_endpoints=[Endpoint("h", 1)],
     )
     wire = req.to_wire()
@@ -303,6 +304,135 @@ def test_endpoint_rejects_invalid_port():
 def test_endpoint_rejects_empty_host():
     with pytest.raises(ValueError, match="host"):
         Endpoint.from_json({"host": "", "port": 80})
+
+
+@pytest.mark.parametrize("field", ["extra", 7])
+def test_register_rejects_unknown_fields(field):
+    sk, pk = _new_key()
+    wire = sign_register(
+        private_key=sk, pubkey=pk, ttl_s=60,
+        advertised_endpoints=[Endpoint("h", 1)],
+    ).to_wire()
+    wire[field] = "ambiguous"
+    with pytest.raises(ValueError, match="fields invalid"):
+        RegisterReq.from_wire(wire)
+
+
+@pytest.mark.parametrize("field", ["pubkey_b64", "signature"])
+def test_register_rejects_padded_or_non_ascii_base64(field: str):
+    sk, pk = _new_key()
+    wire = sign_register(
+        private_key=sk, pubkey=pk, ttl_s=60,
+        advertised_endpoints=[Endpoint("h", 1)],
+    ).to_wire()
+    wire[field] += "="
+    with pytest.raises(ValueError, match=field if field == "pubkey_b64" else "signature"):
+        RegisterReq.from_wire(wire)
+
+
+@pytest.mark.parametrize("field", ["timestamp_ms", "ttl_s"])
+def test_register_rejects_boolean_integer_aliases(field: str):
+    sk, pk = _new_key()
+    wire = sign_register(
+        private_key=sk, pubkey=pk, ttl_s=60,
+        advertised_endpoints=[Endpoint("h", 1)],
+    ).to_wire()
+    wire[field] = True
+    with pytest.raises(ValueError, match=field):
+        RegisterReq.from_wire(wire)
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        " host",
+        "host\nname",
+        "host/path",
+        "999.999.999.999",
+        "bad::ipv6::literal",
+        "-leading.example",
+        "trailing-.example",
+        "a" * (MAX_HOST_LENGTH + 1),
+    ],
+)
+def test_endpoint_rejects_ambiguous_or_unbounded_hosts(host: str):
+    with pytest.raises(ValueError, match="host"):
+        Endpoint.from_json({"host": host, "port": 443})
+
+
+def test_endpoint_rejects_unknown_field_and_boolean_port():
+    with pytest.raises(ValueError, match="fields invalid"):
+        Endpoint.from_json({"host": "h", "port": 1, "ignored": True})
+    with pytest.raises(ValueError, match="port"):
+        Endpoint.from_json({"host": "h", "port": True})
+
+
+def test_register_rejects_unbounded_or_malformed_capabilities():
+    sk, pk = _new_key()
+    baseline = sign_register(
+        private_key=sk, pubkey=pk, ttl_s=60,
+        advertised_endpoints=[Endpoint("h", 1)],
+    ).to_wire()
+    too_many = dict(baseline)
+    too_many["capabilities"] = [f"cap{i}" for i in range(MAX_CAPABILITIES + 1)]
+    with pytest.raises(ValueError, match="capabilities"):
+        RegisterReq.from_wire(too_many)
+
+    for malformed in ("", "bad token", "x" * (MAX_CAPABILITY_LENGTH + 1), 7):
+        wire = dict(baseline)
+        wire["capabilities"] = [malformed]
+        with pytest.raises(ValueError, match="capabilities"):
+            RegisterReq.from_wire(wire)
+
+
+def test_lookup_ack_rejects_hostile_collection_and_schema_shapes():
+    _, pk = _new_key()
+    baseline = LookupAck(
+        pubkey=pk,
+        observed_endpoint=None,
+        advertised_endpoints=[],
+        nat_type="unknown",
+        capabilities=[],
+        expires_at_ms=10,
+        server_time_ms=1,
+    ).to_wire()
+    with_unknown = dict(baseline, ignored="parser-confusion")
+    with pytest.raises(ValueError, match="fields invalid"):
+        LookupAck.from_wire(with_unknown)
+
+    too_many_endpoints = dict(baseline)
+    too_many_endpoints["advertised_endpoints"] = [
+        {"host": f"h{i}", "port": 1} for i in range(MAX_ADVERTISED_ENDPOINTS + 1)
+    ]
+    with pytest.raises(ValueError, match="advertised_endpoints"):
+        LookupAck.from_wire(too_many_endpoints)
+
+    bad_caps = dict(baseline)
+    bad_caps["capabilities"] = [False]
+    with pytest.raises(ValueError, match="capabilities"):
+        LookupAck.from_wire(bad_caps)
+
+
+def test_signers_reject_claimed_public_key_mismatch():
+    sk, _ = _new_key()
+    _, other = _new_key()
+    with pytest.raises(ValueError, match="does not match"):
+        sign_register(
+            private_key=sk,
+            pubkey=other,
+            ttl_s=60,
+            advertised_endpoints=[Endpoint("h", 1)],
+        )
+    with pytest.raises(ValueError, match="does not match"):
+        sign_revoke(private_key=sk, pubkey=other)
+
+
+def test_replay_window_fails_closed_on_coercive_or_invalid_inputs():
+    now = 1_700_000_000_000
+    assert not timestamp_within_replay_window(True, server_now_ms=now)
+    assert not timestamp_within_replay_window(str(now), server_now_ms=now)  # type: ignore[arg-type]
+    assert not timestamp_within_replay_window(now, server_now_ms=True)
+    assert not timestamp_within_replay_window(now, server_now_ms=now, window_ms=-1)
 
 
 # ─── canonical-form determinism ─────────────────────────────────────

@@ -21,4 +21,13 @@ pub enum HwKeyError {
 
     #[error("invalid public key encoding")]
     InvalidKeyEncoding,
+
+    #[error("invalid key label: {0}")]
+    InvalidLabel(&'static str),
+
+    #[error("key-store state is unavailable because its lock was poisoned")]
+    StateUnavailable,
+
+    #[error("key-store capacity exhausted")]
+    CapacityExceeded,
 }

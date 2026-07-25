@@ -14,11 +14,9 @@ from __future__ import annotations
 
 import contextlib
 import os
-import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -127,6 +125,11 @@ def live_daemon(tmp_path: Path) -> Iterator[LiveDaemon]:
     env["ONE_LINK_BIND_HOST"] = "127.0.0.1"
     # Disable any prompt that might open a folder picker etc.
     env["ONE_LINK_DISABLE_NATIVE_PICKER"] = "1"
+    # Exercise the strict browser-owner gate in every live Chromium daemon.
+    # peer.html must prove its enrolled Ed25519 key on the current DataChannel
+    # before any owner request is accepted; this is identity possession, not a
+    # claim of browser hardware/platform attestation.
+    env["ONE_LINK_REQUIRE_BROWSER_IDENTITY_POSSESSION"] = "required"
     # The daemon auto-discovers a free port starting at 7117 and
     # falls through to 7118..7132 if taken, then OS-assigned. Since
     # ONE_LINK_HOME is fresh + isolated, we read the chosen port

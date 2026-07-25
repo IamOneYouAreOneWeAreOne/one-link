@@ -1,0 +1,14 @@
+{
+  "started_at": "2026-05-19T16:09:03",
+  "many_small": {
+    "scenario": "many_small_files",
+    "n": 20,
+    "per_size_bytes": 4096,
+    "total_bytes": 81920,
+    "elapsed_sec": 0.6046,
+    "per_file_sec": 0.0302,
+    "aggregate_throughput_bps": 135497.6,
+    "completed": 20
+  },
+  "finished_at": "2026-05-19T16:09:07"
+}

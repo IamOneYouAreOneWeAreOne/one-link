@@ -1,7 +1,7 @@
-//! Adversarial test vectors for ol_proximity_pair.
+//! Adversarial test vectors for `ol_proximity_pair`.
 //!
 //! Catches known-attack patterns + edge cases that random property
-//! tests might miss. Matches F1.1 (ol_threshold_recovery)
+//! tests might miss. Matches F1.1 (`ol_threshold_recovery`)
 //! adversarial-vector pattern.
 
 use ol_proximity_pair::{
@@ -137,7 +137,7 @@ fn adversarial_hamming_partial_last_block_handled() {
     // 130 bits = 1 full + 1 partial (10 bits). parity_bits_for_string
     // pads to 240 internally → 2 parity blocks. Reconcile must
     // produce 130-byte output.
-    let bits: Vec<u8> = (0..130).map(|i| (i & 1) as u8).collect();
+    let bits: Vec<u8> = (0..130).map(|i| u8::from((i & 1) != 0)).collect();
     let parity = parity_bits_for_string(&bits);
     let r = hamming_reconcile(&bits, &parity);
     assert_eq!(r, bits);
@@ -249,7 +249,7 @@ fn adversarial_pipeline_random_high_entropy() {
         guard_band: 0.1,
     };
     let obs: Vec<u8> = (0..512u32)
-        .map(|i| ((i.wrapping_mul(0x9E3779B9)) & 0xFF) as u8)
+        .map(|i| i.wrapping_mul(0x9E37_79B9).to_le_bytes()[0])
         .collect();
     let bits = quantize_observations(&obs, &cfg).unwrap();
     let parity = parity_bits_for_string(&bits);

@@ -2,8 +2,8 @@
 #
 # Per ADR-0008 (../docs/decisions/0008-ffi-contract.md). Built with
 # maturin; produces a single wheel `one_link_native` containing the
-# pyo3 .so/.pyd plus the Python type stubs in
-# `one_link_native/python/one_link_native/`.
+# pyo3 .so/.pyd plus the canonical Python type stubs in
+# `one_link_native/` package.
 
 [build-system]
 requires      = ["maturin>=1.5,<2.0"]
@@ -42,12 +42,17 @@ Documentation = "https://github.com/IamOne1/One_Link/tree/master/docs/decisions"
 manifest-path = "one_link_native/Cargo.toml"
 # Python module name. abi3 wheel: forward-compatible across Python 3.11+.
 module-name   = "one_link_native"
-features      = ["pyo3/extension-module", "pyo3/abi3-py311"]
+# Every published wheel exposes the same Python ABI.  On Linux this
+# additionally compiles the real fuser backend; ol_fuse's target-gated
+# dependency makes the same feature a no-op (and never a readiness claim)
+# on Windows and macOS.
+features      = ["pyo3/extension-module", "pyo3/abi3-py311", "linux-mount"]
 # Strip release builds for smaller wheels.
 strip         = true
-# Type stubs live in a sibling package one_link_native-stubs/ shipped via include.
-# (Importable via the package name + "-stubs" suffix per PEP 561.)
+# Ship the complete PEP 561 inline package beside the generated PyO3 wrapper.
+# Keeping source and wheel paths identical makes local and release type checks
+# consume one canonical contract instead of silently choosing different stubs.
 include       = [
-    { path = "one_link_native-stubs/__init__.pyi", format = "wheel" },
-    { path = "one_link_native-stubs/py.typed",      format = "wheel" },
+    { path = "one_link_native/*.pyi", format = "wheel" },
+    { path = "one_link_native/py.typed", format = "wheel" },
 ]

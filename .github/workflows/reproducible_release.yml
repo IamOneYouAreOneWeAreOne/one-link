@@ -1,9 +1,8 @@
-# File engine v2 — reproducible signed release build.
+# File engine v2 — independent reproducibility verification.
 #
 # Per FILE_ENGINE_V2_PLAN.md Phase C item #12:
 #
-#     "Reproducible builds + multi-party signing: Sigstore-style
-#     transparency log; multi-signer release."
+#     "Reproducible builds: independent byte-equivalent rebuild."
 #
 # This workflow runs on every annotated tag matching `v*`. It:
 #
@@ -11,51 +10,73 @@
 #    toolchain version, locked cargo registry, `SOURCE_DATE_EPOCH` from
 #    the tag commit, `-C codegen-units=1` etc).
 # 2. Records a BLAKE3 hash of every artifact.
-# 3. Signs each artifact with Sigstore (cosign keyless via OIDC) and
-#    uploads the bundle to the public transparency log.
-# 4. Optionally requires a second signature from a designated co-signer
-#    (configured at the org level as a repository secret).
+# 3. Uploads unsigned workflow artifacts strictly as reproducibility evidence.
 #
-# Acceptance gate is structural: a second run on a fresh worker MUST
-# produce byte-identical artifacts. The hash-of-hashes is checked in to
-# the release notes so external verifiers can confirm without running CI.
+# Trust-boundary rule: `.github/workflows/release.yml` is the sole tagged
+# signing and publication authority. This verifier deliberately has no OIDC,
+# attestation, or contents-write permission and cannot mint trusted artifacts.
+#
+# The enforced byte comparison is deliberately narrow: a second Linux build on
+# a fresh worker must match the first Linux native wheel. Other platform builds
+# are retained as unsigned evidence, not claimed to be byte-identical.
 
-name: reproducible release
+name: reproducibility verification
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
-# Required for Sigstore keyless signing.
 permissions:
-  id-token: write
-  contents: write
-  attestations: write
+  contents: read
+
+concurrency:
+  group: reproducible-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build_and_sign:
-    name: build + Sigstore-sign
+  build_artifacts:
+    name: build unsigned reproducibility artifacts
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Tags need full history for SOURCE_DATE_EPOCH derivation.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Derive reproducible build env
         id: env
         shell: bash
+        env:
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
         run: |
+          set -euo pipefail
+          if [[ "$RELEASE_REF_TYPE" != "tag" ]]; then
+            echo "::error::Reproducible release builds must run from an existing v* tag"
+            exit 1
+          fi
+          project_version="$(awk -F'"' '/^version = "/ { print $2; exit }' pyproject.toml)"
+          if [[ -z "$project_version" ]]; then
+            echo "::error::Unable to read project version from pyproject.toml"
+            exit 1
+          fi
+          if [[ "${RELEASE_REF_NAME#v}" != "$project_version" ]]; then
+            echo "::error::Release tag $RELEASE_REF_NAME does not match pyproject version $project_version"
+            exit 1
+          fi
           # SOURCE_DATE_EPOCH from the tag commit, not the runner clock.
           export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
           echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" >> "$GITHUB_ENV"
-          # Pin codegen-units, no incremental — guarantees byte-identical
-          # artifacts across runs.
+          # Pin codegen-units and disable incremental compilation to reduce
+          # uncontrolled inputs for the Linux comparison below.
           echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
@@ -63,31 +84,34 @@ jobs:
 
       - name: Install pinned Rust toolchain
         # Pin to a specific version, not `stable`, for reproducibility.
-        uses: dtolnay/rust-toolchain@1.83.0
-        with:
-          components: rust-src
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --component rust-src --no-self-update
+          rustup default 1.96.0
 
       - name: Install Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
 
-      - name: Install maturin
-        run: |
-          python -m pip install --upgrade pip
-          pip install "maturin>=1.5,<2.0"
+      - name: setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: false
 
-      - name: Build wheel (reproducible)
+      - name: Install locked release tooling
+        run: uv sync --frozen --python python --only-group release-tools
+
+      - name: Build unsigned comparison candidate
         working-directory: native
         run: |
-          maturin build --release --strip --out ../dist/
+          uv run --project .. --frozen --only-group release-tools maturin build --release --strip --locked --out ../dist/
 
       - name: Hash artifacts (BLAKE3)
         shell: bash
         run: |
           mkdir -p dist
-          python -m pip install blake3
-          python - <<'PY'
+          uv run --frozen --only-group release-tools python - <<'PY'
           import pathlib, json, blake3
           out = {}
           for p in sorted(pathlib.Path("dist").rglob("*")):
@@ -98,15 +122,8 @@ jobs:
               print(f"{v}  {k}")
           PY
 
-      - name: Sigstore-sign every artifact
-        uses: sigstore/gh-action-sigstore-python@v3
-        with:
-          inputs: |
-            dist/*.whl
-            dist/HASHES.json
-
-      - name: Upload signed artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload unsigned reproducibility evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-${{ matrix.os }}
           path: dist/
@@ -116,20 +133,32 @@ jobs:
     # Runs the same Linux build twice on isolated runners and asserts the
     # resulting wheels are byte-identical. Any drift = release block.
     name: verify byte-equivalent rebuild (linux)
-    needs: build_and_sign
+    needs: build_artifacts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install pinned toolchain
-        uses: dtolnay/rust-toolchain@1.83.0
-
-      - name: Install Python + maturin
         run: |
-          python -m pip install --upgrade pip
-          pip install "maturin>=1.5,<2.0" blake3
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup default 1.96.0
+
+      - name: Install Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: false
+
+      - name: Install locked release tooling
+        run: uv sync --frozen --python python --only-group release-tools
 
       - name: Build wheel (rerun)
         env:
@@ -140,17 +169,17 @@ jobs:
         working-directory: native
         run: |
           export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
-          maturin build --release --strip --out ../dist2/
+          uv run --project .. --frozen --only-group release-tools maturin build --release --strip --locked --out ../dist2/
 
       - name: Download original wheel
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: dist-ubuntu-latest
           path: dist1/
 
       - name: Compare BLAKE3 hashes
         run: |
-          python - <<'PY'
+          uv run --frozen --only-group release-tools python - <<'PY'
           import pathlib, blake3, sys
           def hash_dir(d):
               return {p.name: blake3.blake3(p.read_bytes()).hexdigest()
@@ -163,5 +192,5 @@ jobs:
               print(f"  build 1: {a}")
               print(f"  build 2: {b}")
               sys.exit(1)
-          print("Reproducible build verified — byte-identical wheels.")
+          print("Linux native wheel reproducibility verified — byte-identical rebuild.")
           PY

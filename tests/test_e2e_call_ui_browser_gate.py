@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import scripts.e2e_call_ui_browser_gate as e2e_gate
 from scripts.e2e_call_ui_browser_gate import MEDIA_PATCH_JS, _debug_summary, evaluate_report
 
 
@@ -89,3 +90,44 @@ def test_e2e_call_ui_gate_fails_when_media_is_missing() -> None:
     assert any("receiver ICE" in failure for failure in failures)
     assert any("audio packets" in failure for failure in failures)
     assert any("video packets" in failure for failure in failures)
+
+
+def test_e2e_call_ui_gate_startup_failure_does_not_fabricate_call_failures() -> None:
+    failures = evaluate_report({
+        "ok": False,
+        "phase": "browser_startup",
+        "error": "browser startup failed",
+        "privacy": {
+            "contains_media": False,
+            "contains_sdp": False,
+            "contains_ice_candidates": False,
+            "contains_ip_addresses": False,
+            "contains_device_names": False,
+            "contains_user_content": False,
+        },
+    })
+
+    assert any("not ok" in failure for failure in failures)
+    assert any("browser_startup" in failure for failure in failures)
+    assert not any("ICE" in failure for failure in failures)
+    assert not any("SDP" in failure for failure in failures)
+    assert not any("packets" in failure for failure in failures)
+    assert not any("frames" in failure for failure in failures)
+
+
+def test_e2e_temp_cleanup_error_cannot_overwrite_gate_result(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeTemporaryDirectory:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(e2e_gate.tempfile, "TemporaryDirectory", FakeTemporaryDirectory)
+
+    directory = e2e_gate._e2e_temp_directory()
+
+    assert isinstance(directory, FakeTemporaryDirectory)
+    assert captured == {
+        "prefix": "ol_ui_call_e2e_",
+        "ignore_cleanup_errors": True,
+    }

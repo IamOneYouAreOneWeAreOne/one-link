@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import re
 
-import pytest
 import requests
 
 
@@ -120,7 +119,7 @@ def test_unauthorized_api_call_returns_help_not_blank_unauthorized(live_daemon):
 
 def test_index_response_sets_security_headers(live_daemon):
     """The main UI MUST ship with X-Content-Type-Options, CSP,
-    and the auth cookie. Without these the site is open to MIME
+    and an origin-scoped browser bearer. Without these the site is open to MIME
     sniffing attacks and XSS amplification."""
     r = requests.get(
         live_daemon.auth_url, allow_redirects=False, timeout=5,
@@ -132,13 +131,13 @@ def test_index_response_sets_security_headers(live_daemon):
     assert "default-src" in csp or "script-src" in csp, (
         f"CSP missing source directives: {csp!r}"
     )
-    # The bootstrap token sets the ol_ui cookie on the index load.
+    # Plain loopback cookies are port-agnostic. The response expires every
+    # historical auth cookie and injects a revocable origin-storage session.
     set_cookie = r.headers.get("Set-Cookie", "")
-    assert "ol_ui=" in set_cookie, "ol_ui cookie not set on index load"
-    assert "HttpOnly" in set_cookie, (
-        "ol_ui cookie missing HttpOnly flag - JS XSS could exfil "
-        "the auth token"
-    )
+    assert "ol_ui=" in set_cookie
+    assert "Max-Age=0" in set_cookie
+    assert "ol_persistent_session_token" in r.text
+    assert live_daemon.token not in r.text
 
 
 def test_api_files_overrides_x_frame_options_for_inline_previews(live_daemon):

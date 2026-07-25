@@ -5,7 +5,7 @@ use thiserror::Error;
 /// Errors produced by Bloom filter operations.
 #[derive(Debug, Error)]
 pub enum BloomError {
-    /// Filter parameters are invalid (m_bits == 0, k == 0, etc).
+    /// Filter parameters are invalid (`m_bits == 0`, `k == 0`, etc).
     #[error("invalid bloom parameters: {0}")]
     InvalidParameters(&'static str),
 
@@ -18,12 +18,12 @@ pub enum BloomError {
         needed: usize,
     },
 
-    /// Encoded filter's bit-array length doesn't match the declared m_bits.
+    /// Encoded filter's bit-array length doesn't match the declared `m_bits`.
     #[error(
         "bloom encoded length mismatch: header says m_bits={m_bits} (= {expected_bytes} bytes), got {got} bytes"
     )]
     LengthMismatch {
-        /// m_bits from header.
+        /// `m_bits` from header.
         m_bits: u32,
         /// Bytes expected from header.
         expected_bytes: usize,

@@ -108,7 +108,9 @@ def test_round_trip_with_5pct_loss() -> None:
 
 def test_packet_round_trip() -> None:
     chunk_id = b"\xAB" * 32
-    payload = b"\xCD" * 256
+    # Packet metadata must be internally possible: source_length may not
+    # exceed k * symbol_length. Keep the 64 KiB source and use 1 KiB symbols.
+    payload = b"\xCD" * 1024
     encoded = fountain_native.encode_packet(chunk_id, 64, 42, 64 * 1024, payload)
     assert len(encoded) == fountain_native.PACKET_HEADER_LEN + len(payload)
     (cid, k, sid, src_len, p) = fountain_native.decode_packet(encoded)

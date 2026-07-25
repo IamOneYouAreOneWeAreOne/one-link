@@ -1,20 +1,19 @@
-"""v0.20.7 (audit M3) — nonce-salt defence on group AEAD.
+"""Nonce-reuse defence and rolling compatibility for group AEAD.
 
 Pre-v0.20.7 the group AEAD nonce was deterministic ``(epoch, counter)``.
 A daemon that crashed mid-send and restarted with a stale persisted
 chain_key would re-emit a frame at the same ``(key, nonce)`` —
 catastrophic ChaCha20 keystream reuse.
 
-v0.20.7 bumps the group wire version to ``OL-GROUP-MSG-2`` and folds
-4 bytes of fresh ``os.urandom`` into the nonce + AAD per send. These
-tests pin:
+v2 added a four-byte random suffix. v3 replaces that 32-bit collision
+ceiling with a full 96-bit random ChaCha20 nonce. These tests pin:
 
-  - new-sender frames are v2 with a random nonce_salt per send,
+  - new-sender frames are v3 with a full random nonce per send,
   - v1 frames are still accepted on receive (rolling-upgrade safety),
   - the nonce_salt is part of the AAD (flipped salt → AEAD fail),
   - the nonce_salt is part of the signed input (a relay can't
     substitute a salt to force a collision),
-  - mixing v1/v2 across the same chain works (legacy peer + new peer
+  - mixing v1/v3 across the same chain works (legacy peer + new peer
     both hit the same ReceivingChain).
 """
 from __future__ import annotations
@@ -52,7 +51,7 @@ def _make_party():
     return priv, sender, receiver
 
 
-def test_new_frames_emit_v2_with_random_salt():
+def test_new_frames_emit_v3_with_full_entropy_nonce():
     priv, sender, _ = _make_party()
     wire1, sender = gc.encrypt_message(
         plaintext=b"hello", chain=sender, private_key=priv,
@@ -60,19 +59,18 @@ def test_new_frames_emit_v2_with_random_salt():
     wire2, sender = gc.encrypt_message(
         plaintext=b"world", chain=sender, private_key=priv,
     )
-    assert wire1["v"] == "OL-GROUP-MSG-2"
-    assert wire2["v"] == "OL-GROUP-MSG-2"
+    assert wire1["v"] == "OL-GROUP-MSG-3"
+    assert wire2["v"] == "OL-GROUP-MSG-3"
     assert "nonce_salt_b64" in wire1
     salt1 = _b64d(wire1["nonce_salt_b64"])
     salt2 = _b64d(wire2["nonce_salt_b64"])
-    assert len(salt1) == gc.NONCE_SALT_BYTES == 4
-    # Two consecutive os.urandom(4) values colliding has a 2^-32 prior;
-    # two different sends MUST produce different salts in any practical
-    # test run. (This is a property test of os.urandom, not crypto.)
+    assert len(salt1) == gc.NONCE_SALT_BYTES == 12
+    # v3 uses the full 96-bit ChaCha20 nonce for fresh entropy rather than
+    # v2's 32-bit suffix, making stale-state crash replay collision-safe.
     assert salt1 != salt2
 
 
-def test_v2_round_trip():
+def test_v3_round_trip():
     priv, sender, receiver = _make_party()
     plaintext = b"some group chat body bytes"
     wire, sender_after = gc.encrypt_message(
@@ -85,7 +83,7 @@ def test_v2_round_trip():
     assert sender_after.chain_key != sender.chain_key
 
 
-def test_v2_salt_tamper_rejected():
+def test_v3_salt_tamper_rejected():
     priv, sender, receiver = _make_party()
     wire, _ = gc.encrypt_message(
         plaintext=b"x", chain=sender, private_key=priv,
@@ -102,7 +100,7 @@ def test_v2_salt_tamper_rejected():
         gc.decrypt_message(wire=wire, chain=receiver)
 
 
-def test_v2_ciphertext_tamper_rejected():
+def test_v3_ciphertext_tamper_rejected():
     priv, sender, receiver = _make_party()
     wire, _ = gc.encrypt_message(
         plaintext=b"y", chain=sender, private_key=priv,
@@ -156,12 +154,12 @@ def test_legacy_v1_frame_still_accepts_on_receive():
     assert advanced.counter == 1
 
 
-def test_v2_missing_salt_rejected():
+def test_v3_missing_salt_rejected():
     priv, sender, receiver = _make_party()
     wire, _ = gc.encrypt_message(
         plaintext=b"z", chain=sender, private_key=priv,
     )
-    # Drop the salt field — must fail (v2 frame without salt is malformed).
+    # Drop the salt field — a v3 frame without it is malformed.
     wire.pop("nonce_salt_b64")
     import pytest
     with pytest.raises(ValueError):
@@ -179,9 +177,9 @@ def test_unsupported_version_rejected():
         gc.decrypt_message(wire=wire, chain=receiver)
 
 
-def test_v1_to_v2_mixed_chain_works():
+def test_v1_to_v3_mixed_chain_works():
     """A receiver state can serve both an old v1 frame at counter=0
-    AND a v2 frame at counter=1 from the same sender across an
+    AND a v3 frame at counter=1 from the same sender across an
     upgrade. The chain advances normally across the mix."""
     import struct
     priv, sender, receiver = _make_party()
@@ -211,7 +209,7 @@ def test_v1_to_v2_mixed_chain_works():
     }
     out, receiver = gc.decrypt_message(wire=wire_v1, chain=receiver)
     assert out == b"first"
-    # Counter 1: v2 frame from the upgraded sender. (Use the SenderChain
+    # Counter 1: v3 frame from the upgraded sender. (Use the SenderChain
     # API: it has already advanced past 0 because the v1 emit was
     # synthesized; bump sender to match.)
     sender = gc.SenderChain(
@@ -221,10 +219,10 @@ def test_v1_to_v2_mixed_chain_works():
         chain_key=gc.advance_chain_key(sender.chain_key),
         counter=1,
     )
-    wire_v2, _ = gc.encrypt_message(
+    wire_v3, _ = gc.encrypt_message(
         plaintext=b"second", chain=sender, private_key=priv,
     )
-    assert wire_v2["v"] == "OL-GROUP-MSG-2"
-    out, receiver = gc.decrypt_message(wire=wire_v2, chain=receiver)
+    assert wire_v3["v"] == "OL-GROUP-MSG-3"
+    out, receiver = gc.decrypt_message(wire=wire_v3, chain=receiver)
     assert out == b"second"
     assert receiver.counter == 2

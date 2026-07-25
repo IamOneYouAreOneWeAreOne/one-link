@@ -25,56 +25,94 @@ on:
         required: false
         default: "600"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  fuzz:
-    name: cargo fuzz (each target)
+  discover:
+    name: discover fuzz targets
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build deterministic target matrix
+        id: targets
+        working-directory: native
+        run: |
+          set -euo pipefail
+          targets="$({
+            find fuzz/fuzz_targets -maxdepth 1 -type f -name '*.rs' -printf '%f\n' \
+              | sed 's/\.rs$//' \
+              | LC_ALL=C sort
+          } | jq --raw-input --slurp --compact-output 'split("\n") | map(select(length > 0))')"
+          test "${targets}" != "[]"
+          printf 'targets=%s\n' "${targets}" >> "${GITHUB_OUTPUT}"
+
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    needs: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.discover.outputs.targets) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install nightly Rust (cargo-fuzz requires nightly)
-        uses: dtolnay/rust-toolchain@nightly
+        run: |
+          rustup toolchain install nightly-2026-05-13 --profile minimal --component rustfmt --no-self-update
+          rustup default nightly-2026-05-13
 
       - name: Install cargo-fuzz
-        run: cargo install --locked cargo-fuzz
+        run: cargo install --locked --version 0.13.2 cargo-fuzz
 
       - name: Cache cargo target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: native
 
-      - name: Discover and run fuzz targets
+      - name: Verify fuzz workspace formatting
+        working-directory: native
+        run: |
+          cargo +nightly-2026-05-13 fmt --manifest-path fuzz/Cargo.toml --all -- --check
+          cargo +nightly-2026-05-13 fetch --locked --manifest-path fuzz/Cargo.toml
+
+      - name: Run fuzz target
         working-directory: native
         env:
+          FUZZ_TARGET: ${{ matrix.target }}
           RUNTIME_SECONDS: ${{ inputs.runtime_seconds || '600' }}
+          CARGO_NET_OFFLINE: "true"
         run: |
-          if [ ! -d fuzz/fuzz_targets ]; then
-            echo "no fuzz/fuzz_targets directory yet — skipping (initial scaffolding)"
-            exit 0
+          set -euo pipefail
+          case "${RUNTIME_SECONDS}" in
+            ''|*[!0-9]*) echo "runtime_seconds must be an integer" >&2; exit 2 ;;
+          esac
+          if [ "${RUNTIME_SECONDS}" -lt 10 ] || [ "${RUNTIME_SECONDS}" -gt 1200 ]; then
+            echo "runtime_seconds must be between 10 and 1200" >&2
+            exit 2
           fi
-          set -e
-          # Auto-discover every fuzz target in fuzz/fuzz_targets/. As of
-          # Phase D (ADR-0033) the workspace ships 9 targets covering:
-          # Phase A1/B/C (capability_decode, capability_attenuate_roundtrip,
-          # crdt_merge) plus Phase D (routing_dijkstra, homology_fragility,
-          # grammar_repair, duress_gate, prefetch_observe, codegen_parser).
-          for target in $(ls fuzz/fuzz_targets/*.rs | xargs -n1 basename | sed 's/\.rs$//'); do
-            echo "::group::fuzz target: $target"
-            # -- -timeout=10 caps a single input at 10s; max_total_time caps the sweep.
-            cargo +nightly fuzz run "$target" -- \
-              -timeout=10 \
-              -max_total_time="$RUNTIME_SECONDS" || {
-                echo "::error::fuzz target $target FAILED"
-                exit 1
-              }
-            echo "::endgroup::"
-          done
+          cargo +nightly-2026-05-13 fuzz run "${FUZZ_TARGET}" -- \
+            -timeout=10 \
+            -max_total_time="${RUNTIME_SECONDS}"
+          git diff --exit-code -- fuzz/Cargo.lock
 
       - name: Upload corpus on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: fuzz-corpus-${{ github.run_id }}
-          path: native/fuzz/corpus/
+          name: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          path: native/fuzz/corpus/${{ matrix.target }}/
           if-no-files-found: ignore

@@ -94,7 +94,6 @@ def test_welcome_card_has_advanced_toggle(peer_html: str):
     "identity-card",
     "status-card",
     "actions-card",
-    "unlock-card",
     "rdz-card",
     "webrtc-card",
     "pair-card",
@@ -115,10 +114,12 @@ def test_technical_cards_tagged_advanced(peer_html: str, card_id: str):
     "autopair-card",
     "daemon-roster-card",
     "daemon-chat-card",
+    "identity-setup-card",
+    "unlock-card",
 ])
 def test_user_facing_cards_not_advanced(peer_html: str, card_id: str):
-    """Cards that the default user MUST see (welcome, auto-pair,
-    daemon roster + chat) MUST NOT carry data-tier="advanced".
+    """Cards that the default user MUST see (welcome, identity security gates,
+    auto-pair, daemon roster + chat) MUST NOT carry data-tier="advanced".
     Otherwise they'd be invisible until the user flipped the
     toggle, defeating the whole UX scrub."""
     tag = _open_tag_with_id(peer_html, card_id)

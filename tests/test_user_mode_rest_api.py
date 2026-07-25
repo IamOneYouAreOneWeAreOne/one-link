@@ -182,9 +182,105 @@ async def test_set_settings_rejects_bad_appearance_values() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("value", [True, "true", "YES", "1"])
+async def test_set_settings_rejects_enabling_in_place_update(value) -> None:
+    srv = _ui_server_with_state()
+    resp = await srv.api_set_settings(
+        _mock_request({"auto_install_updates": value})
+    )
+
+    assert resp.status == 409
+    srv.daemon.state.set_setting.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [False, "0", " no ", "false"])
+async def test_set_settings_clears_historical_update_consent(value) -> None:
+    srv = _ui_server_with_state()
+    resp = await srv.api_set_settings(
+        _mock_request({"auto_install_updates": value})
+    )
+
+    assert resp.status == 200
+    srv.daemon.state.delete_setting.assert_any_call("auto_install_updates")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [None, 1, 0, [], {}, "enabled", "truthy", ""])
+async def test_set_settings_rejects_ambiguous_update_consent(value) -> None:
+    srv = _ui_server_with_state()
+    resp = await srv.api_set_settings(
+        _mock_request({"auto_install_updates": value})
+    )
+
+    assert resp.status == 400
+    srv.daemon.state.set_setting.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_set_settings_refreshes_daemon_cache() -> None:
     srv = _ui_server_with_state()
     req = _mock_request({"user_mode": "paranoid"})
     resp = await srv.api_set_settings(req)
     assert resp.status == 200
     srv.daemon.refresh_runtime_settings.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "key",
+    [
+        "auto_accept_lan",
+        "pair_default_allow_all",
+        "sync_quiet_hours_enabled",
+        "sync_pause_on_metered",
+        "sync_pause_on_battery",
+        "sync_paused",
+        "onboarding_completed",
+        "incoming_files_require_accept",
+        "dnd_enabled",
+        "notification_sound",
+        "notification_preview",
+        "notify_on_reactions",
+        "send_read_receipts",
+        "display_read_receipts",
+        "send_typing_indicators",
+        "display_typing_indicators",
+        "enter_to_send",
+        "compact_message_list",
+        "show_message_seconds",
+        "auto_scroll_new_messages",
+        "send_link_previews",
+    ],
+)
+async def test_set_settings_rejects_truthy_non_booleans(key: str) -> None:
+    """The JSON string ``"false"`` must never turn a switch on."""
+    srv = _ui_server_with_state()
+    resp = await srv.api_set_settings(_mock_request({key: "false"}))
+
+    assert resp.status == 400
+    srv.daemon.state.set_setting.assert_not_called()
+    srv.daemon.state.delete_setting.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_settings_prevalidates_late_fields_before_any_write() -> None:
+    srv = _ui_server_with_state()
+    resp = await srv.api_set_settings(
+        _mock_request({"theme": "light", "accent_color": "not-a-color"})
+    )
+
+    assert resp.status == 400
+    srv.daemon.state.set_setting.assert_not_called()
+    srv.daemon.state.delete_setting.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [[], ["theme"], "theme=light", 1, True, None])
+async def test_set_settings_requires_json_object(payload) -> None:
+    srv = _ui_server_with_state()
+    resp = await srv.api_set_settings(_mock_request(payload))
+
+    assert resp.status == 400
+    srv.daemon.state.set_setting.assert_not_called()
+    srv.daemon.state.delete_setting.assert_not_called()

@@ -68,7 +68,9 @@ fn bench_header_mac(c: &mut Criterion) {
 }
 
 fn bench_filler_max_hops(c: &mut Criterion) {
-    let keys: Vec<[u8; 32]> = (0..MAX_HOPS - 1).map(|i| [i as u8 + 1; 32]).collect();
+    let keys: Vec<[u8; 32]> = (0..MAX_HOPS - 1)
+        .map(|i| [u8::try_from(i).unwrap() + 1; 32])
+        .collect();
     c.bench_function("sphinx::build_filler_4_relays", |b| {
         b.iter(|| {
             let f = build_filler(black_box(&keys));
@@ -168,17 +170,28 @@ fn bench_full_3_hop_round_trip(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_derive_hop_keys,
-    bench_chacha20_header_keystream,
-    bench_chacha20_payload_keystream,
-    bench_header_mac,
-    bench_filler_max_hops,
-    bench_build_1_hop,
-    bench_build_3_hop,
-    bench_build_5_hop,
-    bench_peel_one_layer,
-    bench_full_3_hop_round_trip,
-);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{
+        bench_build_1_hop, bench_build_3_hop, bench_build_5_hop, bench_chacha20_header_keystream,
+        bench_chacha20_payload_keystream, bench_derive_hop_keys, bench_filler_max_hops,
+        bench_full_3_hop_round_trip, bench_header_mac, bench_peel_one_layer, criterion_group,
+    };
+
+    criterion_group!(
+        benches,
+        bench_derive_hop_keys,
+        bench_chacha20_header_keystream,
+        bench_chacha20_payload_keystream,
+        bench_header_mac,
+        bench_filler_max_hops,
+        bench_build_1_hop,
+        bench_build_3_hop,
+        bench_build_5_hop,
+        bench_peel_one_layer,
+        bench_full_3_hop_round_trip,
+    );
+}
+criterion_main!(criterion_benchmark_harness::benches);

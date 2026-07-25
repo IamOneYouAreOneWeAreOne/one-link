@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 import aiohttp
+import blake3
 import pytest
 
 from tests.harness import daemon_pair
@@ -32,6 +33,115 @@ def _read_tok_and_port(home: Path) -> tuple[str, int]:
     tok = (home / "data" / "ui.token").read_text().strip()
     port = int((home / "data" / "server.port").read_text().strip())
     return tok, port
+
+
+def _assert_hex64(value: object, *, field: str) -> str:
+    assert isinstance(value, str), f"{field} is not a string: {value!r}"
+    assert len(value) == 64, f"{field} is not 64 hex chars: {value!r}"
+    assert value == value.lower(), f"{field} is not canonical lowercase hex"
+    int(value, 16)
+    return value
+
+
+async def _wait_for_durable_sender_completion(
+    s: aiohttp.ClientSession,
+    *,
+    base: str,
+    token: str,
+    peer_fp: str,
+    expected_entries: int,
+) -> dict:
+    """Wait until the one-shot follow-up has an exact durable receipt."""
+    deadline = time.time() + 10
+    transfers: list[dict] = []
+    completed = None
+    while time.time() < deadline:
+        async with s.get(
+            f"{base}/api/transfers?peer_fp={peer_fp}&limit=25",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as response:
+            body = await response.json()
+            assert response.status == 200, body
+        transfers = body.get("transfers") or []
+        completed = next(
+            (
+                row for row in transfers
+                if row.get("direction") == "out"
+                and row.get("kind") == "folder"
+                and row.get("name") == "demo_send"
+                and row.get("status") == "complete"
+                and (row.get("metadata") or {}).get("durable_receipt") is True
+            ),
+            None,
+        )
+        if completed is not None:
+            break
+        await asyncio.sleep(0.1)
+    assert completed is not None, transfers
+
+    metadata = completed.get("metadata") or {}
+    sync_id = metadata.get("folder_sync_id")
+    assert isinstance(sync_id, str) and sync_id, completed
+    receipt = metadata.get("folder_sync_receipt")
+    assert isinstance(receipt, dict), completed
+    assert receipt.get("v") == 1, receipt
+    assert receipt.get("sync_id") == sync_id, receipt
+    assert isinstance(receipt.get("verify_id"), str) and receipt["verify_id"]
+    assert receipt.get("entry_count") == expected_entries, receipt
+    assert receipt.get("wanted_count") == expected_entries, receipt
+    assert receipt.get("paths_verified") == expected_entries, receipt
+    assert receipt.get("source_root") == metadata.get("merkle_root"), receipt
+    assert receipt.get("applied_root") == metadata.get("merkle_root"), receipt
+    assert completed.get("blob_hash") == metadata.get("merkle_root"), completed
+    _assert_hex64(receipt.get("source_root"), field="source_root")
+    _assert_hex64(receipt.get("applied_root"), field="applied_root")
+    _assert_hex64(receipt.get("manifest_digest"), field="manifest_digest")
+    _assert_hex64(
+        receipt.get("channel_transcript"), field="channel_transcript",
+    )
+    return completed
+
+
+async def _assert_receiver_state_and_cas(
+    s: aiohttp.ClientSession,
+    *,
+    base: str,
+    token: str,
+    home: Path,
+    target: Path,
+    expected: dict[str, bytes],
+) -> None:
+    async with s.get(
+        f"{base}/api/folders/demo_send/tree",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as response:
+        body = await response.json()
+        assert response.status == 200, body
+    entries = body.get("entries")
+    assert isinstance(entries, list), body
+    by_path = {entry["path"]: entry for entry in entries}
+    assert set(by_path) == set(expected), body
+    assert body.get("truncated") is False, body
+    expected_bytes = sum(len(payload) for payload in expected.values())
+    assert body.get("total_bytes") == expected_bytes, body
+    assert body.get("local_bytes") == expected_bytes, body
+
+    disk_files = {
+        path.relative_to(target).as_posix()
+        for path in target.rglob("*")
+        if path.is_file()
+    }
+    assert disk_files == set(expected)
+    for rel_path, payload in expected.items():
+        digest = blake3.blake3(payload).hexdigest()
+        entry = by_path[rel_path]
+        assert entry.get("blob_hash") == digest, entry
+        assert entry.get("size") == len(payload), entry
+        assert entry.get("local") is True, entry
+        assert (target / rel_path).read_bytes() == payload
+        cas_path = home / "data" / "blobs" / digest[:2] / digest[2:]
+        assert cas_path.is_file(), f"missing receiver CAS object {digest}"
+        assert cas_path.read_bytes() == payload
 
 
 async def _pair(p) -> tuple[str, str]:
@@ -116,7 +226,7 @@ async def test_folder_send_via_manifest_real_wire():
     """End-to-end: A creates a folder, sends to B via the default
     MANIFEST_PUSH ceremony. B should auto-create the folder (since
     paired but not yet shared) and pull the blobs."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         fp_a, fp_b = await _pair(p)
         ta, port_a = _read_tok_and_port(p.a.home)
         tb, port_b = _read_tok_and_port(p.b.home)
@@ -196,6 +306,23 @@ async def test_folder_send_via_manifest_real_wire():
             assert (target / "a.txt").is_file(), (
                 "a.txt didn't land on B within 30s after Accept"
             )
-            assert (target / "sub" / "b.txt").read_text() == "beta", (
+            assert (target / "a.txt").read_text(encoding="utf-8") == "alpha"
+            assert (target / "sub" / "b.txt").read_text(encoding="utf-8") == "beta", (
                 "sub/b.txt content mismatch on B"
+            )
+            expected = {"a.txt": b"alpha", "sub/b.txt": b"beta"}
+            await _assert_receiver_state_and_cas(
+                s,
+                base=base_b,
+                token=tb,
+                home=p.b.home,
+                target=target,
+                expected=expected,
+            )
+            await _wait_for_durable_sender_completion(
+                s,
+                base=base_a,
+                token=ta,
+                peer_fp=fp_b,
+                expected_entries=len(expected),
             )

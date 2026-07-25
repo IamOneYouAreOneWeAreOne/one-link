@@ -23,9 +23,9 @@ pub const MAX_CONTROL_FRAME_BYTES: u64 = 64 * 1024;
 /// Frame kind byte per ADR-0009.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum FrameKind {
-    /// Request a chunk by chunk_id. Payload = 32-byte chunk_id.
+    /// Request a chunk by `chunk_id`. Payload = 32-byte `chunk_id`.
     ChunkRequest,
-    /// Response carrying a chunk's full chunk_log record bytes.
+    /// Response carrying a chunk's full `chunk_log` record bytes.
     ChunkResponse,
     /// Echo of a `ChunkRequest` when the peer doesn't have the chunk.
     ChunkNotFound,
@@ -35,30 +35,30 @@ pub enum FrameKind {
     ManifestRecord,
     /// Sentinel marking the end of a manifest-sync exchange.
     ManifestSyncEnd,
-    /// Bloom filter of chunk_ids the sender has (ADR-0011 init).
+    /// Bloom filter of `chunk_ids` the sender has (ADR-0011 init).
     BloomFilter,
-    /// Response listing chunk_ids the receiver still needs (ADR-0011).
+    /// Response listing `chunk_ids` the receiver still needs (ADR-0011).
     MissingChunks,
     /// Client-side request for a chunk via fountain delivery (ADR-0015).
-    /// Payload = 32-byte chunk_id. Server responds with a stream of
+    /// Payload = 32-byte `chunk_id`. Server responds with a stream of
     /// `FountainBurst` frames on the same bi-stream until either the
     /// chunk is fully encoded or the client sends `FountainAck`.
     FountainRequest,
     /// Scoped Bloom-filter handshake (ADR-0011 v2): the client supplies
     /// **both** a Bloom of what it already has AND an explicit
-    /// `want_list` of chunk_ids it cares about. The server walks the
-    /// want_list against the Bloom and returns the missing subset,
+    /// `want_list` of `chunk_ids` it cares about. The server walks the
+    /// `want_list` against the Bloom and returns the missing subset,
     /// avoiding a full memtable scan on large servers.
     ///
     /// Payload format:
     /// `[want_count: u32 LE][want_id_1..n: 32 bytes each][bloom_bytes]`.
     ScopedBloomFilter,
     /// One LT-fountain-encoded packet for a chunk (ADR-0015).
-    /// Payload = FountainPacket wire bytes (44-byte header + symbol).
+    /// Payload = `FountainPacket` wire bytes (44-byte header + symbol).
     FountainBurst,
     /// Acknowledgement that the receiver has fully decoded a chunk via
     /// fountain codes; tells the sender to stop emitting symbols.
-    /// Payload = 32-byte chunk_id.
+    /// Payload = 32-byte `chunk_id`.
     FountainAck,
     /// Capability check against a peer's pairing record.
     CapabilityCheck,
@@ -137,7 +137,6 @@ impl FrameKind {
             // a serialised FILE_CDC_CHUNK / FILE_NATIVE_CHUNK envelope
             // (base64 payload + JSON header), which exceeds the 64 KiB
             // control cap for any non-trivial chunk size.
-            Self::ChunkRequest | Self::ChunkResponse | Self::ManifestRecord => MAX_BULK_FRAME_BYTES,
             // Bloom filters and fountain bursts can be moderately large.
             // ADR-0011 caps bloom at 1 MiB; FountainBurst is one
             // symbol (typically ≤1 KiB) + 44 B header. ScopedBloomFilter
@@ -148,7 +147,10 @@ impl FrameKind {
             // large-server full-scan handshake this easily exceeds the
             // 64 KiB control-frame cap. Promote to bulk so the wire
             // protocol matches the in-engine arithmetic.
-            Self::BloomFilter
+            Self::ChunkRequest
+            | Self::ChunkResponse
+            | Self::ManifestRecord
+            | Self::BloomFilter
             | Self::FountainBurst
             | Self::ScopedBloomFilter
             | Self::MissingChunks => MAX_BULK_FRAME_BYTES,
@@ -198,6 +200,41 @@ impl Frame {
         buf
     }
 
+    /// Build the bounded wire header without staging a second copy of the
+    /// payload. The transport writes this header and `payload` separately so a
+    /// maximum-size bulk frame does not require another 1 MiB allocation and
+    /// memory copy on every send.
+    ///
+    /// Revalidate the public `payload` field here rather than relying solely on
+    /// [`Frame::new`]. This keeps the outbound trust boundary fail-closed even
+    /// if a caller constructs or mutates a `Frame` directly.
+    pub(crate) fn validated_wire_header(&self) -> Result<([u8; 11], usize), QuicError> {
+        let len = self.payload.len() as u64;
+        let max = self.kind.max_payload_bytes();
+        if len > max {
+            return Err(QuicError::FrameTooLarge {
+                kind: self.kind.as_u8(),
+                got: len,
+                max,
+            });
+        }
+
+        // One kind byte plus the maximum ten-byte unsigned LEB128 encoding.
+        // Product frame caps currently need only three length bytes, but the
+        // complete bound makes this helper correct if those caps evolve.
+        let mut header = [0u8; 11];
+        header[0] = self.kind.as_u8();
+        let mut value = len;
+        let mut cursor = 1usize;
+        while value >= 0x80 {
+            header[cursor] = value.to_le_bytes()[0] | 0x80;
+            value >>= 7;
+            cursor += 1;
+        }
+        header[cursor] = value.to_le_bytes()[0];
+        Ok((header, cursor + 1))
+    }
+
     /// On-wire byte length: kind byte + varint length + payload.
     #[must_use]
     pub fn on_wire_len(&self) -> usize {
@@ -225,10 +262,13 @@ pub fn varint_len(mut n: u64) -> usize {
 /// Encode `n` as an unsigned LEB128 varint into `buf`.
 pub fn encode_varint(buf: &mut Vec<u8>, mut n: u64) {
     while n >= 0x80 {
-        buf.push((n as u8) | 0x80);
+        // Select the low byte without a truncating cast. Its top bit is
+        // the continuation marker, while the remaining bits are exactly
+        // the low seven bits of this LEB128 group.
+        buf.push(n.to_le_bytes()[0] | 0x80);
         n >>= 7;
     }
-    buf.push(n as u8);
+    buf.push(n.to_le_bytes()[0]);
 }
 
 /// Decode an unsigned LEB128 varint from `buf` starting at `cursor`.
@@ -237,7 +277,7 @@ pub fn encode_varint(buf: &mut Vec<u8>, mut n: u64) {
 /// # Errors
 ///
 /// Returns [`QuicError::MalformedFrame`] if the buffer ends mid-varint
-/// or the value exceeds 9 bytes (more than `u64::MAX`).
+/// or the value exceeds the ten-byte storage bound for `u64`.
 pub fn decode_varint(buf: &[u8], cursor: usize) -> Result<(u64, usize), QuicError> {
     let mut result = 0u64;
     let mut shift = 0u32;
@@ -252,7 +292,7 @@ pub fn decode_varint(buf: &[u8], cursor: usize) -> Result<(u64, usize), QuicErro
         let b = buf[cursor + consumed];
         consumed += 1;
         let chunk = u64::from(b & 0x7F);
-        // Reject overflow (varint > 9 bytes for u64).
+        // The tenth LEB128 byte may carry only bit 63.
         if shift >= 63 && chunk > 1 {
             return Err(QuicError::MalformedFrame {
                 offset: (cursor + consumed) as u64,
@@ -328,14 +368,14 @@ mod tests {
 
     #[test]
     fn frame_rejects_oversized_payload() {
-        let payload = vec![0u8; (MAX_CONTROL_FRAME_BYTES + 1) as usize];
+        let payload = vec![0u8; usize::try_from(MAX_CONTROL_FRAME_BYTES + 1).unwrap()];
         let result = Frame::new(FrameKind::Ping, payload);
         assert!(matches!(result, Err(QuicError::FrameTooLarge { .. })));
     }
 
     #[test]
     fn varint_round_trip_small() {
-        for n in [0u64, 1, 127, 128, 16383, 16384, 2097151, 2097152] {
+        for n in [0u64, 1, 127, 128, 16_383, 16_384, 2_097_151, 2_097_152] {
             let mut buf = Vec::new();
             encode_varint(&mut buf, n);
             let (decoded, consumed) = decode_varint(&buf, 0).unwrap();
@@ -391,12 +431,46 @@ mod tests {
 
     #[test]
     fn max_bulk_payload_round_trip() {
-        let payload = vec![0xCDu8; MAX_BULK_FRAME_BYTES as usize];
+        let payload = vec![0xCDu8; usize::try_from(MAX_BULK_FRAME_BYTES).unwrap()];
         let f = Frame::new(FrameKind::ChunkResponse, payload.clone()).unwrap();
         let encoded = f.encode();
         // Decode the length back.
         let (length, consumed) = decode_varint(&encoded, 1).unwrap();
         assert_eq!(length, MAX_BULK_FRAME_BYTES);
         assert_eq!(&encoded[1 + consumed..], &payload[..]);
+    }
+
+    #[test]
+    fn validated_wire_header_matches_canonical_encoding_at_boundaries() {
+        for length in [
+            0usize,
+            1,
+            127,
+            128,
+            16_383,
+            16_384,
+            64 * 1024,
+            usize::try_from(MAX_BULK_FRAME_BYTES).unwrap(),
+        ] {
+            let frame = Frame::new(FrameKind::ChunkResponse, vec![0xA5; length]).unwrap();
+            let encoded = frame.encode();
+            let (header, header_len) = frame.validated_wire_header().unwrap();
+            assert_eq!(&header[..header_len], &encoded[..header_len]);
+            assert_eq!(&encoded[header_len..], frame.payload.as_slice());
+            assert_eq!(header_len + frame.payload.len(), frame.on_wire_len());
+        }
+    }
+
+    #[test]
+    fn validated_wire_header_rejects_directly_constructed_oversize_frame() {
+        let frame = Frame {
+            kind: FrameKind::ChunkResponse,
+            payload: vec![0u8; usize::try_from(MAX_BULK_FRAME_BYTES + 1).unwrap()],
+        };
+        assert!(matches!(
+            frame.validated_wire_header(),
+            Err(QuicError::FrameTooLarge { kind: 0x02, got, max })
+                if got == MAX_BULK_FRAME_BYTES + 1 && max == MAX_BULK_FRAME_BYTES
+        ));
     }
 }

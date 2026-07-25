@@ -40,7 +40,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from one_link.blobstore import BlobStore
-from one_link.daemon import Daemon
+from one_link.daemon import Daemon, FolderArchiveCommitError
 from one_link.identity import Identity, fingerprint_of
 from one_link.server import UIServer
 from one_link.state import State
@@ -167,6 +167,76 @@ def test_stage_folder_archive_handles_empty_folder(server_ctx, tmp_path):
         archive_path.unlink(missing_ok=True)
 
 
+def test_stage_folder_archive_rejects_symlinked_file_outside_source(
+    server_ctx,
+    tmp_path,
+):
+    """A link nested in a shared folder must not exfiltrate a file from
+    elsewhere on disk into the archive."""
+    root = tmp_path / "src"
+    root.mkdir()
+    outside = tmp_path / "private.txt"
+    outside.write_text("secret", encoding="utf-8")
+    link = root / "innocent.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="linked file"):
+        server_ctx["server"]._stage_folder_archive(root, "src")
+
+    staging = tmp_path / "data" / "folder_archive_staging"
+    assert not list(staging.glob("*.zip"))
+
+
+def test_stage_folder_archive_rejects_symlinked_directory_outside_source(
+    server_ctx,
+    tmp_path,
+):
+    root = tmp_path / "src"
+    root.mkdir()
+    outside = tmp_path / "private"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    link = root / "documents"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="linked directory"):
+        server_ctx["server"]._stage_folder_archive(root, "src")
+
+
+def test_stage_folder_archive_rejects_linked_source_root(server_ctx, tmp_path):
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    (real_root / "secret.txt").write_text("secret", encoding="utf-8")
+    linked_root = tmp_path / "linked"
+    try:
+        linked_root.symlink_to(real_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="source must not be"):
+        server_ctx["server"]._stage_folder_archive(linked_root, "linked")
+
+
+@pytest.mark.parametrize("unsafe_name", ["../escape", "..\\escape", "CON"])
+def test_stage_folder_archive_rejects_unsafe_archive_name(
+    server_ctx,
+    tmp_path,
+    unsafe_name,
+):
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "ok.txt").write_text("ok", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        server_ctx["server"]._stage_folder_archive(root, unsafe_name)
+
+
 # ── _maybe_extract_folder_archive (receiver) ──────────────────────
 
 
@@ -227,8 +297,7 @@ def test_maybe_extract_strips_blob_prefix_from_name(server_ctx, tmp_path):
 
 def test_maybe_extract_rejects_path_traversal_in_member(server_ctx, tmp_path):
     """A zip with member name '../escape.txt' must NOT escape the
-    target root. The malicious member is silently skipped; other
-    members extract normally."""
+    target root. The entire archive is rejected atomically."""
     from one_link.paths import inbox_dir
     box = inbox_dir()
     magic = box / "__one_link_folder__"
@@ -237,11 +306,11 @@ def test_maybe_extract_rejects_path_traversal_in_member(server_ctx, tmp_path):
     with zipfile.ZipFile(archive_path, "w") as zf:
         zf.writestr("../escape.txt", "i should not land in inbox/")
         zf.writestr("ok.txt", "this one's fine")
-    result = server_ctx["daemon"]._maybe_extract_folder_archive(archive_path)
-    assert result is not None
+    with pytest.raises(FolderArchiveCommitError):
+        server_ctx["daemon"]._maybe_extract_folder_archive(archive_path)
     target = box / "evil"
-    # Safe member extracted.
-    assert (target / "ok.txt").read_text() == "this one's fine"
+    # A mixed safe/unsafe archive never publishes a partial target.
+    assert not target.exists()
     # Traversal-attempted member NOT in inbox/.
     assert not (box / "escape.txt").exists()
     # And not anywhere ABOVE inbox either.
@@ -258,10 +327,9 @@ def test_maybe_extract_rejects_absolute_path_member(server_ctx, tmp_path):
     with zipfile.ZipFile(archive_path, "w") as zf:
         zf.writestr("/abs/path.txt", "no")
         zf.writestr("good.txt", "yes")
-    result = server_ctx["daemon"]._maybe_extract_folder_archive(archive_path)
-    assert result is not None
-    target = box / "abs"
-    assert (target / "good.txt").read_text() == "yes"
+    with pytest.raises(FolderArchiveCommitError):
+        server_ctx["daemon"]._maybe_extract_folder_archive(archive_path)
+    assert not (box / "abs").exists()
     # Nothing under /abs/.
     assert not Path("/abs/path.txt").exists()
 
@@ -279,13 +347,9 @@ def test_maybe_extract_rejects_nested_folder_name_with_traversal(
     archive_path = magic / "..foo.zip"
     with zipfile.ZipFile(archive_path, "w") as zf:
         zf.writestr("x.txt", "x")
-    result = server_ctx["daemon"]._maybe_extract_folder_archive(archive_path)
-    # Either rejected (None) OR extracted into a sanitized name.
-    # Just confirm it didn't escape inbox.
-    if result is not None:
-        target = Path(result["target_root"])
-        # Must be under inbox.
-        target.relative_to(inbox_dir().resolve())
+    with pytest.raises(FolderArchiveCommitError):
+        server_ctx["daemon"]._maybe_extract_folder_archive(archive_path)
+    assert not (box / "..foo").exists()
 
 
 # ── round-trip ────────────────────────────────────────────────────

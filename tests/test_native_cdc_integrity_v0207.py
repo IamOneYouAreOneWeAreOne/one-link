@@ -4,7 +4,7 @@ Pins:
   - Correct sidecar → verify True.
   - Tampered sidecar (wrong hash) → verify False + log warning.
   - Tampered binary (sidecar matches a different hash) → verify False.
-  - Missing sidecar → verify True (backward compat for older builds).
+  - Missing sidecar → fail closed.
 """
 from __future__ import annotations
 
@@ -13,7 +13,36 @@ from pathlib import Path
 
 import pytest
 
-from one_link.native_cdc import _verify_bundled_library
+import one_link.native_cdc as native_cdc
+from one_link.native_cdc import (
+    _compile_command,
+    _verify_bundled_library,
+    get_native_cdc_scanner,
+    native_cdc_status,
+    validate_native_cdc_library,
+)
+
+
+def test_windows_gnu_native_cdc_link_omits_wall_clock_timestamp(tmp_path):
+    command = _compile_command(
+        "gcc.exe",
+        tmp_path / "scanner.c",
+        tmp_path / "scanner.dll",
+        target_os_name="nt",
+    )
+    assert "-Wl,--no-insert-timestamp" in command
+    assert "-Wl,--image-base,0x180000000" in command
+    assert "-fPIC" not in command
+
+
+def test_windows_msvc_native_cdc_link_is_reproducible(tmp_path):
+    command = _compile_command(
+        "cl.exe",
+        tmp_path / "scanner.c",
+        tmp_path / "scanner.dll",
+        target_os_name="nt",
+    )
+    assert command[-2:] == ["/link", "/Brepro"]
 
 
 def _write_sidecar(dll_path: Path, hex_hash: str) -> None:
@@ -48,15 +77,12 @@ def test_verify_tampered_binary_rejects(tmp_path):
     assert _verify_bundled_library(dll) is False
 
 
-def test_verify_missing_sidecar_passes_backward_compat(tmp_path):
-    """Builds older than v0.20.7 didn't ship the .sha256 sidecar.
-    Treating a missing sidecar as "trust the binary" preserves
-    behavior for those older bundles. New bundled releases MUST
-    ship the sidecar; the build tooling is responsible for that."""
+def test_verify_missing_sidecar_fails_closed(tmp_path):
+    """A frozen/native payload without its binding is never trusted."""
     dll = tmp_path / "ol_native_cdc.dll"
     dll.write_bytes(b"PAYLOAD")
     # No sidecar written.
-    assert _verify_bundled_library(dll) is True
+    assert _verify_bundled_library(dll) is False
 
 
 def test_verify_malformed_sidecar_rejects(tmp_path):
@@ -71,6 +97,21 @@ def test_verify_malformed_sidecar_rejects(tmp_path):
         assert _verify_bundled_library(dll) is False, (
             f"malformed sidecar {malformed!r} should reject"
         )
+
+
+@pytest.mark.parametrize("variant", ["single_space", "uppercase", "missing_newline"])
+def test_verify_sidecar_requires_exact_canonical_format(tmp_path, variant):
+    dll = tmp_path / "ol_native_cdc.dll"
+    dll.write_bytes(b"PAYLOAD")
+    digest = hashlib.sha256(dll.read_bytes()).hexdigest()
+    if variant == "single_space":
+        payload = f"{digest} {dll.name}\n"
+    elif variant == "uppercase":
+        payload = f"{digest.upper()}  {dll.name}\n"
+    else:
+        payload = f"{digest}  {dll.name}"
+    dll.with_suffix(dll.suffix + ".sha256").write_text(payload, encoding="ascii")
+    assert _verify_bundled_library(dll) is False
 
 
 def test_bundled_dll_passes_self_check_in_repo():
@@ -89,3 +130,38 @@ def test_bundled_dll_passes_self_check_in_repo():
         "bundled DLL doesn't match its own sha256 sidecar — "
         "build pipeline is broken"
     )
+
+
+def test_available_native_cdc_passes_direct_abi_known_vector():
+    scanner = get_native_cdc_scanner()
+    if scanner is None:
+        pytest.skip(f"native CDC unavailable: {native_cdc_status().reason}")
+    validate_native_cdc_library(Path(scanner.library))
+
+
+def test_macos_bundle_sidecar_is_resolved_from_resources(tmp_path, monkeypatch):
+    app = tmp_path / "one-link.app" / "Contents"
+    executable = app / "MacOS" / "one-link"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"launcher")
+    platform_tag = "darwin-arm64"
+    library_name = "ol_native_cdc.dylib"
+    library = app / "Frameworks" / "one_link" / "native" / platform_tag / library_name
+    library.parent.mkdir(parents=True)
+    library.write_bytes(b"native-library")
+    sidecar = (
+        app
+        / "Resources"
+        / "one_link"
+        / "native"
+        / platform_tag
+        / f"{library_name}.sha256"
+    )
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text("0" * 64 + f"  {library_name}\n", encoding="ascii")
+
+    monkeypatch.setattr(native_cdc.sys, "executable", str(executable))
+    monkeypatch.setattr(native_cdc, "native_platform_tag", lambda: platform_tag)
+    monkeypatch.setattr(native_cdc, "native_library_name", lambda: library_name)
+
+    assert native_cdc._bundled_sidecar_path(library) == sidecar

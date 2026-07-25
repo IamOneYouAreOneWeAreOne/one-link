@@ -15,11 +15,12 @@ thiserror     = { workspace = true }
 ed25519-dalek = { workspace = true }
 blake3        = { workspace = true }
 tokio         = { workspace = true }
+rand_core     = { workspace = true }
+futures-util  = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 proptest    = { workspace = true }
 criterion   = { workspace = true }
-rand_core   = { workspace = true }
 rand        = "0.8"
 rand_chacha = "0.3"
 tokio       = { workspace = true, features = ["full"] }

@@ -30,31 +30,45 @@ fn take_id(input: &mut &[u8]) -> Option<NodeId> {
 fuzz_target!(|data: &[u8]| {
     let mut input = data;
     // First 32 bytes: own_id. Remaining: stream of operations.
-    let Some(own) = take_id(&mut input) else { return };
+    let Some(own) = take_id(&mut input) else {
+        return;
+    };
     let mut t = RoutingTable::new(own);
     while !input.is_empty() {
-        let Some(op) = take_byte(&mut input) else { break };
+        let Some(op) = take_byte(&mut input) else {
+            break;
+        };
         match op & 0x07 {
             0 | 1 | 2 => {
                 // Insert.
-                let Some(peer) = take_id(&mut input) else { break };
-                let Some(ts_lo) = take_byte(&mut input) else { break };
+                let Some(peer) = take_id(&mut input) else {
+                    break;
+                };
+                let Some(ts_lo) = take_byte(&mut input) else {
+                    break;
+                };
                 let _ = t.insert(peer, ts_lo as u64);
             }
             3 => {
                 // Remove.
-                let Some(peer) = take_id(&mut input) else { break };
+                let Some(peer) = take_id(&mut input) else {
+                    break;
+                };
                 let _ = t.remove(&peer);
             }
             4 => {
                 // closest_to.
-                let Some(target) = take_id(&mut input) else { break };
+                let Some(target) = take_id(&mut input) else {
+                    break;
+                };
                 let c = t.closest_to(&target);
                 assert!(c.len() <= 20);
             }
             5 => {
                 // contains.
-                let Some(peer) = take_id(&mut input) else { break };
+                let Some(peer) = take_id(&mut input) else {
+                    break;
+                };
                 let _ = t.contains(&peer);
             }
             _ => {

@@ -1,31 +1,18 @@
-//! Coherence Mesh Phase F1.4 — channel-reciprocity proximity Factor-2.
+//! Research primitives for a future channel-reciprocity pairing factor.
 //!
-//! THE PHYSICS-LAYER PAIR-TRUST PRIMITIVE no consumer messenger has.
-//!
-//! Ports `OneField/onefield/mesh/bootstrap.cl` SECTION 3 (Tier 10
-//! production, reviewed 2026-04-09): a 4-stage key-derivation pipeline
-//! that produces an IDENTICAL 256-bit secret on two devices in the
-//! same physical environment WITHOUT ever transmitting the secret.
-//!
-//! ## Why this is alien tech
-//!
-//! Standard pair-by-QR proves *knowledge* (you scanned the screen).
-//! Channel-reciprocity proves *physical co-presence*. A remote attacker
-//! who captures the QR via telephoto camera AND the bootstrap traffic
-//! STILL can't derive the Factor-2 secret because they weren't in the
-//! room. The shared key comes from the physics of the environment.
-//!
-//! Crypto term: this is an **unconditionally-secure key agreement**
-//! protocol when the eavesdropper's mutual information with the
-//! channel is below a threshold. Bose, Bennett & Brassard's
-//! information-theoretic foundation; channel reciprocity is the
-//! practical instantiation.
+//! This crate is **not a shipped proximity-authentication protocol**. It has
+//! no radio/probe acquisition, authenticated interactive reconciliation,
+//! min-entropy estimator, leakage accounting, or hardware validation. Its
+//! current single-flip and permutation drivers do not guarantee that two
+//! noisy observations converge to identical bits. Outputs are therefore
+//! unconfirmed candidates and must never be used directly as authentication
+//! decisions or traffic keys.
 //!
 //! ## Pipeline
 //!
 //! 1. **Probe** (out-of-scope for this crate): each side collects a
-//!    vector of physical observations. OneField uses RF channel
-//!    measurements; in One Link without SDR hardware we use WiFi
+//!    vector of physical observations. `OneField` uses RF channel
+//!    measurements; in One Link without SDR hardware we use `WiFi`
 //!    SSID/RSSI fingerprints + mDNS broadcasts + BLE advertisements,
 //!    plus timing observations. **What** to probe is the daemon's job;
 //!    this crate operates on the resulting observation bytes.
@@ -35,22 +22,19 @@
 //!    threshold + guard band. Both sides produce nearly-identical
 //!    bit strings; remaining errors are corrected in stage 3.
 //!
-//! 3. **Reconcile** ([`reconcile::reconcile_with_syndrome`]): one
-//!    side sends a "syndrome" (block-parity bits) over the public
-//!    bootstrap channel. The other side uses it to flip its
-//!    disagreeing bits without revealing the underlying secret bits.
-//!    Standard CASCADE-style information reconciliation.
+//! 3. **Experimental reconcile** ([`reconcile::reconcile_with_syndrome`]):
+//!    one side sends block parities. The current implementation aligns those
+//!    parities by flipping a fixed position; it cannot locate arbitrary errors
+//!    and is not the interactive CASCADE protocol.
 //!
-//! 4. **Privacy amplification** ([`amplify::privacy_amplify`]):
-//!    BLAKE3-keyed hash the reconciled bits down to 256 bits. Even
-//!    if the eavesdropper learned some bits from the syndrome, the
-//!    final 256 bits are information-theoretically secret as long as
-//!    Eve's mutual information is below the entropy of the input.
+//! 4. **Candidate extraction** ([`amplify::privacy_amplify`]): BLAKE3
+//!    compresses the candidate bits to 256 bits. This is a computational hash,
+//!    not a proof of input entropy or information-theoretic secrecy.
 //!
 //! ## What this crate provides
 //!
 //! Pure-Rust pipeline. No I/O, no radio hardware. The daemon-side
-//! integration (WiFi scanner, mDNS sniffer, BLE advertiser query)
+//! integration (`WiFi` scanner, mDNS sniffer, BLE advertiser query)
 //! lives in a separate wiring layer.
 
 #![forbid(unsafe_code)]
@@ -91,31 +75,22 @@ pub enum PairError {
         /// Minimum required.
         min: usize,
     },
-    /// The two sides' quantized bit strings disagree on too many
-    /// positions even after syndrome reconciliation. Either the
-    /// devices aren't actually co-located, or the observation
-    /// vectors weren't aligned (different probe schedules).
-    #[error("too many disagreements after reconciliation: {got} (max {max})")]
-    TooManyDisagreements {
-        /// Bit mismatches.
-        got: usize,
-        /// Acceptable max.
-        max: usize,
-    },
-    /// Privacy amplification was asked to produce more bits than the
-    /// input has remaining entropy after syndrome exposure.
-    #[error("not enough entropy for {requested}-bit key; input {input_bits} bits less leaked {leaked_bits}")]
-    InsufficientEntropy {
-        /// Bits requested in the final key.
+    /// The candidate bit string is too short for the configured conservative
+    /// size policy after accounting for disclosed parity bits. Passing this
+    /// check does not establish min-entropy.
+    #[error("not enough candidate input for {requested} output bits: input {input_bits} bits less {disclosed_bits} disclosed parity bits")]
+    InsufficientInputBits {
+        /// Output width requested by the extractor.
         requested: usize,
-        /// Bits in the reconciled string before amplification.
+        /// Candidate bits supplied to the extractor.
         input_bits: usize,
-        /// Bits leaked via the syndrome.
-        leaked_bits: usize,
+        /// Public parity bits disclosed by this one-pass helper.
+        disclosed_bits: usize,
     },
 }
 
-/// High-level convenience: full pipeline in one call.
+/// Run the current non-interactive research pipeline and return an
+/// **unconfirmed candidate**.
 ///
 /// Caller supplies:
 ///   - `my_observations`: this side's probe-result byte vector
@@ -124,18 +99,20 @@ pub enum PairError {
 ///     quantized bits and shipped the result to us)
 ///   - `config`: tunables
 ///
-/// Returns the 32-byte final key, identical on both sides when their
-/// observation vectors were physically close enough.
+/// The returned bytes are not a Factor-2 secret and are not safe as a traffic
+/// key or authentication decision. They may diverge even for similar inputs.
+/// A complete protocol must add aligned probing, real interactive
+/// reconciliation, conservative entropy estimation/leakage accounting, and
+/// explicit peer key confirmation. The `ol_pair_qr` state machine provides
+/// equality confirmation for externally supplied candidates, but does not
+/// establish their physical provenance or entropy.
 ///
 /// # Errors
 /// - [`PairError::ObservationTooShort`] when input is below the
 ///   configured minimum
-/// - [`PairError::TooManyDisagreements`] when the reconciliation
-///   produced more than `config.max_disagreement_bits` mismatches
-///   (heuristic — true mismatch requires comparing to peer)
-/// - [`PairError::InsufficientEntropy`] when amplification can't
-///   safely produce the requested key size given syndrome leakage
-pub fn derive_factor2_secret(
+/// - [`PairError::InsufficientInputBits`] when the candidate is below the
+///   conservative size floor after public parity disclosure
+pub fn derive_unconfirmed_candidate(
     my_observations: &[u8],
     peer_syndrome: &[u8],
     config: &PipelineConfig,
@@ -145,13 +122,13 @@ pub fn derive_factor2_secret(
     // Syndrome leaks one bit per syndrome byte. Final key has
     // AMPLIFIED_KEY_BYTES*8 = 256 bits. We need at least that much
     // residual entropy after leakage.
-    let leaked_bits = peer_syndrome.len(); // 1 bit per byte (one parity per block)
+    let disclosed_bits = peer_syndrome.len(); // one parity bit per byte
     let key_bits = AMPLIFIED_KEY_BYTES * 8;
-    if reconciled.len() < leaked_bits + key_bits {
-        return Err(PairError::InsufficientEntropy {
+    if reconciled.len() < disclosed_bits + key_bits {
+        return Err(PairError::InsufficientInputBits {
             requested: key_bits,
             input_bits: reconciled.len(),
-            leaked_bits,
+            disclosed_bits,
         });
     }
     let key = privacy_amplify(&reconciled, &config.amplify_salt);
@@ -164,9 +141,9 @@ pub struct PipelineConfig {
     /// Quantization parameters.
     pub quantize: QuantizeConfig,
     /// Block size in bits for syndrome generation. Larger = less
-    /// leakage but more reconciliation rounds. OneField uses 8.
+    /// leakage but more reconciliation rounds. `OneField` uses 8.
     pub syndrome_block_bits: usize,
-    /// Salt mixed into BLAKE3-keyed privacy amplification. Must be
+    /// Salt mixed into BLAKE3 candidate extraction. Must be
     /// the same on both sides; typically derived from the bootstrap
     /// handshake transcript (Factor-1 QR scan).
     pub amplify_salt: [u8; 32],

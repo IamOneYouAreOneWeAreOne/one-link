@@ -36,7 +36,10 @@
 pub mod dispatcher;
 pub mod error;
 
-pub use dispatcher::{Algorithm, Dispatcher, EventKind, PreCompressed};
+pub use dispatcher::{
+    Algorithm, Dispatcher, EventKind, PreCompressed, MAX_COMPRESSED_PAYLOAD_BYTES,
+    MAX_DECOMPRESSED_BYTES,
+};
 pub use error::CompressError;
 
 /// Crate version embedded for diagnostics.

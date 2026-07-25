@@ -6,10 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from one_link import backup_bundle, master_seed
+from one_link import master_seed
 from one_link.backup_bundle import (
-    BUNDLE_MAGIC, HEADER_LEN, BundleHeader,
-    create_bundle, extract_bundle_to_dir, open_bundle,
+    BUNDLE_MAGIC, HEADER_LEN, create_bundle, extract_bundle_to_dir, open_bundle,
 )
 
 
@@ -20,7 +19,6 @@ def _make_data_dir(tmp_path: Path) -> Path:
     (d / "state.db").write_bytes(b"SQLite format 3\x00" + os.urandom(4096))
     (d / "master.seed").write_bytes(os.urandom(32))
     (d / "data-root-key.bin").write_bytes(os.urandom(32))
-    (d / "lockbox.salt").write_bytes(os.urandom(16))
     (d / "ui.token").write_text("XYZ" * 30)
     inbox = d / "inbox"
     inbox.mkdir()
@@ -41,9 +39,10 @@ def test_bundle_round_trip(tmp_path):
     written = extract_bundle_to_dir(plaintext=plaintext, target_dir=target)
     assert "state.db" in written
     assert "master.seed" in written
-    # ui.token + lockbox.salt also in DEFAULT_INCLUDE.
+    # ui.token is in DEFAULT_INCLUDE. Passphrase-mode fixtures are covered by
+    # the DEK-envelope recovery tests; a bare legacy salt without its source
+    # passphrase must now fail closed instead of producing an unusable backup.
     assert "ui.token" in written
-    assert "lockbox.salt" in written
     # inbox NOT included unless include_files=True.
     assert not any("inbox" in w for w in written)
     # Bytes restored byte-equal.

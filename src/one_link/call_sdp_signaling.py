@@ -31,6 +31,7 @@ Pure module — no I/O, no daemon imports. Tests construct payloads
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, Optional
@@ -44,6 +45,15 @@ CALL_INVITE_SDP_V1 = 1   # schema version embedded in messages so older
                          # peers can refuse cleanly.
 
 CALL_ICE = "CALL_ICE"     # individual ICE candidate, either direction.
+
+MAX_SDP_BYTES = 128 * 1024
+MAX_ICE_CANDIDATE_CHARS = 4 * 1024
+MAX_SDP_MID_CHARS = 256
+_SDP_FIELDS = frozenset({"schema", "kind", "sdp"})
+_ICE_FIELDS = frozenset({
+    "schema", "candidate", "sdpMid", "sdpMLineIndex", "endOfCandidates",
+})
+_CALL_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +100,17 @@ class SdpPayload:
     kind: SdpKind
     sdp: str
 
+    def __post_init__(self) -> None:
+        _validate_schema(self.schema, label="sdp")
+        if not isinstance(self.kind, SdpKind):
+            raise ValueError("sdp kind must be a SdpKind")
+        if not isinstance(self.sdp, str) or not self.sdp:
+            raise ValueError("sdp body required")
+        if len(self.sdp.encode("utf-8")) > MAX_SDP_BYTES:
+            raise ValueError("sdp body too large")
+        if "\x00" in self.sdp or not looks_like_sdp(self.sdp):
+            raise ValueError("sdp body is malformed")
+
     def to_wire(self) -> dict[str, Any]:
         return {
             "schema": self.schema,
@@ -101,18 +122,13 @@ class SdpPayload:
     def from_wire(cls, d: Any) -> "SdpPayload":
         if not isinstance(d, dict):
             raise ValueError("sdp payload must be a dict")
-        try:
-            schema = int(d.get("schema") or 0)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"sdp schema not an int: {exc}") from exc
-        if schema != CALL_INVITE_SDP_V1:
-            raise ValueError(
-                f"unsupported sdp schema {schema}; expected "
-                f"{CALL_INVITE_SDP_V1}"
-            )
+        _reject_unknown_fields(d, _SDP_FIELDS, label="sdp")
+        schema = _validate_schema(d.get("schema"), label="sdp")
         kind_str = d.get("kind")
         if not isinstance(kind_str, str):
             raise ValueError("sdp kind must be string")
+        if kind_str not in {"offer", "answer", "pranswer", "rollback"}:
+            raise ValueError(f"unknown sdp kind: {kind_str!r}")
         try:
             kind = SdpKind.from_str(kind_str)
         except KeyError as exc:
@@ -120,11 +136,6 @@ class SdpPayload:
         sdp = d.get("sdp")
         if not isinstance(sdp, str) or not sdp:
             raise ValueError("sdp body required")
-        # Reasonable cap so a peer can't fill our memory with one
-        # malicious SDP. 128 KiB is more than ample for any real
-        # WebRTC offer (typical ~5 KiB).
-        if len(sdp) > 128 * 1024:
-            raise ValueError("sdp body too large")
         return cls(schema=schema, kind=kind, sdp=sdp)
 
 
@@ -144,6 +155,35 @@ class IceCandidatePayload:
     # no more candidates are coming.
     end_of_candidates: bool = False
 
+    def __post_init__(self) -> None:
+        _validate_schema(self.schema, label="ice")
+        if not isinstance(self.candidate, str):
+            raise ValueError("ice candidate must be string")
+        if len(self.candidate) > MAX_ICE_CANDIDATE_CHARS:
+            raise ValueError("ice candidate too large")
+        if any(ord(ch) < 0x20 or ord(ch) > 0x7E for ch in self.candidate):
+            raise ValueError("ice candidate contains invalid characters")
+        if not isinstance(self.end_of_candidates, bool):
+            raise ValueError("endOfCandidates must be boolean")
+        if self.end_of_candidates:
+            if self.candidate:
+                raise ValueError("end-of-candidates sentinel must be empty")
+        elif not self.candidate.startswith("candidate:"):
+            raise ValueError("ice candidate must start with candidate:")
+        if self.sdp_mid is not None:
+            if (
+                not isinstance(self.sdp_mid, str)
+                or len(self.sdp_mid) > MAX_SDP_MID_CHARS
+                or any(ord(ch) < 0x20 or ord(ch) > 0x7E for ch in self.sdp_mid)
+            ):
+                raise ValueError("sdpMid must be bounded ASCII text or null")
+        if self.sdp_m_line_index is not None and (
+            isinstance(self.sdp_m_line_index, bool)
+            or not isinstance(self.sdp_m_line_index, int)
+            or not 0 <= self.sdp_m_line_index <= 1024
+        ):
+            raise ValueError("sdpMLineIndex out of range")
+
     def to_wire(self) -> dict[str, Any]:
         return {
             "schema":            self.schema,
@@ -157,20 +197,11 @@ class IceCandidatePayload:
     def from_wire(cls, d: Any) -> "IceCandidatePayload":
         if not isinstance(d, dict):
             raise ValueError("ice payload must be a dict")
-        try:
-            schema = int(d.get("schema") or 0)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"ice schema not an int: {exc}") from exc
-        if schema != CALL_INVITE_SDP_V1:
-            raise ValueError(
-                f"unsupported ice schema {schema}; expected "
-                f"{CALL_INVITE_SDP_V1}"
-            )
+        _reject_unknown_fields(d, _ICE_FIELDS, label="ice")
+        schema = _validate_schema(d.get("schema"), label="ice")
         candidate = d.get("candidate")
         if not isinstance(candidate, str):
             raise ValueError("ice candidate must be string")
-        if len(candidate) > 4 * 1024:
-            raise ValueError("ice candidate too large")
         sdp_mid = d.get("sdpMid")
         if sdp_mid is not None and not isinstance(sdp_mid, str):
             raise ValueError("sdpMid must be string or null")
@@ -178,15 +209,14 @@ class IceCandidatePayload:
         if idx_raw is None:
             sdp_m_line_index: Optional[int] = None
         else:
-            try:
-                sdp_m_line_index = int(idx_raw)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"sdpMLineIndex not an int: {exc}"
-                ) from exc
+            if isinstance(idx_raw, bool) or not isinstance(idx_raw, int):
+                raise ValueError("sdpMLineIndex not an int")
+            sdp_m_line_index = idx_raw
             if sdp_m_line_index < 0 or sdp_m_line_index > 1024:
                 raise ValueError("sdpMLineIndex out of range")
-        end_of_candidates = bool(d.get("endOfCandidates"))
+        end_of_candidates = d.get("endOfCandidates", False)
+        if not isinstance(end_of_candidates, bool):
+            raise ValueError("endOfCandidates must be boolean")
         return cls(
             schema=schema,
             candidate=candidate,
@@ -238,7 +268,10 @@ def extract_offer(invite_payload: dict[str, Any]) -> Optional[SdpPayload]:
     raw = invite_payload.get("sdp_offer")
     if raw is None:
         return None
-    return SdpPayload.from_wire(raw)
+    parsed = SdpPayload.from_wire(raw)
+    if parsed.kind != SdpKind.OFFER:
+        raise ValueError("sdp_offer must carry offer kind")
+    return parsed
 
 
 def extract_answer(accept_payload: dict[str, Any]) -> Optional[SdpPayload]:
@@ -246,7 +279,10 @@ def extract_answer(accept_payload: dict[str, Any]) -> Optional[SdpPayload]:
     raw = accept_payload.get("sdp_answer")
     if raw is None:
         return None
-    return SdpPayload.from_wire(raw)
+    parsed = SdpPayload.from_wire(raw)
+    if parsed.kind != SdpKind.ANSWER:
+        raise ValueError("sdp_answer must carry answer kind")
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +307,7 @@ def parse_ice_message(payload: dict[str, Any]) -> tuple[str, IceCandidatePayload
     Raises ``ValueError`` on malformed input. Caller (the daemon's
     dispatch) catches + drops silently."""
     call_id = payload.get("call_id")
-    if not isinstance(call_id, str) or not call_id:
+    if not isinstance(call_id, str) or _CALL_ID_RE.fullmatch(call_id) is None:
         raise ValueError("ICE missing call_id")
     raw = payload.get("candidate")
     if raw is None:
@@ -309,6 +345,13 @@ def looks_like_sdp(s: str) -> bool:
     variations."""
     if not isinstance(s, str):
         return False
+    if not s or "\x00" in s:
+        return False
+    try:
+        if len(s.encode("utf-8")) > MAX_SDP_BYTES:
+            return False
+    except UnicodeEncodeError:
+        return False
     stripped = s.lstrip()
     if not stripped.startswith("v=0"):
         return False
@@ -317,3 +360,22 @@ def looks_like_sdp(s: str) -> bool:
     if "\nm=" not in s and "\rm=" not in s:
         return False
     return True
+
+
+def _validate_schema(value: object, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} schema not an int")
+    if value != CALL_INVITE_SDP_V1:
+        raise ValueError(
+            f"unsupported {label} schema {value}; expected {CALL_INVITE_SDP_V1}"
+        )
+    return value
+
+
+def _reject_unknown_fields(
+    value: dict[str, Any], expected: frozenset[str], *, label: str,
+) -> None:
+    keys = frozenset(value)
+    extra = keys - expected
+    if extra:
+        raise ValueError(f"{label} payload has unknown fields: {', '.join(sorted(extra))}")

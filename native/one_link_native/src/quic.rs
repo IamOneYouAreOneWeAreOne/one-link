@@ -39,9 +39,9 @@
 //! conn.send_response_on(stream_handle, 0x02, response_bytes)
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -51,7 +51,7 @@ use ol_quic::{
     Endpoint as RustEndpoint, EndpointConfig as RustEndpointConfig, Frame, FrameKind,
     Identity as RustIdentity, PeerFingerprint, PeerRegistry,
 };
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyTuple};
 use tokio::runtime::Runtime;
@@ -64,19 +64,68 @@ use crate::errors::quic_error_to_pyerr;
 
 /// Single shared tokio runtime for all QUIC I/O. Spawned with as many
 /// worker threads as the host has cores (capped at 8 for sanity).
-fn runtime() -> &'static Runtime {
-    static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get().min(8))
-            .unwrap_or(2);
+fn runtime() -> PyResult<&'static Runtime> {
+    static RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
+    match RUNTIME.get_or_init(|| {
+        let cores = std::thread::available_parallelism().map_or(2, |n| n.get().min(8));
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(cores)
             .thread_name("ol-quic")
             .enable_all()
             .build()
-            .expect("tokio runtime")
-    })
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(runtime) => Ok(runtime),
+        Err(error) => Err(PyRuntimeError::new_err(format!(
+            "failed to initialize QUIC runtime: {error}"
+        ))),
+    }
+}
+
+const MAX_PENDING_RESPONSE_STREAMS: usize = 4_096;
+const MAX_NATIVE_BATCH_ITEMS: usize = 8_192;
+const MAX_NATIVE_BATCH_BYTES: usize = 64 * 1024 * 1024;
+
+fn mutex_guard<'a, T>(mutex: &'a Mutex<T>, name: &'static str) -> PyResult<MutexGuard<'a, T>> {
+    mutex
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err(format!("{name} mutex poisoned")))
+}
+
+fn validate_batch_len(len: usize, name: &'static str) -> PyResult<()> {
+    if len > MAX_NATIVE_BATCH_ITEMS {
+        return Err(PyValueError::new_err(format!(
+            "{name} has {len} items; maximum is {MAX_NATIVE_BATCH_ITEMS}"
+        )));
+    }
+    Ok(())
+}
+
+fn extract_payload_batch(payloads: &Bound<'_, PyList>, kind: FrameKind) -> PyResult<Vec<Vec<u8>>> {
+    validate_batch_len(payloads.len(), "payloads")?;
+    let per_frame_max = usize::try_from(kind.max_payload_bytes()).unwrap_or(usize::MAX);
+    let mut total_bytes = 0usize;
+    let mut owned = Vec::with_capacity(payloads.len());
+    for item in payloads.iter() {
+        let payload = item.extract::<&[u8]>()?;
+        if payload.len() > per_frame_max {
+            return Err(quic_error_to_pyerr(ol_quic::QuicError::FrameTooLarge {
+                kind: kind.as_u8(),
+                got: payload.len() as u64,
+                max: kind.max_payload_bytes(),
+            }));
+        }
+        total_bytes = total_bytes
+            .checked_add(payload.len())
+            .ok_or_else(|| PyValueError::new_err("payload batch byte count overflow"))?;
+        if total_bytes > MAX_NATIVE_BATCH_BYTES {
+            return Err(PyValueError::new_err(format!(
+                "payload batch has {total_bytes} bytes; maximum is {MAX_NATIVE_BATCH_BYTES}"
+            )));
+        }
+        owned.push(payload.to_vec());
+    }
+    Ok(owned)
 }
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ identity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -107,7 +156,7 @@ impl PyIdentity {
     /// 32-byte BLAKE3 fingerprint of the public key.
     #[getter]
     fn fingerprint<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.fingerprint())
+        PyBytes::new(py, &self.inner.fingerprint())
     }
 
     /// Hex of the fingerprint.
@@ -119,7 +168,7 @@ impl PyIdentity {
     /// 32-byte raw Ed25519 public key.
     #[getter]
     fn public_key_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.public_key_bytes())
+        PyBytes::new(py, &self.inner.public_key_bytes())
     }
 
     /// PKCS#8 PEM string for at-rest storage.
@@ -135,7 +184,11 @@ impl PyIdentity {
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ endpoint config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Python view of `ol_quic::EndpointConfig`.
-#[pyclass(name = "EndpointConfig", module = "one_link_native.quic")]
+#[pyclass(
+    from_py_object,
+    name = "EndpointConfig",
+    module = "one_link_native.quic"
+)]
 #[derive(Debug, Clone)]
 pub struct PyEndpointConfig {
     inner: RustEndpointConfig,
@@ -147,12 +200,12 @@ impl PyEndpointConfig {
     ///
     /// :param bind: UDP bind address as a string (e.g. "127.0.0.1:0").
     ///     Defaults to "[::]:0" (any IPv6 + ephemeral port).
-    /// :param idle_timeout_ms: 30000 by default.
-    /// :param keepalive_interval_ms: 10000 by default.
-    /// :param max_concurrent_bidi_streams: 256 by default.
-    /// :param stream_receive_window_bytes: 0 by default, meaning Quinn default.
-    /// :param send_window_bytes: 0 by default, meaning Quinn default.
-    /// :param send_fairness: true by default; callers can disable it for
+    /// :param `idle_timeout_ms`: 30000 by default.
+    /// :param `keepalive_interval_ms`: 10000 by default.
+    /// :param `max_concurrent_bidi_streams`: 256 by default.
+    /// :param `stream_receive_window_bytes`: 0 by default, meaning Quinn default.
+    /// :param `send_window_bytes`: 0 by default, meaning Quinn default.
+    /// :param `send_fairness`: true by default; callers can disable it for
     ///     specialized same-priority bulk-stream experiments.
     #[new]
     #[pyo3(signature = (bind=None, idle_timeout_ms=None, keepalive_interval_ms=None, max_concurrent_bidi_streams=None, stream_receive_window_bytes=None, send_window_bytes=None, send_fairness=None))]
@@ -244,7 +297,7 @@ impl PyEndpointConfig {
 /// short and direct â€” TLS handshake hot path; the callback should do
 /// O(1) lookup work (peer registry hashmap).
 struct PyCallbackRegistry {
-    callback: Arc<Mutex<PyObject>>,
+    callback: Arc<Mutex<Py<PyAny>>>,
 }
 
 impl std::fmt::Debug for PyCallbackRegistry {
@@ -255,14 +308,18 @@ impl std::fmt::Debug for PyCallbackRegistry {
 
 impl PeerRegistry for PyCallbackRegistry {
     fn is_paired_peer(&self, fingerprint: &PeerFingerprint) -> bool {
-        Python::with_gil(|py| {
-            let callback = self.callback.lock().expect("mutex");
-            let fp_bytes = PyBytes::new_bound(py, fingerprint);
-            match callback.bind(py).call1((fp_bytes,)) {
+        Python::try_attach(|py| {
+            // A poisoned authorization callback is an authentication
+            // failure, never a reason to panic a transport worker.
+            let callback = self.callback.lock().ok()?;
+            let fp_bytes = PyBytes::new(py, fingerprint);
+            Some(match callback.bind(py).call1((fp_bytes,)) {
                 Ok(result) => result.extract::<bool>().unwrap_or(false),
                 Err(_) => false,
-            }
+            })
         })
+        .flatten()
+        .unwrap_or(false)
     }
 }
 
@@ -295,7 +352,7 @@ impl PyEndpoint {
     #[staticmethod]
     fn server(
         identity: &PyIdentity,
-        is_paired_callback: PyObject,
+        is_paired_callback: Py<PyAny>,
         config: PyEndpointConfig,
     ) -> PyResult<Self> {
         let registry = Arc::new(PyCallbackRegistry {
@@ -303,7 +360,8 @@ impl PyEndpoint {
         });
         let identity_arc = identity.inner.clone();
         let config_inner = config.inner;
-        let endpoint = runtime()
+        let runtime = runtime()?;
+        let endpoint = runtime
             .block_on(async move {
                 RustEndpoint::server_for_identity(identity_arc, registry, config_inner)
             })
@@ -314,20 +372,13 @@ impl PyEndpoint {
         // doesn't accumulate unbounded inbound connections.
         let (tx, rx) = mpsc::channel::<PyConnection>(64);
         let endpoint_clone = endpoint.clone();
-        let accept_join = runtime().spawn(async move {
+        let accept_join = runtime.spawn(async move {
             while let Some(maybe_conn) = endpoint_clone.accept().await {
-                match maybe_conn {
-                    Ok(conn) => {
-                        let py_conn = PyConnection::new(conn);
-                        if tx.send(py_conn).await.is_err() {
-                            // Receiver dropped â†’ endpoint shutting down.
-                            break;
-                        }
-                    }
-                    Err(_) => {
-                        // Per-connection failure (cert rejected, etc).
-                        // Continue accepting other connections.
-                        continue;
+                if let Ok(conn) = maybe_conn {
+                    let py_conn = PyConnection::new(conn);
+                    if tx.send(py_conn).await.is_err() {
+                        // Receiver dropped â†’ endpoint shutting down.
+                        break;
                     }
                 }
             }
@@ -345,7 +396,7 @@ impl PyEndpoint {
     fn client(identity: &PyIdentity, config: PyEndpointConfig) -> PyResult<Self> {
         let identity_arc = identity.inner.clone();
         let config_inner = config.inner;
-        let endpoint = runtime()
+        let endpoint = runtime()?
             .block_on(async move { RustEndpoint::client_for_identity(identity_arc, config_inner) })
             .map_err(quic_error_to_pyerr)?;
         Ok(Self {
@@ -367,15 +418,15 @@ impl PyEndpoint {
     /// Our identity fingerprint.
     #[getter]
     fn fingerprint<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.identity().fingerprint())
+        PyBytes::new(py, &self.inner.identity().fingerprint())
     }
 
     /// Connect to a peer; blocks until the handshake completes.
     ///
     /// :param addr: peer socket address as "host:port".
-    /// :param expected_fingerprint: 32-byte fingerprint we expect them
+    /// :param `expected_fingerprint`: 32-byte fingerprint we expect them
     ///     to present (verified at TLS layer per ADR-0010).
-    /// :param timeout_ms: overall timeout for the handshake.
+    /// :param `timeout_ms`: overall timeout for the handshake.
     fn connect_blocking(
         &self,
         py: Python<'_>,
@@ -397,8 +448,9 @@ impl PyEndpoint {
 
         let endpoint = self.inner.clone();
         let timeout = Duration::from_millis(timeout_ms);
-        let conn = py.allow_threads(|| {
-            runtime().block_on(async move {
+        let runtime = runtime()?;
+        let conn = py.detach(move || {
+            runtime.block_on(async move {
                 tokio::time::timeout(timeout, endpoint.connect(socket_addr, fp))
                     .await
                     .map_err(|_| ol_quic::QuicError::Io(std::io::Error::other("connect timeout")))?
@@ -415,8 +467,9 @@ impl PyEndpoint {
             PyValueError::new_err("accept_blocking called on a client-only endpoint")
         })?;
         let timeout = Duration::from_millis(timeout_ms);
-        let result = py.allow_threads(|| {
-            runtime().block_on(async move {
+        let runtime = runtime()?;
+        let result = py.detach(move || {
+            runtime.block_on(async move {
                 let mut guard = rx.lock().await;
                 tokio::time::timeout(timeout, guard.recv()).await
             })
@@ -456,20 +509,43 @@ pub struct PyInboundStream {
 #[pyclass(name = "Connection", module = "one_link_native.quic")]
 pub struct PyConnection {
     inner: Arc<ol_quic::Connection>,
-    /// Per-connection counter so we can hand out stream handles
-    /// uniquely. Used for diagnostics; no functional dependency.
-    stream_counter: Arc<Mutex<u64>>,
-    /// Live handles waiting for response writes (set by
-    /// `recv_frame_blocking`, consumed by `send_response_on`).
-    pending_streams: Arc<Mutex<HashMap<u64, (quinn::SendStream, quinn::RecvStream)>>>,
+    /// Counter and live handles share one lock.  Keeping them in a single
+    /// state object makes ID allocation + insertion atomic and removes the
+    /// opposite lock ordering that could deadlock concurrent single/batch
+    /// receive calls.
+    stream_state: Arc<Mutex<PendingStreamState>>,
+}
+
+struct PendingStreamState {
+    next_id: u64,
+    streams: HashMap<u64, (quinn::SendStream, quinn::RecvStream)>,
+}
+
+impl PendingStreamState {
+    fn insert(&mut self, pair: (quinn::SendStream, quinn::RecvStream)) -> PyResult<u64> {
+        if self.streams.len() >= MAX_PENDING_RESPONSE_STREAMS {
+            return Err(PyRuntimeError::new_err(format!(
+                "pending response stream limit reached ({MAX_PENDING_RESPONSE_STREAMS})"
+            )));
+        }
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| PyRuntimeError::new_err("stream id space exhausted"))?;
+        let stream_id = self.next_id;
+        self.streams.insert(stream_id, pair);
+        Ok(stream_id)
+    }
 }
 
 impl PyConnection {
     fn new(inner: ol_quic::Connection) -> Self {
         Self {
             inner: Arc::new(inner),
-            stream_counter: Arc::new(Mutex::new(0)),
-            pending_streams: Arc::new(Mutex::new(HashMap::new())),
+            stream_state: Arc::new(Mutex::new(PendingStreamState {
+                next_id: 0,
+                streams: HashMap::new(),
+            })),
         }
     }
 }
@@ -495,15 +571,15 @@ impl PyConnection {
     /// handshakes.
     fn peer_fingerprint<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
         let fp = self.inner.peer_fingerprint()?;
-        Some(PyBytes::new_bound(py, &fp))
+        Some(PyBytes::new(py, &fp))
     }
 
     /// Round-trip: open a fresh bidirectional stream, send the request
     /// frame, read the response frame, close the stream.
     ///
-    /// :param frame_kind: u8 frame kind (one of the values in `proto`).
+    /// :param `frame_kind`: u8 frame kind (one of the values in `proto`).
     /// :param payload: request payload bytes.
-    /// :return: (response_kind: int, response_payload: bytes)
+    /// :return: (`response_kind`: int, `response_payload`: bytes)
     fn send_frame_round_trip<'py>(
         &self,
         py: Python<'py>,
@@ -516,19 +592,20 @@ impl PyConnection {
         let request = Frame::new(kind, payload.to_vec()).map_err(quic_error_to_pyerr)?;
 
         let conn = self.inner.clone();
-        let response = py.allow_threads(|| {
-            runtime().block_on(async move { conn.send_frame_request_response(request).await })
+        let runtime = runtime()?;
+        let response = py.detach(move || {
+            runtime.block_on(async move { conn.send_frame_request_response(request).await })
         });
         let response = response.map_err(quic_error_to_pyerr)?;
         let kind_int = response.kind.as_u8();
-        let payload_bytes = PyBytes::new_bound(py, &response.payload);
-        Ok(PyTuple::new_bound(
+        let payload_bytes = PyBytes::new(py, &response.payload);
+        PyTuple::new(
             py,
             vec![
-                kind_int.into_py(py).into_bound(py),
+                kind_int.into_pyobject(py)?.into_any(),
                 payload_bytes.into_any(),
             ],
-        ))
+        )
     }
 
     /// Batched request/response helper: enter the Rust async runtime once,
@@ -540,19 +617,21 @@ impl PyConnection {
         &self,
         py: Python<'py>,
         frame_kind: u8,
-        payloads: Vec<Vec<u8>>,
+        payloads: &Bound<'py, PyList>,
     ) -> PyResult<Bound<'py, PyList>> {
         let kind = FrameKind::from_u8(frame_kind).ok_or_else(|| {
             PyValueError::new_err(format!("unknown frame kind 0x{frame_kind:02x}"))
         })?;
+        let payloads = extract_payload_batch(payloads, kind)?;
         let mut requests = Vec::with_capacity(payloads.len());
         for payload in payloads {
             requests.push(Frame::new(kind, payload).map_err(quic_error_to_pyerr)?);
         }
 
         let conn = self.inner.clone();
-        let responses = py.allow_threads(|| {
-            runtime().block_on(async move {
+        let runtime = runtime()?;
+        let responses = py.detach(move || {
+            runtime.block_on(async move {
                 let mut out = Vec::with_capacity(requests.len());
                 for request in requests {
                     out.push(conn.send_frame_request_response(request).await?);
@@ -572,20 +651,22 @@ impl PyConnection {
         &self,
         py: Python<'py>,
         frame_kind: u8,
-        payloads: Vec<Vec<u8>>,
+        payloads: &Bound<'py, PyList>,
         max_in_flight: Option<usize>,
     ) -> PyResult<Bound<'py, PyList>> {
         let kind = FrameKind::from_u8(frame_kind).ok_or_else(|| {
             PyValueError::new_err(format!("unknown frame kind 0x{frame_kind:02x}"))
         })?;
+        let payloads = extract_payload_batch(payloads, kind)?;
         let mut requests = Vec::with_capacity(payloads.len());
         for payload in payloads {
             requests.push(Frame::new(kind, payload).map_err(quic_error_to_pyerr)?);
         }
         let cap = max_in_flight.unwrap_or(64).clamp(1, 1024);
         let conn = self.inner.clone();
-        let responses = py.allow_threads(|| {
-            runtime().block_on(async move {
+        let runtime = runtime()?;
+        let responses = py.detach(move || {
+            runtime.block_on(async move {
                 let semaphore = Arc::new(Semaphore::new(cap));
                 let mut set = JoinSet::new();
                 let total = requests.len();
@@ -634,23 +715,16 @@ impl PyConnection {
         &self,
         py: Python<'py>,
         frame_kind: u8,
-        payloads: Vec<Vec<u8>>,
+        payloads: &Bound<'py, PyList>,
     ) -> PyResult<Bound<'py, PyList>> {
         let kind = FrameKind::from_u8(frame_kind).ok_or_else(|| {
             PyValueError::new_err(format!("unknown frame kind 0x{frame_kind:02x}"))
         })?;
-        for payload in &payloads {
-            if payload.len() as u64 > kind.max_payload_bytes() {
-                return Err(quic_error_to_pyerr(ol_quic::QuicError::FrameTooLarge {
-                    kind: kind.as_u8(),
-                    got: payload.len() as u64,
-                    max: kind.max_payload_bytes(),
-                }));
-            }
-        }
+        let payloads = extract_payload_batch(payloads, kind)?;
         let conn = self.inner.clone();
-        let responses = py.allow_threads(|| {
-            runtime().block_on(async move {
+        let runtime = runtime()?;
+        let responses = py.detach(move || {
+            runtime.block_on(async move {
                 let total = payloads.len();
                 let (mut send, mut recv) = conn.open_bi_stream().await?;
                 for payload in payloads {
@@ -677,21 +751,13 @@ impl PyConnection {
         &self,
         py: Python<'py>,
         frame_kind: u8,
-        payloads: Vec<Vec<u8>>,
+        payloads: &Bound<'py, PyList>,
         lanes: Option<usize>,
     ) -> PyResult<Bound<'py, PyList>> {
         let kind = FrameKind::from_u8(frame_kind).ok_or_else(|| {
             PyValueError::new_err(format!("unknown frame kind 0x{frame_kind:02x}"))
         })?;
-        for payload in &payloads {
-            if payload.len() as u64 > kind.max_payload_bytes() {
-                return Err(quic_error_to_pyerr(ol_quic::QuicError::FrameTooLarge {
-                    kind: kind.as_u8(),
-                    got: payload.len() as u64,
-                    max: kind.max_payload_bytes(),
-                }));
-            }
-        }
+        let payloads = extract_payload_batch(payloads, kind)?;
         let total = payloads.len();
         let lane_count = lanes.unwrap_or(4).clamp(1, total.max(1)).min(256);
         let mut buckets: Vec<Vec<(usize, Vec<u8>)>> = (0..lane_count).map(|_| Vec::new()).collect();
@@ -699,8 +765,9 @@ impl PyConnection {
             buckets[idx % lane_count].push((idx, payload));
         }
         let conn = self.inner.clone();
-        let responses = py.allow_threads(|| {
-            runtime().block_on(async move {
+        let runtime = runtime()?;
+        let responses = py.detach(move || {
+            runtime.block_on(async move {
                 let mut set = JoinSet::new();
                 for bucket in buckets.into_iter().filter(|bucket| !bucket.is_empty()) {
                     let conn = conn.clone();
@@ -751,7 +818,7 @@ impl PyConnection {
         &self,
         py: Python<'_>,
         frame_kind: u8,
-        payloads: Vec<Vec<u8>>,
+        payloads: &Bound<'_, PyList>,
         expected_response_kind: u8,
     ) -> PyResult<usize> {
         let kind = FrameKind::from_u8(frame_kind).ok_or_else(|| {
@@ -762,23 +829,16 @@ impl PyConnection {
                 "unknown response frame kind 0x{expected_response_kind:02x}"
             ))
         })?;
-        for payload in &payloads {
-            if payload.len() as u64 > kind.max_payload_bytes() {
-                return Err(quic_error_to_pyerr(ol_quic::QuicError::FrameTooLarge {
-                    kind: kind.as_u8(),
-                    got: payload.len() as u64,
-                    max: kind.max_payload_bytes(),
-                }));
-            }
-        }
+        let payloads = extract_payload_batch(payloads, kind)?;
         let payloads = payloads
             .into_iter()
             .map(|payload| encode_frame_bytes(kind, &payload))
             .collect::<Vec<_>>();
         let conn = self.inner.clone();
         let total = payloads.len();
-        let bytes = py.allow_threads(|| {
-            runtime().block_on(async move {
+        let runtime = runtime()?;
+        let bytes = py.detach(move || {
+            runtime.block_on(async move {
                 let (mut send, mut recv) = conn.open_bi_stream().await?;
                 for payload in payloads {
                     write_encoded_frame(&mut send, payload).await?;
@@ -799,7 +859,7 @@ impl PyConnection {
         &self,
         py: Python<'_>,
         frame_kind: u8,
-        payloads: Vec<Vec<u8>>,
+        payloads: &Bound<'_, PyList>,
         expected_response_kind: u8,
         lanes: Option<usize>,
     ) -> PyResult<usize> {
@@ -811,15 +871,7 @@ impl PyConnection {
                 "unknown response frame kind 0x{expected_response_kind:02x}"
             ))
         })?;
-        for payload in &payloads {
-            if payload.len() as u64 > kind.max_payload_bytes() {
-                return Err(quic_error_to_pyerr(ol_quic::QuicError::FrameTooLarge {
-                    kind: kind.as_u8(),
-                    got: payload.len() as u64,
-                    max: kind.max_payload_bytes(),
-                }));
-            }
-        }
+        let payloads = extract_payload_batch(payloads, kind)?;
         let total = payloads.len();
         let payloads = payloads
             .into_iter()
@@ -831,8 +883,9 @@ impl PyConnection {
             buckets[idx % lane_count].push(payload);
         }
         let conn = self.inner.clone();
-        let bytes = py.allow_threads(|| {
-            runtime().block_on(async move {
+        let runtime = runtime()?;
+        let bytes = py.detach(move || {
+            runtime.block_on(async move {
                 let mut set = JoinSet::new();
                 for bucket in buckets.into_iter().filter(|bucket| !bucket.is_empty()) {
                     let conn = conn.clone();
@@ -874,11 +927,21 @@ impl PyConnection {
         py: Python<'py>,
         timeout_ms: u64,
     ) -> PyResult<Option<Bound<'py, PyTuple>>> {
+        if mutex_guard(&self.stream_state, "pending stream state")?
+            .streams
+            .len()
+            >= MAX_PENDING_RESPONSE_STREAMS
+        {
+            return Err(PyRuntimeError::new_err(format!(
+                "pending response stream limit reached ({MAX_PENDING_RESPONSE_STREAMS})"
+            )));
+        }
         let conn = self.inner.clone();
         let timeout = Duration::from_millis(timeout_ms);
 
-        let result = py.allow_threads(|| {
-            runtime().block_on(async move {
+        let runtime = runtime()?;
+        let result = py.detach(move || {
+            runtime.block_on(async move {
                 let pair = match tokio::time::timeout(timeout, conn.accept_bi_stream()).await {
                     Ok(Ok(p)) => p,
                     Ok(Err(e)) => return Ok::<_, ol_quic::QuicError>(Some(Err(e))),
@@ -895,29 +958,21 @@ impl PyConnection {
 
         match result {
             Ok(Some(Ok((send, recv, frame)))) => {
-                let stream_id = {
-                    let mut counter = self.stream_counter.lock().expect("mutex");
-                    *counter += 1;
-                    *counter
-                };
-                self.pending_streams
-                    .lock()
-                    .expect("mutex")
-                    .insert(stream_id, (send, recv));
+                let stream_id = mutex_guard(&self.stream_state, "pending stream state")?
+                    .insert((send, recv))?;
                 let kind_int = frame.kind.as_u8();
-                let payload = PyBytes::new_bound(py, &frame.payload);
-                Ok(Some(PyTuple::new_bound(
+                let payload = PyBytes::new(py, &frame.payload);
+                Ok(Some(PyTuple::new(
                     py,
                     vec![
-                        stream_id.into_py(py).into_bound(py),
-                        kind_int.into_py(py).into_bound(py),
+                        stream_id.into_pyobject(py)?.into_any(),
+                        kind_int.into_pyobject(py)?.into_any(),
                         payload.into_any(),
                     ],
-                )))
+                )?))
             }
-            Ok(Some(Err(e))) => Err(quic_error_to_pyerr(e)),
             Ok(None) => Ok(None), // timeout
-            Err(e) => Err(quic_error_to_pyerr(e)),
+            Ok(Some(Err(e))) | Err(e) => Err(quic_error_to_pyerr(e)),
         }
     }
 
@@ -935,13 +990,28 @@ impl PyConnection {
         timeout_ms: u64,
         idle_timeout_us: Option<u64>,
     ) -> PyResult<Bound<'py, PyList>> {
-        let max_frames = max_frames.clamp(1, 4096);
+        if !(1..=MAX_PENDING_RESPONSE_STREAMS).contains(&max_frames) {
+            return Err(PyValueError::new_err(format!(
+                "max_frames must be between 1 and {MAX_PENDING_RESPONSE_STREAMS}"
+            )));
+        }
+        let available = {
+            let state = mutex_guard(&self.stream_state, "pending stream state")?;
+            MAX_PENDING_RESPONSE_STREAMS.saturating_sub(state.streams.len())
+        };
+        if available == 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "pending response stream limit reached ({MAX_PENDING_RESPONSE_STREAMS})"
+            )));
+        }
+        let max_frames = max_frames.min(available);
         let conn = self.inner.clone();
         let timeout = Duration::from_millis(timeout_ms);
         let idle = Duration::from_micros(idle_timeout_us.unwrap_or(250).min(50_000));
 
-        let result = py.allow_threads(|| {
-            runtime().block_on(async move {
+        let runtime = runtime()?;
+        let result = py.detach(move || {
+            runtime.block_on(async move {
                 let mut out = Vec::with_capacity(max_frames);
                 for idx in 0..max_frames {
                     let wait = if idx == 0 {
@@ -970,22 +1040,29 @@ impl PyConnection {
         });
         let frames = result.map_err(quic_error_to_pyerr)?;
 
-        let items = PyList::empty_bound(py);
-        let mut pending = self.pending_streams.lock().expect("mutex");
-        let mut counter = self.stream_counter.lock().expect("mutex");
+        let items = PyList::empty(py);
+        let mut state = mutex_guard(&self.stream_state, "pending stream state")?;
+        if state.streams.len().saturating_add(frames.len()) > MAX_PENDING_RESPONSE_STREAMS {
+            return Err(PyRuntimeError::new_err(format!(
+                "pending response stream limit reached ({MAX_PENDING_RESPONSE_STREAMS})"
+            )));
+        }
+        let frame_count = u64::try_from(frames.len())
+            .map_err(|_| PyRuntimeError::new_err("stream batch size exceeds u64"))?;
+        if state.next_id.checked_add(frame_count).is_none() {
+            return Err(PyRuntimeError::new_err("stream id space exhausted"));
+        }
         for (send, recv, frame) in frames {
-            *counter += 1;
-            let stream_id = *counter;
-            pending.insert(stream_id, (send, recv));
-            let payload = PyBytes::new_bound(py, &frame.payload);
-            items.append(PyTuple::new_bound(
+            let stream_id = state.insert((send, recv))?;
+            let payload = PyBytes::new(py, &frame.payload);
+            items.append(PyTuple::new(
                 py,
                 vec![
-                    stream_id.into_py(py).into_bound(py),
-                    frame.kind.as_u8().into_py(py).into_bound(py),
+                    stream_id.into_pyobject(py)?.into_any(),
+                    frame.kind.as_u8().into_pyobject(py)?.into_any(),
                     payload.into_any(),
                 ],
-            ))?;
+            )?)?;
         }
         Ok(items)
     }
@@ -1003,15 +1080,14 @@ impl PyConnection {
             PyValueError::new_err(format!("unknown frame kind 0x{frame_kind:02x}"))
         })?;
         let frame = Frame::new(kind, payload.to_vec()).map_err(quic_error_to_pyerr)?;
-        let pair = self
-            .pending_streams
-            .lock()
-            .expect("mutex")
+        let pair = mutex_guard(&self.stream_state, "pending stream state")?
+            .streams
             .remove(&stream_id)
             .ok_or_else(|| PyValueError::new_err(format!("unknown stream_id {stream_id}")))?;
         let (mut send, _recv) = pair;
-        let result = py.allow_threads(|| {
-            runtime().block_on(async move {
+        let runtime = runtime()?;
+        let result = py.detach(move || {
+            runtime.block_on(async move {
                 write_frame(&mut send, &frame).await?;
                 send.finish()
                     .map_err(|e| ol_quic::QuicError::Io(std::io::Error::other(e.to_string())))?;
@@ -1032,24 +1108,53 @@ impl PyConnection {
         responses: Vec<(u64, u8, Vec<u8>)>,
         max_in_flight: Option<usize>,
     ) -> PyResult<()> {
-        let mut streams = Vec::with_capacity(responses.len());
+        if responses.len() > MAX_PENDING_RESPONSE_STREAMS {
+            return Err(PyValueError::new_err(format!(
+                "responses has {} items; maximum is {MAX_PENDING_RESPONSE_STREAMS}",
+                responses.len()
+            )));
+        }
+        // Validate the complete batch before consuming any live stream.  The
+        // previous loop removed earlier handles and then could fail on a
+        // later invalid kind/id, leaving callers unable to respond to the
+        // already-consumed requests.
+        let mut prepared = Vec::with_capacity(responses.len());
+        let mut ids = HashSet::with_capacity(responses.len());
+        for (stream_id, frame_kind, payload) in responses {
+            if !ids.insert(stream_id) {
+                return Err(PyValueError::new_err(format!(
+                    "duplicate stream_id {stream_id} in response batch"
+                )));
+            }
+            let kind = FrameKind::from_u8(frame_kind).ok_or_else(|| {
+                PyValueError::new_err(format!("unknown frame kind 0x{frame_kind:02x}"))
+            })?;
+            let frame = Frame::new(kind, payload).map_err(quic_error_to_pyerr)?;
+            prepared.push((stream_id, frame));
+        }
+
+        let mut streams = Vec::with_capacity(prepared.len());
         {
-            let mut pending = self.pending_streams.lock().expect("mutex");
-            for (stream_id, frame_kind, payload) in responses {
-                let kind = FrameKind::from_u8(frame_kind).ok_or_else(|| {
-                    PyValueError::new_err(format!("unknown frame kind 0x{frame_kind:02x}"))
-                })?;
-                let frame = Frame::new(kind, payload).map_err(quic_error_to_pyerr)?;
-                let pair = pending.remove(&stream_id).ok_or_else(|| {
-                    PyValueError::new_err(format!("unknown stream_id {stream_id}"))
+            let mut state = mutex_guard(&self.stream_state, "pending stream state")?;
+            for stream_id in &ids {
+                if !state.streams.contains_key(stream_id) {
+                    return Err(PyValueError::new_err(format!(
+                        "unknown stream_id {stream_id}"
+                    )));
+                }
+            }
+            for (stream_id, frame) in prepared {
+                let pair = state.streams.remove(&stream_id).ok_or_else(|| {
+                    PyRuntimeError::new_err("validated pending stream disappeared")
                 })?;
                 streams.push((pair, frame));
             }
         }
 
         let cap = max_in_flight.unwrap_or(64).clamp(1, 1024);
-        let result = py.allow_threads(|| {
-            runtime().block_on(async move {
+        let runtime = runtime()?;
+        let result = py.detach(move || {
+            runtime.block_on(async move {
                 let semaphore = Arc::new(Semaphore::new(cap));
                 let mut set = JoinSet::new();
                 for ((mut send, _recv), frame) in streams {
@@ -1090,9 +1195,10 @@ impl PyConnection {
         py: Python<'_>,
         requests: usize,
         response_kind: u8,
-        payload: Vec<u8>,
+        payload: &[u8],
         max_in_flight: Option<usize>,
     ) -> PyResult<usize> {
+        validate_batch_len(requests, "requests")?;
         let kind = FrameKind::from_u8(response_kind).ok_or_else(|| {
             PyValueError::new_err(format!("unknown frame kind 0x{response_kind:02x}"))
         })?;
@@ -1105,9 +1211,10 @@ impl PyConnection {
         }
         let cap = max_in_flight.unwrap_or(64).clamp(1, 1024);
         let conn = self.inner.clone();
-        let response = encode_frame_bytes(kind, &payload);
-        let result = py.allow_threads(|| {
-            runtime().block_on(async move {
+        let response = encode_frame_bytes(kind, payload);
+        let runtime = runtime()?;
+        let result = py.detach(move || {
+            runtime.block_on(async move {
                 let semaphore = Arc::new(Semaphore::new(cap));
                 let mut set = JoinSet::new();
                 for _ in 0..requests {
@@ -1150,9 +1257,15 @@ impl PyConnection {
         streams: usize,
         requests_per_stream: usize,
         response_kind: u8,
-        payload: Vec<u8>,
+        payload: &[u8],
         max_in_flight: Option<usize>,
     ) -> PyResult<usize> {
+        validate_batch_len(streams, "streams")?;
+        validate_batch_len(requests_per_stream, "requests_per_stream")?;
+        let total_requests = streams.checked_mul(requests_per_stream).ok_or_else(|| {
+            PyValueError::new_err("streams * requests_per_stream overflows usize")
+        })?;
+        validate_batch_len(total_requests, "total stream requests")?;
         let kind = FrameKind::from_u8(response_kind).ok_or_else(|| {
             PyValueError::new_err(format!("unknown frame kind 0x{response_kind:02x}"))
         })?;
@@ -1165,9 +1278,10 @@ impl PyConnection {
         }
         let cap = max_in_flight.unwrap_or(16).clamp(1, 256);
         let conn = self.inner.clone();
-        let response = encode_frame_bytes(kind, &payload);
-        let result = py.allow_threads(|| {
-            runtime().block_on(async move {
+        let response = encode_frame_bytes(kind, payload);
+        let runtime = runtime()?;
+        let result = py.detach(move || {
+            runtime.block_on(async move {
                 let semaphore = Arc::new(Semaphore::new(cap));
                 let mut set = JoinSet::new();
                 for _ in 0..streams {
@@ -1204,7 +1318,7 @@ impl PyConnection {
     /// RTT estimate in milliseconds.
     #[getter]
     fn rtt_ms(&self) -> u64 {
-        self.inner.rtt().as_millis().min(u64::MAX as u128) as u64
+        u64::try_from(self.inner.rtt().as_millis()).unwrap_or(u64::MAX)
     }
 
     /// Close the connection gracefully.
@@ -1217,9 +1331,12 @@ impl PyConnection {
 
 pub(crate) fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     use ol_quic::{ALPN, MAX_BULK_FRAME_BYTES, MAX_CONTROL_FRAME_BYTES};
-    m.add("ALPN", PyBytes::new_bound(m.py(), ALPN))?;
+    m.add("ALPN", PyBytes::new(m.py(), ALPN))?;
     m.add("MAX_BULK_FRAME_BYTES", MAX_BULK_FRAME_BYTES)?;
     m.add("MAX_CONTROL_FRAME_BYTES", MAX_CONTROL_FRAME_BYTES)?;
+    m.add("MAX_PENDING_RESPONSE_STREAMS", MAX_PENDING_RESPONSE_STREAMS)?;
+    m.add("MAX_NATIVE_BATCH_ITEMS", MAX_NATIVE_BATCH_ITEMS)?;
+    m.add("MAX_NATIVE_BATCH_BYTES", MAX_NATIVE_BATCH_BYTES)?;
 
     // Frame kind constants â€” exported as module-level integers so Python
     // callers can pass `quic.FRAME_CHUNK_REQUEST` instead of memorizing 0x01.
@@ -1265,18 +1382,18 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-fn frames_to_pylist<'py>(py: Python<'py>, frames: Vec<Frame>) -> PyResult<Bound<'py, PyList>> {
-    let items = PyList::empty_bound(py);
+fn frames_to_pylist(py: Python<'_>, frames: Vec<Frame>) -> PyResult<Bound<'_, PyList>> {
+    let items = PyList::empty(py);
     for frame in frames {
         let kind_int = frame.kind.as_u8();
-        let payload_bytes = PyBytes::new_bound(py, &frame.payload);
-        items.append(PyTuple::new_bound(
+        let payload_bytes = PyBytes::new(py, &frame.payload);
+        items.append(PyTuple::new(
             py,
             vec![
-                kind_int.into_py(py).into_bound(py),
+                kind_int.into_pyobject(py)?.into_any(),
                 payload_bytes.into_any(),
             ],
-        ))?;
+        )?)?;
     }
     Ok(items)
 }
@@ -1362,8 +1479,19 @@ async fn read_expected_stream_payload_bytes_chunks(
                 max,
             });
         }
-        skip_chunk_bytes(recv, &mut cur, &mut pos, length as usize).await?;
-        bytes += length as usize;
+        let platform_length =
+            usize::try_from(length).map_err(|_| ol_quic::QuicError::FrameTooLarge {
+                kind: kind.as_u8(),
+                got: length,
+                max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+            })?;
+        skip_chunk_bytes(recv, &mut cur, &mut pos, platform_length).await?;
+        bytes = bytes.checked_add(platform_length).ok_or_else(|| {
+            ol_quic::QuicError::MalformedFrame {
+                offset: u64::try_from(bytes).unwrap_or(u64::MAX),
+                reason: "batch byte count overflow",
+            }
+        })?;
     }
     Ok(bytes)
 }

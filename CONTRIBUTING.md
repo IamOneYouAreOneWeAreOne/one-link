@@ -24,10 +24,12 @@ Every change passes these gates:
    dependency is supply-chain risk. The bar is "no other path
    exists" or "this is a vetted, audited library with no
    telemetry."
-3. **No telemetry, no analytics, no phone-home of any kind.**
-   This is non-negotiable. If your change adds an outbound HTTP
-   request to an origin the user did not configure, it gets
-   reverted at review.
+3. **No product analytics, advertising telemetry, or covert phone-home.**
+   This is non-negotiable. Necessary network behavior (for example,
+   user-configured discovery/relay or an explicitly enabled update check) must
+   be consented to, documented in the threat model, narrowly scoped, and
+   testable. An outbound request to an undisclosed origin gets reverted at
+   review.
 4. **Threat-model alignment.** If the change introduces a new
    surface (a new wire kind, a new endpoint, a new file format),
    the PR description must say which threat tiers (T1-T9) the

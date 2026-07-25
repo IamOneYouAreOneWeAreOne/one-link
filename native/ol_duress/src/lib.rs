@@ -1,4 +1,4 @@
-//! `ol_duress` — plausibly deniable storage + duress codes.
+//! `ol_duress` — duress-gate and signaling primitives.
 //!
 //! Per `FILE_ENGINE_V2_PLAN.md` Phase D item #6:
 //!
@@ -6,19 +6,18 @@
 //! > duress-key-unlocks-decoy + steganographic coercion signal in
 //! > ratchet header. Coercion-resistant tier.
 //!
-//! ## Threat model
+//! ## Design target and current boundary
 //!
-//! Operator is coerced (legal compulsion or physical threat) to
-//! produce a decryption key. The "real" volume must look
-//! indistinguishable from random data so its existence can be
-//! plausibly denied; the "decoy" volume contains real-but-uninteresting
-//! data that satisfies the coercer. The operator types either:
+//! The design target is a coercion-aware filesystem in which an operator can
+//! open a decoy volume and notify trusted peers. This crate does not implement
+//! storage layout, a filesystem driver, UI behavior, or network embedding, so
+//! it does not provide plausible deniability or coercion resistance by itself.
+//! It classifies a presented passphrase against caller-supplied checks and
+//! returns either:
 //!
-//! - The **real key** — unlocks the protected volume; nothing
-//!   observable changes for an external observer.
-//! - The **duress key** — unlocks the decoy volume + emits a
-//!   covert "I am under coercion" signal via the ratchet header
-//!   that paired peers can decode but a network observer cannot.
+//! - A derived **real-volume key**.
+//! - A derived **decoy-volume key** plus deterministic signal bytes that a
+//!   caller may embed in another authenticated protocol.
 //!
 //! The crate is **policy + primitives**, not a full filesystem
 //! driver — that wiring lands in the daemon when Phase D production
@@ -28,15 +27,14 @@
 //!
 //! - [`Volume`] represents a 32-byte volume secret. Real and decoy
 //!   volumes are independent.
-//! - [`DuressGate::open`] takes a presented passphrase + the
-//!   per-account `duress_marker` and decides: unlock real | unlock
-//!   decoy | reject. The decision uses constant-time comparison so
-//!   an attacker watching timing can't distinguish "wrong passphrase"
-//!   from "duress passphrase."
-//! - [`DuressGate::signal_in_ratchet_header`] emits a 32-byte
-//!   covert marker that paired peers detect; the marker is
-//!   indistinguishable from a random nonce to anyone without the
-//!   pair-shared decoder.
+//! - [`DuressGate::open`] takes a presented passphrase plus expected check
+//!   values and decides real | decoy | reject. It evaluates both derivations
+//!   before selecting an outcome, but source structure and timing tests are
+//!   not a universal side-channel proof.
+//! - [`DuressGate::signal_in_ratchet_header`] emits a deterministic 32-byte
+//!   keyed marker. This crate does not place it on a wire or establish that
+//!   its surrounding traffic is covert or indistinguishable from non-duress
+//!   traffic; that is a promotion gate for a complete protocol.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

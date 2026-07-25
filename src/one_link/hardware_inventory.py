@@ -11,11 +11,18 @@ from __future__ import annotations
 import ipaddress
 import os
 import platform
-import shutil
 import socket
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Iterable, Mapping
+
+from one_link.process_security import (
+    hidden_creationflags,
+    resolve_argv,
+    resolve_system_executable,
+    trusted_process_env,
+)
 
 
 ProbeRunner = Callable[[list[str], float], tuple[int, str, str]]
@@ -98,8 +105,9 @@ def collect_hardware_inventory(
 ) -> HardwareInventory:
     """Collect a best-effort local hardware/path inventory.
 
-    The function is side-effect-light. It reads OS state and PATH, but does
-    not start hotspot/Wi-Fi Direct/BLE scans or touch RF transmit.
+    The function is side-effect-light. It reads OS state using binaries from
+    fixed system directories; it does not trust PATH, start hotspot/Wi-Fi
+    Direct/BLE scans, or touch RF transmit.
     Tests inject ``env`` and ``runner`` for deterministic behavior.
     """
 
@@ -256,9 +264,14 @@ def _bluetooth_path(
         available = rc == 0 and bool(stdout.strip())
         if available:
             notes.append("Bluetooth device detected")
-    elif shutil.which("bluetoothctl") and not available:
-        available = True
-        notes.append("bluetoothctl available")
+    elif not available:
+        try:
+            resolve_system_executable("bluetoothctl")
+        except (OSError, ValueError):
+            pass
+        else:
+            available = True
+            notes.append("bluetoothctl available")
     if forced:
         notes.append("forced by ONE_LINK_ASSUME_BLE")
     return HardwarePath(
@@ -377,10 +390,17 @@ def _local_ip_addresses() -> tuple[str, ...]:
         except OSError:
             continue
         for info in infos:
-            try:
-                addrs.add(str(info[4][0]))
-            except Exception:
+            # ``getaddrinfo`` is OS-controlled, but defensive shape checks
+            # keep a malformed provider result from hiding behind a broad
+            # per-entry exception boundary.
+            if len(info) < 5:
                 continue
+            sockaddr = info[4]
+            if not isinstance(sockaddr, tuple) or not sockaddr:
+                continue
+            address = sockaddr[0]
+            if isinstance(address, str) and address:
+                addrs.add(address)
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
@@ -421,19 +441,21 @@ def _run_command(argv: list[str], timeout_s: float) -> tuple[int, str, str]:
     # console window every refresh cycle. The UI polls /api/fabric
     # every 30s, which triggers this; without the flag the user sees
     # a black box pop up on the desktop every 30 seconds.
-    import os as _os
-    creationflags = 0
-    if _os.name == "nt":
-        creationflags = 0x08000000  # CREATE_NO_WINDOW
+    if not 0.0 < float(timeout_s) <= 30.0:
+        return 127, "", "invalid probe timeout"
     try:
+        safe_argv = resolve_argv(argv, system_tool=True)
         r = subprocess.run(
-            argv,
+            safe_argv,
             capture_output=True,
             text=True,
             timeout=timeout_s,
             check=False,
-            creationflags=creationflags,
+            creationflags=hidden_creationflags(),
+            cwd=str(Path(safe_argv[0]).parent),
+            env=trusted_process_env(),
+            shell=False,
         )
-    except Exception as exc:
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
         return 127, "", str(exc)
-    return int(r.returncode), r.stdout or "", r.stderr or ""
+    return int(r.returncode), (r.stdout or "")[:262_144], (r.stderr or "")[:65_536]

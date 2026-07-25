@@ -1,13 +1,15 @@
 """Master seed — the single recoverable secret behind a daemon's
 identity + at-rest data.
 
-The 24-word BIP-39 mnemonic the user writes down on paper encodes
-this seed exactly. Every other long-lived secret in the daemon
-(Ed25519 identity private key, lockbox data root key, future
-device-cluster shares) derives from it via HKDF-SHA256 with
-domain-separated `info` strings. So a single recovery (typing
-the 24 words on a fresh machine) re-creates the entire
-cryptographic state of the original daemon.
+The 24-word BIP-39 mnemonic the user writes down on paper encodes this seed
+exactly. The Ed25519 identity, silent lockbox data-root key, backup-bundle key,
+and cluster seed derive from it via domain-separated HKDF-SHA256. Other stable
+application secrets do not pretend to be derived: passphrase-mode LockBox and
+SQLCipher keys remain independently generated and are authenticated/wrapped to
+the seed in portable recovery artifacts. Consequently the phrase reconstructs
+identity and seed-derived authority; recovering retained application data also
+requires the corresponding exported backup/envelopes (and, for unmigrated
+legacy data, the explicitly reported source passphrase).
 
 Trust ground vs corporate substrate
 -----------------------------------
@@ -26,12 +28,11 @@ Backward compatibility
 ----------------------
 Daemons that pre-existed this module's introduction have separate
 randomly-generated identity.key + DRK without a master seed.
-``load_or_create_seed`` is opt-in for those daemons: it returns
-the seed only when the seed file already exists. Identity.py and
-lockbox.py check ``has_seed(data_dir)`` to decide whether to
-derive their keys from the seed (new flow) or generate fresh
-randomness (legacy flow). The "Initialize seed" CLI command lets
-existing daemons migrate explicitly — a key-rotating action with
+``load_or_create_seed`` is used by explicit provisioning surfaces. Identity
+and lockbox loading preserve the legacy flow when the seed path is proven
+absent, but any existing invalid/unreadable/protection-failed artifact raises
+instead of being reclassified as a first boot. The "Initialize seed" CLI
+command lets existing daemons migrate explicitly — a key-rotating action with
 clear UX consequences.
 """
 from __future__ import annotations
@@ -44,6 +45,17 @@ from typing import Optional
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+from one_link.key_material import (
+    KeyMaterialIntegrityError,
+    KeyMaterialPersistenceError,
+    KeyMaterialProtectionError,
+    artifact_exists,
+    atomic_create_bytes,
+    atomic_replace_bytes,
+    read_bytes_if_exists,
+    sync_existing_authority,
+)
 
 
 SEED_FILENAME = "master.seed"
@@ -64,8 +76,13 @@ def _seed_path(data_dir: Path) -> Path:
 
 
 def has_seed(data_dir: Path) -> bool:
-    """True iff a master seed has been provisioned for this install."""
-    return _seed_path(data_dir).is_file()
+    """True iff any master-seed artifact exists.
+
+    This deliberately does not mean "valid": an unreadable, corrupt, or
+    non-regular artifact is existing authority and must not be mistaken for a
+    first boot.  :func:`load_seed` performs validation and raises.
+    """
+    return artifact_exists(_seed_path(data_dir), label="master seed")
 
 
 def seed_file_fingerprint(data_dir: Path) -> Optional[tuple[int, int]]:
@@ -89,27 +106,62 @@ def seed_file_fingerprint(data_dir: Path) -> Optional[tuple[int, int]]:
     return (int(st.st_mtime_ns), int(st.st_size))
 
 
-def load_seed(data_dir: Path) -> Optional[bytes]:
-    """Read the master seed off disk + DPAPI-unwrap on Windows.
-    Returns None if no seed file exists or unwrap fails."""
-    p = _seed_path(data_dir)
-    if not p.is_file():
-        return None
-    try:
-        blob = p.read_bytes()
-    except OSError:
-        return None
+def _harden_seed_path(path: Path) -> None:
+    if os.name == "nt":
+        from one_link.identity import _restrict_windows_acl
+
+        _restrict_windows_acl(path)
+
+
+def _decode_seed_blob(blob: bytes) -> bytes:
     if not blob:
-        return None
+        raise KeyMaterialIntegrityError("existing master seed is empty")
     if os.name == "nt":
         from one_link.lockbox import _dpapi_unprotect
+
         unwrapped = _dpapi_unprotect(blob)
-        if unwrapped is None or len(unwrapped) != SEED_LEN_BYTES:
-            return None
-        return unwrapped
+        if unwrapped is None:
+            raise KeyMaterialProtectionError(
+                "existing master seed could not be DPAPI-unprotected"
+            )
+        if len(unwrapped) != SEED_LEN_BYTES:
+            raise KeyMaterialIntegrityError(
+                "existing master seed has an invalid unwrapped length"
+            )
+        return bytes(unwrapped)
     if len(blob) != SEED_LEN_BYTES:
+        raise KeyMaterialIntegrityError("existing master seed has an invalid length")
+    return bytes(blob)
+
+
+def _encode_seed(seed: bytes) -> bytes:
+    if os.name != "nt":
+        return bytes(seed)
+    from one_link.lockbox import _dpapi_protect
+
+    wrapped = _dpapi_protect(bytes(seed))
+    if not wrapped:
+        raise KeyMaterialProtectionError(
+            "DPAPI protection failed; refusing to persist a raw master seed"
+        )
+    return bytes(wrapped)
+
+
+def load_seed(data_dir: Path) -> Optional[bytes]:
+    """Load and validate the master seed; return ``None`` only if absent.
+
+    Existing unreadable, empty, malformed, reparse, or DPAPI-unusable files
+    raise a typed key-material error and are preserved byte-for-byte.
+    """
+    blob = read_bytes_if_exists(
+        _seed_path(data_dir),
+        label="master seed",
+        max_bytes=65536,
+        harden_path=_harden_seed_path,
+    )
+    if blob is None:
         return None
-    return blob
+    return _decode_seed_blob(blob)
 
 
 def store_seed(data_dir: Path, seed: bytes) -> None:
@@ -120,38 +172,68 @@ def store_seed(data_dir: Path, seed: bytes) -> None:
         raise TypeError("seed must be bytes")
     if len(seed) != SEED_LEN_BYTES:
         raise ValueError(f"seed must be {SEED_LEN_BYTES} bytes")
-    p = _seed_path(data_dir)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    expected = bytes(seed)
+    payload = _encode_seed(expected)
 
-    out_bytes = bytes(seed)
-    if os.name == "nt":
-        from one_link.lockbox import _dpapi_protect
-        wrapped = _dpapi_protect(out_bytes)
-        if wrapped:
-            out_bytes = wrapped
+    def _validate(blob: bytes) -> None:
+        if not secrets.compare_digest(_decode_seed_blob(blob), expected):
+            raise KeyMaterialIntegrityError(
+                "persisted master seed does not match requested authority"
+            )
 
-    tmp = p.with_name(p.name + ".tmp." + secrets.token_hex(4))
-    # Windows: O_BINARY suppresses the default CRLF translation that
-    # would corrupt DPAPI-wrapped blobs (a single 0x0a byte becomes
-    # 0x0d 0x0a on disk). On POSIX O_BINARY isn't defined; the OR
-    # is a no-op via getattr.
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    flags |= getattr(os, "O_BINARY", 0)
-    fd = os.open(str(tmp), flags, 0o600)
-    try:
-        os.write(fd, out_bytes)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(tmp, p)
-    if os.name != "nt":
+    atomic_replace_bytes(
+        _seed_path(data_dir),
+        payload,
+        label="master seed",
+        validate=_validate,
+        harden_path=_harden_seed_path,
+    )
+
+
+def _legacy_authority_artifacts(
+    data_dir: Path,
+    *,
+    identity_path: Optional[Path] = None,
+) -> list[Path]:
+    """Return existing artifacts that make seed minting a key rotation."""
+    from one_link import keychain, lockbox
+
+    root = Path(data_dir)
+    candidates = [
+        root / lockbox.DRK_FILENAME,
+        root / lockbox.SALT_FILENAME,
+        root / lockbox.DEK_ENVELOPE_FILENAME,
+        root / "state.db",
+        root / "state.db-wal",
+        root / "state.db-shm",
+        root / keychain.LOCAL_KEY_FILENAME,
+        root / keychain.RECOVERY_KEY_FILENAME,
+        root / "recovery-authority.intent.json",
+    ]
+    if identity_path is None:
+        # Only infer the process-global identity for the process-global data
+        # directory.  Library callers routinely pass unrelated temporary roots.
+        from one_link import paths
+
         try:
-            os.chmod(p, 0o600)
+            if root.resolve(strict=False) == paths.data_dir().resolve(strict=False):
+                identity_path = paths.key_path()
         except OSError:
-            pass
+            identity_path = None
+    if identity_path is not None:
+        candidates.append(Path(identity_path))
+    return [
+        path
+        for path in candidates
+        if artifact_exists(path, label="legacy authority artifact")
+    ]
 
 
-def load_or_create_seed(data_dir: Path) -> tuple[bytes, bool]:
+def load_or_create_seed(
+    data_dir: Path,
+    *,
+    identity_path: Optional[Path] = None,
+) -> tuple[bytes, bool]:
     """Return ``(seed, created)``. If a seed already exists on disk,
     load + return it with ``created=False``. Otherwise mint 32 fresh
     random bytes, persist them, and return ``(seed, True)``.
@@ -164,9 +246,40 @@ def load_or_create_seed(data_dir: Path) -> tuple[bytes, bool]:
     existing = load_seed(data_dir)
     if existing is not None:
         return existing, False
+    legacy = _legacy_authority_artifacts(
+        Path(data_dir), identity_path=identity_path
+    )
+    if legacy:
+        names = ", ".join(sorted(path.name for path in legacy))
+        raise KeyMaterialIntegrityError(
+            "refusing to mint an unrelated recovery seed over existing "
+            f"authority/state ({names}); explicit transactional migration is required"
+        )
     seed = secrets.token_bytes(SEED_LEN_BYTES)
-    store_seed(data_dir, seed)
-    return seed, True
+    payload = _encode_seed(seed)
+
+    def _validate(blob: bytes) -> None:
+        if not secrets.compare_digest(_decode_seed_blob(blob), seed):
+            raise KeyMaterialIntegrityError(
+                "published master seed does not match generated authority"
+            )
+
+    created = atomic_create_bytes(
+        _seed_path(data_dir),
+        payload,
+        label="master seed",
+        validate=_validate,
+        harden_path=_harden_seed_path,
+    )
+    if created:
+        return seed, True
+    sync_existing_authority(_seed_path(data_dir), label="master seed")
+    winner = load_seed(data_dir)
+    if winner is None:
+        raise KeyMaterialPersistenceError(
+            "concurrent master-seed publication reported a winner but no seed exists"
+        )
+    return winner, False
 
 
 # ── derived keys ─────────────────────────────────────────────────
@@ -225,6 +338,197 @@ def derive_cluster_seed(seed: bytes) -> bytes:
         salt=None,
         info=_INFO_CLUSTER_SEED,
     ).derive(bytes(seed))
+
+
+# ── recoverable authority bootstrap / convergence ──────────────────
+
+
+def _silent_drk_matches_seed(data_dir: Path, seed: bytes) -> Optional[bool]:
+    """Observe whether the persisted silent DRK is derived from ``seed``.
+
+    ``None`` means the DRK path is proven absent.  Existing malformed,
+    inaccessible, or DPAPI-unusable artifacts raise through the shared
+    fail-closed key-material taxonomy.
+    """
+    from one_link import lockbox
+
+    blob = read_bytes_if_exists(
+        Path(data_dir) / lockbox.DRK_FILENAME,
+        label="data root key",
+        max_bytes=65536,
+        harden_path=lockbox._harden_drk_path,
+    )
+    if blob is None:
+        return None
+    actual = lockbox._decode_drk_blob(blob)
+    return secrets.compare_digest(actual, derive_drk(bytes(seed)))
+
+
+def inspect_derived_authority(
+    data_dir: Path,
+    *,
+    identity_path: Path,
+    seed: bytes,
+) -> dict[str, Optional[bool]]:
+    """Return non-mutating identity/DRK alignment evidence for ``seed``."""
+    from one_link import identity, lockbox
+
+    if not isinstance(seed, (bytes, bytearray)) or len(seed) != SEED_LEN_BYTES:
+        raise ValueError(f"seed must be {SEED_LEN_BYTES} bytes")
+    silent_drk = _silent_drk_matches_seed(Path(data_dir), bytes(seed))
+    envelope = lockbox.recovery_envelope_matches_seed(Path(data_dir), bytes(seed))
+    if envelope is None:
+        data_root = (
+            False
+            if lockbox.requires_legacy_passphrase_recovery(Path(data_dir))
+            else silent_drk
+        )
+    else:
+        # The DRK remains a required derived authority artifact, while the
+        # envelope's seed slot proves that the actual passphrase-mode DEK is
+        # recoverable too.  A paper check must never green-light only one.
+        data_root = bool(silent_drk is True and envelope is True)
+    return {
+        "identity": identity.identity_file_matches_seed(
+            Path(identity_path), bytes(seed)
+        ),
+        "data_root": data_root,
+    }
+
+
+def _store_seed_derived_drk(data_dir: Path, seed: bytes) -> None:
+    """Atomically publish the exact silent DRK derived from ``seed``."""
+    from one_link import lockbox
+
+    expected = derive_drk(bytes(seed))
+    payload = lockbox._encode_drk(expected)
+
+    def _validate(blob: bytes) -> None:
+        actual = lockbox._decode_drk_blob(blob)
+        if not secrets.compare_digest(actual, expected):
+            raise KeyMaterialIntegrityError(
+                "persisted data root key does not match recovered authority"
+            )
+
+    atomic_replace_bytes(
+        Path(data_dir) / lockbox.DRK_FILENAME,
+        payload,
+        label="data root key",
+        validate=_validate,
+        harden_path=lockbox._harden_drk_path,
+    )
+
+
+def install_seed_derived_authority(
+    data_dir: Path,
+    *,
+    identity_path: Path,
+    seed: bytes,
+    previous_seed: Optional[bytes] = None,
+) -> None:
+    """Converge seed, Ed25519 identity, and silent DRK on one root.
+
+    Each individual artifact is atomically replaced and read back.  Recovery
+    callers must keep their durable intent journal present until this function
+    returns; after a process or power failure the next boot can then replay the
+    idempotent convergence before loading any key into the daemon.
+    """
+    from one_link import identity, lockbox
+
+    expected = bytes(seed)
+    if len(expected) != SEED_LEN_BYTES:
+        raise ValueError(f"seed must be {SEED_LEN_BYTES} bytes")
+    if previous_seed is not None and len(previous_seed) != SEED_LEN_BYTES:
+        raise ValueError(f"previous_seed must be {SEED_LEN_BYTES} bytes")
+    # Rebind the stable application DEK before replacing the source seed.  The
+    # recovery intent remains durable around this call, so a crash after this
+    # atomic envelope write replays against the new slot idempotently.
+    envelope_present = lockbox.rebind_recovery_envelope(
+        Path(data_dir),
+        target_seed=expected,
+        current_seed=previous_seed,
+    )
+    if not envelope_present:
+        # A fresh explicit-passphrase target can publish its first dual wrap
+        # now.  Conversely, a legacy salt with no supplied passphrase proves
+        # an additional source factor is required; fail before replacing any
+        # seed/identity/DRK bytes.
+        lockbox.ensure_recovery_envelope_for_backup(
+            Path(data_dir),
+            seed=expected,
+        )
+        if lockbox.requires_legacy_passphrase_recovery(Path(data_dir)):
+            raise KeyMaterialProtectionError(
+                "legacy application data requires the source "
+                "ONE_LINK_PASSPHRASE before recovery can replace authority"
+            )
+    store_seed(Path(data_dir), expected)
+    identity.store_seed_derived_identity(Path(identity_path), expected)
+    _store_seed_derived_drk(Path(data_dir), expected)
+    loaded = load_seed(Path(data_dir))
+    evidence = inspect_derived_authority(
+        Path(data_dir), identity_path=Path(identity_path), seed=expected
+    )
+    if (
+        loaded is None
+        or not secrets.compare_digest(loaded, expected)
+        or evidence != {"identity": True, "data_root": True}
+    ):
+        raise KeyMaterialIntegrityError(
+            "recovered seed, identity, and data root failed convergence proof"
+        )
+
+
+def provision_seed_before_derived_authority(
+    data_dir: Path,
+    *,
+    identity_path: Path,
+) -> tuple[Optional[bytes], bool]:
+    """Establish the recoverable root before daemon identity/DRK creation.
+
+    A genuinely fresh install (no seed, identity, or DRK) receives a master
+    seed first.  Legacy installs with independent identity/DRK authority remain
+    usable but are not silently relabelled recoverable: this returns
+    ``(None, False)`` and explicit migration remains required.  Whenever a seed
+    exists, every already-published derived artifact must match it exactly or
+    startup fails closed.
+    """
+    from one_link import identity, lockbox
+
+    root = Path(data_dir)
+    id_path = Path(identity_path)
+    seed = load_seed(root)
+    created = False
+    if seed is None:
+        legacy_identity = artifact_exists(id_path, label="identity key")
+        legacy_drk = artifact_exists(
+            root / lockbox.DRK_FILENAME,
+            label="data root key",
+        )
+        if legacy_identity or legacy_drk:
+            return None, False
+        seed, created = load_or_create_seed(root, identity_path=id_path)
+
+    identity_match = identity.identity_file_matches_seed(id_path, seed)
+    if identity_match is False:
+        raise KeyMaterialIntegrityError(
+            "master seed does not derive the persisted Ed25519 identity"
+        )
+
+    drk_match = _silent_drk_matches_seed(root, seed)
+    if drk_match is False:
+        raise KeyMaterialIntegrityError(
+            "master seed does not derive the persisted data root key"
+        )
+    if drk_match is None:
+        # The seed is already durable, so the lockbox's no-replace first
+        # publication deterministically derives and verifies the DRK from it.
+        actual = lockbox.acquire_or_create_silent_drk(root)
+        if not secrets.compare_digest(actual, derive_drk(seed)):
+            raise KeyMaterialIntegrityError(
+                "new data root key does not match the master seed"
+            )
+    return seed, created
 
 
 # ── Row 10: sealed runtime ───────────────────────────────────────

@@ -4,7 +4,7 @@
 //!
 //! ## Theory
 //!
-//! S_One identifies three operator families in the coherence-field
+//! `S_One` identifies three operator families in the coherence-field
 //! Lagrangian:
 //!
 //! 1. **Transport** — `D · ∇²(δτ_c)`: spatial diffusion of field
@@ -68,8 +68,9 @@ pub fn alignment_scalars(flux: &[f64]) -> Vec<f64> {
     if n == 0 {
         return Vec::new();
     }
-    let mean: f64 = flux.iter().sum::<f64>() / n as f64;
-    let variance: f64 = flux.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / n as f64;
+    let count = flux.iter().fold(0.0_f64, |total, _| total + 1.0);
+    let mean: f64 = flux.iter().sum::<f64>() / count;
+    let variance: f64 = flux.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / count;
     let std_dev = variance.sqrt().max(1e-9);
     flux.iter()
         .map(|&v| {

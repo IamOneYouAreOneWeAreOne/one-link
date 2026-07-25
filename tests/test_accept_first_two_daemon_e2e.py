@@ -27,6 +27,10 @@ def _offer_frame(name: str, payload: bytes) -> dict:
         "blob": h,
         "name": name,
         "size": len(payload),
+        # Current peers negotiate durable commit receipts. Their offer
+        # contract therefore requires a stable 128-bit delivery identity so
+        # retries can be correlated without creating duplicate inbox files.
+        "delivery_id": uuid.uuid4().hex,
         "chunks": [
             {"index": 0, "hash": h, "size": len(payload),
              "start": 0, "end": len(payload)},
@@ -38,7 +42,10 @@ def test_incoming_file_is_held_pending_accept_by_default(monkeypatch):
     # The harness defaults accept-first OFF for its daemons; opt back IN
     # here so the spawned pair runs the production default behaviour.
     monkeypatch.setenv("ONE_LINK_REQUIRE_FILE_ACCEPT", "1")
-    with daemon_pair() as p:
+    # Exercise consent after the normal SAS/pin boundary. Pending identities
+    # correctly have neither chat nor file capability, so leaving the harness
+    # pair unpinned would test only the trust gate and never reach accept-first.
+    with daemon_pair(pin_trust=True) as p:
         # require-accept is ON by default, so B must HOLD A's file offer
         # instead of pulling it.
         assert request(

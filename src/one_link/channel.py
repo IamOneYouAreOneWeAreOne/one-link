@@ -39,11 +39,12 @@ Activation flow:
      forward every send/recv goes through the ratchet, providing forward
      secrecy + post-compromise security.
 
-Atomicity: activation flips BOTH directions at the same logical
-boundary. Sending side: switch happens after the local CAPS frame
-is written. Receiving side: switch happens after the peer's CAPS
-frame is parsed. Each side's recv loop is single-threaded so there
-is no in-flight frame between the CAPS frame and the next frame.
+Cutover: the authenticated, transcript-bound CAPS frame is the final
+legacy-AEAD frame in each direction.  Once that exact sequence boundary
+is recorded, legacy ciphertext is never accepted again.  Alice can send
+ratcheted application data immediately.  Bob's outbound calls queue behind
+an event until his first authenticated Alice ratchet frame derives his send
+chain; there is no guessed "legacy grace window" and no downgrade fallback.
 
 Wire-format on the ratchet path:
     [length-prefix, unchanged] [42-byte Header.encode()] [ciphertext]
@@ -60,16 +61,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import logging
 import os
+import struct
+import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from one_link.double_ratchet import RatchetState
+    from one_link.native_transfer import NativeTransferDuplexSession
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -79,32 +85,96 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from one_link.capabilities import PQ_HYBRID_HANDSHAKE_V1
 from one_link.identity import Identity, fingerprint_of, verify
 from one_link.wire import read_frame, write_frame, write_frame_nowait
 
 log = logging.getLogger(__name__)
 
-# External audit 2026-05-18 ES-1: per-peer counter of v1-fallback
-# HELLO sig acceptances. The flag-day plan is a CAPS-advertised
-# `uks_v2_only` after which v1 acceptance becomes a hard reject;
-# until then, ops grep this counter to spot peers stuck on v1 (or
-# attackers trying to splice).
-_v1_sig_fallback_counts: dict[bytes, int] = {}
+# External audit 2026-05-18 ES-1: legacy v1 HELLO downgrade telemetry.
+#
+# A v1 HELLO is self-signed, so an unauthenticated remote can mint an
+# unlimited number of valid keys.  Keying an ordinary dict by every claimed
+# key therefore turns an observability feature into a memory-DoS primitive.
+# Only identities which the daemon confirms are *currently pinned* receive a
+# per-peer slot.  Unknown identities feed one saturating aggregate counter.
+# The known-peer table is additionally TTL/LRU bounded in case a device has a
+# very large or churn-heavy trust roster.
+_V1_SIG_KNOWN_MAX_ENTRIES: int = 1024
+_V1_SIG_KNOWN_TTL_S: float = 24.0 * 60.0 * 60.0
+_V1_SIG_COUNTER_MAX: int = (1 << 63) - 1
+_v1_sig_fallback_counts: "OrderedDict[bytes, tuple[int, float]]" = OrderedDict()
+_v1_sig_unknown_attempts: int = 0
+_v1_sig_known_attempts: int = 0
+_v1_sig_known_evictions: int = 0
+_v1_sig_telemetry_lock = threading.Lock()
 
-def _bump_v1_sig_counter(peer_ed_pub: bytes) -> int:
-    """Increment + return the v1-fallback count for this peer's
-    Ed25519 pubkey. Module-local; bounded by the number of distinct
-    peers, which is itself bounded by paired-peer count."""
-    n = _v1_sig_fallback_counts.get(peer_ed_pub, 0) + 1
-    _v1_sig_fallback_counts[peer_ed_pub] = n
-    return n
+
+def _saturating_increment(value: int) -> int:
+    return value if value >= _V1_SIG_COUNTER_MAX else value + 1
 
 
-def v1_sig_fallback_summary() -> dict[str, int]:
-    """Diagnostic surface: peer-fingerprint-prefix -> v1 fallback
-    count. Read by the One Link Doctor health check and the
-    Truth Dashboard."""
-    return {pk.hex()[:16]: n for pk, n in _v1_sig_fallback_counts.items()}
+def _prune_v1_sig_known_locked(now: float) -> None:
+    """Expire stale known-peer telemetry while the caller holds the lock."""
+    cutoff = now - _V1_SIG_KNOWN_TTL_S
+    stale = [peer for peer, (_count, seen_at) in _v1_sig_fallback_counts.items() if seen_at <= cutoff]
+    for peer in stale:
+        _v1_sig_fallback_counts.pop(peer, None)
+
+
+def _bump_v1_sig_counter(
+    peer_ed_pub: bytes,
+    *,
+    is_pinned: bool,
+    now: float | None = None,
+) -> int:
+    """Record one cryptographically valid legacy-v1 HELLO attempt.
+
+    Per-key detail is retained only for a caller-confirmed pinned identity.
+    Unknown/self-minted identities share a single fixed-memory counter.  The
+    returned value is the relevant per-peer or aggregate count for logging.
+    """
+    if len(peer_ed_pub) != 32:
+        raise ValueError("legacy-v1 telemetry key must be 32 bytes")
+    observed_at = time.monotonic() if now is None else float(now)
+    global _v1_sig_unknown_attempts, _v1_sig_known_attempts, _v1_sig_known_evictions
+    with _v1_sig_telemetry_lock:
+        if not is_pinned:
+            _v1_sig_unknown_attempts = _saturating_increment(_v1_sig_unknown_attempts)
+            return _v1_sig_unknown_attempts
+
+        _prune_v1_sig_known_locked(observed_at)
+        _v1_sig_known_attempts = _saturating_increment(_v1_sig_known_attempts)
+        previous = _v1_sig_fallback_counts.pop(peer_ed_pub, (0, observed_at))[0]
+        count = _saturating_increment(previous)
+        # Reinsert at the tail: OrderedDict order is the deterministic LRU
+        # order, independent of hash randomisation.
+        _v1_sig_fallback_counts[peer_ed_pub] = (count, observed_at)
+        while len(_v1_sig_fallback_counts) > _V1_SIG_KNOWN_MAX_ENTRIES:
+            _v1_sig_fallback_counts.popitem(last=False)
+            _v1_sig_known_evictions = _saturating_increment(_v1_sig_known_evictions)
+        return count
+
+
+def v1_sig_fallback_summary(*, now: float | None = None) -> dict[str, int]:
+    """Return bounded legacy-v1 downgrade telemetry.
+
+    Hex keys are pinned peer public-key prefixes.  Reserved keys begin with
+    ``__`` and expose aggregate known/unknown attempts plus LRU eviction
+    pressure. No untrusted public key is ever retained solely for telemetry.
+    """
+    observed_at = time.monotonic() if now is None else float(now)
+    with _v1_sig_telemetry_lock:
+        _prune_v1_sig_known_locked(observed_at)
+        summary = {
+            peer.hex()[:16]: count
+            for peer, (count, _seen_at) in _v1_sig_fallback_counts.items()
+        }
+        summary["__unknown_attempts__"] = _v1_sig_unknown_attempts
+        summary["__known_attempts__"] = _v1_sig_known_attempts
+        summary["__known_evictions__"] = _v1_sig_known_evictions
+        summary["__known_tracked__"] = len(_v1_sig_fallback_counts)
+        return summary
 
 
 # 2026-05-22 audit Batch V — handshake nonce replay cache.
@@ -121,36 +191,38 @@ def v1_sig_fallback_summary() -> dict[str, int]:
 # window, bounded to 8 192 entries with FIFO eviction. A replay
 # inside the window is rejected before any signature work.
 #
-# The cache is module-local + thread-safe under CPython's GIL for
-# the OrderedDict ops we use. Cleared between processes; per-process
-# bounded; no persistence.
+# The cache is module-local and guarded explicitly so free-threaded Python and
+# test/application threads cannot race the check-and-insert operation. Cleared
+# between processes; per-process bounded; no persistence.
 _HANDSHAKE_REPLAY_WINDOW_S: float = 60.0
 _HANDSHAKE_REPLAY_MAX_ENTRIES: int = 8192
 _handshake_replay_cache: "OrderedDict[tuple[bytes, bytes], float]" = OrderedDict()
+_handshake_replay_lock = threading.Lock()
 
 
 def _handshake_replay_seen(peer_ed_pub: bytes, nonce: bytes, now: float) -> bool:
     """Return True iff ``(peer_ed_pub, nonce)`` has been observed
     inside the current replay window. Inserts the entry as a side
     effect on first-seen. Bounded; FIFO-evicts when over the cap."""
-    cache = _handshake_replay_cache
-    cutoff = now - _HANDSHAKE_REPLAY_WINDOW_S
-    # Drop expired entries cheaply — only those at the head are
-    # candidates (insertion-ordered).
-    while cache:
-        oldest_k = next(iter(cache))
-        if cache[oldest_k] >= cutoff:
-            break
-        cache.popitem(last=False)
-    key = (peer_ed_pub, nonce)
-    if key in cache:
-        return True
-    cache[key] = now
-    if len(cache) > _HANDSHAKE_REPLAY_MAX_ENTRIES:
-        # FIFO eviction — same audit-defense pattern as cap_store.
-        with contextlib.suppress(KeyError):
+    with _handshake_replay_lock:
+        cache = _handshake_replay_cache
+        cutoff = now - _HANDSHAKE_REPLAY_WINDOW_S
+        # Drop expired entries cheaply — only those at the head are
+        # candidates (insertion-ordered).
+        while cache:
+            oldest_k = next(iter(cache))
+            if cache[oldest_k] >= cutoff:
+                break
             cache.popitem(last=False)
-    return False
+        key = (peer_ed_pub, nonce)
+        if key in cache:
+            return True
+        cache[key] = now
+        if len(cache) > _HANDSHAKE_REPLAY_MAX_ENTRIES:
+            # FIFO eviction — same audit-defense pattern as cap_store.
+            with contextlib.suppress(KeyError):
+                cache.popitem(last=False)
+        return False
 
 
 PROTO = b"OL1"
@@ -158,8 +230,29 @@ NONCE_LEN = 16
 HELLO_TAG = b"OL1|HELLO|"
 REPLY_TAG = b"OL1|REPLY|"
 AAD_PREFIX = b"OL1/data|"
+# Authenticated post-quantum channel handshake.  This is deliberately a new
+# wire version, rather than overloading the fixed-length classical HELLO:
+# peers either negotiate this exact suite or the connection fails.  A caller
+# can enter the legacy handshake only through an explicit downgrade policy.
+PQ_HANDSHAKE_MAGIC = b"OLPQ"
+PQ_HANDSHAKE_VERSION = 3
+PQ_SUITE_X25519_MLKEM768_V1 = 0x0001
+PQ_HYBRID_HANDSHAKE_CAP = PQ_HYBRID_HANDSHAKE_V1
+PQ_HELLO_TAG = b"OL1|PQ-HELLO|v3|"
+PQ_REPLY_TAG = b"OL1|PQ-REPLY|v3|"
+PQ_CONFIRM_TAG = b"OL1|PQ-CONFIRM|v3|"
+PQ_CONFIRM_MAGIC = b"OLKC"
+PQ_CHANNEL_SECRET_INFO = b"OL1/pq-hybrid/channel-secret|v3|"
+PQ_CONFIRM_KEY_INFO = b"OL1/pq-hybrid/key-confirm|v3|"
+PQ_MAX_OFFERED_SUITES = 8
+PQ_KEM_PUBLIC_KEY_LEN = 1216
+PQ_KEM_CIPHERTEXT_LEN = 1120
 # v0.8.2: capability tag both peers must advertise to enable ratchet.
 DR_CAP = "double_ratchet_v1"
+# Extension that makes the Alice-first Double Ratchet bootstrap explicit and
+# deadlock-free without changing v1 behavior for older peers.
+DR_CUTOVER_CAP = "double_ratchet_cutover_v2"
+DR_CUTOVER_COMMIT_PREFIX = b"\x00OL1|DR-CUTOVER-COMMIT|v2|"
 # Phase C-3 (ADR-0026): capability tag both peers must advertise to
 # enable the native chunk-store transport (FILE_NATIVE_CHUNK messages).
 # Keep in sync with `capabilities.NATIVE_TRANSFER_INDEXED_V1`.
@@ -183,6 +276,12 @@ class Channel:
     tx_seq: int = 0
     rx_seq: int = 0
     transcript_hash: bytes = b""
+    # Cryptographically established handshake posture.  These fields report
+    # what protected this exact channel, never what a module merely supports.
+    handshake_version: int = 2
+    handshake_suite: str = "x25519-classical-v2"
+    pq_protected: bool = False
+    key_confirmed: bool = False
     # Set after CAPS exchange (post-handshake first encrypted message).
     # None = peer hasn't sent CAPS yet (legacy or pre-CAPS).
     peer_caps: dict | None = None
@@ -190,7 +289,7 @@ class Channel:
     # v0.8.2: Double Ratchet bootstrap material — kept alive
     # post-handshake so we can activate the ratchet later if both
     # peers advertise DOUBLE_RATCHET_V1. Set by initiate / respond.
-    _dr_role: Optional[str] = None      # "alice" | "bob"
+    _dr_role: Optional[str] = None  # "alice" | "bob"
     _dr_x_priv: Optional[X25519PrivateKey] = None
     _dr_peer_x_pub: Optional[bytes] = None
     _dr_shared: Optional[bytes] = None  # raw 32-byte ECDH output
@@ -200,6 +299,7 @@ class Channel:
     _caps_sent: bool = False
     _caps_received: bool = False
     _peer_dr_capable: bool = False
+    _peer_dr_cutover_capable: bool = False
     # Phase C-3 (ADR-0026): native transfer capability tracking.
     # True iff the peer's CAPS frame included NATIVE_TRANSFER_V1.
     # Independent of ratchet status — the native pipeline derives
@@ -217,14 +317,31 @@ class Channel:
     # "DR bootstrap material missing" and falls back to legacy
     # FILE_BIN_CHUNK, losing Wave 2f QUIC and ratchet-binding.
     _native_transfer_seed: Optional[bytes] = None
-    # 2026-05-21 audit T2-A: bound the legacy-AEAD fallback window
-    # post-DR-activation. The activation-race window allows at most
-    # ONE legacy-shaped frame in flight at the moment both sides
-    # flip to DR. After that, a peer that keeps sending legacy bytes
-    # is either misbehaving or replaying — refuse rather than
-    # accept indefinitely. Counts successful legacy decrypts that
-    # happened after DR activation.
-    _legacy_frames_post_dr: int = 0
+    # Authenticated cutover state. ``note_caps_sent`` freezes the exact local
+    # final-legacy sequence (CAPS is the final legacy frame), while successful
+    # activation freezes the corresponding receive boundary. Any legacy frame
+    # beyond it is a protocol violation, never an activation "race".
+    _legacy_tx_final_seq: Optional[int] = None
+    _legacy_rx_final_seq: Optional[int] = None
+    _dr_cutover_phase: str = "legacy"
+    _closed: bool = False
+    # Sending and ratchet mutation are stateful. Serialize concurrent callers
+    # and make Bob wait without buffering unbounded plaintext internally.
+    _send_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _ratchet_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _caps_negotiated: asyncio.Event = field(
+        default_factory=asyncio.Event,
+        init=False,
+        repr=False,
+    )
+    _dr_send_ready: asyncio.Event = field(
+        default_factory=asyncio.Event,
+        init=False,
+        repr=False,
+    )
+    _peer_caps_snapshot: Optional[frozenset[str]] = None
+    _dr_cutover_commit_sent: bool = False
+    _dr_cutover_commit_received: bool = False
     # When non-None, channel is in ratchet mode. send/recv branch
     # to the ratchet path and the legacy AEADs go unused. Set
     # exactly once per channel by maybe_activate_ratchet.
@@ -234,12 +351,16 @@ class Channel:
     # maybe_activate_ratchet flips it, then a RatchetState until
     # close().
     _dr_state: Optional["RatchetState"] = None
-    # Phase C-3 (ADR-0026): cached native transfer session for
-    # FILE_NATIVE_CHUNK encrypt/decrypt. Lazily built by the daemon
-    # on first chunk; sender and receiver hold MATCHED instances
-    # because both sides derive the same secret via
-    # `derive_native_transfer_secret`.
-    _native_transfer_session: object = None  # NativeTransferSession
+    # Cached direction-safe facade for FILE_NATIVE_CHUNK.  The facade owns
+    # independent TX and RX NativeTransferSession ratchets; sharing one
+    # ratchet bidirectionally repeats chunk-index zero's key/nonce and also
+    # desynchronises reverse-direction traffic after the first receive.
+    _native_transfer_session: Optional["NativeTransferDuplexSession"] = None
+    # Never recreate a native facade under the same authenticated channel
+    # roots: doing so resets both chunk counters to zero and repeats AEAD
+    # key/nonces.  A caller may clear the cached object to request fallback,
+    # but native transfer can resume only after a fresh channel handshake.
+    _native_transfer_session_created: bool = False
 
     def __post_init__(self) -> None:
         # 2026-05-22 audit T2-K: eagerly derive the native-transfer
@@ -265,12 +386,13 @@ class Channel:
                     salt=self.transcript_hash,
                     info=b"OL1/native-transfer/seed|v1",
                 ).derive(self._dr_shared)
-            except Exception as exc:
+            except (TypeError, ValueError) as exc:
                 # Non-fatal: derive on demand later. Common path is
                 # tests that build a Channel with synthetic state.
                 log.debug(
                     "Channel.__post_init__: eager seed derive failed "
-                    "(will lazy-derive on first use): %s", exc,
+                    "(will lazy-derive on first use): %s",
+                    exc,
                 )
 
     def _nonce(self, seq: int) -> bytes:
@@ -285,16 +407,14 @@ class Channel:
 
     # ─── Phase C-3 native transfer integration (ADR-0025) ─────────────
     def derive_native_transfer_secret(self) -> bytes:
-        """Derive a 32-byte session secret suitable for seeding a
-        :class:`one_link.native_transfer.NativeTransferSession`.
+        """Derive the 32-byte root for native transfer traffic secrets.
 
-        The native pipeline (ChunkRatchet + per-chunk AEAD) needs a
-        distinct 32-byte secret separate from this channel's
-        legacy AEAD keys and from the Double Ratchet root seed. We
-        derive via HKDF with a fresh info tag so each domain has
-        its own derived material — leaking either the legacy
-        channel keys or the DR root doesn't compromise the native
-        transfer secret.
+        This root is domain-separated from legacy AEAD and the Double
+        Ratchet.  It is *not* used directly for chunk encryption: callers
+        derive initiator→responder and responder→initiator traffic roots via
+        :meth:`derive_native_transfer_direction_secrets`, preventing the two
+        channel directions from reusing an AEAD key/nonce at the same chunk
+        index.
 
         The same derivation runs on both peers (deterministic from
         ``transcript_hash`` + the DR bootstrap shared secret), so
@@ -322,6 +442,29 @@ class Channel:
         self._native_transfer_seed = seed
         return seed
 
+    def derive_native_transfer_direction_secrets(self) -> tuple[bytes, bytes]:
+        """Return local ``(tx_secret, rx_secret)`` for native transfer.
+
+        Both peers first derive the same canonical initiator→responder and
+        responder→initiator roots from the authenticated channel transcript.
+        The handshake role then maps those roots to local TX/RX, so Alice TX
+        exactly matches Bob RX and Bob TX exactly matches Alice RX while the
+        two traffic directions remain cryptographically independent.
+        """
+        from one_link.native_transfer import derive_directional_secrets
+
+        initiator_to_responder, responder_to_initiator = derive_directional_secrets(
+            self.derive_native_transfer_secret(),
+            transcript_hash=self.transcript_hash,
+        )
+        if self._dr_role == "alice":
+            return initiator_to_responder, responder_to_initiator
+        if self._dr_role == "bob":
+            return responder_to_initiator, initiator_to_responder
+        raise RuntimeError(
+            "channel cannot map native transfer directions: authenticated handshake role missing"
+        )
+
     def get_or_create_native_transfer_session(
         self,
         *,
@@ -330,10 +473,9 @@ class Channel:
     ):
         """Lazy, cached version of :meth:`establish_native_transfer`.
 
-        Daemon callers invoke this on every chunk — the session is
-        built once on first call and reused for the rest of the
-        channel's lifetime. Sender and receiver each cache their
-        own instance; matched derivation makes them line up."""
+        Daemon callers invoke this on every chunk.  The returned facade is
+        built once and routes encryption to its TX ratchet and decryption to
+        its independent RX ratchet."""
         if self._native_transfer_session is None:
             self._native_transfer_session = self.establish_native_transfer(
                 cipher_backend=cipher_backend,
@@ -347,14 +489,12 @@ class Channel:
         cipher_backend: str = "fast",
         store_root: "Path | None" = None,
     ):
-        """Build a :class:`NativeTransferSession` from this channel's
-        derived native-transfer secret.
+        """Build a direction-safe native transfer facade for this channel.
 
-        The daemon's ``send_file`` / chunk-store transport call sites
-        invoke this once per channel and reuse the returned session
-        across all chunks of that channel. The session is matched on
-        both peers (same shared secret, deterministic derivation), so
-        the receiver's instance decrypts what the sender's produces.
+        The daemon keeps its existing single-object API, while the facade owns
+        separate role-bound TX/RX sessions.  Alice TX matches Bob RX and vice
+        versa; local TX can never consume or collide with local RX ratchet
+        state.
 
         ``cipher_backend`` defaults to ``"fast"`` (cryptography.hazmat
         BoringSSL); pass ``"native"`` for the ring-backed
@@ -368,12 +508,22 @@ class Channel:
                 "one_link_native; build via `cd native && maturin "
                 "develop --release`"
             )
-        secret = self.derive_native_transfer_secret()
-        return _native_transfer.session_from_shared_secret(
-            secret,
+        if self._native_transfer_session_created:
+            raise RuntimeError(
+                "native transfer session cannot be recreated on the same "
+                "channel (would reuse chunk key/nonces); reopen the secure "
+                "channel or fall back to the legacy transport"
+            )
+        tx_secret, rx_secret = self.derive_native_transfer_direction_secrets()
+        session = _native_transfer.duplex_session_from_directional_secrets(
+            tx_secret,
+            rx_secret,
             cipher_backend=cipher_backend,
             store_root=store_root,
         )
+        self._native_transfer_session_created = True
+        self._native_transfer_session = session
+        return session
 
     @property
     def is_ratchet_active(self) -> bool:
@@ -385,8 +535,18 @@ class Channel:
     # ─── v0.8.2: caps-driven ratchet activation ────────────────────
 
     def note_caps_sent(self) -> None:
-        """Daemon calls this immediately after writing the local
-        CAPS frame. Marks the send-side ready for ratchet flip."""
+        """Freeze the local CAPS frame as the final legacy-AEAD frame.
+
+        The daemon calls this synchronously after ``send(CAPS)`` returns.
+        Moving the boundary on a duplicate call would make already-emitted
+        application frames appear legitimate, so only an exact idempotent
+        repeat is accepted.
+        """
+        if self._caps_sent:
+            if self._legacy_tx_final_seq != self.tx_seq:
+                raise RuntimeError("cannot move the final legacy CAPS boundary")
+            return
+        self._legacy_tx_final_seq = self.tx_seq
         self._caps_sent = True
 
     def note_caps_received(self, features: list[str] | tuple[str, ...] | set[str]) -> None:
@@ -396,10 +556,17 @@ class Channel:
         if features is None:
             features = []
         # Normalize to a set once so membership checks are O(1).
-        feature_set = set(features)
+        feature_set = frozenset(features)
+        if self._caps_received:
+            if self._peer_caps_snapshot != feature_set:
+                raise RuntimeError("peer CAPS changed after the authenticated cutover boundary")
+            return
+        self._peer_caps_snapshot = feature_set
         self._peer_dr_capable = DR_CAP in feature_set
+        self._peer_dr_cutover_capable = DR_CUTOVER_CAP in feature_set
         self._peer_native_transfer_capable = NATIVE_TRANSFER_CAP in feature_set
         self._caps_received = True
+        self._caps_negotiated.set()
 
     @property
     def peer_native_transfer_capable(self) -> bool:
@@ -429,16 +596,30 @@ class Channel:
             or self._dr_peer_x_pub is None
             or self._dr_x_priv is None
         ):
+            self._dr_cutover_phase = "failed"
+            self._dr_send_ready.set()
             log.warning(
                 "channel ratchet activation requested but bootstrap "
-                "material missing for peer %s — staying on legacy",
+                "material missing for peer %s — cutover failed closed",
                 self.peer_short_id,
             )
             return False
+        if self._legacy_tx_final_seq is None:
+            self._dr_cutover_phase = "failed"
+            self._dr_send_ready.set()
+            raise RuntimeError("ratchet cutover missing local final-legacy CAPS boundary")
+        if self.tx_seq != self._legacy_tx_final_seq:
+            self._dr_cutover_phase = "failed"
+            self._dr_send_ready.set()
+            raise RuntimeError(
+                "legacy application frame emitted after CAPS and before ratchet activation"
+            )
         try:
             from one_link.double_ratchet import (
-                init_alice, init_bob,
+                init_alice,
+                init_bob,
             )
+
             # Derive a root_key distinct from the legacy AEAD keys.
             # If legacy keys leak, the DR bootstrap stays safe; if
             # the bootstrap leaks, legacy still has its own keys.
@@ -459,14 +640,29 @@ class Channel:
                     dh_priv=self._dr_x_priv,
                 )
             else:
-                log.warning(
-                    "channel ratchet: unknown role %r for %s",
-                    self._dr_role, self.peer_short_id,
+                raise RuntimeError(
+                    f"channel ratchet: unknown role {self._dr_role!r} "
+                    f"for {self.peer_short_id}"
                 )
-                return False
+            # The peer CAPS has already authenticated under legacy AEAD and
+            # its application-level channel_bind was checked before this
+            # method is called. Freeze that exact receive sequence as the
+            # final legacy boundary. Stream ordering makes any later legacy
+            # frame necessarily post-boundary and therefore invalid.
+            self._legacy_rx_final_seq = self.rx_seq
+            if self._dr_role == "alice":
+                self._dr_cutover_phase = "ratchet_ready"
+                self._dr_send_ready.set()
+            else:
+                # Signal's responder state intentionally has no send chain
+                # until it authenticates Alice's first DR header. Outbound
+                # calls wait on this event instead of silently downgrading.
+                self._dr_cutover_phase = "ratchet_wait_peer"
+                self._dr_send_ready.clear()
             log.info(
                 "channel ratchet activated for peer %s as %s",
-                self.peer_short_id, self._dr_role,
+                self.peer_short_id,
+                self._dr_role,
             )
             # Pre-derive + cache the native-transfer seed BEFORE
             # wiping the DR bootstrap material. Without this the
@@ -490,52 +686,124 @@ class Channel:
             self._dr_peer_x_pub = None
             return True
         except Exception as e:
-            log.warning(
-                "channel ratchet activation FAILED for %s: %s — "
-                "falling back to legacy AEAD",
-                self.peer_short_id, e,
+            self._dr_cutover_phase = "failed"
+            self._dr_send_ready.set()
+            log.error(
+                "channel ratchet activation FAILED for %s: %s — closing rather than downgrading",
+                self.peer_short_id,
+                e,
             )
             self._dr_state = None
-            return False
+            raise
 
     # ─── send / recv ───────────────────────────────────────────────
 
     def _can_send_ratchet(self) -> bool:
-        """v0.20.7 (security audit C4 send-side race fix): True only
-        when DR is active AND we have a usable send chain.
-
-        After both sides exchange CAPS and call maybe_activate_ratchet,
-        Alice's RatchetState has send_chain_key set (init_alice runs
-        an immediate root step). Bob's RatchetState is intentionally
-        send-empty until Alice's first message arrives — that's the
-        Signal Double Ratchet specification: Bob can't send before
-        receiving Alice's first ratchet message because his
-        send_chain_key is derived during the DH ratchet that
-        Alice's first frame triggers.
-
-        For us that means there's a brief window where Bob has
-        DR active but cannot encrypt outbound. Legacy AEAD keys are
-        still alive (the recv-side race tolerance keeps them around);
-        falling back to legacy for that window keeps the channel
-        bidirectional and matches the symmetry of the recv-side
-        DR-then-legacy fallback in recv(). Once Bob receives Alice's
-        first DR frame, his send_chain_key gets set and subsequent
-        sends go through the ratchet.
-        """
+        """Return whether authenticated ratchet sending is available."""
         if self._dr_state is None:
             return False
         return getattr(self._dr_state, "send_chain_key", None) is not None
 
+    def _cutover_commit_payload(self) -> bytes:
+        if self._legacy_tx_final_seq is None or self._legacy_rx_final_seq is None:
+            raise RuntimeError("ratchet cutover boundaries are incomplete")
+        return (
+            DR_CUTOVER_COMMIT_PREFIX
+            + self.transcript_hash
+            + struct.pack(
+                ">QQ",
+                self._legacy_tx_final_seq,
+                self._legacy_rx_final_seq,
+            )
+        )
+
+    def _validate_cutover_commit(self, plaintext: bytes) -> None:
+        expected_size = len(DR_CUTOVER_COMMIT_PREFIX) + 32 + 16
+        if len(plaintext) != expected_size:
+            raise RuntimeError("malformed ratchet cutover commit")
+        offset = len(DR_CUTOVER_COMMIT_PREFIX)
+        committed_transcript = plaintext[offset : offset + 32]
+        remote_tx_final, remote_rx_final = struct.unpack(">QQ", plaintext[offset + 32 :])
+        if committed_transcript != self.transcript_hash:
+            raise RuntimeError("ratchet cutover commit transcript mismatch")
+        if (
+            remote_tx_final != self._legacy_rx_final_seq
+            or remote_rx_final != self._legacy_tx_final_seq
+        ):
+            raise RuntimeError("ratchet cutover commit legacy sequence mismatch")
+
+    async def _send_cutover_commit_locked(self) -> bool:
+        """Send Alice's authenticated boundary commit with the send lock held."""
+        if not self._peer_dr_cutover_capable or self._dr_role != "alice":
+            return False
+        if self._dr_cutover_commit_sent:
+            return False
+        if self._dr_state is None or not self._can_send_ratchet():
+            raise RuntimeError("ratchet cutover commit requested before Alice send readiness")
+        await self._send_ratchet(self._cutover_commit_payload())
+        self._dr_cutover_commit_sent = True
+        return True
+
+    async def send_ratchet_cutover_commit(self) -> bool:
+        """Emit the negotiated v2 commit before either peer needs app data.
+
+        The daemon awaits this immediately after Alice activates. Calling it
+        for Bob, an older v1 peer, or after an existing commit is an idempotent
+        no-op. Ordinary :meth:`send` also enforces commit-before-application as
+        a defensive backstop for non-daemon channel users.
+        """
+        # Bob cannot emit this control frame. Return before taking the send
+        # lock because a Bob application send may legitimately hold that lock
+        # while waiting for Alice's first authenticated DR frame.
+        if not self._peer_dr_cutover_capable or self._dr_role != "alice":
+            return False
+        async with self._send_lock:
+            if self._closed:
+                raise RuntimeError("cannot commit ratchet cutover on a closed channel")
+            return await self._send_cutover_commit_locked()
+
+    async def _wait_for_outbound_mode(self) -> None:
+        """Resolve CAPS/DR cutover without ever emitting post-CAPS legacy.
+
+        Application sends that race mandatory CAPS negotiation wait for the
+        peer's authenticated CAPS. If DR was negotiated, Bob then waits for
+        the first authenticated peer DR frame to derive his sending chain.
+        Closing the channel wakes both waits and fails them deterministically.
+        """
+        if self._caps_sent and not self._caps_received:
+            await self._caps_negotiated.wait()
+        if self._closed:
+            raise RuntimeError("channel closed while waiting for ratchet cutover")
+        # Receiving peer CAPS first is valid on a full-duplex stream. Until
+        # ``note_caps_sent`` freezes our boundary, one legacy send is the local
+        # CAPS response; the daemon's mandatory-first-frame validator prevents
+        # application data from exploiting that protocol slot.
+        if self._caps_sent and self._caps_received and self._peer_dr_capable:
+            if self._dr_state is None:
+                raise RuntimeError("peer negotiated Double Ratchet but activation is not healthy")
+            if self._dr_cutover_phase == "ratchet_wait_peer":
+                await self._dr_send_ready.wait()
+                if self._closed:
+                    raise RuntimeError("channel closed while waiting for ratchet send chain")
+                if self._dr_cutover_phase != "ratchet_ready":
+                    raise RuntimeError("ratchet cutover failed before send readiness")
+                if not self._can_send_ratchet():
+                    raise RuntimeError("ratchet send-ready signal violated channel invariant")
+            elif not self._can_send_ratchet():
+                raise RuntimeError("ratchet marked ready without a sending chain")
+
     async def send(self, plaintext: bytes) -> None:
-        if self._can_send_ratchet():
-            await self._send_ratchet(plaintext)
-            return
-        # Legacy path (also used by Bob immediately post-activation
-        # until Alice's first DR frame seeds his send chain).
-        nonce = self._nonce(self.tx_seq)
-        self.tx_seq += 1
-        ct = self.tx_aead.encrypt(nonce, plaintext, self._aad())
-        await write_frame(self.writer, ct)
+        async with self._send_lock:
+            await self._wait_for_outbound_mode()
+            if self._dr_state is not None:
+                await self._send_cutover_commit_locked()
+                await self._send_ratchet(plaintext)
+                return
+            await self._wait_writer_capacity(len(plaintext) + 16 + 4)
+            nonce = self._nonce(self.tx_seq)
+            self.tx_seq += 1
+            ct = self.tx_aead.encrypt(nonce, plaintext, self._aad())
+            await write_frame(self.writer, ct)
 
     async def queue_send(self, plaintext: bytes) -> None:
         """Encrypt and write a frame without awaiting socket drain.
@@ -545,106 +813,80 @@ class Channel:
         paths keep using ``send`` so small messages retain immediate
         backpressure and error visibility.
         """
-        if self._can_send_ratchet():
-            self._queue_send_ratchet(plaintext)
-            return
-        nonce = self._nonce(self.tx_seq)
-        self.tx_seq += 1
-        ct = self.tx_aead.encrypt(nonce, plaintext, self._aad())
-        write_frame_nowait(self.writer, ct)
+        async with self._send_lock:
+            await self._wait_for_outbound_mode()
+            if self._dr_state is not None:
+                await self._send_cutover_commit_locked()
+                await self._queue_send_ratchet(plaintext)
+                return
+            # Relay-backed writers expose an optional capacity hook because
+            # their StreamWriter-compatible write() method is synchronous
+            # while the underlying WebSocket send is async. Awaiting it before
+            # advancing the nonce keeps pipelined windows byte-bounded.
+            await self._wait_writer_capacity(len(plaintext) + 16 + 4)
+            nonce = self._nonce(self.tx_seq)
+            self.tx_seq += 1
+            ct = self.tx_aead.encrypt(nonce, plaintext, self._aad())
+            write_frame_nowait(self.writer, ct)
+
+    async def _wait_writer_capacity(self, framed_size: int) -> None:
+        wait_writable = getattr(self.writer, "wait_writable", None)
+        if wait_writable is not None:
+            await wait_writable(framed_size)
 
     async def flush(self) -> None:
         await self.writer.drain()
 
     async def recv(self) -> bytes:
-        # v0.9.6: ratchet activation race tolerance. The two sides
-        # flip _dr_state independently as caps_sent + caps_received
-        # complete on each end. There's a brief window where WE've
-        # activated DR but the peer's NEXT outbound frame was queued
-        # BEFORE peer activated → peer's frame is legacy AEAD. Decoding
-        # a legacy ciphertext as a DR header reads a uniformly-random
-        # first byte and raises "unsupported ratchet header version".
-        #
-        # The fix: when DR is active, try DR first; on header-parse
-        # failure, fall back to legacy. Both paths use different keys,
-        # so a successful decryption under either is unambiguous —
-        # an attacker forging a legacy frame to bypass DR can't
-        # succeed because the legacy AEAD key would also fail
-        # without authentic ciphertext.
+        # The authenticated CAPS frame is the exact final legacy boundary.
+        # Once DR is active, accepting even correctly authenticated legacy
+        # bytes would be a downgrade; parse/decrypt exclusively as DR.
         if self._dr_state is not None:
-            payload = await read_frame(self.reader)
-            try:
-                return self._decode_ratchet_payload(payload)
-            except (ValueError, RuntimeError) as dr_err:
-                # Activation-race fingerprints: the bytes we just read
-                # were encrypted by the peer's send-side BEFORE peer
-                # activated DR (i.e. legacy AEAD ciphertext arriving
-                # AFTER our local activation). DR-parsing legacy
-                # bytes can fail in several ways:
-                #   - "header too short" / "ratchet frame too short"
-                #   - "ratchet header version" (the version byte
-                #     isn't 1)
-                #   - "too many skipped messages" (random middle
-                #     bytes interpreted as header.n)
-                #   - "low-order point" (M5: random ECDH bytes)
-                #   - "out-of-order delivery on current chain"
-                #   - AEAD InvalidTag (random keystream mismatch)
-                # All of these mean "this wasn't DR." Fall back to
-                # legacy AEAD on the same bytes; keys are disjoint
-                # so a wrong-path decrypt cannot accidentally
-                # succeed. If legacy also fails, surface the
-                # original DR error so the channel tears down on
-                # genuine corruption. v0.20.7 (security audit C4):
-                # broaden the fingerprint list so the activation-
-                # race window doesn't spuriously kill channels.
-                msg = str(dr_err)
-                race_indicators = (
-                    "ratchet header version",
-                    "ratchet frame too short",
-                    "header too short",
-                    "too many skipped messages",
-                    "low-order point",
-                    "out-of-order delivery on current chain",
-                    "replayed message",
-                )
-                if not any(ind in msg for ind in race_indicators):
-                    # AEAD InvalidTag from dr_decrypt is a
-                    # cryptography library exception; re-classify it
-                    # as a race-fallback candidate too.
-                    from cryptography.exceptions import InvalidTag
-                    if not isinstance(dr_err, InvalidTag):
-                        raise
-                try:
-                    nonce = self._nonce(self.rx_seq)
-                    pt = self.rx_aead.decrypt(nonce, payload, self._aad())
-                    self.rx_seq += 1
-                    # 2026-05-21 audit T2-A: hard-cap how many legacy
-                    # frames we'll accept after DR activation. The
-                    # activation race window is one frame; a sustained
-                    # stream of legacy-shaped frames post-activation is
-                    # the attacker shape, not the race shape.
-                    self._legacy_frames_post_dr += 1
-                    if self._legacy_frames_post_dr > 1:
-                        log.warning(
-                            "channel %s: %d legacy frames accepted "
-                            "post-DR-activation — rejecting further "
-                            "legacy bytes",
-                            self.peer_short_id,
-                            self._legacy_frames_post_dr,
-                        )
-                        raise RuntimeError(
-                            "legacy AEAD frame after DR activation "
-                            "(beyond 1-frame race window)"
-                        )
-                    return pt
-                except Exception:
-                    raise dr_err
+            while True:
+                payload = await read_frame(self.reader)
+                # One RatchetState contains both directional root/chain state.
+                # A concurrent send and receive must not interleave their DH
+                # mutations, even though network reads/writes remain duplex.
+                async with self._ratchet_lock:
+                    plaintext = self._decode_ratchet_payload(payload)
+                    is_cutover_commit = plaintext.startswith(DR_CUTOVER_COMMIT_PREFIX)
+                    if is_cutover_commit:
+                        if not self._peer_dr_cutover_capable or self._dr_role != "bob":
+                            raise RuntimeError("unexpected ratchet cutover control frame")
+                        if self._dr_cutover_commit_received:
+                            raise RuntimeError("duplicate ratchet cutover commit")
+                        # Validate both authenticated legacy boundaries before
+                        # releasing Bob's queued outbound calls. DR AEAD alone
+                        # authenticates the sender, not the claimed boundary.
+                        try:
+                            self._validate_cutover_commit(plaintext)
+                        except RuntimeError:
+                            self._dr_cutover_phase = "failed"
+                            self._dr_send_ready.set()
+                            raise
+
+                    if self._dr_cutover_phase == "ratchet_wait_peer":
+                        if not self._can_send_ratchet():
+                            raise RuntimeError(
+                                "authenticated peer ratchet frame did not derive responder send chain"
+                            )
+                        self._dr_cutover_phase = "ratchet_ready"
+                        self._dr_send_ready.set()
+
+                    if is_cutover_commit:
+                        self._dr_cutover_commit_received = True
+                        # Internal control frames never escape into JSON/binary
+                        # application dispatch. Continue to the next app frame;
+                        # Bob's queued senders were released above.
+                        continue
+                return plaintext
+        if self._caps_sent and self._caps_received and self._peer_dr_capable:
+            raise RuntimeError("peer negotiated Double Ratchet but receive state is unavailable")
         # Legacy path.
         # v0.20.7 (security audit M2): increment rx_seq AFTER successful
         # decrypt so a single bit-flip / injected garbage frame does not
-        # permanently desync the channel. The DR fallback path above
-        # already follows this pattern; this brings the legacy path in
-        # line. On decrypt failure the exception propagates and the
+        # permanently desync the channel. On decrypt failure the exception
+        # propagates and the
         # channel is closed by the caller, so leaving rx_seq unmodified
         # is safe (the channel will not be reused).
         ct = await read_frame(self.reader)
@@ -655,12 +897,13 @@ class Channel:
 
     def _decode_ratchet_payload(self, payload: bytes) -> bytes:
         """Synchronous DR-decrypt of an already-read frame payload.
-        Split out from _recv_ratchet so recv() can try-DR-then-legacy
-        on the same buffered bytes (one read_frame, two decode
-        attempts)."""
+        Split from network reads so authentication and cutover-state changes
+        can run atomically under ``_ratchet_lock``."""
         from one_link.double_ratchet import (
-            Header as DRHeader, decrypt as dr_decrypt,
+            Header as DRHeader,
+            decrypt as dr_decrypt,
         )
+
         # All four ratchet methods are only reached after
         # ``is_ratcheting`` returns True, which guarantees
         # ``_dr_state is not None``. External audit 2026-05-18 ES-18:
@@ -677,34 +920,49 @@ class Channel:
         header = DRHeader.decode(payload[:DR_HEADER_LEN])
         ct = payload[DR_HEADER_LEN:]
         return dr_decrypt(
-            self._dr_state, header, ct, ad=self.transcript_hash,
+            self._dr_state,
+            header,
+            ct,
+            ad=self.transcript_hash,
         )
 
     async def _send_ratchet(self, plaintext: bytes) -> None:
         from one_link.double_ratchet import encrypt as dr_encrypt
+
         # ES-18: explicit raise, not assert (python -O strips asserts).
         if self._dr_state is None:
             raise RuntimeError("ratchet not yet activated")
-        header, ct = dr_encrypt(
-            self._dr_state, plaintext, ad=self.transcript_hash,
-        )
+        await self._wait_writer_capacity(len(plaintext) + DR_HEADER_LEN + 16 + 4)
+        async with self._ratchet_lock:
+            header, ct = dr_encrypt(
+                self._dr_state,
+                plaintext,
+                ad=self.transcript_hash,
+            )
         # Wire layout: [Header (DR_HEADER_LEN bytes)][ciphertext]
         await write_frame(self.writer, header.encode() + ct)
 
-    def _queue_send_ratchet(self, plaintext: bytes) -> None:
+    async def _queue_send_ratchet(self, plaintext: bytes) -> None:
         from one_link.double_ratchet import encrypt as dr_encrypt
+
         # ES-18: explicit raise, not assert.
         if self._dr_state is None:
             raise RuntimeError("ratchet not yet activated")
-        header, ct = dr_encrypt(
-            self._dr_state, plaintext, ad=self.transcript_hash,
-        )
+        await self._wait_writer_capacity(len(plaintext) + DR_HEADER_LEN + 16 + 4)
+        async with self._ratchet_lock:
+            header, ct = dr_encrypt(
+                self._dr_state,
+                plaintext,
+                ad=self.transcript_hash,
+            )
         write_frame_nowait(self.writer, header.encode() + ct)
 
     async def _recv_ratchet(self) -> bytes:
         from one_link.double_ratchet import (
-            Header as DRHeader, decrypt as dr_decrypt,
+            Header as DRHeader,
+            decrypt as dr_decrypt,
         )
+
         # ES-18: explicit raise, not assert.
         if self._dr_state is None:
             raise RuntimeError("ratchet not yet activated")
@@ -716,16 +974,34 @@ class Channel:
             )
         header = DRHeader.decode(payload[:DR_HEADER_LEN])
         ct = payload[DR_HEADER_LEN:]
-        return dr_decrypt(
-            self._dr_state, header, ct, ad=self.transcript_hash,
-        )
+        async with self._ratchet_lock:
+            return dr_decrypt(
+                self._dr_state,
+                header,
+                ct,
+                ad=self.transcript_hash,
+            )
 
     async def close(self) -> None:
+        self._closed = True
+        self._dr_cutover_phase = "closed"
+        # Wake any application send queued behind CAPS/ratchet readiness so it
+        # terminates rather than leaking a task after the transport closes.
+        self._caps_negotiated.set()
+        self._dr_send_ready.set()
         try:
             self.writer.close()
             await self.writer.wait_closed()
-        except Exception:
-            pass
+        except (OSError, RuntimeError) as exc:
+            # Socket/loop teardown is best-effort, but it must not be silent:
+            # repeated close failures are a useful explanation for reconnect
+            # churn and duplicate transfer attempts.
+            log.debug(
+                "channel close failed for %s: %s",
+                self.peer_short_id,
+                exc,
+                exc_info=True,
+            )
 
 
 def _x25519_keypair() -> tuple[X25519PrivateKey, bytes]:
@@ -744,7 +1020,9 @@ def _sha256(data: bytes) -> bytes:
 
 
 def _derive_keys(
-    shared: bytes, salt: bytes, transcript_hash: bytes,
+    shared: bytes,
+    salt: bytes,
+    transcript_hash: bytes,
 ) -> tuple[bytes, bytes]:
     out = HKDF(
         algorithm=hashes.SHA256(),
@@ -755,7 +1033,7 @@ def _derive_keys(
     return out[:32], out[32:64]
 
 
-async def initiate(
+async def _initiate_classical(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     me: Identity,
@@ -775,27 +1053,26 @@ async def initiate(
     somehow accept, the initiator catches the redirect at the REPLY
     pubkey check.
 
-    For TOFU first-meet flows where the responder pubkey isn't yet
-    known, leave ``expected_responder_ed_pub`` as None — the legacy
-    sig material is used and the responder side accepts both v1 and
-    v2 sigs. This is a soft transition: callers wire in the bind as
-    knowledge of the target identity becomes available.
+    Unbound v1 handshakes are rejected by default because they do not bind the
+    responder identity and are vulnerable to unknown-key-share splicing. An
+    operator performing a deliberately isolated legacy migration may set
+    ``ONE_LINK_ALLOW_V1_HELLO=1`` temporarily on both endpoints. Normal paired
+    and QR flows already know the responder key and must pass it here.
     """
-    if (
-        expected_responder_ed_pub is not None
-        and len(expected_responder_ed_pub) != 32
-    ):
+    if expected_responder_ed_pub is not None and len(expected_responder_ed_pub) != 32:
         raise ValueError(
-            f"expected_responder_ed_pub must be 32 bytes, "
-            f"got {len(expected_responder_ed_pub)}"
+            f"expected_responder_ed_pub must be 32 bytes, got {len(expected_responder_ed_pub)}"
+        )
+    if expected_responder_ed_pub is None and os.environ.get("ONE_LINK_ALLOW_V1_HELLO") != "1":
+        raise ValueError(
+            "expected_responder_ed_pub is required for an identity-bound HELLO; "
+            "legacy unbound v1 is disabled (temporary migration override: "
+            "ONE_LINK_ALLOW_V1_HELLO=1)"
         )
     x_priv, x_pub = _x25519_keypair()
     nonce_i = os.urandom(NONCE_LEN)
     if expected_responder_ed_pub is not None:
-        sig_i = me.sign(
-            HELLO_TAG + me.public_bytes + x_pub + nonce_i
-            + expected_responder_ed_pub
-        )
+        sig_i = me.sign(HELLO_TAG + me.public_bytes + x_pub + nonce_i + expected_responder_ed_pub)
     else:
         sig_i = me.sign(HELLO_TAG + me.public_bytes + x_pub + nonce_i)
     hello = me.public_bytes + x_pub + nonce_i + sig_i
@@ -811,13 +1088,9 @@ async def initiate(
     if not verify(r_ed, sig_r, REPLY_TAG + nonce_i + r_ed + r_x + nonce_r):
         raise RuntimeError("REPLY signature invalid")
     # v0.20.7 (M1): catch UKS redirect where attacker re-routes our
-    # HELLO to a different responder. If we didn't know who we were
-    # talking to (TOFU), the bind step above used legacy material and
-    # this check is skipped.
-    if (
-        expected_responder_ed_pub is not None
-        and r_ed != expected_responder_ed_pub
-    ):
+    # HELLO to a different responder. The only unbound case is the explicit,
+    # migration-only v1 override validated at function entry.
+    if expected_responder_ed_pub is not None and r_ed != expected_responder_ed_pub:
         raise RuntimeError(
             "REPLY pubkey does not match expected responder identity "
             "(possible unknown-key-share redirect)"
@@ -844,12 +1117,23 @@ async def initiate(
     )
 
 
-async def respond(
+async def _respond_classical(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     me: Identity,
+    *,
+    is_pinned_peer: Callable[[bytes], bool] | None = None,
+    hello: bytes | None = None,
 ) -> Channel:
-    hello = await read_frame(reader)
+    """Accept an inbound encrypted channel.
+
+    ``is_pinned_peer`` is the owning daemon's current trust-roster lookup. It
+    is consulted only after a legacy-v1 HELLO signature verifies and controls
+    whether downgrade telemetry may retain a per-peer slot. Missing or broken
+    lookups fail closed to fixed-memory aggregate telemetry.
+    """
+    if hello is None:
+        hello = await read_frame(reader)
     if len(hello) != 32 + 32 + NONCE_LEN + 64:
         raise RuntimeError(f"bad HELLO length: {len(hello)}")
     i_ed = hello[0:32]
@@ -868,54 +1152,48 @@ async def respond(
             f"{int(_HANDSHAKE_REPLAY_WINDOW_S)} s window)"
         )
     # v0.20.7 (security audit M1): try the v2 sig (with our pubkey
-    # bound in) first to defeat unknown-key-share. Fall back to the
-    # v1 sig material only if v2 fails — that's the rolling-upgrade
-    # hatch for initiators who don't yet know our identity (TOFU
-    # first-meet) and signed without the bind.
-    sig_v2_material = (
-        HELLO_TAG + i_ed + i_x + nonce_i + me.public_bytes
-    )
+    # bound in) first to defeat unknown-key-share. The v1 signature material
+    # exists only for an explicitly enabled legacy migration. Normal
+    # first-meet flows obtain the responder identity through pairing/QR and use
+    # the bound v2 material.
+    sig_v2_material = HELLO_TAG + i_ed + i_x + nonce_i + me.public_bytes
     sig_v1_material = HELLO_TAG + i_ed + i_x + nonce_i
     if verify(i_ed, sig_i, sig_v2_material):
         pass  # v2 sig — UKS-defended path, the common case once peers upgrade.
     elif verify(i_ed, sig_i, sig_v1_material):
-        # 2026-05-21 audit T2-B: operators can now hard-reject the
-        # v1-sig rolling-upgrade hatch via ``ONE_LINK_REJECT_V1_HELLO=1``.
-        # That closes the UKS splice between paired peers (audit ES-1)
-        # the moment ops are confident both ends speak v2. Default
-        # remains accept-with-warning until the ``uks_v2_only`` CAPS
-        # flag-day ships.
-        if os.environ.get("ONE_LINK_REJECT_V1_HELLO") == "1":
-            v1_count = _bump_v1_sig_counter(i_ed)
+        pinned = False
+        if is_pinned_peer is not None:
+            try:
+                pinned = bool(is_pinned_peer(i_ed))
+            except Exception as exc:
+                # Trust-store failure must not turn an untrusted key into a
+                # retained per-peer metric. Keep the attempt observable via
+                # the unknown aggregate and surface the lookup failure.
+                log.warning(
+                    "channel.respond: pinned-peer telemetry lookup failed: %s",
+                    exc,
+                )
+        v1_count = _bump_v1_sig_counter(i_ed, is_pinned=pinned)
+        telemetry_class = "pinned" if pinned else "unknown"
+        if os.environ.get("ONE_LINK_ALLOW_V1_HELLO") != "1":
             log.warning(
-                "channel.respond: rejecting v1 HELLO sig from peer %s "
-                "(ONE_LINK_REJECT_V1_HELLO=1). v1-fallback count: %d.",
-                i_ed.hex()[:16], v1_count,
+                "channel.respond: rejected legacy v1 HELLO sig from peer %s "
+                "because it lacks responder identity binding. telemetry=%s "
+                "v1-attempt count: %d.",
+                i_ed.hex()[:16],
+                telemetry_class,
+                v1_count,
             )
-            raise RuntimeError(
-                "HELLO signature invalid (v1 sig hard-rejected "
-                "by ONE_LINK_REJECT_V1_HELLO)"
-            )
-        # External audit 2026-05-18 ES-1: this fallback was added as
-        # a rolling-upgrade hatch (audit M1) but at v0.20.7 it's still
-        # universally accepted. An attacker on a hostile LAN who MITMs
-        # a TOFU first-meet between two paired peers (A and C, both
-        # paired with B) can splice their HELLO/REPLY because v1 sig
-        # doesn't bind the responder's pubkey. The flag-day cleanup
-        # is a CAPS-advertised `uks_v2_only` flag after which v1
-        # acceptance becomes a hard reject.
-        #
-        # Until that ships: log at WARNING (not INFO) so ops can
-        # actually grep for it, and increment a per-pubkey counter so
-        # a sudden spike of v1-fallback from a known-upgraded peer
-        # surfaces as suspicious behaviour.
-        v1_count = _bump_v1_sig_counter(i_ed)
+            raise RuntimeError("HELLO signature invalid (legacy unbound v1 is disabled)")
+        # Explicit migration-only compatibility path. It remains observable so
+        # operators can remove the override as soon as the old peer upgrades.
         log.warning(
-            "channel.respond: peer %s used legacy v1 HELLO sig "
-            "(no responder-pubkey binding). UKS defence NOT active "
-            "for this handshake. v1-fallback count for this peer: %d. "
-            "Fix: upgrade the other side so it signs the v2 transcript.",
+            "channel.respond: migration override accepted legacy v1 HELLO from %s; "
+            "responder identity binding and UKS defence are NOT active. "
+            "telemetry=%s v1-fallback count: %d. Remove "
+            "ONE_LINK_ALLOW_V1_HELLO after upgrade.",
             i_ed.hex()[:16],
+            telemetry_class,
             v1_count,
         )
     else:
@@ -945,4 +1223,651 @@ async def respond(
         _dr_x_priv=x_priv,
         _dr_peer_x_pub=i_x,
         _dr_shared=shared,
+    )
+
+
+@dataclass(frozen=True)
+class _PQHello:
+    """Strictly decoded v3 initiator flight."""
+
+    offered_suites: tuple[int, ...]
+    initiator_ed: bytes
+    initiator_x25519: bytes
+    nonce: bytes
+    kem_public_key: bytes
+    signature: bytes
+    unsigned: bytes
+
+
+@dataclass(frozen=True)
+class _PQReply:
+    """Strictly decoded v3 responder flight."""
+
+    selected_suite: int
+    hello_hash: bytes
+    responder_ed: bytes
+    responder_x25519: bytes
+    nonce: bytes
+    kem_ciphertext: bytes
+    signature: bytes
+    unsigned: bytes
+
+
+def _encode_pq_hello_unsigned(
+    *,
+    offered_suites: tuple[int, ...],
+    initiator_ed: bytes,
+    initiator_x25519: bytes,
+    nonce: bytes,
+    kem_public_key: bytes,
+) -> bytes:
+    if not offered_suites or len(offered_suites) > PQ_MAX_OFFERED_SUITES:
+        raise ValueError("PQ HELLO must offer between 1 and 8 suites")
+    if offered_suites != tuple(sorted(set(offered_suites))):
+        raise ValueError("PQ HELLO suites must be unique and canonically sorted")
+    if any(not 0 < suite <= 0xFFFF for suite in offered_suites):
+        raise ValueError("PQ HELLO suite identifiers must be non-zero u16 values")
+    if len(initiator_ed) != 32 or len(initiator_x25519) != 32:
+        raise ValueError("PQ HELLO identity and X25519 public keys must be 32 bytes")
+    if len(nonce) != NONCE_LEN:
+        raise ValueError(f"PQ HELLO nonce must be {NONCE_LEN} bytes")
+    if len(kem_public_key) != PQ_KEM_PUBLIC_KEY_LEN:
+        raise ValueError(
+            f"PQ HELLO ML-KEM hybrid public key must be {PQ_KEM_PUBLIC_KEY_LEN} bytes"
+        )
+    suite_bytes = b"".join(struct.pack(">H", suite) for suite in offered_suites)
+    return (
+        PQ_HANDSHAKE_MAGIC
+        + bytes((PQ_HANDSHAKE_VERSION, len(offered_suites)))
+        + suite_bytes
+        + initiator_ed
+        + initiator_x25519
+        + nonce
+        + kem_public_key
+    )
+
+
+def _parse_pq_hello(raw: bytes) -> _PQHello:
+    minimum = 4 + 1 + 1 + 2 + 32 + 32 + NONCE_LEN + PQ_KEM_PUBLIC_KEY_LEN + 64
+    if len(raw) < minimum:
+        raise RuntimeError(f"bad PQ HELLO length: {len(raw)}")
+    if raw[:4] != PQ_HANDSHAKE_MAGIC:
+        raise RuntimeError("bad PQ HELLO magic")
+    if raw[4] != PQ_HANDSHAKE_VERSION:
+        raise RuntimeError(f"unsupported PQ handshake version: {raw[4]}")
+    suite_count = raw[5]
+    if not 0 < suite_count <= PQ_MAX_OFFERED_SUITES:
+        raise RuntimeError("invalid PQ HELLO suite count")
+    expected = 4 + 1 + 1 + (2 * suite_count) + 32 + 32 + NONCE_LEN + PQ_KEM_PUBLIC_KEY_LEN + 64
+    if len(raw) != expected:
+        raise RuntimeError(f"bad PQ HELLO length: {len(raw)} (expected {expected})")
+    offset = 6
+    offered = tuple(
+        struct.unpack(">H", raw[offset + (2 * index) : offset + (2 * index) + 2])[0]
+        for index in range(suite_count)
+    )
+    if offered != tuple(sorted(set(offered))) or any(suite == 0 for suite in offered):
+        raise RuntimeError("PQ HELLO suite offer is not canonical")
+    offset += 2 * suite_count
+    initiator_ed = raw[offset : offset + 32]
+    offset += 32
+    initiator_x25519 = raw[offset : offset + 32]
+    offset += 32
+    nonce = raw[offset : offset + NONCE_LEN]
+    offset += NONCE_LEN
+    kem_public_key = raw[offset : offset + PQ_KEM_PUBLIC_KEY_LEN]
+    offset += PQ_KEM_PUBLIC_KEY_LEN
+    signature = raw[offset : offset + 64]
+    return _PQHello(
+        offered_suites=offered,
+        initiator_ed=initiator_ed,
+        initiator_x25519=initiator_x25519,
+        nonce=nonce,
+        kem_public_key=kem_public_key,
+        signature=signature,
+        unsigned=raw[:-64],
+    )
+
+
+def _encode_pq_reply_unsigned(
+    *,
+    selected_suite: int,
+    hello_hash: bytes,
+    responder_ed: bytes,
+    responder_x25519: bytes,
+    nonce: bytes,
+    kem_ciphertext: bytes,
+) -> bytes:
+    if not 0 < selected_suite <= 0xFFFF:
+        raise ValueError("PQ REPLY selected suite must be a non-zero u16")
+    if len(hello_hash) != 32:
+        raise ValueError("PQ REPLY hello hash must be 32 bytes")
+    if len(responder_ed) != 32 or len(responder_x25519) != 32:
+        raise ValueError("PQ REPLY identity and X25519 public keys must be 32 bytes")
+    if len(nonce) != NONCE_LEN:
+        raise ValueError(f"PQ REPLY nonce must be {NONCE_LEN} bytes")
+    if len(kem_ciphertext) != PQ_KEM_CIPHERTEXT_LEN:
+        raise ValueError(
+            f"PQ REPLY ML-KEM hybrid ciphertext must be {PQ_KEM_CIPHERTEXT_LEN} bytes"
+        )
+    return (
+        PQ_HANDSHAKE_MAGIC
+        + bytes((PQ_HANDSHAKE_VERSION,))
+        + struct.pack(">H", selected_suite)
+        + hello_hash
+        + responder_ed
+        + responder_x25519
+        + nonce
+        + kem_ciphertext
+    )
+
+
+def _parse_pq_reply(raw: bytes) -> _PQReply:
+    expected = 4 + 1 + 2 + 32 + 32 + 32 + NONCE_LEN + PQ_KEM_CIPHERTEXT_LEN + 64
+    if len(raw) != expected:
+        if len(raw) == 32 + 32 + NONCE_LEN + 64:
+            raise RuntimeError(
+                "PQ REPLY signature invalid (legacy/classical reply rejected as a downgrade)"
+            )
+        raise RuntimeError(f"bad PQ REPLY length: {len(raw)} (expected {expected})")
+    if raw[:4] != PQ_HANDSHAKE_MAGIC:
+        raise RuntimeError("bad PQ REPLY magic")
+    if raw[4] != PQ_HANDSHAKE_VERSION:
+        raise RuntimeError(f"unsupported PQ handshake version: {raw[4]}")
+    selected_suite = struct.unpack(">H", raw[5:7])[0]
+    if selected_suite == 0:
+        raise RuntimeError("PQ REPLY selected an invalid zero suite")
+    offset = 7
+    hello_hash = raw[offset : offset + 32]
+    offset += 32
+    responder_ed = raw[offset : offset + 32]
+    offset += 32
+    responder_x25519 = raw[offset : offset + 32]
+    offset += 32
+    nonce = raw[offset : offset + NONCE_LEN]
+    offset += NONCE_LEN
+    kem_ciphertext = raw[offset : offset + PQ_KEM_CIPHERTEXT_LEN]
+    offset += PQ_KEM_CIPHERTEXT_LEN
+    signature = raw[offset : offset + 64]
+    return _PQReply(
+        selected_suite=selected_suite,
+        hello_hash=hello_hash,
+        responder_ed=responder_ed,
+        responder_x25519=responder_x25519,
+        nonce=nonce,
+        kem_ciphertext=kem_ciphertext,
+        signature=signature,
+        unsigned=raw[:-64],
+    )
+
+
+def _pqkem_runtime():
+    """Return the exact native ML-KEM ABI or fail closed before wire I/O."""
+    from one_link import pq_hybrid, pqkem_native
+
+    probe = getattr(pqkem_native, "runtime_is_usable", None)
+    usable = bool(probe()) if callable(probe) else bool(pqkem_native.HAS_NATIVE)
+    sizes_match = (
+        pqkem_native.HYBRID_PUBLIC_KEY_LEN == PQ_KEM_PUBLIC_KEY_LEN
+        and pqkem_native.HYBRID_CIPHERTEXT_LEN == PQ_KEM_CIPHERTEXT_LEN
+        and pqkem_native.SHARED_SECRET_LEN == 32
+    )
+    if not usable or not sizes_match:
+        raise pq_hybrid.PQUnavailableError(
+            "live PQ channel handshake requires the verified one_link_native.pqkem "
+            "ML-KEM-768 + X25519 ABI; refusing a classical or NullKEM downgrade"
+        )
+    return pqkem_native
+
+
+def _safe_x25519_exchange(private_key: X25519PrivateKey, peer_public: bytes) -> bytes:
+    if len(peer_public) != 32:
+        raise RuntimeError("X25519 peer public key must be 32 bytes")
+    try:
+        shared = private_key.exchange(X25519PublicKey.from_public_bytes(peer_public))
+    except ValueError as exc:
+        raise RuntimeError("invalid or low-order X25519 public key") from exc
+    if hmac.compare_digest(shared, b"\x00" * 32):
+        raise RuntimeError("invalid or low-order X25519 public key")
+    return shared
+
+
+def _derive_pq_channel_secret(
+    *,
+    classical_shared: bytes,
+    kem_shared: bytes,
+    salt: bytes,
+    transcript_hash: bytes,
+    suite: int,
+) -> bytes:
+    """Extract both independent contributions into one transcript-bound root."""
+    if len(classical_shared) != 32 or len(kem_shared) != 32:
+        raise RuntimeError("PQ hybrid inputs must both be 32-byte shared secrets")
+    if len(transcript_hash) != 32:
+        raise RuntimeError("PQ hybrid transcript hash must be 32 bytes")
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=PQ_CHANNEL_SECRET_INFO + struct.pack(">H", suite) + transcript_hash,
+    ).derive(classical_shared + kem_shared)
+
+
+def _derive_pq_confirmation_key(
+    shared_secret: bytes,
+    transcript_hash: bytes,
+    suite: int,
+) -> bytes:
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=transcript_hash,
+        info=PQ_CONFIRM_KEY_INFO + struct.pack(">H", suite),
+    ).derive(shared_secret)
+
+
+def _build_pq_confirmation(
+    *,
+    confirmation_key: bytes,
+    transcript_hash: bytes,
+    suite: int,
+    role: bytes,
+    prior_tag: bytes = b"",
+) -> bytes:
+    if role not in (b"I", b"R"):
+        raise ValueError("PQ confirmation role must be I or R")
+    if len(transcript_hash) != 32:
+        raise ValueError("PQ confirmation transcript must be 32 bytes")
+    if prior_tag and len(prior_tag) != 32:
+        raise ValueError("PQ confirmation prior tag must be 32 bytes")
+    prefix = (
+        PQ_CONFIRM_MAGIC
+        + bytes((PQ_HANDSHAKE_VERSION,))
+        + struct.pack(">H", suite)
+        + role
+        + transcript_hash
+    )
+    tag = hmac.digest(confirmation_key, PQ_CONFIRM_TAG + prefix + prior_tag, "sha256")
+    return prefix + tag
+
+
+def _verify_pq_confirmation(
+    raw: bytes,
+    *,
+    confirmation_key: bytes,
+    transcript_hash: bytes,
+    suite: int,
+    role: bytes,
+    prior_tag: bytes = b"",
+) -> bytes:
+    expected_len = 4 + 1 + 2 + 1 + 32 + 32
+    if len(raw) != expected_len:
+        raise RuntimeError(f"bad PQ key-confirmation length: {len(raw)}")
+    expected = _build_pq_confirmation(
+        confirmation_key=confirmation_key,
+        transcript_hash=transcript_hash,
+        suite=suite,
+        role=role,
+        prior_tag=prior_tag,
+    )
+    if not hmac.compare_digest(raw, expected):
+        raise RuntimeError("PQ key confirmation failed")
+    return raw[-32:]
+
+
+async def _initiate_pq(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    me: Identity,
+    *,
+    expected_responder_ed_pub: bytes,
+) -> Channel:
+    if len(expected_responder_ed_pub) != 32:
+        raise ValueError(
+            f"expected_responder_ed_pub must be 32 bytes, got {len(expected_responder_ed_pub)}"
+        )
+    pqkem = _pqkem_runtime()
+    x_priv, x_pub = _x25519_keypair()
+    nonce_i = os.urandom(NONCE_LEN)
+    kem_public, kem_secret = pqkem.keypair()
+    kem_public_bytes = bytes(kem_public.to_bytes())
+    offered = (PQ_SUITE_X25519_MLKEM768_V1,)
+    hello_unsigned = _encode_pq_hello_unsigned(
+        offered_suites=offered,
+        initiator_ed=me.public_bytes,
+        initiator_x25519=x_pub,
+        nonce=nonce_i,
+        kem_public_key=kem_public_bytes,
+    )
+    hello = hello_unsigned + me.sign(PQ_HELLO_TAG + hello_unsigned + expected_responder_ed_pub)
+    await write_frame(writer, hello)
+
+    raw_reply = await read_frame(reader)
+    reply = _parse_pq_reply(raw_reply)
+    hello_hash = _sha256(hello)
+    if not hmac.compare_digest(reply.hello_hash, hello_hash):
+        raise RuntimeError("PQ REPLY is bound to a different HELLO")
+    if reply.selected_suite not in offered:
+        raise RuntimeError("PQ REPLY selected a suite the initiator did not offer")
+    if reply.selected_suite != PQ_SUITE_X25519_MLKEM768_V1:
+        raise RuntimeError("PQ REPLY selected an unsupported suite")
+    if not hmac.compare_digest(reply.responder_ed, expected_responder_ed_pub):
+        raise RuntimeError(
+            "PQ REPLY pubkey does not match expected responder identity "
+            "(possible unknown-key-share redirect)"
+        )
+    if not verify(
+        reply.responder_ed,
+        reply.signature,
+        PQ_REPLY_TAG + reply.unsigned,
+    ):
+        raise RuntimeError("PQ REPLY signature invalid")
+
+    classical_shared = _safe_x25519_exchange(x_priv, reply.responder_x25519)
+    kem_ciphertext = pqkem.ciphertext_from_bytes(reply.kem_ciphertext)
+    kem_shared = bytes(pqkem.decapsulate(kem_secret, kem_ciphertext))
+    del kem_secret
+    transcript_hash = _sha256(hello + raw_reply)
+    shared = _derive_pq_channel_secret(
+        classical_shared=classical_shared,
+        kem_shared=kem_shared,
+        salt=nonce_i + reply.nonce,
+        transcript_hash=transcript_hash,
+        suite=reply.selected_suite,
+    )
+    confirmation_key = _derive_pq_confirmation_key(
+        shared,
+        transcript_hash,
+        reply.selected_suite,
+    )
+    initiator_confirmation = _build_pq_confirmation(
+        confirmation_key=confirmation_key,
+        transcript_hash=transcript_hash,
+        suite=reply.selected_suite,
+        role=b"I",
+    )
+    await write_frame(writer, initiator_confirmation)
+    raw_responder_confirmation = await read_frame(reader)
+    _verify_pq_confirmation(
+        raw_responder_confirmation,
+        confirmation_key=confirmation_key,
+        transcript_hash=transcript_hash,
+        suite=reply.selected_suite,
+        role=b"R",
+        prior_tag=initiator_confirmation[-32:],
+    )
+
+    k_i_to_r, k_r_to_i = _derive_keys(shared, nonce_i + reply.nonce, transcript_hash)
+    return Channel(
+        reader=reader,
+        writer=writer,
+        peer_ed_pub=reply.responder_ed,
+        peer_short_id=fingerprint_of(reply.responder_ed)[:8],
+        tx_aead=ChaCha20Poly1305(k_i_to_r),
+        rx_aead=ChaCha20Poly1305(k_r_to_i),
+        transcript_hash=transcript_hash,
+        handshake_version=PQ_HANDSHAKE_VERSION,
+        handshake_suite=PQ_HYBRID_HANDSHAKE_CAP,
+        pq_protected=True,
+        key_confirmed=True,
+        _dr_role="alice",
+        _dr_x_priv=x_priv,
+        _dr_peer_x_pub=reply.responder_x25519,
+        _dr_shared=shared,
+    )
+
+
+async def _respond_pq(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    me: Identity,
+    *,
+    raw_hello: bytes,
+) -> Channel:
+    hello = _parse_pq_hello(raw_hello)
+    if _handshake_replay_seen(hello.initiator_ed, hello.nonce, time.monotonic()):
+        raise RuntimeError(
+            "PQ HELLO replay rejected (duplicate nonce inside "
+            f"{int(_HANDSHAKE_REPLAY_WINDOW_S)} s window)"
+        )
+    if not verify(
+        hello.initiator_ed,
+        hello.signature,
+        PQ_HELLO_TAG + hello.unsigned + me.public_bytes,
+    ):
+        raise RuntimeError("PQ HELLO signature invalid")
+    supported = (PQ_SUITE_X25519_MLKEM768_V1,)
+    selected_suite = next(
+        (suite for suite in supported if suite in hello.offered_suites),
+        None,
+    )
+    if selected_suite is None:
+        raise RuntimeError("PQ HELLO offered no mutually supported suite")
+    pqkem = _pqkem_runtime()
+    kem_public = pqkem.public_key_from_bytes(hello.kem_public_key)
+    kem_ciphertext, kem_shared_raw = pqkem.encapsulate(kem_public)
+    kem_shared = bytes(kem_shared_raw)
+    kem_ciphertext_bytes = bytes(kem_ciphertext.to_bytes())
+
+    x_priv, x_pub = _x25519_keypair()
+    nonce_r = os.urandom(NONCE_LEN)
+    hello_hash = _sha256(raw_hello)
+    reply_unsigned = _encode_pq_reply_unsigned(
+        selected_suite=selected_suite,
+        hello_hash=hello_hash,
+        responder_ed=me.public_bytes,
+        responder_x25519=x_pub,
+        nonce=nonce_r,
+        kem_ciphertext=kem_ciphertext_bytes,
+    )
+    reply = reply_unsigned + me.sign(PQ_REPLY_TAG + reply_unsigned)
+    await write_frame(writer, reply)
+
+    classical_shared = _safe_x25519_exchange(x_priv, hello.initiator_x25519)
+    transcript_hash = _sha256(raw_hello + reply)
+    shared = _derive_pq_channel_secret(
+        classical_shared=classical_shared,
+        kem_shared=kem_shared,
+        salt=hello.nonce + nonce_r,
+        transcript_hash=transcript_hash,
+        suite=selected_suite,
+    )
+    confirmation_key = _derive_pq_confirmation_key(shared, transcript_hash, selected_suite)
+    raw_initiator_confirmation = await read_frame(reader)
+    initiator_tag = _verify_pq_confirmation(
+        raw_initiator_confirmation,
+        confirmation_key=confirmation_key,
+        transcript_hash=transcript_hash,
+        suite=selected_suite,
+        role=b"I",
+    )
+    responder_confirmation = _build_pq_confirmation(
+        confirmation_key=confirmation_key,
+        transcript_hash=transcript_hash,
+        suite=selected_suite,
+        role=b"R",
+        prior_tag=initiator_tag,
+    )
+    await write_frame(writer, responder_confirmation)
+
+    k_i_to_r, k_r_to_i = _derive_keys(shared, hello.nonce + nonce_r, transcript_hash)
+    return Channel(
+        reader=reader,
+        writer=writer,
+        peer_ed_pub=hello.initiator_ed,
+        peer_short_id=fingerprint_of(hello.initiator_ed)[:8],
+        tx_aead=ChaCha20Poly1305(k_r_to_i),
+        rx_aead=ChaCha20Poly1305(k_i_to_r),
+        transcript_hash=transcript_hash,
+        handshake_version=PQ_HANDSHAKE_VERSION,
+        handshake_suite=PQ_HYBRID_HANDSHAKE_CAP,
+        pq_protected=True,
+        key_confirmed=True,
+        _dr_role="bob",
+        _dr_x_priv=x_priv,
+        _dr_peer_x_pub=hello.initiator_x25519,
+        _dr_shared=shared,
+    )
+
+
+def _legacy_handshake_override_enabled(explicit: bool | None) -> bool:
+    if explicit is not None:
+        return explicit
+    return (
+        os.environ.get("ONE_LINK_ALLOW_CLASSICAL_HANDSHAKE") == "1"
+        or os.environ.get("ONE_LINK_ALLOW_V1_HELLO") == "1"
+    )
+
+
+def _reject_legacy_hello_by_policy(
+    raw_hello: bytes,
+    me: Identity,
+    *,
+    is_pinned_peer: Callable[[bytes], bool] | None,
+) -> None:
+    """Preserve precise malformed/signature errors, then reject valid legacy."""
+    expected = 32 + 32 + NONCE_LEN + 64
+    if len(raw_hello) != expected:
+        raise RuntimeError(f"bad HELLO length: {len(raw_hello)}")
+    initiator_ed = raw_hello[:32]
+    initiator_x = raw_hello[32:64]
+    nonce = raw_hello[64 : 64 + NONCE_LEN]
+    signature = raw_hello[64 + NONCE_LEN :]
+    if _handshake_replay_seen(initiator_ed, nonce, time.monotonic()):
+        raise RuntimeError(
+            "HELLO replay rejected (duplicate nonce inside "
+            f"{int(_HANDSHAKE_REPLAY_WINDOW_S)} s window)"
+        )
+    v2 = HELLO_TAG + initiator_ed + initiator_x + nonce + me.public_bytes
+    v1 = HELLO_TAG + initiator_ed + initiator_x + nonce
+    if verify(initiator_ed, signature, v2):
+        raise RuntimeError(
+            "legacy classical handshake rejected: live channels require the "
+            "versioned X25519+ML-KEM-768 suite (explicit migration override: "
+            "ONE_LINK_ALLOW_CLASSICAL_HANDSHAKE=1)"
+        )
+    if not verify(initiator_ed, signature, v1):
+        raise RuntimeError("HELLO signature invalid")
+    pinned = False
+    if is_pinned_peer is not None:
+        try:
+            pinned = bool(is_pinned_peer(initiator_ed))
+        except Exception as exc:
+            log.warning(
+                "channel.respond: pinned-peer telemetry lookup failed: %s",
+                exc,
+            )
+    count = _bump_v1_sig_counter(initiator_ed, is_pinned=pinned)
+    log.warning(
+        "channel.respond: rejected legacy v1 HELLO from %s; PQ hybrid is "
+        "required. telemetry=%s v1-attempt count: %d",
+        initiator_ed.hex()[:16],
+        "pinned" if pinned else "unknown",
+        count,
+    )
+    raise RuntimeError(
+        "HELLO signature invalid (legacy unbound v1 is disabled; PQ hybrid required)"
+    )
+
+
+async def initiate(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    me: Identity,
+    *,
+    expected_responder_ed_pub: Optional[bytes] = None,
+    allow_classical_downgrade: bool = False,
+    force_classical_handshake: bool = False,
+) -> Channel:
+    """Open an authenticated, mutually-confirmed PQ-hybrid channel.
+
+    The default path requires the native ML-KEM runtime and never retries a
+    rejected v3 flight as classical.  A legacy handshake is reachable only
+    through an explicit caller decision; forcing it additionally requires the
+    downgrade flag so a single accidental boolean cannot remove PQ protection.
+    """
+    if force_classical_handshake:
+        if not allow_classical_downgrade:
+            raise ValueError(
+                "force_classical_handshake requires allow_classical_downgrade=True"
+            )
+        log.warning(
+            "explicitly forcing legacy X25519-only channel handshake; this "
+            "connection has no ML-KEM harvest-now-decrypt-later protection"
+        )
+        return await _initiate_classical(
+            reader,
+            writer,
+            me,
+            expected_responder_ed_pub=expected_responder_ed_pub,
+        )
+    if expected_responder_ed_pub is None:
+        if os.environ.get("ONE_LINK_ALLOW_V1_HELLO") == "1":
+            log.warning(
+                "ONE_LINK_ALLOW_V1_HELLO explicitly selected the legacy "
+                "X25519-only migration handshake; no ML-KEM protection"
+            )
+            return await _initiate_classical(
+                reader,
+                writer,
+                me,
+                expected_responder_ed_pub=None,
+            )
+        raise ValueError(
+            "expected_responder_ed_pub is required for the authenticated PQ handshake; "
+            "legacy unbound v1 is disabled"
+        )
+    try:
+        return await _initiate_pq(
+            reader,
+            writer,
+            me,
+            expected_responder_ed_pub=expected_responder_ed_pub,
+        )
+    except Exception as exc:
+        from one_link.pq_hybrid import PQUnavailableError
+
+        if not isinstance(exc, PQUnavailableError) or not allow_classical_downgrade:
+            raise
+        log.warning(
+            "native PQ runtime unavailable; explicit caller policy permits a "
+            "legacy X25519-only handshake"
+        )
+        return await _initiate_classical(
+            reader,
+            writer,
+            me,
+            expected_responder_ed_pub=expected_responder_ed_pub,
+        )
+
+
+async def respond(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    me: Identity,
+    *,
+    is_pinned_peer: Callable[[bytes], bool] | None = None,
+    allow_classical_downgrade: bool | None = None,
+) -> Channel:
+    """Accept v3 PQ channels and fail closed on legacy/classical peers."""
+    raw_hello = await read_frame(reader)
+    if raw_hello.startswith(PQ_HANDSHAKE_MAGIC):
+        return await _respond_pq(reader, writer, me, raw_hello=raw_hello)
+    if not _legacy_handshake_override_enabled(allow_classical_downgrade):
+        _reject_legacy_hello_by_policy(
+            raw_hello,
+            me,
+            is_pinned_peer=is_pinned_peer,
+        )
+        raise RuntimeError("unreachable legacy handshake policy state")
+    log.warning(
+        "explicit migration policy accepted a legacy X25519-only channel; "
+        "this connection has no ML-KEM harvest-now-decrypt-later protection"
+    )
+    return await _respond_classical(
+        reader,
+        writer,
+        me,
+        is_pinned_peer=is_pinned_peer,
+        hello=raw_hello,
     )

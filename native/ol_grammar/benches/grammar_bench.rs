@@ -1,4 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+//! Criterion benchmarks for grammar compression and decompression.
+
+use criterion::{black_box, criterion_main, BenchmarkId, Criterion};
 use ol_grammar::{compress, decompress};
 
 fn bench_compress(c: &mut Criterion) {
@@ -26,5 +28,13 @@ fn bench_decompress(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_compress, bench_decompress);
-criterion_main!(benches);
+// Criterion's macro generates the public group function, so the lint exception
+// is confined to that generated item instead of the benchmark crate.
+#[allow(missing_docs)]
+mod criterion_benchmark_harness {
+    use super::{bench_compress, bench_decompress};
+    use criterion::criterion_group;
+
+    criterion_group!(benches, bench_compress, bench_decompress);
+}
+criterion_main!(criterion_benchmark_harness::benches);

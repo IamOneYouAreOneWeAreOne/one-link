@@ -15,9 +15,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -64,12 +63,179 @@ def test_detect_empty(tmp_path: Path):
     assert se.detect_db_state(p) == "empty"
 
 
+def test_stale_plaintext_backup_cleanup_overwrites_every_byte_and_unlinks(
+    tmp_path: Path,
+    monkeypatch,
+):
+    live = tmp_path / "state.db"
+    live_bytes = b"encrypted-live-database-sentinel"
+    live.write_bytes(live_bytes)
+    backup = se.plaintext_backup_path(live)
+    plaintext = (b"SQLite format 3\0" + b"PRIVATE-MESSAGE\0" * 8192)
+    backup.write_bytes(plaintext)
+    observed: dict[str, bytes] = {}
+    real_delete = se._delete_open_backup
+
+    def _observe_then_delete(path: Path, fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        observed["wiped"] = os.read(fd, len(plaintext))
+        real_delete(path, fd)
+
+    monkeypatch.setattr(se.os, "urandom", lambda n: b"\xa5" * n)
+    monkeypatch.setattr(se, "_delete_open_backup", _observe_then_delete)
+
+    assert se.cleanup_plaintext_migration_backup(live) is True
+    assert not backup.exists()
+    assert live.read_bytes() == live_bytes
+    assert observed["wiped"] == b"\xa5" * len(plaintext)
+
+
+def test_stale_plaintext_backup_cleanup_refuses_symlink(
+    tmp_path: Path,
+    monkeypatch,
+):
+    live = tmp_path / "state.db"
+    live.write_bytes(b"encrypted-live")
+    victim = tmp_path / "victim.db"
+    victim_bytes = b"SQLite format 3\0DO-NOT-TOUCH"
+    victim.write_bytes(victim_bytes)
+    backup = se.plaintext_backup_path(live)
+    try:
+        backup.symlink_to(victim)
+    except OSError as exc:
+        # Windows may deny symlink creation outside Developer Mode. Exercise
+        # the same fail-closed reparse branch with an identity-stable stand-in
+        # so the security gate is never silently skipped in CI.
+        backup.write_bytes(victim_bytes)
+        backup_stat = os.lstat(backup)
+        real_is_reparse = se._is_reparse_point
+        monkeypatch.setattr(
+            se,
+            "_is_reparse_point",
+            lambda value: value is backup_stat or real_is_reparse(value),
+        )
+        real_lstat = se.os.lstat
+        monkeypatch.setattr(
+            se.os,
+            "lstat",
+            lambda path: backup_stat if Path(path) == backup else real_lstat(path),
+        )
+
+    with pytest.raises(
+        se.PlaintextBackupCleanupError,
+        match="symlink|reparse",
+    ):
+        se.cleanup_plaintext_migration_backup(live)
+
+    assert os.path.lexists(backup)
+    assert victim.read_bytes() == victim_bytes
+    assert live.read_bytes() == b"encrypted-live"
+
+
+def test_stale_plaintext_backup_cleanup_refuses_non_regular_file(
+    tmp_path: Path,
+):
+    live = tmp_path / "state.db"
+    live.write_bytes(b"encrypted-live")
+    backup = se.plaintext_backup_path(live)
+    backup.mkdir()
+
+    with pytest.raises(
+        se.PlaintextBackupCleanupError,
+        match="non-regular",
+    ):
+        se.cleanup_plaintext_migration_backup(live)
+
+    assert backup.is_dir()
+    assert live.read_bytes() == b"encrypted-live"
+
+
+def test_stale_plaintext_backup_cleanup_detects_path_identity_race(
+    tmp_path: Path,
+    monkeypatch,
+):
+    live = tmp_path / "state.db"
+    live_bytes = b"encrypted-live"
+    live.write_bytes(live_bytes)
+    backup = se.plaintext_backup_path(live)
+    backup.write_bytes(b"SQLite format 3\0" + b"secret" * 4096)
+    real_lstat = se.os.lstat
+    backup_lstats = 0
+
+    def _raced_lstat(path):
+        nonlocal backup_lstats
+        result = real_lstat(path)
+        if Path(path) != backup:
+            return result
+        backup_lstats += 1
+        if backup_lstats < 2:
+            return result
+        values = list(result)
+        values[1] = int(result.st_ino) + 1
+        return os.stat_result(values)
+
+    monkeypatch.setattr(se.os, "lstat", _raced_lstat)
+
+    with pytest.raises(
+        se.PlaintextBackupCleanupError,
+        match="replaced before unlink",
+    ):
+        se.cleanup_plaintext_migration_backup(live)
+
+    assert backup.exists(), "a raced pathname must never be unlinked"
+    assert live.read_bytes() == live_bytes
+
+
+@pytest.mark.parametrize(
+    ("cipher_rows", "sqlite_rows", "expected_error"),
+    [
+        ([('page 7 HMAC verification failed',)], [("ok",)], "SQLCipher"),
+        ([], [("database disk image is malformed",)], "SQLite"),
+    ],
+)
+def test_backup_cleanup_truth_gate_rejects_cipher_or_sqlite_corruption(
+    cipher_rows,
+    sqlite_rows,
+    expected_error,
+):
+    class _Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return list(self.rows)
+
+        def fetchone(self):
+            return self.rows[0] if self.rows else None
+
+    class _Connection:
+        def execute(self, sql):
+            if sql.startswith("SELECT version"):
+                return _Result([(se.STATE_SCHEMA_VERSION_CURRENT,)])
+            if sql == "PRAGMA cipher_version":
+                return _Result([("4.6.1",)])
+            if sql == "PRAGMA cipher_integrity_check":
+                return _Result(cipher_rows)
+            if sql == "PRAGMA integrity_check":
+                return _Result(sqlite_rows)
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+    with pytest.raises(
+        se.EncryptedDatabaseVerificationError,
+        match=expected_error,
+    ):
+        se.verify_encrypted_state_for_backup_cleanup(_Connection())
+
+
 @pytest.mark.skipif(not se._have_sqlcipher(), reason="sqlcipher3 not installed")
 def test_detect_encrypted_via_migration(tmp_path: Path):
     p = tmp_path / "x.db"
     c = sqlite3.connect(str(p))
     c.execute("CREATE TABLE schema_version(version INTEGER)")
-    c.execute("INSERT INTO schema_version VALUES(1)")
+    c.execute(
+        "INSERT INTO schema_version VALUES(?)",
+        (se.STATE_SCHEMA_VERSION_CURRENT,),
+    )
     c.commit(); c.close()
     se.migrate_plaintext_to_encrypted(p, "test-passphrase-xyz")
     assert se.detect_db_state(p) == "encrypted"
@@ -111,7 +277,10 @@ def test_migration_securely_deletes_plaintext_backup(tmp_path: Path):
     p = tmp_path / "s.db"
     c = sqlite3.connect(str(p))
     c.execute("CREATE TABLE schema_version(version INTEGER)")
-    c.execute("INSERT INTO schema_version VALUES(1)")
+    c.execute(
+        "INSERT INTO schema_version VALUES(?)",
+        (se.STATE_SCHEMA_VERSION_CURRENT,),
+    )
     c.execute("CREATE TABLE t(body TEXT)")
     c.execute("INSERT INTO t VALUES('plaintext must not survive')")
     c.commit(); c.close()
@@ -128,6 +297,136 @@ def test_migration_securely_deletes_plaintext_backup(tmp_path: Path):
             assert b"plaintext must not survive" not in f.read_bytes(), (
                 f"plaintext leaked into {f.name}"
             )
+
+
+@pytest.mark.skipif(not se._have_sqlcipher(), reason="sqlcipher3 not installed")
+def test_encrypted_state_boot_cleans_backup_left_by_older_release(
+    tmp_path: Path,
+    monkeypatch,
+):
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE schema_version(version INTEGER)")
+    conn.execute("INSERT INTO schema_version VALUES(27)")
+    conn.execute("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT)")
+    conn.commit()
+    conn.close()
+    passphrase = "stale-backup-cleanup-integration-key"
+    se.migrate_plaintext_to_encrypted(db_path, passphrase)
+    stale = se.plaintext_backup_path(db_path)
+    stale_conn = sqlite3.connect(stale)
+    stale_conn.execute("CREATE TABLE leaked(body TEXT)")
+    stale_conn.execute("INSERT INTO leaked VALUES('historic plaintext')")
+    stale_conn.commit()
+    stale_conn.close()
+    assert b"historic plaintext" in stale.read_bytes()
+
+    monkeypatch.setenv(kc.ENV_VAR, passphrase)
+    state = State(db_path=db_path)
+    try:
+        assert state.is_encrypted is True
+        assert state._encryption_backup_path is None
+        assert not stale.exists()
+    finally:
+        state.close()
+
+
+@pytest.mark.skipif(not se._have_sqlcipher(), reason="sqlcipher3 not installed")
+def test_encrypted_state_retains_backup_when_full_verification_refuses(
+    tmp_path: Path,
+    monkeypatch,
+):
+    passphrase = "verification-refusal-test-key"
+    monkeypatch.setenv(kc.ENV_VAR, passphrase)
+    db_path = tmp_path / "state.db"
+    initial = State(db_path=db_path)
+    initial.close()
+    stale = se.plaintext_backup_path(db_path)
+    stale_bytes = b"SQLite format 3\0ONLY-RECOVERY-COPY" * 4096
+    stale.write_bytes(stale_bytes)
+
+    def _refuse(_conn, *, expected_schema_version):
+        assert expected_schema_version == se.STATE_SCHEMA_VERSION_CURRENT
+        raise se.EncryptedDatabaseVerificationError(
+            "simulated encrypted partial-page corruption"
+        )
+
+    monkeypatch.setattr(
+        se,
+        "verify_encrypted_state_for_backup_cleanup",
+        _refuse,
+    )
+    reopened = State(db_path=db_path)
+    try:
+        assert reopened._encryption_backup_path == stale
+        assert stale.read_bytes() == stale_bytes
+    finally:
+        reopened.close()
+
+
+@pytest.mark.skipif(not se._have_sqlcipher(), reason="sqlcipher3 not installed")
+def test_encrypted_state_retains_uninspectable_backup_without_crashing(
+    tmp_path: Path,
+    monkeypatch,
+):
+    passphrase = "uninspectable-backup-test-key"
+    monkeypatch.setenv(kc.ENV_VAR, passphrase)
+    db_path = tmp_path / "state.db"
+    initial = State(db_path=db_path)
+    initial.close()
+    stale = se.plaintext_backup_path(db_path)
+    stale_bytes = b"SQLite format 3\0ACL-RECOVERY-COPY" * 4096
+    stale.write_bytes(stale_bytes)
+    real_lstat = os.lstat
+
+    def _deny_backup_inspection(path):
+        if Path(path) == stale:
+            raise PermissionError("simulated backup ACL denial")
+        return real_lstat(path)
+
+    monkeypatch.setattr(os, "lstat", _deny_backup_inspection)
+    reopened = State(db_path=db_path)
+    try:
+        assert reopened._encryption_backup_path == stale
+        # Use an already-open descriptor would be overkill here; restore the
+        # path inspection primitive before proving that no byte was touched.
+        monkeypatch.setattr(os, "lstat", real_lstat)
+        assert stale.read_bytes() == stale_bytes
+    finally:
+        reopened.close()
+
+
+@pytest.mark.skipif(not se._have_sqlcipher(), reason="sqlcipher3 not installed")
+def test_truncated_encrypted_database_never_triggers_plaintext_backup_erase(
+    tmp_path: Path,
+    monkeypatch,
+):
+    passphrase = "truncated-encrypted-database-test-key"
+    monkeypatch.setenv(kc.ENV_VAR, passphrase)
+    db_path = tmp_path / "state.db"
+    initial = State(db_path=db_path)
+    initial.set_setting("large-value", "x" * 512_000)
+    initial.close()
+    stale = se.plaintext_backup_path(db_path)
+    stale_bytes = b"SQLite format 3\0TRUNCATION-RECOVERY" * 4096
+    stale.write_bytes(stale_bytes)
+    original_size = db_path.stat().st_size
+    with open(db_path, "r+b") as handle:
+        handle.truncate(max(4096, original_size // 2))
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    damaged = None
+    try:
+        damaged = State(db_path=db_path)
+    except Exception:
+        pass
+    finally:
+        if damaged is not None:
+            assert damaged._encryption_backup_path == stale
+            damaged.close()
+
+    assert stale.read_bytes() == stale_bytes
 
 
 @pytest.mark.skipif(not se._have_sqlcipher(), reason="sqlcipher3 not installed")
@@ -318,10 +617,8 @@ def test_network_bind_loopback_is_info_with_recovery_hint():
     assert "ONE_LINK_BIND_HOST" in msg
 
 
-def test_network_bind_lan_default_is_info_with_recovery_hint():
-    """0.0.0.0 is the project default + correctly auth-gated; the
-    audit should report it WITHOUT warning + tell the user how to
-    restrict if they prefer loopback-only."""
+def test_network_bind_explicit_lan_is_info_with_recovery_hint():
+    """Explicit 0.0.0.0 is auth-gated and explains loopback recovery."""
     findings = hc.check_network_bind("0.0.0.0", lan_explicit=True)
     assert all(f.severity == "info" for f in findings)
     msg = " ".join(f.message for f in findings)

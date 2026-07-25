@@ -12,13 +12,10 @@ These pin behaviors the user audit surfaced as broken:
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import json
 import time
 from pathlib import Path
-from types import SimpleNamespace
-from typing import AsyncIterator
 
+import blake3
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -26,6 +23,7 @@ from one_link.daemon import (
     Daemon,
     FILE_ACK_DEADLINE_S,
     HANDSHAKE_DEADLINE_OUTBOUND_S,
+    IncomingFile,
     OutboundSession,
     TransferPausedError,
     _is_transient_send_error,
@@ -46,8 +44,80 @@ def _new_identity() -> Identity:
     )
 
 
+async def _close_silent_server(
+    server: asyncio.AbstractServer,
+    writers: list[asyncio.StreamWriter],
+    handler_tasks: set[asyncio.Task[None]],
+) -> None:
+    """Close a synthetic peer and every accepted-side handler it owns."""
+    server.close()
+    for task in handler_tasks:
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*handler_tasks, return_exceptions=True)
+    for writer in writers:
+        writer.close()
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                *(writer.wait_closed() for writer in writers),
+                return_exceptions=True,
+            ),
+            timeout=2.0,
+        )
+    except TimeoutError:
+        for writer in writers:
+            transport = writer.transport
+            transport.abort()
+        await asyncio.sleep(0)
+    await asyncio.wait_for(server.wait_closed(), timeout=2.0)
+
+
 def test_timeout_errors_are_transient_send_errors() -> None:
     assert _is_transient_send_error(asyncio.TimeoutError())
+
+
+@pytest.mark.asyncio
+async def test_fire_and_forget_retry_tasks_are_owned_and_drained_by_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daemon = Daemon(_new_identity())
+    daemon.state = State(db_path=tmp_path / "state.db")
+    peer_fp = "ab" * 32
+    started = asyncio.Event()
+    cancelled: set[str] = set()
+
+    async def _hold_resume(_peer_fp: str, *, force: bool = False) -> None:
+        del force
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.add("resume")
+            raise
+
+    async def _hold_outbox(_peer_fp: str) -> None:
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.add("outbox")
+            raise
+
+    monkeypatch.setattr(daemon, "_resume_paused_swallow", _hold_resume)
+    monkeypatch.setattr(daemon, "_flush_outbox_swallow", _hold_outbox)
+
+    daemon._schedule_resume_paused(peer_fp)
+    daemon._schedule_outbox_flush(peer_fp)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await asyncio.sleep(0)
+    assert len(daemon._background_tasks) == 2
+
+    await daemon.stop()
+
+    assert cancelled == {"resume", "outbox"}
+    assert not daemon._background_tasks
 
 
 class _DesyncedChannel:
@@ -125,8 +195,12 @@ async def test_send_file_aborts_when_receiver_doesnt_speak_protocol(
 
     # Silent listener: accept and hold; never reply.
     accepted_writers: list[asyncio.StreamWriter] = []
+    handler_tasks: set[asyncio.Task[None]] = set()
 
     async def _silent(reader, writer):
+        task = asyncio.current_task()
+        if task is not None:
+            handler_tasks.add(task)
         accepted_writers.append(writer)
         try:
             await asyncio.sleep(60.0)
@@ -158,13 +232,8 @@ async def test_send_file_aborts_when_receiver_doesnt_speak_protocol(
         elapsed = time.monotonic() - started
         # Must abort within the tight window, NOT hang forever.
         assert elapsed < 5.0, f"send_file took {elapsed:.1f}s — did the timeout fire?"
-        for w in accepted_writers:
-            with contextlib.suppress(Exception):
-                w.close()
-        server.close()
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(server.wait_closed(), timeout=2.0)
-        state_a.close()
+        await _close_silent_server(server, accepted_writers, handler_tasks)
+        await daemon_a.stop()
 
 
 @pytest.mark.asyncio
@@ -186,7 +255,14 @@ async def test_send_file_marks_transfer_paused_with_reason(
     daemon_a.state = state_a
     daemon_a.discovery = None
 
+    accepted_writers: list[asyncio.StreamWriter] = []
+    handler_tasks: set[asyncio.Task[None]] = set()
+
     async def _silent(reader, writer):
+        task = asyncio.current_task()
+        if task is not None:
+            handler_tasks.add(task)
+        accepted_writers.append(writer)
         try:
             await asyncio.sleep(30.0)
         except asyncio.CancelledError:
@@ -216,10 +292,8 @@ async def test_send_file_marks_transfer_paused_with_reason(
         assert "timed out" in rec.metadata["error"].lower()
         assert rec.metadata.get("transient") is True
     finally:
-        server.close()
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(server.wait_closed(), timeout=2.0)
-        state_a.close()
+        await _close_silent_server(server, accepted_writers, handler_tasks)
+        await daemon_a.stop()
 
 
 @pytest.mark.asyncio
@@ -279,7 +353,7 @@ async def test_resume_retry_preserves_existing_progress_on_handshake_timeout(
     assert rec.chunks_done == 1
     assert rec.chunks_total >= 4
     assert rec.metadata["delivery_state"] == "waiting_for_device"
-    state_a.close()
+    await daemon_a.stop()
 
 
 def test_ratchet_header_mismatch_is_transient():
@@ -331,7 +405,7 @@ async def test_send_file_pauses_and_preserves_on_ratchet_desync(tmp_path: Path):
     assert row.metadata["transient"] is True
     assert "ratchet header version" in row.metadata["error"]
     assert me_b.fingerprint not in daemon_a._outbound_sessions
-    state_a.close()
+    await daemon_a.stop()
 
 
 # ─── transfer-ledger watchdog ──────────────────────────────────────
@@ -393,6 +467,191 @@ def test_reap_stuck_transfers_marks_old_offered_as_waiting(tmp_path: Path):
     # Fresh row still 'offered'.
     assert rows["fresh1"].status == "offered"
     state.close()
+
+
+def test_reaper_preserves_inbound_offer_waiting_for_acceptance(tmp_path: Path):
+    me = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    old = int(time.time() * 1000) - (10 * 60 * 1000)
+    state.upsert_transfer(
+        id="in:held", direction="in", peer_fp="aa" * 32, kind="file",
+        name="ACE.zip", size=100, status="offered", progress_bytes=40,
+        total_bytes=100, chunks_done=4, chunks_total=10,
+        metadata={"needs_accept": True, "delivery_state": "awaiting_acceptance"},
+    )
+    with state._write_lock:
+        state._conn.execute(
+            "UPDATE transfers SET updated_ms = ? WHERE id = ?", (old, "in:held"),
+        )
+
+    assert daemon._reap_stuck_transfers() == 0
+    row = state.get_transfer("in:held")
+    assert row.status == "offered"
+    assert row.progress_bytes == 40
+    assert row.metadata["delivery_state"] == "awaiting_acceptance"
+    state.close()
+
+
+def test_reaper_labels_stale_inbound_as_waiting_for_sender(tmp_path: Path):
+    me = _new_identity()
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    old = int(time.time() * 1000) - (10 * 60 * 1000)
+    state.upsert_transfer(
+        id="in:stalled", direction="in", peer_fp="bb" * 32, kind="file",
+        name="ACE.zip", size=100, status="active", progress_bytes=40,
+        total_bytes=100, chunks_done=4, chunks_total=10,
+        metadata={"delivery_state": "receiving"},
+    )
+    with state._write_lock:
+        state._conn.execute(
+            "UPDATE transfers SET updated_ms = ? WHERE id = ?", (old, "in:stalled"),
+        )
+
+    assert daemon._reap_stuck_transfers() == 1
+    row = state.get_transfer("in:stalled")
+    assert row.status == "paused"
+    assert row.progress_bytes == 40
+    assert row.metadata["delivery_state"] == "waiting_for_sender"
+    assert "next_retry_ms" not in row.metadata
+    state.close()
+
+
+def test_reaper_parks_cdc_partial_and_releases_capacity(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    me = _new_identity()
+    peer_fp = "bb" * 32
+    state = State(db_path=tmp_path / "state.db")
+    daemon = Daemon(me)
+    daemon.state = state
+    payload = b"park resumable progress"
+    blob = blake3.blake3(payload).hexdigest()
+    out_path = tmp_path / "data" / "inbox" / "park.partial"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(out_path, "x+b")
+    handle.write(payload)
+    chunks = [{
+        "index": 0,
+        "start": 0,
+        "end": len(payload),
+        "size": len(payload),
+        "hash": blob,
+    }]
+    transfer_id = f"in:{blob}"
+    incoming = IncomingFile(
+        name="park.bin",
+        size=len(payload),
+        blob_hex=blob,
+        out_path=out_path,
+        handle=handle,
+        hasher=blake3.blake3(payload),
+        cdc_chunks=chunks,
+        cdc_missing=set(),
+        cdc_parts={},
+        cdc_streamed={0},
+        transfer_id=transfer_id,
+        acceptance_granted=True,
+        peer_fp=peer_fp,
+        reservation_id=transfer_id,
+        cache_reservation_id=transfer_id,
+    )
+    daemon._incoming_files[blob] = incoming
+    admission = daemon._transfer_reservation_ledger().reserve(
+        reservation_id=transfer_id,
+        name="park.bin",
+        size=len(payload),
+        peer_fp=peer_fp,
+        policy=daemon._transfer_admission_policy.__class__(
+            min_free_reserve_bytes=0,
+            free_reserve_ratio=0,
+        ),
+    )
+    assert admission.ok
+    state.upsert_transfer(
+        id=transfer_id,
+        direction="in",
+        peer_fp=peer_fp,
+        kind="file",
+        name="park.bin",
+        size=len(payload),
+        blob_hash=blob,
+        status="active",
+        progress_bytes=len(payload),
+        total_bytes=len(payload),
+        chunks_done=1,
+        chunks_total=1,
+        metadata={"delivery_state": "receiving"},
+    )
+    old = int(time.time() * 1000) - (10 * 60 * 1000)
+    with state._write_lock:
+        state._conn.execute(
+            "UPDATE transfers SET updated_ms = ? WHERE id = ?",
+            (old, transfer_id),
+        )
+
+    incoming.finalizing = True
+    assert daemon._reap_stuck_transfers() == 0
+    assert daemon._incoming_files[blob] is incoming
+    assert state.get_transfer(transfer_id).status == "active"
+
+    incoming.finalizing = False
+    with state._write_lock:
+        state._conn.execute(
+            "UPDATE transfers SET status = ?, updated_ms = ? WHERE id = ?",
+            ("paused", old, transfer_id),
+        )
+    assert daemon._reap_stuck_transfers() == 1
+    assert blob not in daemon._incoming_files
+    assert incoming.handle.closed
+    assert out_path.is_file()
+    assert daemon._transfer_reservation_ledger().snapshot() == ()
+    assert (peer_fp, blob) in set(daemon._resume_registry.keys())
+    row = state.get_transfer(transfer_id)
+    assert row is not None and row.status == "paused"
+    state.close()
+
+
+def test_resume_selects_partial_with_verified_bytes_across_manifest_change(
+    tmp_path: Path, monkeypatch,
+):
+    """A zero-byte retry duplicate must not replace a useful old partial."""
+    monkeypatch.setenv("ONE_LINK_HOME", str(tmp_path))
+    daemon = Daemon(_new_identity())
+    inbox = tmp_path / "data" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    payload = b"abcdefgh"
+    blob = blake3.blake3(payload).hexdigest()
+    canonical = inbox / f"{blob[:8]}_ACE.zip"
+    canonical.write_bytes(payload)
+    preferred = inbox / f"{blob[:8]}_staged_ACE.zip"
+    preferred.write_bytes(b"")
+    chunks = [
+        {
+            "index": 0, "start": 0, "end": 4, "size": 4,
+            "hash": blake3.blake3(payload[:4]).hexdigest(),
+        },
+        {
+            "index": 1, "start": 4, "end": 8, "size": 4,
+            "hash": blake3.blake3(payload[4:]).hexdigest(),
+        },
+    ]
+
+    selected, handle, valid = daemon._open_best_resume_partial(
+        blob=blob, size=len(payload), cdc_chunks=chunks,
+        preferred_path=preferred, canonical_name="ACE.zip",
+    )
+    try:
+        assert selected == canonical.resolve()
+        assert valid == {0, 1}
+        assert handle.read() == payload
+    finally:
+        handle.close()
 
 
 def test_reap_stuck_transfers_marks_old_planning_queue_as_waiting(tmp_path: Path):
@@ -639,6 +898,28 @@ def test_upload_failure_uses_server_reason_in_toast(tmp_path):
     assert "sendingToast?.remove" in text
     # The failure path translates the server reason via errorToastBody.
     assert "errorToastBody" in text
+
+
+def test_every_direct_upload_coalesces_one_stable_file_intent(tmp_path):
+    p = Path(__file__).parent.parent / "src" / "one_link" / "web" / "index.html"
+    text = p.read_text(encoding="utf-8")
+    idx = text.find("function _uploadIntentEntry(")
+    assert idx > 0
+    upload_idx = text.find("async upload(peer, file, opts = {})", idx)
+    upload_end = text.find("\n    folders()", upload_idx)
+    assert idx < upload_idx < upload_end
+    helper = text[idx:upload_idx]
+    snippet = text[upload_idx:upload_end]
+    assert "const _implicitUploadIntents = new WeakMap()" in text
+    assert "clientDeliveryId: opts.clientDeliveryId || _newClientMsgId()" in helper
+    assert "if (intent.inFlight) return await intent.inFlight" in snippet
+    assert 'fd.append("client_delivery_id", intent.clientDeliveryId)' in snippet
+    assert "intent.inFlight = operation" in snippet
+    key_pos = snippet.find('fd.append("client_delivery_id"')
+    size_pos = snippet.find('fd.append("file_size"')
+    complete_pos = snippet.find('fd.append("intent_metadata_complete"')
+    file_pos = snippet.find('fd.append("file", file, file.name)')
+    assert 0 < key_pos < size_pos < complete_pos < file_pos
 
 
 # ─── deadline constants exposed for tests ──────────────────────────

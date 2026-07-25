@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
-    X25519PrivateKey, X25519PublicKey,
+    X25519PrivateKey,
 )
 
 from one_link import double_ratchet as dr

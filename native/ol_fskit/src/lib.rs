@@ -1,4 +1,4 @@
-//! `ol_fskit` — macOS FSKit filesystem surface (Phase B layer 9).
+//! `ol_fskit` — macOS `FSKit` filesystem surface (Phase B layer 9).
 //!
 //! Per `FILE_ENGINE_V2_PLAN.md`:
 //!
@@ -15,14 +15,14 @@
 //!
 //! ## Scaffold status
 //!
-//! FSKit ships through Apple's Swift / Objective-C runtime. Bridging
+//! `FSKit` ships through Apple's Swift / Objective-C runtime. Bridging
 //! it to a Rust backend requires either:
 //!
 //! 1. A Swift package that links the Rust `staticlib` and forwards
-//!    FSUnaryFileSystem / FSFileSystem callbacks into our trait
+//!    `FSUnaryFileSystem` / `FSFileSystem` callbacks into our trait
 //!    methods, or
 //! 2. `objc2-foundation` bindings (the Rust path) directly
-//!    instantiating the FSKit ObjC classes.
+//!    instantiating the `FSKit` `ObjC` classes.
 //!
 //! Both options need a macOS host to verify; the crate ships the
 //! API surface today so the daemon's per-platform mount endpoint
@@ -38,7 +38,7 @@ use thiserror::Error;
 
 pub use ol_fuse::{DirEntry, EntryKind, FilesystemBackend, FsError, MemoryBackend, Stat};
 
-/// Options the daemon passes when mounting a folder as FSKit.
+/// Options the daemon passes when mounting a folder as `FSKit`.
 #[derive(Debug, Clone)]
 pub struct MountOptions {
     /// Mountpoint directory. macOS mounts under `/Volumes/<name>`
@@ -61,11 +61,11 @@ impl Default for MountOptions {
     }
 }
 
-/// Errors mount() can return.
+/// Errors `mount()` can return.
 #[allow(missing_docs)]
 #[derive(Debug, Error)]
 pub enum MountError {
-    #[error("FSKit not supported on this platform (macOS 15+ only)")]
+    #[error("FSKit not supported on this platform (macOS 15.4+ only)")]
     UnsupportedPlatform,
     #[error("mountpoint does not exist or is not a directory: {0}")]
     InvalidMountpoint(PathBuf),
@@ -73,38 +73,26 @@ pub enum MountError {
     Backend(String),
 }
 
-/// Mount `backend` at `opts.mountpoint` via FSKit.
+/// Mount `backend` at `opts.mountpoint` via `FSKit`.
 ///
 /// Behaviour:
 ///
-/// - **macOS with `macos-mount` feature**: returns
-///   [`MountError::Backend`] with a "Swift adapter not yet wired"
-///   message — the Swift bridge is the Phase-B deliverable.
-/// - **macOS without the feature**: returns
-///   [`MountError::Backend`] with a "rebuild with --features
-///   macos-mount" hint.
+/// - **macOS, with or without `macos-mount`**: returns
+///   [`MountError::Backend`] stating that the app-extension adapter is
+///   unimplemented. The feature is reserved and does not enable mounting.
 /// - **Non-macOS**: returns [`MountError::UnsupportedPlatform`].
-pub fn mount<B>(
-    #[cfg(all(target_os = "macos", feature = "macos-mount"))] _backend: B,
-    #[cfg(not(all(target_os = "macos", feature = "macos-mount")))] _backend: B,
-    opts: MountOptions,
-) -> Result<(), MountError>
+pub fn mount<B>(_backend: B, opts: MountOptions) -> Result<(), MountError>
 where
     B: FilesystemBackend + 'static,
 {
     if !opts.mountpoint.is_dir() {
         return Err(MountError::InvalidMountpoint(opts.mountpoint));
     }
-    #[cfg(all(target_os = "macos", feature = "macos-mount"))]
+    #[cfg(target_os = "macos")]
     {
         Err(MountError::Backend(
-            "Swift / FSKit adapter not yet wired (Phase B daemon mount endpoint pending)".into(),
-        ))
-    }
-    #[cfg(all(target_os = "macos", not(feature = "macos-mount")))]
-    {
-        Err(MountError::Backend(
-            "rebuild ol_fskit with --features macos-mount to enable FSKit".into(),
+            "FSKit app-extension adapter is not implemented; the reserved macos-mount feature does not enable mounting"
+                .into(),
         ))
     }
     #[cfg(not(target_os = "macos"))]
@@ -133,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_with_valid_mountpoint_errors_on_scaffold() {
+    fn mount_with_valid_mountpoint_never_claims_success() {
         let tmp = tempfile::tempdir().unwrap();
         let opts = MountOptions {
             mountpoint: tmp.path().to_path_buf(),
@@ -141,9 +129,18 @@ mod tests {
         };
         let backend = MemoryBackend::new();
         let err = mount(backend, opts).unwrap_err();
+        #[cfg(target_os = "macos")]
         match err {
-            MountError::UnsupportedPlatform | MountError::Backend(_) => {}
+            MountError::Backend(message) => {
+                assert!(message.contains("not implemented"));
+                assert!(message.contains("does not enable mounting"));
+                assert!(!message.contains("rebuild"));
+            }
             other => panic!("unexpected: {other:?}"),
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(matches!(err, MountError::UnsupportedPlatform));
         }
     }
 

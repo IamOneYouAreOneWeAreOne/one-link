@@ -13,7 +13,7 @@ a follow-up commit per ADR-0025's shadow-window gate).
 
 from __future__ import annotations
 
-import asyncio
+import concurrent.futures
 import os
 
 import pytest
@@ -58,11 +58,10 @@ def _matched_channels():
         # under test don't touch them.
         from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
-        loop = asyncio.new_event_loop()
-        reader = asyncio.StreamReader(loop=loop)
+        reader = type("R", (), {})()
         writer = type("W", (), {"drain": lambda self: None, "close": lambda self: None})()
         c = Channel(
-            reader=reader,
+            reader=reader,  # type: ignore[arg-type]
             writer=writer,  # type: ignore[arg-type]
             peer_ed_pub=b"\x00" * 32,
             peer_short_id="peer_test",
@@ -92,17 +91,29 @@ def test_derive_native_transfer_secret_matched_across_peers():
     assert len(secret_a) == 32
 
 
+def test_directional_secrets_are_role_mapped_and_distinct():
+    """Alice TX must equal Bob RX, never either reverse traffic root."""
+    alice, bob = _matched_channels()
+    alice_tx, alice_rx = alice.derive_native_transfer_direction_secrets()
+    bob_tx, bob_rx = bob.derive_native_transfer_direction_secrets()
+
+    assert alice_tx == bob_rx
+    assert bob_tx == alice_rx
+    assert alice_tx != alice_rx
+    assert bob_tx != bob_rx
+    assert alice_tx != bob_tx
+
+
 def test_derive_native_transfer_secret_rejects_pre_handshake():
     """Calling before the channel has a DR-bootstrap shared raises."""
     from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
     from one_link.channel import Channel
 
-    loop = asyncio.new_event_loop()
-    reader = asyncio.StreamReader(loop=loop)
+    reader = type("R", (), {})()
     writer = type("W", (), {})()
     c = Channel(
-        reader=reader,
+        reader=reader,  # type: ignore[arg-type]
         writer=writer,  # type: ignore[arg-type]
         peer_ed_pub=b"\x00" * 32,
         peer_short_id="peer_test",
@@ -129,6 +140,76 @@ def test_establish_native_transfer_round_trips_via_paired_channels(tmp_path):
     records = list(sender.encrypt_file(path))
     recovered = receiver.decrypt_records_to_bytes(records)
     assert recovered == payload
+
+
+def test_native_transfer_round_trips_sequential_reverse_direction():
+    """Receiving one direction must not consume the reverse TX ratchet."""
+    alice, bob = _matched_channels()
+    alice_session = alice.establish_native_transfer()
+    bob_session = bob.establish_native_transfer()
+
+    alice_payload = os.urandom(96 * 1024)
+    alice_record = alice_session.encrypt_chunk_bytes(alice_payload)
+    assert bob_session.decrypt_chunk(alice_record) == alice_payload
+
+    bob_payload = os.urandom(80 * 1024)
+    bob_record = bob_session.encrypt_chunk_bytes(bob_payload)
+    assert alice_session.decrypt_chunk(bob_record) == bob_payload
+
+    # Each traffic direction owns its own counter and may safely start at
+    # index zero because the direction roots (and thus AEAD keys) differ.
+    assert alice_record.chunk_index == 0
+    assert bob_record.chunk_index == 0
+
+
+def test_native_transfer_concurrent_bidirectional_and_key_nonce_separation():
+    """Simultaneous index-zero sends use independent keys and ciphertexts."""
+    alice, bob = _matched_channels()
+    alice_session = alice.establish_native_transfer()
+    bob_session = bob.establish_native_transfer()
+
+    assert alice_session.tx_session.shared_secret == bob_session.rx_session.shared_secret
+    assert bob_session.tx_session.shared_secret == alice_session.rx_session.shared_secret
+    assert alice_session.tx_session.shared_secret != alice_session.rx_session.shared_secret
+
+    plaintext = os.urandom(64 * 1024)
+    # The identical plaintext produces the same valid content address/AAD in
+    # both directions.  Differing ciphertext therefore proves direction
+    # separation without bypassing the receiver's mandatory address check.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        alice_future = pool.submit(
+            alice_session.encrypt_chunk_bytes,
+            plaintext,
+        )
+        bob_future = pool.submit(
+            bob_session.encrypt_chunk_bytes,
+            plaintext,
+        )
+        alice_record = alice_future.result(timeout=5)
+        bob_record = bob_future.result(timeout=5)
+
+    assert alice_record.chunk_index == bob_record.chunk_index == 0
+    assert alice_record.chunk_id == bob_record.chunk_id
+    assert alice_record.ciphertext != bob_record.ciphertext
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        at_bob = pool.submit(bob_session.decrypt_chunk, alice_record)
+        at_alice = pool.submit(alice_session.decrypt_chunk, bob_record)
+        assert at_bob.result(timeout=5) == plaintext
+        assert at_alice.result(timeout=5) == plaintext
+
+
+def test_native_transfer_cache_reset_cannot_reuse_channel_key_nonce():
+    """Clearing the facade must force legacy fallback or a new handshake."""
+    alice, _ = _matched_channels()
+    first = alice.get_or_create_native_transfer_session()
+    first.encrypt_chunk_bytes(b"burn index zero")
+
+    # The transfer doctor can retire a broken native facade.  Reconstructing
+    # it from the same channel seed would reset index zero under the same key.
+    alice._native_transfer_session = None
+    with pytest.raises(RuntimeError, match="would reuse chunk key/nonces"):
+        alice.get_or_create_native_transfer_session()
 
 
 def test_establish_native_transfer_supports_native_backend(tmp_path):

@@ -11,11 +11,10 @@
 //! ```
 //!
 //! The writer holds the active file's fd, the in-memory buffer of
-//! pending records, and the running file size. Rotation is triggered
-//! when the next record would push the file past
-//! [`crate::file::ROTATION_SIZE`]; in that case [`Wal::append`] returns
-//! [`WalError::RotationCapExceeded`] and the caller calls [`Wal::rotate`]
-//! to allocate a new file before retrying.
+//! pending records, and the running file size. When the next record would
+//! push the file past [`crate::file::ROTATION_SIZE`], [`Wal::append`]
+//! transparently seals the old file and appends into a new one. Higher layers
+//! therefore cannot accidentally turn the per-file cap into a lifetime cap.
 //!
 //! Single-writer model: the [`Wal`] is `!Sync`. Higher-level crates
 //! coordinate batches via a Mutex or single writer thread per log.
@@ -25,7 +24,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::error::WalError;
-use crate::file::{parse_header, write_header, LogKind, FILE_HEADER_LEN, ROTATION_SIZE};
+use crate::file::{
+    parse_header, write_header, LogKind, FILE_HEADER_LEN, FILE_HEADER_LEN_USIZE, ROTATION_SIZE,
+};
 use crate::record::Record;
 
 /// WAL writer handle.
@@ -41,6 +42,17 @@ pub struct Wal {
     pending: Vec<u8>,
 }
 
+/// Exact on-disk coordinate reserved for an appended record.
+///
+/// The file id is part of the identity: byte offsets repeat after rotation.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub struct AppendPosition {
+    /// WAL file id (1-based).
+    pub file_id: u64,
+    /// Byte offset of the record header within that file.
+    pub offset: u64,
+}
+
 impl std::fmt::Debug for Wal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Wal")
@@ -49,7 +61,7 @@ impl std::fmt::Debug for Wal {
             .field("file_id", &self.file_id)
             .field("file_size", &self.file_size)
             .field("pending_bytes", &self.pending.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -98,14 +110,14 @@ impl Wal {
         let path = file_path(dir, file_id);
         let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
         // Validate header.
-        let mut header = [0u8; FILE_HEADER_LEN as usize];
+        let mut header = [0u8; FILE_HEADER_LEN_USIZE];
         std::io::Read::read_exact(&mut file, &mut header)?;
         let parsed = parse_header(&header, &path.to_string_lossy())?;
         if parsed != kind {
             return Err(WalError::MagicMismatch {
                 path: path.to_string_lossy().to_string(),
-                got_hex: format!("{:?}", parsed),
-                expected_hex: format!("{:?}", kind),
+                got_hex: format!("{parsed:?}"),
+                expected_hex: format!("{kind:?}"),
             });
         }
         // Capture size, then seek to end so subsequent appends extend the file
@@ -136,24 +148,33 @@ impl Wal {
         self.file_size + self.pending.len() as u64
     }
 
-    /// Append a record to the in-memory pending buffer. Does not fsync.
+    /// Append a record to the in-memory pending buffer. Does not fsync unless
+    /// the active file must rotate; rotation durably seals the previous file.
     ///
     /// # Errors
     ///
     /// - [`WalError::PayloadTooLarge`] from [`Record::encode`].
-    /// - [`WalError::RotationCapExceeded`] if the record would push the
-    ///   active file past [`ROTATION_SIZE`]. The caller must rotate.
-    pub fn append(&mut self, record: &Record) -> Result<(), WalError> {
+    /// - [`WalError::RotationCapExceeded`] only if one encoded record cannot
+    ///   fit in an otherwise-empty WAL file.
+    pub fn append(&mut self, record: &Record) -> Result<AppendPosition, WalError> {
         let encoded = record.encode()?;
-        let projected_total = self.file_size + self.pending.len() as u64 + encoded.len() as u64;
-        if projected_total > ROTATION_SIZE {
+        let encoded_len = encoded.len() as u64;
+        if FILE_HEADER_LEN + encoded_len > ROTATION_SIZE {
             return Err(WalError::RotationCapExceeded {
-                current: self.file_size + self.pending.len() as u64,
+                current: FILE_HEADER_LEN,
                 cap: ROTATION_SIZE,
             });
         }
+        let projected_total = self.file_size + self.pending.len() as u64 + encoded_len;
+        if projected_total > ROTATION_SIZE {
+            self.rotate()?;
+        }
+        let position = AppendPosition {
+            file_id: self.file_id,
+            offset: self.file_size + self.pending.len() as u64,
+        };
         self.pending.extend_from_slice(&encoded);
-        Ok(())
+        Ok(position)
     }
 
     /// Flush the pending batch to durable storage in a single barrier.
@@ -276,7 +297,7 @@ mod tests {
         assert_eq!(wal.active_file_size(), FILE_HEADER_LEN);
         let path = file_path(dir.path(), 1);
         let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(bytes.len(), FILE_HEADER_LEN as usize);
+        assert_eq!(bytes.len(), FILE_HEADER_LEN_USIZE);
         assert_eq!(&bytes[..8], &crate::file::MAGIC_CHUNK_LOG);
     }
 
@@ -289,7 +310,7 @@ mod tests {
         wal.flush().unwrap();
         let path = file_path(dir.path(), 1);
         let bytes = std::fs::read(&path).unwrap();
-        let header_len = FILE_HEADER_LEN as usize;
+        let header_len = FILE_HEADER_LEN_USIZE;
         let r1_len = 8 + 5 + 4; // header + payload + crc
         let r2_len = 8 + 6 + 4;
         assert_eq!(bytes.len(), header_len + r1_len + r2_len);
@@ -326,28 +347,26 @@ mod tests {
     }
 
     #[test]
-    fn cap_exceeded_signaled() {
+    fn append_transparently_rotates_at_cap() {
         let dir = tempdir().unwrap();
         let mut wal = Wal::create(dir.path(), LogKind::ChunkLog).unwrap();
-        // Force a payload that pushes over the rotation cap.
-        let near_cap = (ROTATION_SIZE - FILE_HEADER_LEN - 200) as usize;
-        let payload = vec![0u8; near_cap.min(crate::record::MAX_PAYLOAD_LEN)];
-        // First append fits.
-        wal.append(&rec(0x01, 0x00, &payload)).unwrap();
-        wal.flush().unwrap();
-        // Force lots more appends until we trip the cap.
-        let mut tripped = false;
-        for _ in 0..ROTATION_SIZE / payload.len() as u64 {
-            match wal.append(&rec(0x01, 0x00, &payload)) {
-                Err(WalError::RotationCapExceeded { .. }) => {
-                    tripped = true;
-                    break;
-                }
-                Ok(()) => continue,
-                Err(other) => panic!("unexpected: {:?}", other),
+        // Reuse the largest legal record until the active file fills. The
+        // crossing append must land at the first record offset in file 2.
+        let payload = vec![0u8; crate::record::MAX_PAYLOAD_LEN];
+        let mut rotated_position = None;
+        for _ in 0..=(ROTATION_SIZE / payload.len() as u64) {
+            let pos = wal.append(&rec(0x01, 0x00, &payload)).unwrap();
+            if pos.file_id == 2 {
+                rotated_position = Some(pos);
+                break;
             }
         }
-        assert!(tripped, "should have hit rotation cap");
+        let pos = rotated_position.expect("append should have auto-rotated");
+        assert_eq!(pos.offset, FILE_HEADER_LEN);
+        assert_eq!(wal.active_file_id(), 2);
+        wal.flush().unwrap();
+        assert!(file_path(dir.path(), 1).exists());
+        assert!(file_path(dir.path(), 2).exists());
     }
 
     #[test]
@@ -357,7 +376,7 @@ mod tests {
         wal.flush().unwrap();
         wal.flush().unwrap();
         let bytes = std::fs::read(file_path(dir.path(), 1)).unwrap();
-        assert_eq!(bytes.len(), FILE_HEADER_LEN as usize);
+        assert_eq!(bytes.len(), FILE_HEADER_LEN_USIZE);
     }
 
     #[test]
@@ -370,6 +389,6 @@ mod tests {
         }
         let path = file_path(dir.path(), 1);
         let bytes = std::fs::read(&path).unwrap();
-        assert!(bytes.len() > FILE_HEADER_LEN as usize);
+        assert!(bytes.len() > FILE_HEADER_LEN_USIZE);
     }
 }

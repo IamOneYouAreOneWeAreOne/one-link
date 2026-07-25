@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 import uuid
 from typing import Any
@@ -116,7 +117,40 @@ def make_msg(t: str, sender_short_id: str, **fields: Any) -> dict[str, Any]:
 
 
 def encode_msg(msg: dict[str, Any]) -> bytes:
-    return json.dumps(msg, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    if not isinstance(msg, dict):
+        raise ValueError("message must be a JSON object")
+    try:
+        encoded = json.dumps(
+            msg,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ValueError("message is not finite JSON") from exc
+    if len(encoded) > MAX_FRAME:
+        raise ValueError(f"encoded message too large: {len(encoded)} > {MAX_FRAME}")
+    return encoded
+
+
+def _reject_duplicate_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"duplicate JSON field: {key}")
+        out[key] = value
+    return out
+
+
+def _parse_finite_float(raw: str) -> float:
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError("non-finite JSON number")
+    return value
+
+
+def _reject_json_constant(raw: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {raw}")
 
 
 def decode_msg(data: bytes) -> dict[str, Any]:
@@ -126,8 +160,20 @@ def decode_msg(data: bytes) -> dict[str, Any]:
     # downstream `msg.get("t")` raised AttributeError or TypeError,
     # which the recv loop swallowed and closed the channel —
     # functional but log-noisy and cheap to drive.
+    if not isinstance(data, bytes):
+        raise ValueError("frame payload must be bytes")
+    if len(data) > MAX_FRAME:
+        raise ValueError(f"frame too large: {len(data)} > {MAX_FRAME}")
     _check_json_depth(data)
-    out = json.loads(data.decode("utf-8"))
+    try:
+        out = json.loads(
+            data.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_object,
+            parse_float=_parse_finite_float,
+            parse_constant=_reject_json_constant,
+        )
+    except (json.JSONDecodeError, UnicodeError, RecursionError) as exc:
+        raise ValueError("frame is not valid JSON") from exc
     if not isinstance(out, dict):
         raise ValueError("frame must be a JSON object")
     return out

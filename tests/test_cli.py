@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -22,6 +20,7 @@ def _cli(*args, env=None) -> subprocess.CompletedProcess:
         [sys.executable, "-m", "one_link.cli", *args],
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,
         env=env,
         timeout=30,
     )
@@ -108,17 +107,23 @@ def test_send_clean_error_when_daemon_not_running(tmp_path: Path):
 
 
 def test_request_clean_error_when_daemon_drops_mid_command(monkeypatch):
-    class DropSocket:
-        def sendall(self, _data):
-            return None
-
-        def recv(self, _size):
-            raise ConnectionResetError("reset by peer")
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr(cli_mod, "_connect_control", lambda timeout=5.0: (DropSocket(), 12345))
+    monkeypatch.setattr(
+        cli_mod.daemon_mod,
+        "read_control_port",
+        lambda clear_stale=False: 12345,
+    )
+    monkeypatch.setattr(
+        cli_mod.control_ipc,
+        "read_control_secret",
+        lambda: "test-secret",
+    )
+    monkeypatch.setattr(
+        cli_mod.control_ipc,
+        "request_control",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ConnectionResetError("reset by peer")
+        ),
+    )
 
     with pytest.raises(click.ClickException) as exc:
         cli_mod._request("send_file", timeout=0.1, peer="abc", path="x")
@@ -136,6 +141,11 @@ def test_windows_force_kill_uses_subprocess_not_shell(monkeypatch):
         return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr(cli_mod.os, "environ", {"SystemRoot": r"C:\Windows"})
+    monkeypatch.setattr(
+        cli_mod,
+        "resolve_system_executable",
+        lambda *_args, **_kwargs: r"C:\Windows\System32\taskkill.exe",
+    )
     monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
 
     cli_mod._force_kill_windows_pid(1234)
@@ -145,13 +155,60 @@ def test_windows_force_kill_uses_subprocess_not_shell(monkeypatch):
     assert argv[0].endswith(r"System32\taskkill.exe")
     assert argv[1:] == ["/F", "/PID", "1234"]
     assert kwargs["check"] is False
-    assert "shell" not in kwargs
+    assert kwargs["shell"] is False
+
+
+def test_daemon_stop_never_kills_pid_after_control_auth_failure(monkeypatch):
+    monkeypatch.setattr(cli_mod.daemon_mod, "read_control_port", lambda: 7117)
+    monkeypatch.setattr(
+        cli_mod,
+        "_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            click.ClickException("control authentication failed")
+        ),
+    )
+    monkeypatch.setattr(
+        cli_mod.daemon_mod,
+        "_pid_matches_one_link_daemon",
+        lambda _pid: (_ for _ in ()).throw(
+            AssertionError("an unauthenticated PID must never be trusted")
+        ),
+    )
+
+    with pytest.raises(click.ClickException, match="could not stop daemon"):
+        cli_mod.daemon_stop.callback()
+
+
+def test_daemon_stop_revalidates_authenticated_pid_before_force_kill(monkeypatch):
+    monkeypatch.setattr(cli_mod.daemon_mod, "read_control_port", lambda: 7117)
+
+    def request(cmd, **_kwargs):
+        if cmd == "status":
+            return {"ok": True, "pid": 4242}
+        raise ConnectionResetError("shutdown response lost")
+
+    checked: list[int] = []
+    monkeypatch.setattr(cli_mod, "_request", request)
+    monkeypatch.setattr(
+        cli_mod.daemon_mod,
+        "_pid_matches_one_link_daemon",
+        lambda pid: checked.append(pid) or False,
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_force_kill_windows_pid",
+        lambda _pid: (_ for _ in ()).throw(AssertionError("unverified kill")),
+    )
+
+    with pytest.raises(click.ClickException, match="could not stop daemon"):
+        cli_mod.daemon_stop.callback()
+    assert checked == [4242]
 
 
 @pytest.mark.timeout(120)
 def test_full_cli_round_trip():
     """Two daemons via the harness; drive A's CLI as a subprocess."""
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         env = dict(os.environ)
         env["ONE_LINK_HOME"] = str(p.a.home)
 
@@ -177,7 +234,7 @@ def test_full_cli_round_trip():
 
 @pytest.mark.timeout(120)
 def test_cli_send_file_round_trip():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         env = dict(os.environ)
         env["ONE_LINK_HOME"] = str(p.a.home)
 

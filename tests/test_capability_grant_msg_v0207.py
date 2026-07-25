@@ -21,11 +21,9 @@ Pinned:
 """
 from __future__ import annotations
 
-import asyncio
 import base64
 import time
 from types import SimpleNamespace
-from typing import Optional
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -71,6 +69,7 @@ def _make_daemon():
     d.me = me
     d.state = None
     d._cap_store = cap_store.CapStore()
+    d._update_handoff_draining = False
     # _on_peer_message reads several attributes; stub them.
     d._inbound_is_rejected = lambda fp: False
     d._is_pinned = lambda fp: True

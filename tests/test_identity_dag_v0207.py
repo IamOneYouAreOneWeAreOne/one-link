@@ -33,7 +33,7 @@ These tests pin:
 """
 from __future__ import annotations
 
-import struct
+
 import time
 
 import pytest
@@ -105,6 +105,39 @@ def test_cert_zero_expires_never_expires():
     )
     # Far in the future — still valid (no expiry).
     idag.verify_device_cert(blob, now_ms=2**62)
+
+
+def test_cert_not_valid_before_issuance_beyond_clock_skew():
+    root_seed, root_pub = _gen_ed25519()
+    _, device_pub = _gen_ed25519()
+    now_ms = int(time.time() * 1000)
+    blob = idag.encode_device_cert(
+        root_priv_seed=root_seed,
+        root_pub=root_pub,
+        device_pub=device_pub,
+        device_kind="phone",
+        added_ms=now_ms + idag.MAX_CERT_FUTURE_SKEW_MS + 1,
+    )
+
+    with pytest.raises(ValueError, match="issuance is in the future"):
+        idag.verify_device_cert(blob, now_ms=now_ms)
+
+
+@pytest.mark.parametrize("field", ["added_ms", "expires_ms"])
+def test_cert_encoder_rejects_boolean_timestamps(field: str):
+    root_seed, root_pub = _gen_ed25519()
+    _, device_pub = _gen_ed25519()
+    kwargs = {"added_ms": 1, "expires_ms": 0}
+    kwargs[field] = True
+
+    with pytest.raises(ValueError, match=f"{field} must be an integer"):
+        idag.encode_device_cert(
+            root_priv_seed=root_seed,
+            root_pub=root_pub,
+            device_pub=device_pub,
+            device_kind="phone",
+            **kwargs,
+        )
 
 
 def test_cert_signature_tamper_rejected():

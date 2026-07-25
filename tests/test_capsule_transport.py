@@ -15,14 +15,17 @@ from one_link.async_capsule import (
     CAPSULE_CHUNK,
     CAPSULE_COMPLETE,
     CAPSULE_OFFER,
+    AsyncCapsule,
     CapsuleBuilder,
     CapsuleKind,
 )
 from one_link.capsule_transport import (
-    DEFAULT_CAPSULE_CHUNK_SIZE,
     InboundCapsule,
     InboundCapsuleRegistry,
     InboundError,
+    MAX_CAPSULE_BYTES,
+    MAX_CAPSULE_CHUNK_BYTES,
+    MAX_CAPSULE_CHUNKS,
     parse_inbound_chunk,
     parse_inbound_complete,
     parse_inbound_offer,
@@ -36,6 +39,8 @@ from one_link.frame_provenance import (
     sign_provenance,
 )
 from one_link.identity import Identity
+
+BOB_FP = "b" * 64
 
 
 # ---------------------------------------------------------------------------
@@ -79,13 +84,12 @@ def _signed(identity: Identity, content: bytes, ts_us: int = 0):
     )
 
 
-def _build_capsule(alice: Identity, *, n_frames: int = 5) -> "AsyncCapsule":
-    from one_link.async_capsule import AsyncCapsule  # noqa: F401
+def _build_capsule(alice: Identity, *, n_frames: int = 5) -> AsyncCapsule:
     b = CapsuleBuilder(
         capsule_id="cap-001",
         call_id="call-x",
         sender_master_vk_hex=alice.fingerprint,
-        recipient_master_vk_hex="bob-vk",
+        recipient_master_vk_hex=BOB_FP,
         kind=CapsuleKind.VOICE_NOTE_OUTGOING,
         started_at_ms=1_000,
     )
@@ -97,6 +101,32 @@ def _build_capsule(alice: Identity, *, n_frames: int = 5) -> "AsyncCapsule":
             timestamp_ms=1_000 + i * 100,
         )
     return b.finalize(finalized_at_ms=2_000, resume_window_ms=600_000)
+
+
+def _registry_offer_kwargs(
+    alice: Identity,
+    *,
+    capsule_id: str = "x",
+) -> dict:
+    payload = b"x"
+    return {
+        "capsule_id": capsule_id,
+        "sender_master_vk_hex": alice.fingerprint,
+        "expected_payload_hash": make_segment_hash(payload).hex(),
+        "declared_size": len(payload),
+        "declared_duration_ms": 0,
+        "declared_recording_state": 0,
+        "declared_resumable_until_ms": 0,
+        "declared_kind": 0,
+        "declared_codec": "opus",
+        "declared_sample_rate": 48_000,
+        "declared_call_id": "call-x",
+        "declared_started_at_ms": 0,
+        "declared_finalized_at_ms": 0,
+        "recipient_master_vk_hex": BOB_FP,
+        "provenance_chain": (_signed(alice, payload),),
+        "provenance_segment_sizes": (len(payload),),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +157,7 @@ def test_stream_chunks_a_large_payload(alice: Identity) -> None:
         capsule_id="big",
         call_id="call-x",
         sender_master_vk_hex=alice.fingerprint,
-        recipient_master_vk_hex="bob",
+        recipient_master_vk_hex=BOB_FP,
         kind=CapsuleKind.VOICE_NOTE_OUTGOING,
         started_at_ms=0,
     )
@@ -150,6 +180,34 @@ def test_stream_rejects_invalid_chunk_size(alice: Identity) -> None:
     cap = _build_capsule(alice)
     with pytest.raises(ValueError, match="chunk_size"):
         list(stream_capsule_to_messages(cap, sender_short_id="a", chunk_size=0))
+    with pytest.raises(ValueError, match="chunk_size"):
+        list(stream_capsule_to_messages(cap, sender_short_id="a", chunk_size=True))
+
+
+def test_stream_rejects_chunk_layout_above_wire_sequence_limit(
+    alice: Identity,
+) -> None:
+    payload = b"x" * (MAX_CAPSULE_CHUNKS + 1)
+    builder = CapsuleBuilder(
+        capsule_id="too-many-wire-chunks",
+        call_id="call-x",
+        sender_master_vk_hex=alice.fingerprint,
+        recipient_master_vk_hex=BOB_FP,
+        kind=CapsuleKind.VOICE_NOTE_OUTGOING,
+        started_at_ms=0,
+    )
+    builder.append_audio(
+        chunk=payload,
+        provenance=_signed(alice, payload),
+        timestamp_ms=1,
+    )
+    cap = builder.finalize(finalized_at_ms=2, resume_window_ms=1)
+    with pytest.raises(ValueError, match="limit"):
+        list(stream_capsule_to_messages(
+            cap,
+            sender_short_id=alice.short_id,
+            chunk_size=1,
+        ))
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +232,12 @@ def test_round_trip_assembles_and_verifies(alice: Identity) -> None:
         declared_kind=offer["kind"],
         declared_codec=offer["codec"],
         declared_sample_rate=offer["sample_rate"],
+        declared_call_id=offer["call_id"],
+        declared_started_at_ms=offer["started_at_ms"],
+        declared_finalized_at_ms=offer["finalized_at_ms"],
+        recipient_master_vk_hex=BOB_FP,
         provenance_chain=offer["provenance_chain"],
+        provenance_segment_sizes=offer["provenance_segment_sizes"],
     )
     for m in msgs[1:-1]:
         parsed = parse_inbound_chunk(m)
@@ -192,13 +255,26 @@ def test_round_trip_assembles_and_verifies(alice: Identity) -> None:
     assert len(final_cap.provenance_chain) == len(cap.provenance_chain)
 
 
+def test_verification_binds_public_key_to_full_declared_fingerprint(
+    alice: Identity,
+) -> None:
+    kwargs = _registry_offer_kwargs(alice)
+    kwargs["sender_master_vk_hex"] = alice.fingerprint[:8] + (
+        "0" if alice.fingerprint[8] != "0" else "1"
+    ) + alice.fingerprint[9:]
+    inbound = InboundCapsule(**kwargs)
+    inbound.add_chunk(seq=0, data=b"x", declared_total=1)
+    with pytest.raises(InboundError, match="does not match capsule identity"):
+        inbound.verify_and_finalize(sender_public_bytes=alice.public_bytes)
+
+
 def test_round_trip_with_large_payload_succeeds(alice: Identity) -> None:
     """Multi-chunk transfer reassembles correctly."""
     b = CapsuleBuilder(
         capsule_id="multi",
         call_id="call-x",
         sender_master_vk_hex=alice.fingerprint,
-        recipient_master_vk_hex="bob",
+        recipient_master_vk_hex=BOB_FP,
         kind=CapsuleKind.VOICE_NOTE_OUTGOING,
         started_at_ms=0,
     )
@@ -227,6 +303,12 @@ def test_round_trip_with_large_payload_succeeds(alice: Identity) -> None:
         declared_kind=offer["kind"],
         declared_codec=offer["codec"],
         declared_sample_rate=offer["sample_rate"],
+        declared_call_id=offer["call_id"],
+        declared_started_at_ms=offer["started_at_ms"],
+        declared_finalized_at_ms=offer["finalized_at_ms"],
+        recipient_master_vk_hex=BOB_FP,
+        provenance_chain=offer["provenance_chain"],
+        provenance_segment_sizes=offer["provenance_segment_sizes"],
     )
     for m in msgs[1:-1]:
         parsed = parse_inbound_chunk(m)
@@ -262,10 +344,19 @@ def test_corrupted_payload_fails_hash_check(alice: Identity) -> None:
         declared_kind=offer["kind"],
         declared_codec=offer["codec"],
         declared_sample_rate=offer["sample_rate"],
+        declared_call_id=offer["call_id"],
+        declared_started_at_ms=offer["started_at_ms"],
+        declared_finalized_at_ms=offer["finalized_at_ms"],
+        recipient_master_vk_hex=BOB_FP,
+        provenance_chain=offer["provenance_chain"],
+        provenance_segment_sizes=offer["provenance_segment_sizes"],
     )
     # Tamper the chunk
     chunk_msg = msgs[1].copy()
-    chunk_msg["data_b64"] = base64.b64encode(b"\xff" * 100).decode("ascii")
+    original = base64.b64decode(chunk_msg["data_b64"], validate=True)
+    chunk_msg["data_b64"] = base64.b64encode(
+        bytes([original[0] ^ 1]) + original[1:]
+    ).decode("ascii")
     parsed = parse_inbound_chunk(chunk_msg)
     inbound.add_chunk(
         seq=parsed["seq"], data=parsed["data"],
@@ -284,13 +375,23 @@ def test_provenance_from_wrong_signer_rejected(
         capsule_id="att",
         call_id="call-x",
         sender_master_vk_hex=alice.fingerprint,
-        recipient_master_vk_hex="bob",
+        recipient_master_vk_hex=BOB_FP,
         kind=CapsuleKind.VOICE_NOTE_OUTGOING,
         started_at_ms=0,
     )
     # Build with Bob's signature instead of Alice's
     chunk = b"opus-fake"
-    b.append_audio(chunk=chunk, provenance=_signed(bob, chunk), timestamp_ms=100)
+    forged = sign_provenance(
+        segment_hash=make_segment_hash(chunk),
+        device_id=alice.short_id,
+        frame_kind=FrameKind.REAL,
+        path_class=PathClass.LAN,
+        recording_state=RecordingState.NOT_RECORDING,
+        timestamp_us=100,
+        produce_confidence=1.0,
+        signing_key=bob.private,
+    )
+    b.append_audio(chunk=chunk, provenance=forged, timestamp_ms=100)
     cap = b.finalize(finalized_at_ms=200, resume_window_ms=600_000)
     msgs = list(stream_capsule_to_messages(cap, sender_short_id=alice.short_id))
 
@@ -307,7 +408,12 @@ def test_provenance_from_wrong_signer_rejected(
         declared_kind=offer["kind"],
         declared_codec=offer["codec"],
         declared_sample_rate=offer["sample_rate"],
+        declared_call_id=offer["call_id"],
+        declared_started_at_ms=offer["started_at_ms"],
+        declared_finalized_at_ms=offer["finalized_at_ms"],
+        recipient_master_vk_hex=BOB_FP,
         provenance_chain=offer["provenance_chain"],
+        provenance_segment_sizes=offer["provenance_segment_sizes"],
     )
     for m in msgs[1:-1]:
         parsed = parse_inbound_chunk(m)
@@ -316,6 +422,50 @@ def test_provenance_from_wrong_signer_rejected(
             declared_total=parsed["total"],
         )
     with pytest.raises(InboundError, match="provenance verification failed"):
+        inbound.verify_and_finalize(sender_public_bytes=alice.public_bytes)
+
+
+def test_valid_signatures_from_wrong_payload_slices_are_rejected(
+    alice: Identity,
+) -> None:
+    cap = _build_capsule(alice, n_frames=2)
+    messages = list(stream_capsule_to_messages(
+        cap,
+        sender_short_id=alice.short_id,
+    ))
+    tampered_offer = dict(messages[0])
+    first_size, second_size = tampered_offer["provenance_segment_sizes"]
+    tampered_offer["provenance_segment_sizes"] = [
+        first_size + 1,
+        second_size - 1,
+    ]
+    offer = parse_inbound_offer(tampered_offer)
+    inbound = InboundCapsuleRegistry().open_inbound(
+        capsule_id=offer["capsule_id"],
+        sender_master_vk_hex=alice.fingerprint,
+        expected_payload_hash=offer["payload_hash"],
+        declared_size=offer["size"],
+        declared_duration_ms=offer["duration_ms"],
+        declared_recording_state=offer["recording_state"],
+        declared_resumable_until_ms=offer["resumable_until_ms"],
+        declared_kind=offer["kind"],
+        declared_codec=offer["codec"],
+        declared_sample_rate=offer["sample_rate"],
+        declared_call_id=offer["call_id"],
+        declared_started_at_ms=offer["started_at_ms"],
+        declared_finalized_at_ms=offer["finalized_at_ms"],
+        recipient_master_vk_hex=BOB_FP,
+        provenance_chain=offer["provenance_chain"],
+        provenance_segment_sizes=offer["provenance_segment_sizes"],
+    )
+    for message in messages[1:-1]:
+        parsed = parse_inbound_chunk(message)
+        inbound.add_chunk(
+            seq=parsed["seq"],
+            data=parsed["data"],
+            declared_total=parsed["total"],
+        )
+    with pytest.raises(InboundError, match="does not cover payload"):
         inbound.verify_and_finalize(sender_public_bytes=alice.public_bytes)
 
 
@@ -364,10 +514,12 @@ def test_parse_offer_rejects_malformed_provenance_chain_entry() -> None:
             "t": CAPSULE_OFFER,
             "capsule_id": "x",
             "payload_hash": "0" * 64,
-            "size": 0, "duration_ms": 0,
+            "size": 1, "duration_ms": 0,
             "recording_state": 0, "resumable_until_ms": 0,
             "kind": 0, "codec": "opus", "sample_rate": 48_000,
+            "call_id": "call-x", "started_at_ms": 0, "finalized_at_ms": 0,
             "provenance_chain": [{"v": "not-an-int"}],
+            "provenance_segment_sizes": [1],
         })
 
 
@@ -377,33 +529,79 @@ def test_parse_offer_rejects_non_list_provenance_chain() -> None:
             "t": CAPSULE_OFFER,
             "capsule_id": "x",
             "payload_hash": "0" * 64,
-            "size": 0, "duration_ms": 0,
+            "size": 1, "duration_ms": 0,
             "recording_state": 0, "resumable_until_ms": 0,
             "kind": 0, "codec": "opus", "sample_rate": 48_000,
+            "call_id": "call-x", "started_at_ms": 0, "finalized_at_ms": 0,
             "provenance_chain": "not-a-list",
+            "provenance_segment_sizes": [1],
         })
 
 
-def test_parse_offer_missing_provenance_chain_yields_empty_tuple() -> None:
-    """Older clients may omit the chain. The parse must accept that
-    (empty tuple); verify_and_finalize will succeed with no
-    cryptographic claims."""
-    result = parse_inbound_offer({
-        "t": CAPSULE_OFFER,
-        "capsule_id": "x",
-        "payload_hash": "0" * 64,
-        "size": 0, "duration_ms": 0,
-        "recording_state": 0, "resumable_until_ms": 0,
-        "kind": 0, "codec": "opus", "sample_rate": 48_000,
-    })
-    assert result["provenance_chain"] == ()
+def test_parse_offer_missing_provenance_boundaries_is_rejected(
+    alice: Identity,
+) -> None:
+    """The capability version never accepts unverifiable legacy coverage."""
+    offer = next(stream_capsule_to_messages(
+        _build_capsule(alice, n_frames=1),
+        sender_short_id=alice.short_id,
+    ))
+    offer.pop("provenance_segment_sizes")
+    with pytest.raises(InboundError, match="provenance_segment_sizes"):
+        parse_inbound_offer(offer)
+
+
+def test_parse_offer_rejects_unbounded_or_inconsistent_segment_sizes(
+    alice: Identity,
+) -> None:
+    offer = next(stream_capsule_to_messages(
+        _build_capsule(alice, n_frames=2),
+        sender_short_id=alice.short_id,
+    ))
+    with pytest.raises(InboundError, match="must be an integer"):
+        parse_inbound_offer({
+            **offer,
+            "provenance_segment_sizes": [True, offer["size"] - 1],
+        })
+    with pytest.raises(InboundError, match="segment count"):
+        parse_inbound_offer({
+            **offer,
+            "provenance_segment_sizes": [offer["size"]],
+        })
+    with pytest.raises(InboundError, match="do not cover"):
+        parse_inbound_offer({
+            **offer,
+            "provenance_segment_sizes": [1, 1],
+        })
+
+
+def test_parse_offer_rejects_type_confused_and_inconsistent_time_contract(
+    alice: Identity,
+) -> None:
+    offer = next(stream_capsule_to_messages(
+        _build_capsule(alice, n_frames=1),
+        sender_short_id=alice.short_id,
+    ))
+    with pytest.raises(InboundError, match="must be an integer"):
+        parse_inbound_offer({**offer, "recording_state": True})
+    with pytest.raises(InboundError, match="capture timestamps"):
+        parse_inbound_offer({**offer, "finalized_at_ms": offer["started_at_ms"] - 1})
+    with pytest.raises(InboundError, match="resume window"):
+        parse_inbound_offer({
+            **offer,
+            "resumable_until_ms": (
+                offer["finalized_at_ms"] + 30 * 24 * 60 * 60 * 1000 + 1
+            ),
+        })
+    with pytest.raises(InboundError, match="call_id"):
+        parse_inbound_offer({**offer, "call_id": "unsafe/call"})
 
 
 # ---------------------------------------------------------------------------
 # Idempotent chunk replay
 # ---------------------------------------------------------------------------
 
-def test_duplicate_chunk_overwrites_idempotently(alice: Identity) -> None:
+def test_exact_duplicate_chunk_is_accepted_idempotently(alice: Identity) -> None:
     """A retransmitted chunk with the same seq should NOT fail."""
     cap = _build_capsule(alice)
     msgs = list(stream_capsule_to_messages(cap, sender_short_id=alice.short_id))
@@ -421,6 +619,12 @@ def test_duplicate_chunk_overwrites_idempotently(alice: Identity) -> None:
         declared_kind=offer["kind"],
         declared_codec=offer["codec"],
         declared_sample_rate=offer["sample_rate"],
+        declared_call_id=offer["call_id"],
+        declared_started_at_ms=offer["started_at_ms"],
+        declared_finalized_at_ms=offer["finalized_at_ms"],
+        recipient_master_vk_hex=BOB_FP,
+        provenance_chain=offer["provenance_chain"],
+        provenance_segment_sizes=offer["provenance_segment_sizes"],
     )
     parsed = parse_inbound_chunk(msgs[1])
     # Add the SAME chunk twice
@@ -438,6 +642,46 @@ def test_duplicate_chunk_overwrites_idempotently(alice: Identity) -> None:
     assert final_cap.payload_hash == cap.payload_hash
 
 
+def test_duplicate_chunk_with_changed_bytes_is_rejected(alice: Identity) -> None:
+    cap = _build_capsule(alice)
+    messages = list(stream_capsule_to_messages(
+        cap,
+        sender_short_id=alice.short_id,
+    ))
+    offer = parse_inbound_offer(messages[0])
+    inbound = InboundCapsuleRegistry().open_inbound(
+        capsule_id=offer["capsule_id"],
+        sender_master_vk_hex=alice.fingerprint,
+        expected_payload_hash=offer["payload_hash"],
+        declared_size=offer["size"],
+        declared_duration_ms=offer["duration_ms"],
+        declared_recording_state=offer["recording_state"],
+        declared_resumable_until_ms=offer["resumable_until_ms"],
+        declared_kind=offer["kind"],
+        declared_codec=offer["codec"],
+        declared_sample_rate=offer["sample_rate"],
+        declared_call_id=offer["call_id"],
+        declared_started_at_ms=offer["started_at_ms"],
+        declared_finalized_at_ms=offer["finalized_at_ms"],
+        recipient_master_vk_hex=BOB_FP,
+        provenance_chain=offer["provenance_chain"],
+        provenance_segment_sizes=offer["provenance_segment_sizes"],
+    )
+    parsed = parse_inbound_chunk(messages[1])
+    inbound.add_chunk(
+        seq=parsed["seq"],
+        data=parsed["data"],
+        declared_total=parsed["total"],
+    )
+    changed = bytes([parsed["data"][0] ^ 1]) + parsed["data"][1:]
+    with pytest.raises(InboundError, match="changed content"):
+        inbound.add_chunk(
+            seq=parsed["seq"],
+            data=changed,
+            declared_total=parsed["total"],
+        )
+
+
 def test_inconsistent_declared_total_rejected(alice: Identity) -> None:
     inbound = InboundCapsule(
         capsule_id="x",
@@ -450,6 +694,12 @@ def test_inconsistent_declared_total_rejected(alice: Identity) -> None:
         declared_kind=0,
         declared_codec="opus",
         declared_sample_rate=48_000,
+        declared_call_id="call-x",
+        declared_started_at_ms=0,
+        declared_finalized_at_ms=0,
+        recipient_master_vk_hex=BOB_FP,
+        provenance_chain=(_signed(alice, b"a" * 100),),
+        provenance_segment_sizes=(100,),
     )
     inbound.add_chunk(seq=0, data=b"a", declared_total=3)
     with pytest.raises(InboundError, match="flipped"):
@@ -468,6 +718,12 @@ def test_seq_above_declared_total_rejected(alice: Identity) -> None:
         declared_kind=0,
         declared_codec="opus",
         declared_sample_rate=48_000,
+        declared_call_id="call-x",
+        declared_started_at_ms=0,
+        declared_finalized_at_ms=0,
+        recipient_master_vk_hex=BOB_FP,
+        provenance_chain=(_signed(alice, b"a" * 100),),
+        provenance_segment_sizes=(100,),
     )
     with pytest.raises(InboundError, match="declared total"):
         inbound.add_chunk(seq=5, data=b"a", declared_total=3)
@@ -479,49 +735,81 @@ def test_seq_above_declared_total_rejected(alice: Identity) -> None:
 
 def test_registry_open_idempotent(alice: Identity) -> None:
     reg = InboundCapsuleRegistry()
-    a = reg.open_inbound(
-        capsule_id="x",
-        sender_master_vk_hex=alice.fingerprint,
-        expected_payload_hash="0" * 64,
-        declared_size=0,
-        declared_duration_ms=0,
-        declared_recording_state=0,
-        declared_resumable_until_ms=0,
-        declared_kind=0,
-        declared_codec="opus",
-        declared_sample_rate=48_000,
-    )
-    b = reg.open_inbound(
-        capsule_id="x",
-        sender_master_vk_hex=alice.fingerprint,
-        expected_payload_hash="ff" * 32,  # different, but cap_id reuses entry
-        declared_size=0,
-        declared_duration_ms=0,
-        declared_recording_state=0,
-        declared_resumable_until_ms=0,
-        declared_kind=0,
-        declared_codec="opus",
-        declared_sample_rate=48_000,
-    )
+    a = reg.open_inbound(**_registry_offer_kwargs(alice))
+    b = reg.open_inbound(**_registry_offer_kwargs(alice))
     assert a is b
 
 
-def test_registry_fifo_eviction_under_cap(alice: Identity) -> None:
+def test_registry_rejects_conflicting_capsule_id_replay(alice: Identity) -> None:
+    reg = InboundCapsuleRegistry()
+    kwargs = _registry_offer_kwargs(alice)
+    reg.open_inbound(**kwargs)
+
+    with pytest.raises(InboundError, match="conflicting offer"):
+        reg.open_inbound(**{**kwargs, "expected_payload_hash": "f" * 64})
+
+
+def test_capsule_parsers_enforce_memory_and_integer_bounds() -> None:
+    offer = {
+        "t": CAPSULE_OFFER,
+        "capsule_id": "bounded",
+        "payload_hash": "0" * 64,
+        "size": MAX_CAPSULE_BYTES + 1,
+        "duration_ms": 1,
+        "recording_state": 0,
+        "resumable_until_ms": 1,
+        "kind": 0,
+        "codec": "opus",
+        "sample_rate": 48_000,
+        "call_id": "call-x",
+        "started_at_ms": 0,
+        "finalized_at_ms": 0,
+        "provenance_chain": [],
+        "provenance_segment_sizes": [],
+    }
+    with pytest.raises(InboundError, match="size outside"):
+        parse_inbound_offer(offer)
+    with pytest.raises(InboundError, match="must be an integer"):
+        parse_inbound_offer({**offer, "size": True})
+    with pytest.raises(InboundError, match="duration_ms must be an integer"):
+        parse_inbound_offer({key: value for key, value in offer.items() if key != "duration_ms"})
+
+    oversized_b64 = "A" * ((((MAX_CAPSULE_CHUNK_BYTES + 2) // 3) * 4) + 4)
+    with pytest.raises(InboundError, match="chunk size limit"):
+        parse_inbound_chunk({
+            "t": CAPSULE_CHUNK,
+            "capsule_id": "bounded",
+            "seq": 0,
+            "total": 1,
+            "data_b64": oversized_b64,
+        })
+    with pytest.raises(InboundError, match="chunk limit"):
+        parse_inbound_chunk({
+            "t": CAPSULE_CHUNK,
+            "capsule_id": "bounded",
+            "seq": MAX_CAPSULE_CHUNKS,
+            "total": MAX_CAPSULE_CHUNKS,
+            "data_b64": "",
+        })
+    with pytest.raises(InboundError, match="n_chunks must be an integer"):
+        parse_inbound_complete({
+            "t": CAPSULE_COMPLETE,
+            "capsule_id": "bounded",
+            "payload_hash": "0" * 64,
+        })
+
+
+def test_registry_rejects_new_offer_at_capacity_without_eviction(
+    alice: Identity,
+) -> None:
     reg = InboundCapsuleRegistry(max_inflight=3)
-    for i in range(5):
-        reg.open_inbound(
-            capsule_id=f"cap-{i}",
-            sender_master_vk_hex=alice.fingerprint,
-            expected_payload_hash="0" * 64,
-            declared_size=0, declared_duration_ms=0,
-            declared_recording_state=0, declared_resumable_until_ms=0,
-            declared_kind=0, declared_codec="opus", declared_sample_rate=48_000,
-        )
+    for i in range(3):
+        reg.open_inbound(**_registry_offer_kwargs(alice, capsule_id=f"cap-{i}"))
+    with pytest.raises(InboundError, match="capacity"):
+        reg.open_inbound(**_registry_offer_kwargs(alice, capsule_id="cap-3"))
     assert len(reg) == 3
-    # First two evicted
-    assert reg.get("cap-0") is None
-    assert reg.get("cap-1") is None
-    assert reg.get("cap-4") is not None
+    assert all(reg.get(f"cap-{i}") is not None for i in range(3))
+    assert reg.get("cap-3") is None
 
 
 def test_registry_thread_safe_concurrent_opens(alice: Identity) -> None:
@@ -531,15 +819,10 @@ def test_registry_thread_safe_concurrent_opens(alice: Identity) -> None:
     def worker(start: int) -> None:
         try:
             for i in range(50):
-                reg.open_inbound(
+                reg.open_inbound(**_registry_offer_kwargs(
+                    alice,
                     capsule_id=f"cap-{start * 50 + i}",
-                    sender_master_vk_hex=alice.fingerprint,
-                    expected_payload_hash="0" * 64,
-                    declared_size=0, declared_duration_ms=0,
-                    declared_recording_state=0, declared_resumable_until_ms=0,
-                    declared_kind=0, declared_codec="opus",
-                    declared_sample_rate=48_000,
-                )
+                ))
         except BaseException as e:
             errors.append(e)
 

@@ -15,8 +15,11 @@ use ed25519_dalek::SigningKey;
 use rand_core::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, StaticSecret};
 
-use crate::chain_key::{derive_chain_key, ChainKey};
-use crate::confirm::PairConfirm;
+use crate::chain_key::{
+    derive_chain_key, factor2_confirmation_matches, factor2_confirmation_tag, mix_factor2_recip,
+    ChainKey, Factor2ConfirmationRole, FACTOR2_CONFIRMATION_TAG_LEN,
+};
+use crate::confirm::{PairConfirm, CONFIRM_ENCODED_BYTES};
 use crate::errors::{PairError, PairResult};
 use crate::invite::Invite;
 use crate::response::{PairResponse, RESPONSE_NONCE_LEN};
@@ -125,25 +128,64 @@ impl Scanner {
     /// the transcript hash matches what we saw, then advances to
     /// Done and returns the final chain key.
     pub fn receive_confirm(&mut self, confirm_bytes: &[u8]) -> PairResult<ChainKey> {
-        self.receive_confirm_inner(confirm_bytes, None)
+        self.receive_confirm_inner(confirm_bytes)
     }
 
-    /// Like [`Scanner::receive_confirm`] but mixes in a Factor-2
-    /// channel-reciprocity key. Both peers MUST supply the same
-    /// factor-2 key; otherwise the chain keys diverge.
+    /// Verify the inviter's Factor-2 key-confirmation proof, then return a
+    /// scanner acknowledgement and the confirmed mixed chain key.
+    ///
+    /// A different Factor-2 candidate fails closed with
+    /// [`PairError::Factor2KeyConfirmationFailed`]; no chain key is released
+    /// and the state machine remains pending so a valid frame may be retried.
     pub fn receive_confirm_with_factor2(
         &mut self,
         confirm_bytes: &[u8],
         factor2_key: &[u8; 32],
-    ) -> PairResult<ChainKey> {
-        self.receive_confirm_inner(confirm_bytes, Some(factor2_key))
+    ) -> PairResult<(Vec<u8>, ChainKey)> {
+        let expected_len = CONFIRM_ENCODED_BYTES + FACTOR2_CONFIRMATION_TAG_LEN;
+        if confirm_bytes.len() != expected_len {
+            return Err(PairError::BadFactor2ConfirmationLen {
+                expected: expected_len,
+                got: confirm_bytes.len(),
+            });
+        }
+        if self.state != ScannerState::AwaitingConfirm {
+            return Err(PairError::WrongState);
+        }
+        let (signed_confirm, supplied_tag_bytes) = confirm_bytes.split_at(CONFIRM_ENCODED_BYTES);
+        let _ = PairConfirm::decode_and_verify(
+            signed_confirm,
+            &self.invite.id_pubkey,
+            &self.transcript,
+        )?;
+        let base_chain_key = self
+            .pending_chain_key
+            .as_ref()
+            .ok_or(PairError::Internal("chain_key missing"))?;
+        let final_chain_key = mix_factor2_recip(base_chain_key, factor2_key);
+        let expected_tag = factor2_confirmation_tag(
+            &final_chain_key,
+            &self.transcript,
+            Factor2ConfirmationRole::Inviter,
+        );
+        let mut supplied_tag = [0u8; FACTOR2_CONFIRMATION_TAG_LEN];
+        supplied_tag.copy_from_slice(supplied_tag_bytes);
+        if !factor2_confirmation_matches(&expected_tag, &supplied_tag) {
+            return Err(PairError::Factor2KeyConfirmationFailed);
+        }
+
+        let ack = factor2_confirmation_tag(
+            &final_chain_key,
+            &self.transcript,
+            Factor2ConfirmationRole::Scanner,
+        );
+        self.pending_chain_key = None;
+        self.state = ScannerState::Done;
+        self.ephemeral_secret = None;
+        Ok((ack.to_vec(), final_chain_key))
     }
 
-    fn receive_confirm_inner(
-        &mut self,
-        confirm_bytes: &[u8],
-        factor2_key: Option<&[u8; 32]>,
-    ) -> PairResult<ChainKey> {
+    fn receive_confirm_inner(&mut self, confirm_bytes: &[u8]) -> PairResult<ChainKey> {
         if self.state != ScannerState::AwaitingConfirm {
             return Err(PairError::WrongState);
         }
@@ -156,16 +198,12 @@ impl Scanner {
             .pending_chain_key
             .take()
             .ok_or(PairError::Internal("chain_key missing"))?;
-        let final_chain_key = match factor2_key {
-            Some(f2) => crate::chain_key::mix_factor2_recip(&chain_key, f2),
-            None => chain_key,
-        };
         self.state = ScannerState::Done;
         // Zeroize ephemeral material now that pairing is done.
         if let Some(esk) = self.ephemeral_secret.take() {
             drop(esk);
         }
-        Ok(final_chain_key)
+        Ok(chain_key)
     }
 
     /// User said the SAS doesn't match. Abort + zeroize secrets.

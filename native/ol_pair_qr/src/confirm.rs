@@ -33,6 +33,13 @@ pub const TAG_CONFIRM: u8 = 0x03;
 /// Maximum encoded byte length for a `PairConfirm`.
 pub const CONFIRM_MAX_BYTES: usize = 200;
 
+/// Exact encoded byte length for a version-1 `PairConfirm`.
+///
+/// The Factor-2 confirmation envelope uses this boundary to split the
+/// signed Factor-1 confirm from its key-confirmation tag.  Keeping an
+/// explicit constant avoids accepting ambiguous, variably parsed frames.
+pub const CONFIRM_ENCODED_BYTES: usize = 2 + PUBLIC_KEY_LENGTH + TRANSCRIPT_LEN + SIGNATURE_LENGTH;
+
 /// Domain-separation tag for the confirm signature.
 pub const CONFIRM_SIG_DOMAIN: &[u8] = b"OL-pair-qr-v1-confirm";
 
@@ -165,7 +172,7 @@ fn signing_payload(transcript: &TranscriptHash) -> Vec<u8> {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
+    use rand::{rngs::OsRng, RngCore};
 
     fn fresh_keypair() -> SigningKey {
         SigningKey::generate(&mut OsRng)
@@ -173,7 +180,6 @@ mod tests {
 
     fn fresh_transcript() -> TranscriptHash {
         let mut b = [0u8; TRANSCRIPT_LEN];
-        use rand::RngCore;
         OsRng.fill_bytes(&mut b);
         TranscriptHash::from_bytes(b)
     }
@@ -207,10 +213,10 @@ mod tests {
         let t = fresh_transcript();
         let c = PairConfirm::sign(&sk, t);
         let encoded = c.encode();
-        let other_sk = fresh_keypair();
-        let other_pk = other_sk.verifying_key().to_bytes();
+        let attacker_signer = fresh_keypair();
+        let substituted_pubkey = attacker_signer.verifying_key().to_bytes();
         // Inviter pubkey we pinned doesn't match what's on the wire.
-        let err = PairConfirm::decode_and_verify(&encoded, &other_pk, &t).unwrap_err();
+        let err = PairConfirm::decode_and_verify(&encoded, &substituted_pubkey, &t).unwrap_err();
         assert_eq!(err, PairError::BadSignature);
     }
 

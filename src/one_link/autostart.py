@@ -27,14 +27,18 @@ it.
 """
 from __future__ import annotations
 
+import contextlib
 import os
-import shutil
+import plistlib
+import secrets
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
 from typing import Optional
 
 from one_link import __version__
+from one_link.process_security import resolve_explicit_executable
 
 AUTOSTART_NAME = "One Link"
 AUTOSTART_ID = "com.coherence.one-link"
@@ -46,40 +50,88 @@ AUTOSTART_COMMENT = "One Link — peer-to-peer chat / files / calls (auto-starte
 def _launch_command() -> list[str]:
     """Build the argv for "start One Link at login".
 
-    Prefers the frozen ``one-link`` binary when one is on PATH (the
-    user installed the release zip). Falls back to
-    ``<sys.executable> -m one_link.cli`` for source-checkout users.
+    Uses the current frozen binary or ``<sys.executable> -P -m one_link.cli``.
+    PATH, adjacent launcher stubs, and the working directory are never
+    consulted because this command persists across logins and would otherwise
+    turn a transient search-path hijack into durable code execution.
 
     Always passes ``--supervise --no-browser``: supervised so a daemon
     crash auto-restarts; no browser so login doesn't pop a tab.
     """
-    one_link_exe = shutil.which("one-link") or shutil.which("one-link.exe")
-    if one_link_exe:
-        return [one_link_exe, "app", "--supervise", "--no-browser"]
-    return [sys.executable, "-m", "one_link.cli", "app",
-            "--supervise", "--no-browser"]
+    python_exe = resolve_explicit_executable(sys.executable)
+    if getattr(sys, "frozen", False):
+        return [python_exe, "app", "--supervise", "--no-browser"]
+    return [
+        python_exe,
+        "-P",
+        "-m",
+        "one_link.cli",
+        "app",
+        "--supervise",
+        "--no-browser",
+    ]
 
 
 def _quote_for_shell(args: list[str]) -> str:
-    """Render argv as a single shell-safe command string.
+    """Render argv for a Windows Run value or freedesktop Exec field.
 
     Different backends need a string (Windows registry, .desktop ``Exec=``,
     LaunchAgent ``ProgramArguments`` is the exception — it takes a list).
-    Round-trippable through any reasonable shell; spaces are escaped
-    via double-quoting on Windows + single-quoting on POSIX.
+    Neither backend invokes a POSIX shell. Windows uses the same quoting
+    algorithm as ``CreateProcess``; freedesktop Exec has its own double-quote
+    and percent-field-code grammar.
     """
+    if not args or any(
+        not isinstance(arg, str)
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in arg)
+        for arg in args
+    ):
+        raise ValueError("autostart argv must contain control-free strings")
     if os.name == "nt":
-        out: list[str] = []
-        for a in args:
-            if " " in a or "\t" in a:
-                out.append(f'"{a}"')
-            else:
-                out.append(a)
-        return " ".join(out)
-    # POSIX: single-quote, escape any embedded single quotes.
-    return " ".join(
-        "'" + a.replace("'", "'\\''") + "'" for a in args
-    )
+        return subprocess.list2cmdline(args)
+
+    def desktop_quote(arg: str) -> str:
+        # '%' introduces desktop field codes even inside quotes; '%%' is a
+        # literal percent. Within double quotes, these four characters must be
+        # backslash escaped by the Desktop Entry specification.
+        escaped = arg.replace("%", "%%")
+        for char in ("\\", '"', "`", "$"):
+            escaped = escaped.replace(char, "\\" + char)
+        return f'"{escaped}"'
+
+    return " ".join(desktop_quote(arg) for arg in args)
+
+
+def _atomic_private_write(path: Path, data: bytes) -> None:
+    """Atomically publish a private autostart artifact without symlink writes."""
+
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb", closefd=True) as handle:
+            fd = -1
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
+        if hasattr(os, "O_DIRECTORY"):
+            with contextlib.suppress(OSError):
+                directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            temporary.unlink()
 
 
 # ─── Windows backend (registry Run key) ────────────────────────────────
@@ -138,33 +190,18 @@ def _macos_is_enabled() -> bool:
 
 def _macos_enable() -> Path:
     args = _launch_command()
-    args_xml = "\n".join(f"    <string>{a}</string>" for a in args)
-    plist = textwrap.dedent(f"""\
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-          "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>Label</key>
-            <string>{AUTOSTART_ID}</string>
-            <key>ProgramArguments</key>
-            <array>
-        {args_xml}
-            </array>
-            <key>RunAtLoad</key>
-            <true/>
-            <key>KeepAlive</key>
-            <false/>
-            <key>StandardOutPath</key>
-            <string>/tmp/one-link-autostart.out</string>
-            <key>StandardErrorPath</key>
-            <string>/tmp/one-link-autostart.err</string>
-        </dict>
-        </plist>
-        """)
+    plist = plistlib.dumps(
+        {
+            "Label": AUTOSTART_ID,
+            "ProgramArguments": args,
+            "RunAtLoad": True,
+            "KeepAlive": False,
+        },
+        fmt=plistlib.FMT_XML,
+        sort_keys=True,
+    )
     path = _macos_plist_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(plist, encoding="utf-8")
+    _atomic_private_write(path, plist)
     return path
 
 
@@ -183,7 +220,10 @@ def _macos_disable() -> bool:
 
 def _linux_desktop_path() -> Path:
     config_home = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    return Path(config_home) / "autostart" / "one-link.desktop"
+    root = Path(config_home).expanduser()
+    if not root.is_absolute():
+        raise ValueError("XDG_CONFIG_HOME must be absolute")
+    return root / "autostart" / "one-link.desktop"
 
 
 def _linux_is_enabled() -> bool:
@@ -203,8 +243,7 @@ def _linux_enable() -> Path:
         X-One-Link-Version={__version__}
         """)
     path = _linux_desktop_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(desktop, encoding="utf-8")
+    _atomic_private_write(path, desktop.encode("utf-8"))
     return path
 
 

@@ -575,17 +575,26 @@ def test_powershell_picker_passes_dialog_title(monkeypatch):
     captured = {}
     def fake_run(args, **kw):
         captured["args"] = args
+        captured["kwargs"] = kw
         class _R:
             returncode = 0
             stdout = "C:/Picked"
             stderr = ""
         return _R()
+    monkeypatch.setattr(
+        server,
+        "resolve_argv",
+        lambda argv, **_kwargs: ["C:/Windows/System32/powershell.exe", *argv[1:]],
+    )
     monkeypatch.setattr(server.subprocess, "run", fake_run)
     out = server._pick_win_powershell("Choose a folder to share with One Link")
     assert out == "C:/Picked"
-    # The PS script string lives in args[-1] for `-Command <script>`.
+    # The script is static and the untrusted title travels over stdin, so a
+    # quote/newline in UI copy can never become PowerShell source.
     script = captured["args"][-1]
-    assert "Choose a folder to share with One Link" in script
+    assert "Choose a folder to share with One Link" not in script
+    assert captured["kwargs"]["input"] == "Choose a folder to share with One Link"
+    assert "[Console]::In.ReadToEnd()" in script
     assert "FolderBrowserDialog" in script
     # v0.21.x: the script must NOT use UseDescriptionForTitle or
     # AutoUpgradeEnabled - those properties don't exist on Windows
@@ -617,6 +626,11 @@ def test_powershell_picker_returns_none_on_empty_path(monkeypatch):
             stdout = ""
             stderr = ""
         return _R()
+    monkeypatch.setattr(
+        server,
+        "resolve_argv",
+        lambda argv, **_kwargs: ["C:/Windows/System32/powershell.exe", *argv[1:]],
+    )
     monkeypatch.setattr(server.subprocess, "run", fake_run)
     assert server._pick_win_powershell("hi") is None
 

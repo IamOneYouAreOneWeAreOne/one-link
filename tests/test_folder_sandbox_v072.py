@@ -16,12 +16,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from one_link.daemon import Daemon
+from one_link.daemon import FOLDER_BLOB_MAX_BYTES, Daemon
 from one_link.identity import Identity, fingerprint_of
 from one_link.state import State
 
@@ -312,16 +311,17 @@ def test_sandbox_filter_rejects_pattern_matches(tmp_path: Path):
     state.close()
 
 
-def test_sandbox_filter_ignores_max_file_bytes_after_v021(tmp_path: Path):
-    """v0.21.x product decision: One Link does NOT impose a file
-    size limit. Even when a folder row still has max_file_bytes set
-    (e.g. left over from an older client), the daemon must accept
-    every entry regardless of size — zero ``reject_size`` audit rows."""
+def test_sandbox_filter_honors_configured_max_file_bytes(tmp_path: Path):
+    """A user's explicit per-folder limit is an enforced admission policy.
+
+    Ignoring this persisted policy would let a peer bypass an administrator's
+    storage boundary and would create manifest entries whose blobs must later
+    be refused.
+    """
     me = _new_identity()
     state = State(db_path=tmp_path / "s.db")
     state.add_folder(
         name="x", local_path=str(tmp_path / "x"), shared_with=[],
-        # Legacy cap still on the row; daemon must ignore it.
         max_file_bytes=1_000,
     )
     daemon = Daemon(me)
@@ -336,12 +336,54 @@ def test_sandbox_filter_ignores_max_file_bytes_after_v021(tmp_path: Path):
     kept = daemon._sandbox_filter_manifest_entries(
         folder=folder, peer_fp=fp, entries=entries,
     )
-    # Both kept — no size cap enforced.
-    assert [e["file_path"] for e in kept] == ["small.txt", "huge.bin"]
+    assert [e["file_path"] for e in kept] == ["small.txt"]
     audit = state.list_folder_audit(folder_name="x")
     rejects = [e for e in audit if e["action"] == "reject_size"]
-    assert len(rejects) == 0, (
-        f"v0.21.x must not produce reject_size rows; got {rejects}"
+    assert len(rejects) == 1
+    assert rejects[0]["file_path"] == "huge.bin"
+    assert rejects[0]["size"] == 10_000_000_000
+    assert rejects[0]["note"] == "exceeds max_file_bytes=1000"
+    writes = [e for e in audit if e["action"] == "write"]
+    assert [e["file_path"] for e in writes] == ["small.txt"]
+    state.close()
+
+
+def test_sandbox_filter_default_supports_large_files_with_finite_ceiling(
+    tmp_path: Path,
+):
+    """No custom cap means the production 16-TiB protocol ceiling applies.
+
+    This keeps ordinary multi-gigabyte datasets supported while rejecting an
+    impossible declaration before it can create phantom CRDT state.
+    """
+    me = _new_identity()
+    state = State(db_path=tmp_path / "s.db")
+    state.add_folder(
+        name="x", local_path=str(tmp_path / "x"), shared_with=[],
+    )
+    daemon = Daemon(me)
+    daemon.state = state
+
+    folder = state.get_folder("x")
+    fp = "cc" * 32
+    entries = [
+        {"file_path": "dataset.bin", "blob_hash": "bb" * 32,
+         "size": 10_000_000_000},
+        {"file_path": "impossible.bin", "blob_hash": "cc" * 32,
+         "size": FOLDER_BLOB_MAX_BYTES + 1},
+    ]
+    kept = daemon._sandbox_filter_manifest_entries(
+        folder=folder, peer_fp=fp, entries=entries,
+    )
+
+    assert [e["file_path"] for e in kept] == ["dataset.bin"]
+    audit = state.list_folder_audit(folder_name="x")
+    rejects = [e for e in audit if e["action"] == "reject_size"]
+    assert len(rejects) == 1
+    assert rejects[0]["file_path"] == "impossible.bin"
+    assert rejects[0]["size"] == FOLDER_BLOB_MAX_BYTES + 1
+    assert rejects[0]["note"] == (
+        f"exceeds max_file_bytes={FOLDER_BLOB_MAX_BYTES}"
     )
     state.close()
 

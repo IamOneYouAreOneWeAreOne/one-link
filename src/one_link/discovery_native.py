@@ -46,9 +46,14 @@ Typical daemon usage:
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from one_link_native.discovery import InsertOutcome as NativeInsertOutcome
 
 log = logging.getLogger(__name__)
+
+InsertOutcome: type[NativeInsertOutcome] | None
 
 try:
     from one_link_native import discovery as _native_disc  # type: ignore[import-not-found,attr-defined]
@@ -207,10 +212,12 @@ async def run_maintenance_loop(
             node.tick_maintenance(
                 now, bucket_max_age_secs, record_max_age_secs
             )
-        except Exception:
-            # Tick failures are non-fatal — log + continue. Daemons
-            # that want strict semantics catch this themselves.
-            pass
+        except Exception as exc:
+            # Maintenance is availability work rather than a request-path
+            # security boundary, so a single failed tick remains non-fatal.
+            # It must not be invisible: a permanently broken DHT otherwise
+            # looks like an empty network forever.
+            log.warning("sovereign discovery maintenance tick failed: %s", exc)
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=period_secs)
         except asyncio.TimeoutError:

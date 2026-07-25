@@ -5,7 +5,7 @@
 //! - `fetch_chunk_local` — the chunk is already in the receiver's store
 //!   (no transport round trip). Measures the read-local fast path.
 //! - `fetch_chunk_warm` — fresh fetch from a paired peer over a warm
-//!   cached connection. Measures the QUIC round-trip + chunk_store
+//!   cached connection. Measures the QUIC round-trip + `chunk_store`
 //!   append + flush cost.
 //! - `fetch_many_warm_serial` — 16 chunks fetched serially over a warm
 //!   connection. Measures throughput on a small batch.
@@ -14,7 +14,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_main, Criterion, Throughput};
 use ol_chunk_store::{
     ChunkAddressKind, ChunkAeadKind, ChunkRecord, ChunkRecordKind, ChunkStore, StripeDescriptor,
 };
@@ -62,7 +62,7 @@ fn mk_record(seed: u32, plaintext_len: u32) -> ChunkRecord {
 struct Fixture {
     _alice_root: TempDir,
     _bob_root: TempDir,
-    alice_engine: Arc<TransferEngine>,
+    _alice_engine: Arc<TransferEngine>,
     bob_engine: Arc<TransferEngine>,
     alice_fp: PeerFingerprint,
     chunk_ids: Vec<[u8; 32]>,
@@ -121,7 +121,7 @@ async fn setup_pair(
     Fixture {
         _alice_root: alice_root,
         _bob_root: bob_root,
-        alice_engine,
+        _alice_engine: alice_engine,
         bob_engine,
         alice_fp,
         chunk_ids,
@@ -197,9 +197,9 @@ fn bench_bloom_handshake_warm(c: &mut Criterion) {
     });
 }
 
-/// Compare `fetch_chunk_fountain` vs `fetch_chunk` (single ChunkResponse)
+/// Compare `fetch_chunk_fountain` vs `fetch_chunk` (single `ChunkResponse`)
 /// on loopback. On a no-loss link, fountain has wire overhead from the
-/// FountainPacket header (~4.4% per symbol) + extra symbols beyond K
+/// `FountainPacket` header (~4.4% per symbol) + extra symbols beyond `K`
 /// for decode safety. This bench tells us how much that costs.
 fn bench_fountain_vs_warm(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
@@ -209,7 +209,7 @@ fn bench_fountain_vs_warm(c: &mut Criterion) {
     // fountain overhead to be visible; small enough to keep the bench
     // fast.
     let chunk_bytes = 16 * 1024u32;
-    group.throughput(Throughput::Bytes(chunk_bytes as u64));
+    group.throughput(Throughput::Bytes(u64::from(chunk_bytes)));
 
     group.bench_function("warm_chunk_response_16KiB", |b| {
         let fx = rt.block_on(setup_pair(rt.handle(), 10_000, chunk_bytes));
@@ -247,7 +247,7 @@ fn bench_fountain_vs_warm(c: &mut Criterion) {
 }
 
 /// Compare `bloom_handshake_scoped` vs `bloom_handshake` on a server
-/// with a large memtable (10K chunks) where the want_list is small
+/// with a large memtable (10K chunks) where the `want_list` is small
 /// (100 chunks). Scoped path should crush the full-scan path because
 /// it doesn't walk the server's 10K chunks.
 fn bench_scoped_vs_full_bloom(c: &mut Criterion) {
@@ -290,11 +290,11 @@ fn bench_scoped_vs_full_bloom(c: &mut Criterion) {
 /// Group-commit win: 32 chunks via `fetch_many` (1 fsync) vs 32
 /// sequential `fetch_chunk` calls (32 fsyncs).
 fn bench_group_commit_win(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
     const BATCH: u32 = 32;
 
+    let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("group_commit");
-    group.throughput(Throughput::Elements(BATCH as u64));
+    group.throughput(Throughput::Elements(u64::from(BATCH)));
 
     group.bench_function("fetch_many_batched_x32", |b| {
         // Fresh fixture per measurement so each iter has un-fetched chunks.
@@ -328,13 +328,14 @@ fn bench_group_commit_win(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_fetch_chunk_local,
-    bench_fetch_chunk_warm,
-    bench_bloom_handshake_warm,
-    bench_group_commit_win,
-    bench_fountain_vs_warm,
-    bench_scoped_vs_full_bloom,
-);
-criterion_main!(benches);
+fn run_benchmarks() {
+    let mut criterion = Criterion::default().configure_from_args();
+    bench_fetch_chunk_local(&mut criterion);
+    bench_fetch_chunk_warm(&mut criterion);
+    bench_bloom_handshake_warm(&mut criterion);
+    bench_group_commit_win(&mut criterion);
+    bench_fountain_vs_warm(&mut criterion);
+    bench_scoped_vs_full_bloom(&mut criterion);
+}
+
+criterion_main!(run_benchmarks);

@@ -1,11 +1,12 @@
 //! Row 7 — pluggable transport obfuscation primitive.
 //!
-//! Wraps wire bytes with a ChaCha20 keystream derived from a pre-
-//! shared key + per-packet nonce. A DPI box / passive observer that
-//! doesn't hold the pre-shared key sees uniformly-random bytes,
-//! making One Link traffic statistically indistinguishable from
-//! e.g. encrypted-but-padded HTTPS payloads, random VPN traffic, or
-//! WireGuard packet bodies.
+//! Wraps wire bytes with a `ChaCha20` keystream derived from a pre-
+//! shared key + per-packet nonce. Under `ChaCha20`'s PRG assumption and
+//! unique nonces, the transformed payload removes obvious plaintext
+//! structure. This says nothing about the surrounding handshake,
+//! framing, length, timing, endpoint, or active-probe behavior, so it
+//! does not make One Link statistically indistinguishable from HTTPS,
+//! a VPN, `WireGuard`, or any allowed protocol.
 //!
 //! ## What this is
 //!
@@ -17,19 +18,20 @@
 //!
 //! ## What this is NOT
 //!
-//! - Not a full TLS-mimicry. Real DPI defeats need to mimic the
-//!   TLS handshake bit-for-bit + JA3 fingerprint matching.
+//! - Not TLS mimicry and not a demonstrated DPI bypass. A complete
+//!   pluggable transport needs an explicit target distribution and
+//!   active-probe analysis; copying one fingerprint is insufficient.
 //! - Not a key-exchange protocol. The pre-shared key arrives via
 //!   F2 pair-by-QR or F3-onion-routed channel.
 //! - Not steganographic. Random-looking is the goal, not "looks like
-//!   YouTube traffic specifically." For deeper traffic-analysis
-//!   resistance, layer cover-traffic (row 6) + onion routing
-//!   (row 5).
+//!   `YouTube` traffic specifically." Cover and onion primitives can be
+//!   inputs to a future traffic-analysis design, but layering them does
+//!   not automatically provide resistance.
 //!
 //! ## API
 //!
 //! `obfuscate(key, packet_bytes, packet_id) -> Vec<u8>` XORs the
-//! input with a deterministic ChaCha20 keystream. `deobfuscate(...)`
+//! input with a deterministic `ChaCha20` keystream. `deobfuscate(...)`
 //! is the same operation (XOR is symmetric).
 //!
 //! Length is preserved byte-for-byte. There is NO authentication at
@@ -45,7 +47,7 @@ use thiserror::Error;
 /// Length of the pre-shared obfuscation key.
 pub const OBFS_KEY_LEN: usize = 32;
 
-/// Length of the per-packet nonce. ChaCha20 standard 96-bit nonce.
+/// Length of the per-packet nonce. `ChaCha20` standard 96-bit nonce.
 pub const OBFS_NONCE_LEN: usize = 12;
 
 /// Typed error surface.
@@ -87,7 +89,7 @@ pub fn obfuscate_in_place(
     cipher.apply_keystream(bytes);
 }
 
-/// Deobfuscate `bytes`. Pure-alias for [`obfuscate`] — ChaCha20
+/// Deobfuscate `bytes`. Pure-alias for [`obfuscate`] — `ChaCha20`
 /// XOR is symmetric. Provided as a separate name so call sites
 /// document direction.
 pub fn deobfuscate(
@@ -111,7 +113,7 @@ pub fn deobfuscate_in_place(
 /// packet counter. The connection ID provides per-connection
 /// uniqueness; the counter provides per-packet uniqueness.
 ///
-/// Format: 4-byte conn_id || 8-byte counter (big-endian) = 12 bytes.
+/// Format: 4-byte `conn_id` || 8-byte counter (big-endian) = 12 bytes.
 ///
 /// Daemons SHOULD use this rather than rolling their own nonce
 /// scheme — repeating a (key, nonce) pair is catastrophic.
@@ -168,27 +170,28 @@ mod tests {
     }
 
     #[test]
-    fn output_looks_uniform_for_zero_plaintext() {
-        // Pure keystream output (XOR with all-zero plaintext).
+    fn keystream_sample_passes_coarse_byte_frequency_smoke() {
+        // A coarse regression smoke over one deterministic keystream
+        // sample. This is not a randomness, DPI, or indistinguishability
+        // proof; ChaCha20 security comes from its reviewed construction.
         let key = [0xAB; OBFS_KEY_LEN];
         let nonce = [0xCD; OBFS_NONCE_LEN];
         let plain = vec![0u8; 4096];
         let obf = obfuscate(&key, &nonce, &plain);
-        // Chi-squared: byte distribution should look uniform.
+        // Chi-squared catches gross implementation breakage only.
         let mut counts = [0u32; 256];
         for &b in &obf {
             counts[b as usize] += 1;
         }
-        let expected = obf.len() as f64 / 256.0;
+        let expected = f64::from(u32::try_from(obf.len()).unwrap()) / 256.0;
         let chi: f64 = counts
             .iter()
             .map(|&c| {
-                let d = c as f64 - expected;
+                let d = f64::from(c) - expected;
                 d * d / expected
             })
             .sum();
-        // df=255 critical value at p=0.001 is ~340. ChaCha20 output
-        // sits comfortably under this.
+        // Loose threshold chosen to catch a severely biased output.
         eprintln!("obfuscation byte-dist chi-sq = {chi:.1}");
         assert!(chi < 400.0);
     }
@@ -216,8 +219,8 @@ mod tests {
 
     #[test]
     fn derive_nonce_deterministic() {
-        let n1 = derive_nonce(0xDEADBEEF, 0x123456789ABCDEF0);
-        let n2 = derive_nonce(0xDEADBEEF, 0x123456789ABCDEF0);
+        let n1 = derive_nonce(0xDEAD_BEEF, 0x1234_5678_9ABC_DEF0);
+        let n2 = derive_nonce(0xDEAD_BEEF, 0x1234_5678_9ABC_DEF0);
         assert_eq!(n1, n2);
     }
 

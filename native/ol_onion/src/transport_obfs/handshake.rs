@@ -3,7 +3,7 @@
 //! Threat model:
 //!
 //! - **Passive DPI** observes wire bytes. Both handshake messages
-//!   look uniformly random; ChaCha20 obfuscation under the
+//!   look uniformly random; `ChaCha20` obfuscation under the
 //!   handshake-derived key kicks in for the bulk data.
 //! - **Active probe attacker** tries to detect bridges by sending
 //!   random / well-known protocol bytes to candidate IPs and seeing
@@ -66,7 +66,7 @@ pub const BRIDGE_SECRET_LEN: usize = 32;
 /// Length of the per-message handshake MAC.
 pub const HANDSHAKE_MAC_LEN: usize = 16;
 
-/// Length of the fixed-portion handshake message (ephem_pk + mac).
+/// Length of the fixed-portion handshake message (`ephem_pk` + mac).
 pub const HANDSHAKE_LEN: usize = 32 + HANDSHAKE_MAC_LEN;
 
 /// Epoch window for the HMAC binding (seconds). 1 hour = 3600.
@@ -90,7 +90,7 @@ pub enum HandshakeError {
         /// Actual length.
         got: usize,
     },
-    /// HMAC verification failed. Either the bridge_id is wrong, the
+    /// HMAC verification failed. Either the `bridge_id` is wrong, the
     /// epoch is too far skewed, or the message was tampered.
     #[error("handshake MAC did not verify")]
     BadMac,

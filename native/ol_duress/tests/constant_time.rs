@@ -2,26 +2,22 @@
 //!
 //! Per `FILE_ENGINE_V2_PLAN.md` Phase C item #9 + Phase D #6:
 //!
-//! > Plausibly deniable storage: duress key unlocks decoy with no
-//! > observable disk-pattern difference from real-key unlock.
+//! > Design target: a complete storage integration should avoid an
+//! > observable real/decoy disk-pattern distinction.
 //!
 //! And the broader Phase C constant-time sweep gate.
 //!
-//! The threat model: an attacker watching the operator type a
-//! passphrase + measuring `DuressGate::open()` wall-clock time
-//! must NOT be able to distinguish:
+//! This microbenchmark compares `DuressGate::open()` wall-clock samples for:
 //!
 //! - Real-key path (returns `DuressOutcome::Real`).
 //! - Duress-key path (returns `DuressOutcome::Duress { ... }`).
 //! - Wrong-passphrase path (returns `Err(GateError::Rejected)`).
 //!
 //! `DuressGate::open` uses `subtle::ConstantTimeEq` for both check-
-//! hash comparisons, and runs BOTH derivations regardless of which
-//! branch the result follows. The work each path does is identical
-//! at the CPU instruction level; this test confirms wall-clock
-//! variance stays below the plan's 1.20× ceiling (looser than the
-//! <1% mean variance the underlying primitive guarantees — the
-//! looser bound covers OS-scheduling noise).
+//! hash comparisons, and runs both derivations before selecting a branch.
+//! This noisy timing gate can catch large regressions on the measured host;
+//! it does not prove identical machine code, constant-time execution, disk-
+//! pattern deniability, or resistance to a capable local observer.
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -30,6 +26,20 @@ use std::time::Instant;
 mod timing_gate;
 
 use ol_duress::DuressGate;
+
+fn u128_as_f64(value: u128) -> f64 {
+    let words = [
+        u32::try_from(value >> 96).expect("the top u128 limb fits in u32"),
+        u32::try_from((value >> 64) & u128::from(u32::MAX))
+            .expect("the second u128 limb fits in u32"),
+        u32::try_from((value >> 32) & u128::from(u32::MAX))
+            .expect("the third u128 limb fits in u32"),
+        u32::try_from(value & u128::from(u32::MAX)).expect("the low u128 limb fits in u32"),
+    ];
+    words.into_iter().fold(0.0_f64, |acc, word| {
+        acc.mul_add(4_294_967_296.0, f64::from(word))
+    })
+}
 
 fn measure(fn_to_call: impl Fn() + Send, iters: usize, bursts: usize) -> f64 {
     // Warm-up.
@@ -44,7 +54,11 @@ fn measure(fn_to_call: impl Fn() + Send, iters: usize, bursts: usize) -> f64 {
         }
         total_ns += s.elapsed().as_nanos();
     }
-    total_ns as f64 / (iters * bursts) as f64
+    let samples = iters
+        .checked_mul(bursts)
+        .expect("the timing sample count must fit in usize");
+    let samples = u64::try_from(samples).expect("supported Rust pointer widths fit in u64");
+    u128_as_f64(total_ns) / u128_as_f64(u128::from(samples))
 }
 
 #[test]
@@ -105,14 +119,14 @@ fn duress_open_timing_variance_under_120_percent_real_vs_duress() {
     );
 
     eprintln!("DuressGate::open timing:");
-    eprintln!("  real_pw   = {:.1} ns/call", t_real);
-    eprintln!("  duress_pw = {:.1} ns/call", t_duress);
-    eprintln!("  wrong_pw  = {:.1} ns/call", t_wrong);
+    eprintln!("  real_pw   = {t_real:.1} ns/call");
+    eprintln!("  duress_pw = {t_duress:.1} ns/call");
+    eprintln!("  wrong_pw  = {t_wrong:.1} ns/call");
 
     let max_t = t_real.max(t_duress).max(t_wrong);
     let min_t = t_real.min(t_duress).min(t_wrong);
     let ratio = max_t / min_t;
-    eprintln!("  max/min ratio = {:.4}", ratio);
+    eprintln!("  max/min ratio = {ratio:.4}");
 
     timing_gate!(
         ratio < 1.20,

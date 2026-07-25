@@ -1,24 +1,24 @@
 //! Stateful per-direction Sealer/Opener over handshake-derived keys.
 //!
-//! A `Session` holds two ChaCha20 keys: one for OUTBOUND traffic
+//! A `Session` holds two `ChaCha20` keys: one for OUTBOUND traffic
 //! (this side → peer) and one for INBOUND (peer → this side).
 //! Both sides derive the same two keys, but their `outbound_key`
 //! and `inbound_key` are swapped — so client.outbound ==
 //! server.inbound and vice versa. Each direction uses
 //! `derive_nonce(direction_tag, packet_counter)` to produce unique
-//! per-packet ChaCha20 nonces; (key, nonce) pairs never repeat.
+//! per-packet `ChaCha20` nonces; (key, nonce) pairs never repeat.
 
 use crate::transport_obfs::primitive::{deobfuscate, derive_nonce, obfuscate, OBFS_KEY_LEN};
 use zeroize::Zeroize;
 
-/// Length of a session key (= ChaCha20 key length).
+/// Length of a session key (= `ChaCha20` key length).
 pub const SESSION_KEY_LEN: usize = OBFS_KEY_LEN;
 
 /// Tag used by `derive_nonce`. Direction is captured by WHICH key
-/// (outbound_key vs inbound_key) is used, so both directions can
+/// (`outbound_key` vs `inbound_key`) is used, so both directions can
 /// use the same tag; (key, nonce) pairs never repeat because the
 /// keys differ.
-const OUTBOUND_DIRECTION_TAG: u32 = 0x4F4C5458; // "OLTX"
+const OUTBOUND_DIRECTION_TAG: u32 = 0x4F4C_5458; // "OLTX"
 
 /// Which direction a packet flows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

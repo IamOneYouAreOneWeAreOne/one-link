@@ -1,13 +1,13 @@
 //! Byte-equivalence gate for `ol_canon`. Per the plan: 1M random
 //! structured inputs MUST produce byte-identical output across runs.
 //!
-//! Configurable via ``OL_CANON_GATE_ITERS`` (default 100k for
-//! everyday `cargo test`; CI nightly sets 1_000_000 to meet the
+//! Configurable via `OL_CANON_GATE_ITERS` (default 100k for
+//! everyday `cargo test`; CI nightly sets `1_000_000` to meet the
 //! plan's Phase A1 acceptance number).
 
 use ol_canon::{CanonDecoder, CanonEncoder};
 
-/// SplitMix64 — deterministic, fast, ample quality for round-trip
+/// `SplitMix64` — deterministic, fast, ample quality for round-trip
 /// fuzzing. Same constants as the rest of the workspace's randomized
 /// gates so seeds are interchangeable.
 fn next_rng(state: &mut u64) -> u64 {
@@ -34,7 +34,7 @@ fn random_value(state: &mut u64) -> Value {
         0 => Value::Null,
         1 => Value::Bool(next_rng(state) & 1 == 0),
         2 => Value::U64(next_rng(state)),
-        3 => Value::I64(next_rng(state) as i64),
+        3 => Value::I64(next_rng(state).cast_signed()),
         4 => {
             // Reject NaN/Inf so the round-trip equality holds at the
             // bit level. Canonicalisation is tested separately.
@@ -47,18 +47,25 @@ fn random_value(state: &mut u64) -> Value {
             }
         }
         5 => {
-            let len = (next_rng(state) % 16) as usize;
+            let len =
+                usize::try_from(next_rng(state) % 16).expect("a residue modulo 16 fits in usize");
             let mut s = String::with_capacity(len);
             for _ in 0..len {
                 // ASCII printable so we don't need full UTF-8 generators
-                let c = b'a' + (next_rng(state) % 26) as u8;
-                s.push(c as char);
+                let offset =
+                    u8::try_from(next_rng(state) % 26).expect("a residue modulo 26 fits in u8");
+                s.push(char::from(b'a' + offset));
             }
             Value::String(s)
         }
         _ => {
-            let len = (next_rng(state) % 32) as usize;
-            let bytes: Vec<u8> = (0..len).map(|_| (next_rng(state) & 0xFF) as u8).collect();
+            let len =
+                usize::try_from(next_rng(state) % 32).expect("a residue modulo 32 fits in usize");
+            let bytes: Vec<u8> = (0..len)
+                .map(|_| {
+                    u8::try_from(next_rng(state) & 0xFF).expect("a masked low byte fits in u8")
+                })
+                .collect();
             Value::Bytes(bytes)
         }
     }
@@ -92,7 +99,7 @@ fn decode(bytes: &[u8]) -> Value {
         ol_canon::TypeTag::Float64 => Value::F64(d.decode_f64().unwrap()),
         ol_canon::TypeTag::String => Value::String(d.decode_string().unwrap()),
         ol_canon::TypeTag::Bytes => Value::Bytes(d.decode_bytes().unwrap()),
-        other => panic!("unexpected tag: {:?}", other),
+        other => panic!("unexpected tag: {other:?}"),
     }
 }
 
@@ -109,7 +116,7 @@ fn property_random_values_round_trip_and_are_deterministic() {
         let bytes_a = encode(&value);
         let bytes_b = encode(&value);
         if bytes_a != bytes_b {
-            eprintln!("non-deterministic encode for {:?}", value);
+            eprintln!("non-deterministic encode for {value:?}");
             fail += 1;
             continue;
         }
@@ -117,12 +124,11 @@ fn property_random_values_round_trip_and_are_deterministic() {
         // Float bit-equality: NaN/Inf were filtered above.
         if let (Value::F64(a), Value::F64(b)) = (&value, &decoded) {
             if a.to_bits() != b.to_bits() {
-                eprintln!("f64 round-trip mismatch: {} vs {}", a, b);
+                eprintln!("f64 round-trip mismatch: {a} vs {b}");
                 fail += 1;
-                continue;
             }
         } else if value != decoded {
-            eprintln!("round-trip mismatch: {:?} → {:?}", value, decoded);
+            eprintln!("round-trip mismatch: {value:?} → {decoded:?}");
             fail += 1;
         }
     }

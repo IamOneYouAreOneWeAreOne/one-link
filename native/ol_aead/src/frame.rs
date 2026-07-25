@@ -13,6 +13,7 @@
 //! amplification cap from ADR-0002.
 
 use ol_chunk::{frame_count_for_plaintext, AEAD_FRAME_PLAINTEXT_LEN, AEAD_TAG_LEN};
+use rayon::prelude::*;
 
 use crate::cipher::AeadCipher;
 use crate::error::AeadError;
@@ -28,6 +29,16 @@ pub(crate) const AEAD_TAG_LEN_USIZE: usize = AEAD_TAG_LEN;
 /// produces chunks ≤ 256 KiB. The AEAD pipeline rejects larger inputs
 /// to keep the on-stack frame index calculation bounded.
 pub const MAX_CHUNK_PLAINTEXT_LEN: usize = 256 * 1024;
+
+/// Maximum chunks processed in one parallel batch.
+pub const MAX_PARALLEL_CHUNKS: usize = 8_192;
+
+/// Maximum aggregate caller-controlled input retained by one batch.
+pub const MAX_PARALLEL_INPUT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Maximum on-wire ciphertext for a maximum-sized chunk.
+pub const MAX_CHUNK_CIPHERTEXT_LEN: usize = MAX_CHUNK_PLAINTEXT_LEN
+    + (MAX_CHUNK_PLAINTEXT_LEN / AEAD_FRAME_PLAINTEXT_LEN) * AEAD_TAG_LEN_USIZE;
 
 /// View of a single AEAD frame within a chunk's on-wire ciphertext layout.
 ///
@@ -220,6 +231,12 @@ pub fn decrypt_frame(
     frame_ciphertext: &[u8],
     tag: &[u8; AEAD_TAG_LEN_USIZE],
 ) -> Result<Vec<u8>, AeadError> {
+    if frame_ciphertext.len() > AEAD_FRAME_PLAINTEXT_LEN {
+        return Err(AeadError::FrameTooLarge {
+            got: frame_ciphertext.len(),
+            max: AEAD_FRAME_PLAINTEXT_LEN,
+        });
+    }
     let nonce = frame_nonce(chunk_id, frame_index)?;
     let mut buf = frame_ciphertext.to_vec();
     cipher.decrypt_in_place(&nonce, chunk_id.as_slice(), &mut buf, tag)?;
@@ -228,7 +245,7 @@ pub fn decrypt_frame(
 
 /// Encrypt many chunks in parallel via rayon.
 ///
-/// Each chunk's encryption is independent (different chunk_id → different
+/// Each chunk's encryption is independent (different `chunk_id` → different
 /// nonce + AAD), so the work shards cleanly across cores. Wins land
 /// around N ≥ 8 chunks; below that, rayon dispatch overhead dominates
 /// the per-chunk AEAD work (~12 µs/chunk at 64 KiB on AES-NI).
@@ -244,7 +261,7 @@ pub fn encrypt_chunks_par(
     cipher: &AeadCipher,
     chunks: &[(&[u8; 32], &[u8])],
 ) -> Result<Vec<Vec<u8>>, AeadError> {
-    use rayon::prelude::*;
+    validate_parallel_batch(chunks.len(), chunks.iter().map(|(_, bytes)| bytes.len()))?;
     chunks
         .par_iter()
         .map(|(id, pt)| encrypt_chunk(cipher, id, pt))
@@ -263,11 +280,39 @@ pub fn decrypt_chunks_par(
     cipher: &AeadCipher,
     chunks: &[(&[u8; 32], usize, &[u8])],
 ) -> Result<Vec<Vec<u8>>, AeadError> {
-    use rayon::prelude::*;
+    validate_parallel_batch(chunks.len(), chunks.iter().map(|(_, _, bytes)| bytes.len()))?;
     chunks
         .par_iter()
         .map(|(id, pt_len, ct)| decrypt_chunk(cipher, id, *pt_len, ct))
         .collect()
+}
+
+fn validate_parallel_batch(
+    count: usize,
+    lengths: impl Iterator<Item = usize>,
+) -> Result<(), AeadError> {
+    if count > MAX_PARALLEL_CHUNKS {
+        return Err(AeadError::BatchTooLarge {
+            got: count,
+            max: MAX_PARALLEL_CHUNKS,
+        });
+    }
+    let mut total = 0usize;
+    for len in lengths {
+        total = total
+            .checked_add(len)
+            .ok_or(AeadError::BatchBytesTooLarge {
+                got: usize::MAX,
+                max: MAX_PARALLEL_INPUT_BYTES,
+            })?;
+        if total > MAX_PARALLEL_INPUT_BYTES {
+            return Err(AeadError::BatchBytesTooLarge {
+                got: total,
+                max: MAX_PARALLEL_INPUT_BYTES,
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -315,6 +360,35 @@ mod tests {
         assert_eq!(ciphertext.len(), 0);
         let recovered = decrypt_chunk(&cipher, &chunk_id, 0, &ciphertext).unwrap();
         assert!(recovered.is_empty());
+    }
+
+    #[test]
+    fn decrypt_frame_rejects_oversized_input_before_copy() {
+        let cipher = fixed_cipher(AeadKind::AesGcm256);
+        let chunk_id = [0x34u8; 32];
+        let ciphertext = vec![0u8; AEAD_FRAME_PLAINTEXT_LEN + 1];
+        assert!(matches!(
+            decrypt_frame(
+                &cipher,
+                &chunk_id,
+                0,
+                &ciphertext,
+                &[0u8; AEAD_TAG_LEN_USIZE]
+            ),
+            Err(AeadError::FrameTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn parallel_batch_resource_limits_are_checked_without_allocating_outputs() {
+        assert!(matches!(
+            validate_parallel_batch(MAX_PARALLEL_CHUNKS + 1, std::iter::repeat_n(0, 1)),
+            Err(AeadError::BatchTooLarge { .. })
+        ));
+        assert!(matches!(
+            validate_parallel_batch(65, std::iter::repeat_n(1024 * 1024, 65)),
+            Err(AeadError::BatchBytesTooLarge { .. })
+        ));
     }
 
     #[test]

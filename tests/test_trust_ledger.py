@@ -13,11 +13,8 @@ from __future__ import annotations
 
 import threading
 
-import pytest
 
 from one_link.identity_sas import (
-    RotationDecision,
-    TrustRecord,
     VerificationState,
 )
 from one_link.trust_ledger import TrustLedger

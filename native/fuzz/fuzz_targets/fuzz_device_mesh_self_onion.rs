@@ -3,8 +3,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use ol_device_mesh::self_onion::{
-    build_self_onion_circuit, derive_onion_identity, peel_self_onion_layer,
-    sign_onion_attestation, OnionKeyRegistry,
+    build_self_onion_circuit, derive_onion_identity, peel_self_onion_layer, sign_onion_attestation,
+    OnionKeyRegistry,
 };
 use ol_device_mesh::self_routing::Route;
 use ol_device_mesh::{MasterIdentity, DEVICE_ID_LEN};
@@ -21,10 +21,7 @@ fuzz_target!(|data: &[u8]| {
     let dst_ident = derive_onion_identity(&master, &dst);
     let mut reg = OnionKeyRegistry::empty();
     for (id, ident) in [(&src, &src_ident), (&dst, &dst_ident)] {
-        let att = sign_onion_attestation(
-            &master, *id, ident.public_bytes(), 0, 365,
-        )
-        .unwrap();
+        let att = sign_onion_attestation(&master, *id, ident.public_bytes(), 0, 365).unwrap();
         reg.ingest(att, &master.verifying_key()).unwrap();
     }
 
@@ -45,10 +42,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // 2. Mutate a signed attestation and re-verify.
-    let att = sign_onion_attestation(
-        &master, src, src_ident.public_bytes(), 0, 365,
-    )
-    .unwrap();
+    let att = sign_onion_attestation(&master, src, src_ident.public_bytes(), 0, 365).unwrap();
     let mut tampered = att.clone();
     if let Some(&b) = data.first() {
         if !tampered.master_sig.is_empty() {

@@ -55,7 +55,7 @@ pub fn encode_zigzag(value: i64, out: &mut Vec<u8>) {
     // The cast keeps the sign-bit smear; we then shift left by 1 and
     // XOR with the smear so positive numbers become 2n and negative
     // -(n+1) becomes 2n+1.
-    let zigzag = ((value as u64) << 1) ^ ((value >> 63) as u64);
+    let zigzag = (value.cast_unsigned() << 1) ^ (value >> 63).cast_unsigned();
     encode_varint(zigzag, out);
 }
 
@@ -63,7 +63,7 @@ pub fn encode_zigzag(value: i64, out: &mut Vec<u8>) {
 pub fn decode_zigzag(input: &[u8], pos: usize) -> Result<(i64, usize), DecodeError> {
     let (raw, n) = decode_varint(input, pos)?;
     // (raw >> 1) ^ -(raw & 1) — the standard zigzag inverse.
-    let value = ((raw >> 1) as i64) ^ -((raw & 1) as i64);
+    let value = (raw >> 1).cast_signed() ^ -(raw & 1).cast_signed();
     Ok((value, n))
 }
 
@@ -73,7 +73,16 @@ mod tests {
 
     #[test]
     fn round_trip_small_unsigned() {
-        for v in [0u64, 1, 127, 128, 16_383, 16_384, u32::MAX as u64, u64::MAX] {
+        for v in [
+            0u64,
+            1,
+            127,
+            128,
+            16_383,
+            16_384,
+            u64::from(u32::MAX),
+            u64::MAX,
+        ] {
             let mut out = Vec::new();
             encode_varint(v, &mut out);
             let (decoded, n) = decode_varint(&out, 0).unwrap();

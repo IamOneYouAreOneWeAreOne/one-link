@@ -34,13 +34,13 @@
 //!
 //! The AEAD-decrypted body is one of:
 //!
-//! - **Relay layer** (hops_remaining > 0):
+//! - **Relay layer** (`hops_remaining` > 0):
 //!   `next_hop_id (32 B) || inner_OnionPacket_bytes (variable)`
-//! - **Destination layer** (hops_remaining == 0):
+//! - **Destination layer** (`hops_remaining` == 0):
 //!   `user_payload (variable)`
 //!
-//! The version + hops_remaining + ephem_pubkey + aead_nonce +
-//! ciphertext_len are bound into the AEAD AAD so a relay cannot
+//! The version + `hops_remaining` + `ephem_pubkey` + `aead_nonce` +
+//! `ciphertext_len` are bound into the AEAD AAD so a relay cannot
 //! tamper with packet metadata without breaking the next hop's
 //! verify.
 
@@ -64,9 +64,9 @@ pub const AEAD_TAG_LEN: usize = 16;
 pub const HOP_ID_LEN: usize = 32;
 
 /// Bytes added per layer of onion wrapping:
-/// version (1) + hops_remaining (1) + ephem_pubkey (32) +
-/// aead_nonce (12) + ciphertext_len (2) + AEAD tag (16) +
-/// hop_id pointing to next hop (32, for relay layers).
+/// version (1) + `hops_remaining` (1) + `ephem_pubkey` (32) +
+/// `aead_nonce` (12) + `ciphertext_len` (2) + AEAD tag (16) +
+/// `hop_id` pointing to next hop (32, for relay layers).
 pub const PER_LAYER_OVERHEAD: usize =
     1 + 1 + EPHEM_PUBKEY_LEN + AEAD_NONCE_LEN + 2 + AEAD_TAG_LEN + HOP_ID_LEN;
 
@@ -82,7 +82,7 @@ pub const TRANSPORT_PAD_HINT: usize = 1280;
 
 /// Reserved for [`OnionError::PayloadOversize`] checks; payload at
 /// the innermost layer is capped so the outermost packet still
-/// fits inside [`TRANSPORT_PAD_HINT`] even at MAX_HOPS hops.
+/// fits inside [`TRANSPORT_PAD_HINT`] even at `MAX_HOPS` hops.
 pub const MAX_USER_PAYLOAD: usize =
     TRANSPORT_PAD_HINT.saturating_sub(MAX_HOPS * PER_LAYER_OVERHEAD);
 
@@ -131,9 +131,9 @@ impl OnionPacket {
         // u16 BE ciphertext length.
         // ciphertext.len() ≤ TRANSPORT_PAD_HINT = 1280 < u16::MAX,
         // guaranteed by the decode-time bounds check and by build_onion.
-        debug_assert!(self.ciphertext.len() <= u16::MAX as usize);
-        #[allow(clippy::cast_possible_truncation)]
-        let ct_len_u16 = self.ciphertext.len() as u16;
+        debug_assert!(u16::try_from(self.ciphertext.len()).is_ok());
+        let ct_len_u16 = u16::try_from(self.ciphertext.len())
+            .expect("onion ciphertext length must fit in the wire u16");
         w.write_u16(ct_len_u16);
         w.write_fixed(&self.ciphertext);
         w.into_bytes()
@@ -156,7 +156,7 @@ impl OnionPacket {
         let nonce_slice = r.read_fixed(AEAD_NONCE_LEN)?;
         let mut aead_nonce = [0u8; AEAD_NONCE_LEN];
         aead_nonce.copy_from_slice(nonce_slice);
-        let ciphertext_len = r.read_u16()? as usize;
+        let ciphertext_len = usize::from(r.read_u16()?);
         // Refuse oversize length before allocating.
         if ciphertext_len > TRANSPORT_PAD_HINT {
             return Err(OnionError::BadFrameSize {
@@ -185,9 +185,9 @@ impl OnionPacket {
         w.write_fixed(&self.aead_nonce);
         // ciphertext.len() ≤ TRANSPORT_PAD_HINT = 1280 < u16::MAX,
         // guaranteed by the decode-time bounds check and by build_onion.
-        debug_assert!(self.ciphertext.len() <= u16::MAX as usize);
-        #[allow(clippy::cast_possible_truncation)]
-        let ct_len_u16 = self.ciphertext.len() as u16;
+        debug_assert!(u16::try_from(self.ciphertext.len()).is_ok());
+        let ct_len_u16 = u16::try_from(self.ciphertext.len())
+            .expect("onion ciphertext length must fit in the wire u16");
         w.write_u16(ct_len_u16);
         w.into_bytes()
     }
@@ -195,7 +195,7 @@ impl OnionPacket {
 
 /// Pad a wire-encoded `OnionPacket` to exactly [`TRANSPORT_PAD_HINT`]
 /// bytes. The original packet's first 2 bytes hold the
-/// `ciphertext_len` u16 (after the version, hops_remaining, ephem,
+/// `ciphertext_len` u16 (after the version, `hops_remaining`, ephem,
 /// and nonce header), so the receiver can always extract the
 /// real packet length and strip the trailing padding before
 /// decoding. Pad bytes are random-looking (key-derived) so the
@@ -204,7 +204,7 @@ impl OnionPacket {
 ///
 /// `pad_seed` is a 32-byte sender-side secret that key-derives the
 /// pad bytes via BLAKE3. Pass a fresh value per packet (e.g.,
-/// BLAKE3(circuit_id || packet_counter)). Different packets MUST
+/// `BLAKE3(circuit_id || packet_counter)`. Different packets MUST
 /// use different `pad_seed` values to avoid leaking length
 /// information via repeated identical pad bytes.
 ///
@@ -240,6 +240,8 @@ pub fn pad_packet_to_transport(encoded: &[u8], pad_seed: &[u8; 32]) -> OnionResu
 /// Refuses if `padded` is not exactly [`TRANSPORT_PAD_HINT`] bytes
 /// or if the embedded length is implausible.
 pub fn unpad_packet_from_transport(padded: &[u8]) -> OnionResult<Vec<u8>> {
+    const LEN_OFFSET: usize = 1 + 1 + EPHEM_PUBKEY_LEN + AEAD_NONCE_LEN;
+
     if padded.len() != TRANSPORT_PAD_HINT {
         return Err(OnionError::BadFrameSize {
             got: padded.len(),
@@ -248,14 +250,16 @@ pub fn unpad_packet_from_transport(padded: &[u8]) -> OnionResult<Vec<u8>> {
     }
     // The header is: version(1) + hops_remaining(1) + ephem(32) +
     // nonce(12) + ciphertext_len(u16 BE). Length offset = 46.
-    const LEN_OFFSET: usize = 1 + 1 + EPHEM_PUBKEY_LEN + AEAD_NONCE_LEN;
     if padded[0] != ONION_PACKET_VERSION {
         return Err(OnionError::UnsupportedVersion {
             got: padded[0],
             supported: ONION_PACKET_VERSION,
         });
     }
-    let ct_len = u16::from_be_bytes([padded[LEN_OFFSET], padded[LEN_OFFSET + 1]]) as usize;
+    let ct_len = usize::from(u16::from_be_bytes([
+        padded[LEN_OFFSET],
+        padded[LEN_OFFSET + 1],
+    ]));
     let total = ONION_HEADER_LEN + ct_len;
     if total > TRANSPORT_PAD_HINT {
         return Err(OnionError::BadFrameSize {
@@ -308,7 +312,7 @@ mod tests {
         w.write_u8(0);
         w.write_fixed(&[0u8; EPHEM_PUBKEY_LEN]);
         w.write_fixed(&[0u8; AEAD_NONCE_LEN]);
-        w.write_u16((TRANSPORT_PAD_HINT + 1) as u16);
+        w.write_u16(u16::try_from(TRANSPORT_PAD_HINT + 1).unwrap());
         // No actual bytes follow — decode should fail at length check.
         let bytes = w.into_bytes();
         let err = OnionPacket::decode(&bytes).unwrap_err();
@@ -397,7 +401,7 @@ mod tests {
         let mut bytes = vec![0u8; TRANSPORT_PAD_HINT];
         bytes[0] = ONION_PACKET_VERSION;
         let len_offset = 1 + 1 + EPHEM_PUBKEY_LEN + AEAD_NONCE_LEN;
-        let bogus_len = (TRANSPORT_PAD_HINT as u16).wrapping_add(1);
+        let bogus_len = u16::try_from(TRANSPORT_PAD_HINT).unwrap().wrapping_add(1);
         bytes[len_offset..len_offset + 2].copy_from_slice(&bogus_len.to_be_bytes());
         let err = unpad_packet_from_transport(&bytes).unwrap_err();
         assert!(matches!(err, OnionError::BadFrameSize { .. }));

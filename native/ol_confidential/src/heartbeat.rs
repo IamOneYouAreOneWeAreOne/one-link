@@ -414,7 +414,7 @@ mod tests {
         // heartbeat_id MUST still be the same — chain continuity
         // depends only on the bound metadata).
         let mut doc_with_other_sig = doc.clone();
-        for b in doc_with_other_sig.master_sig.iter_mut() {
+        for b in &mut doc_with_other_sig.master_sig {
             *b ^= 0xFFu8;
         }
         let id_with_other_sig = heartbeat_id(&doc_with_other_sig);

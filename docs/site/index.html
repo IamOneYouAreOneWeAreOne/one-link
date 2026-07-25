@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>One Link - peer-to-peer chat + file sync, for the people</title>
-<meta name="description" content="Peer-to-peer chat and file sync. No accounts, no servers, no cloud. Your devices find each other on your network and talk directly, end-to-end encrypted, mutually authenticated.">
+<meta name="description" content="End-to-end encrypted chat and file sync with no account or central message store. Devices connect directly when routes permit; optional discovery and encrypted relay infrastructure can assist across networks.">
 <meta name="theme-color" content="#0e0e10">
 <style>
   :root {
@@ -83,7 +83,7 @@
   .download .what { font-weight: 600; color: var(--fg); }
   .download .for { color: var(--dim); font-size: 13px; }
 
-  /* Primary download button - auto-detects OS, one click. */
+  /* The primary CTA fails closed until a verified release exists. */
   .download-primary {
     display: flex;
     align-items: center;
@@ -107,7 +107,7 @@
     border-bottom-color: transparent;
   }
   .download-primary:active { transform: translateY(0); }
-  .download-primary[data-os="unknown"] {
+  .download-primary[data-release-state="unavailable"] {
     background: var(--code-bg);
     color: var(--fg);
     border: 1px solid var(--hr);
@@ -154,71 +154,69 @@
 </head>
 <body>
 <main>
-  <span class="pill" id="version-pill">for the people</span>
+  <span class="pill" id="version-pill">alpha development preview</span>
   <h1>One Link</h1>
   <p class="lede">
-    Peer-to-peer chat and file sync. No accounts. No servers.
-    No cloud. No telemetry. Your devices find each other on your
-    network and talk directly, end-to-end encrypted, mutually
-    authenticated.
+    Peer-to-peer chat and file sync with no required user account and no
+    application telemetry. Devices connect directly where routes permit;
+    optional rendezvous and relay services support cross-network discovery and
+    fallback. Peer sessions are end-to-end encrypted and mutually authenticated.
   </p>
 
   <div class="badges">
     <span class="badge good">AGPLv3</span>
-    <span class="badge good">no telemetry</span>
-    <span class="badge good">no accounts</span>
-    <span class="badge good">at-rest encryption by default</span>
-    <span class="badge good">forward secrecy</span>
-    <span class="badge good">reproducible builds</span>
+    <span class="badge good">no product analytics</span>
+    <span class="badge good">no required account</span>
+    <span class="badge good">SQLCipher state DB by default</span>
+    <span class="badge good">ephemeral session keys</span>
+    <span class="badge">no verified production release</span>
   </div>
 
-  <h2>Download</h2>
+  <h2>Release status</h2>
   <p>
-    One click. No Python, no command line, no setup. Double-click
-    the file you download and One Link starts. Open browser tab,
-    done.
+    <strong>No verified production download is currently published.</strong>
+    As checked against GitHub on 2026-07-24, the only release is the mutable
+    <code>auto-latest</code> prerelease. Its rolling binaries and checksum files
+    were refreshed on 2026-07-22, but it has no Sigstore bundles, published
+    SBOM, or provenance assets and is not an approved install source.
+  </p>
+  <p>
+    The release workflow is implemented, but it has not yet produced a
+    production tag. This page therefore does not redirect to a mutable release
+    or guess an artifact from your operating system.
   </p>
 
-  <!-- Primary download - auto-detects OS via JS. data-os defaults
-       to 'unknown' (linked to releases page); JS sets it to a
-       direct asset URL on detection. -->
   <a class="download-primary" id="download-primary"
-     href="https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest"
-     data-os="unknown">
-    <span class="text">Download for your platform</span>
-    <span class="arrow">↓</span>
+     href="#source-install" data-release-state="unavailable">
+    <span class="text">Production download unavailable</span>
   </a>
   <p class="download-meta" id="download-meta">
-    <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest">All downloads + signatures →</a>
+    Alpha source evaluation is available below. Do not use
+    <code>auto-latest</code> binaries as trusted software.
   </p>
 
-  <details class="alt">
-    <summary>Other ways to install (advanced)</summary>
-    <p>From PyPI (once published):</p>
-    <pre><code>pip install one_link
-one-link app</code></pre>
-    <p>Native fast path (QUIC + coherence-field):</p>
-    <pre><code>pip install one_link_native --find-links \
-  https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest</code></pre>
-    <p>From source:</p>
+  <details class="alt" id="source-install">
+    <summary>Evaluate a reviewed source commit (advanced)</summary>
+    <p>This is a development path, not a production installation:</p>
     <pre><code>git clone https://github.com/IamOneYouAreOneWeAreOne/one-link
 cd one-link
-pip install -e .
-one-link app</code></pre>
+git checkout &lt;reviewed-commit-sha&gt;
+uv sync --frozen --extra dev
+uv run --frozen one-link app</code></pre>
   </details>
 
-  <h2>Verify before you trust</h2>
+  <h2>Future release verification contract</h2>
   <p>
-    Download the artifact, the matching <code>.sigstore</code>
-    bundle, and <code>SHA256SUMS</code> from the GitHub release.
-    Then run:
+    After an immutable <code>v*</code> tag successfully publishes an artifact,
+    its matching <code>.sigstore</code> bundle, <code>SHA256SUMS</code>, signed
+    manifest, provenance, and SBOM, verify the exact tag with:
   </p>
-  <pre><code>bash scripts/verify-release.sh ./one_link-0.20.7.tar.gz</code></pre>
+  <pre><code>bash scripts/verify-release.sh ./&lt;artifact&gt; vX.Y.Z</code></pre>
   <p>
-    The script checks the SHA-256 against the signed manifest and
-    verifies the Sigstore signature was produced by One Link's
-    GitHub Actions release workflow from the matching tag. Any
-    mismatch refuses the install and tells you why.
+    The verifier is tooling, not evidence that those assets exist today. It
+    checks the checksum and Sigstore identities and fails on missing or
+    mismatched evidence. Never substitute <code>latest</code>,
+    <code>master</code>, or <code>auto-latest</code> for the exact tag.
   </p>
   <p>
     If you don't trust the script either, the underlying check is
@@ -226,21 +224,45 @@ one-link app</code></pre>
     workflow identity pinned. Run it yourself.
   </p>
 
-  <h2>What's inside</h2>
+  <h2>What's in the development tree</h2>
+  <p>
+    These are source-level capabilities under test, not a production-release
+    certification. Exact behavior must be verified at the reviewed commit.
+  </p>
   <ul>
     <li>X25519 + Ed25519 mutual handshake. ChaCha20-Poly1305 framed
         wire protocol.</li>
-    <li>Signal-style Double Ratchet for forward secrecy +
-        post-compromise security on every channel.</li>
-    <li>8-digit transcript-bound SAS pair flow. 5-minute pair TTL.
+    <li>Compatible daemon peers advertise and activate a Signal-style Double
+        Ratchet after capability negotiation; downgrade, legacy-peer, recovery,
+        and production qualification remain release gates.</li>
+    <li>Five-word transcript-bound SAS pair flow. 5-minute pair TTL.
         Deny-by-default capability gate after pair.</li>
     <li>Group-chat sender chains with sliding-window OOO support
         + Ed25519-signed messages.</li>
-    <li>At-rest encryption ON BY DEFAULT (no passphrase prompt).
-        DPAPI on Windows binds the data root key to the user's
-        login credentials.</li>
+    <li>The desktop state database uses SQLCipher by default and refuses silent
+        plaintext fallback. Identity keys, received blobs, runtime memory, and
+        OS-account compromise have separate limits in the threat model.</li>
     <li>WebRTC browser-as-peer transport with cryptographically
-        bound DTLS-SRTP fingerprint (signed answer envelope).</li>
+        bound DTLS-SRTP fingerprint (signed answer envelope). Independent
+        Chromium and Firefox profiles complete direct DataChannel probes with
+        outside STUN disabled; WebKit/iOS and a physical NAT/TURN matrix remain
+        release gates.</li>
+    <li>Compatible native daemons use a signed, key-confirmed X25519 +
+        FIPS-203 ML-KEM-768 handshake and refuse classical downgrade by
+        default. Ed25519 identity signatures and browser/WebRTC channels are
+        outside that post-quantum KEM claim.</li>
+    <li>The optional native v2 relay uses rotating pairwise route tags and
+        recipient-seals both identity-bearing channel first flights. This is
+        not sender anonymity: the relay still observes sockets, timing, size,
+        counts, and rotating-tag linkage. Onion/mix-net message routing is not
+        active.</li>
+    <li>Explicit owner-confirmed, one-click transactional installation is live
+        only when the complete local frozen standalone bundle and its fixed
+        external A/B helper validate. The helper independently authenticates,
+        activates, health-checks, and rolls back the exact release. Source,
+        pip, development, incomplete, moved, or modified installs fail closed;
+        Unattended/background automatic installation remains disabled, and no
+        verified public stable tagged release exists yet.</li>
     <li>BLAKE3-verified content-defined chunking for fast
         large-file sync. Native-code accelerator with SHA-256
         sidecar integrity check.</li>
@@ -268,9 +290,10 @@ one-link app</code></pre>
     so it can never be quietly enclosed inside a closed-source
     corporate product. The full charter is in
     <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link/blob/master/NOTICE">NOTICE</a>.
-    No accounts, no email, no phone number, no telemetry, no
-    advertising, no selling user data, no corporate substrate
-    dependency the user can't opt out of. Ever.
+    The project aims to require no account, email, or phone number and to ship
+    no application telemetry or advertising. Necessary infrastructure and
+    supply-chain dependencies are documented in the threat model instead of
+    being presented as nonexistent.
   </p>
 
   <div class="footer">
@@ -282,135 +305,5 @@ one-link app</code></pre>
   </div>
 </main>
 
-<script>
-  // OS-detect + dynamic-release download wiring. Everything runs
-  // client-side from this page; no telemetry beats back to a server.
-  // GitHub Pages serves this static file; the only outbound call
-  // is to api.github.com to find the latest release tag, and even
-  // that's optional (the page works without it).
-  (function () {
-    "use strict";
-    const OWNER = "IamOneYouAreOneWeAreOne";
-    const REPO = "one-link";
-    const RELEASE_BASE =
-      `https://github.com/${OWNER}/${REPO}/releases`;
-
-    // Detect the user's OS. We accept a few false-negatives (e.g.
-    // BSDs report as Linux, ChromeOS reports as Linux) - they get
-    // the Linux binary, which is the right answer anyway.
-    function detectOS() {
-      const ua = (navigator.userAgent || "").toLowerCase();
-      const platform = (navigator.platform || "").toLowerCase();
-      const data = navigator.userAgentData && navigator.userAgentData.platform;
-      const hint = (data || "").toLowerCase();
-      if (hint.includes("win") || ua.includes("windows") || platform.includes("win")) {
-        return "windows";
-      }
-      if (hint.includes("mac") || ua.includes("mac os") || ua.includes("macintosh") || platform.includes("mac")) {
-        return "macos";
-      }
-      if (ua.includes("iphone") || ua.includes("ipad")) {
-        // No iOS binary yet; send to the source page so users see
-        // the roadmap entry rather than a 404.
-        return "ios";
-      }
-      if (ua.includes("android")) {
-        return "android";
-      }
-      if (ua.includes("linux") || platform.includes("linux") || hint.includes("linux")) {
-        return "linux";
-      }
-      return "unknown";
-    }
-
-    // Map detected OS -> {asset filename, friendly label}. The
-    // filenames must match the release.yml workflow's asset_name
-    // values. If those change, this table changes.
-    const OS_ASSETS = {
-      windows: {
-        asset: "one-link-windows.exe",
-        label: "Download for Windows",
-        note: "Double-click the .exe to start.",
-      },
-      macos: {
-        asset: "one-link-macos",
-        label: "Download for macOS",
-        note: "Open Terminal and run: chmod +x one-link-macos && ./one-link-macos app",
-      },
-      linux: {
-        asset: "one-link-linux-x86_64",
-        label: "Download for Linux",
-        note: "chmod +x one-link-linux-x86_64 && ./one-link-linux-x86_64 app",
-      },
-      ios: {
-        asset: null,
-        label: "iOS coming soon",
-        note: "Browser-as-peer support today. Native iOS in the v1.0 roadmap.",
-      },
-      android: {
-        asset: null,
-        label: "Android coming soon",
-        note: "Browser-as-peer support today. Native Android in the v1.0 roadmap.",
-      },
-      unknown: {
-        asset: null,
-        label: "Choose your platform",
-        note: "We couldn't detect your OS automatically.",
-      },
-    };
-
-    function wireDownload() {
-      const os = detectOS();
-      const info = OS_ASSETS[os] || OS_ASSETS.unknown;
-      const btn = document.getElementById("download-primary");
-      const meta = document.getElementById("download-meta");
-      if (!btn) return;
-      btn.dataset.os = os;
-      const textEl = btn.querySelector(".text");
-      if (textEl) textEl.textContent = info.label;
-      if (info.asset) {
-        // Direct asset URL - GitHub redirects /releases/latest/download/<file>
-        // to the actual versioned URL. No API call needed.
-        btn.href = `${RELEASE_BASE}/latest/download/${info.asset}`;
-      } else {
-        btn.href = `${RELEASE_BASE}/latest`;
-      }
-      if (meta) {
-        const allLink = '<a href="' + RELEASE_BASE + '/latest">All downloads + signatures →</a>';
-        meta.innerHTML = info.note ? `${info.note} · ${allLink}` : allLink;
-      }
-    }
-
-    // Pull the latest release tag from the GitHub API to display
-    // it in the pill. Best-effort; if the API is rate-limited
-    // (60 req/hr unauthenticated) or the repo is private, we just
-    // leave the static text alone. No errors, no retries.
-    async function setLatestVersionPill() {
-      const pill = document.getElementById("version-pill");
-      if (!pill) return;
-      try {
-        const r = await fetch(
-          `https://api.github.com/repos/${OWNER}/${REPO}/releases/latest`,
-          { headers: { "Accept": "application/vnd.github+json" } }
-        );
-        if (!r.ok) return;
-        const j = await r.json();
-        if (j.tag_name) {
-          pill.textContent = `${j.tag_name} - for the people`;
-        }
-      } catch (_e) { /* swallow - pill stays as fallback text */ }
-    }
-
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", function () {
-        wireDownload();
-        setLatestVersionPill();
-      });
-    } else {
-      wireDownload();
-      setLatestVersionPill();
-    }
-  })();
-</script>
 </body>
 </html>

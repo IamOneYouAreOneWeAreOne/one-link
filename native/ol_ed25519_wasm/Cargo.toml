@@ -1,0 +1,16 @@
+[package]
+name = "ol_ed25519_wasm"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-3-Clause"
+description = "Integrity-pinned Ed25519 WebAssembly fallback for One Link browser peers"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["alloc", "fast", "zeroize"] }
+zeroize = { workspace = true }
+
+[lints]
+workspace = true

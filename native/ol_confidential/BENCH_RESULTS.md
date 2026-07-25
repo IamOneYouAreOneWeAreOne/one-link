@@ -1,4 +1,8 @@
-# `ol_confidential` (Row 10 — confidential-compute daemon) microbenchmarks
+# `ol_confidential` primitive microbenchmarks (historical)
+
+> These timings are one source-host snapshot. They do not prove daemon
+> wiring, same-user-malware resistance, remote TPM residency, side-channel
+> security, or current packaged-release behavior.
 
 Captured against `0.21.0-alpha.0` on Windows 11 Intel host, release
 profile (`cargo bench -p ol_confidential --bench confidential_bench`).
@@ -13,7 +17,7 @@ profile (`cargo bench -p ol_confidential --bench confidential_bench`).
 | `confidential::attest_issue`         | 894 µs   | single-unseal pair-derive + sign over 2 KB doc transcript |
 | `confidential::attest_verify`        | 60 µs    | hybrid sig verify + transcript rebuild            |
 
-## Real-hardware Windows TPM (NCrypt PCP)
+## Windows Microsoft Platform Crypto Provider path (measured host)
 
 `cargo bench -p ol_confidential --features windows-tpm --bench windows_tpm_bench`.
 
@@ -26,24 +30,22 @@ Microsoft Platform Crypto Provider in user mode (no admin required).
 | `confidential::tpm_ecdsa_p256_sign`             | 35 ms    | TPM-internal ECDSA-P256 sign over a 32 B digest   |
 | `confidential::tpm_platform_quote_produce`      | 34 ms    | public_blob + sign + wire-format envelope         |
 
-The TPM sign is ~100× slower than software ECDSA on the same host —
-that's the price of holding the key inside the chip with kernel-
-gated access. The numbers are bounded by the TPM's TIS bus speed,
-not the curve math.
+The measured provider call was roughly 100× slower than software ECDSA on
+that host. This timing and local provider selection are not remote hardware-
+provenance evidence; the current wire envelope has no EK/vendor chain.
 
-## What this means for the daemon
+## What this measured for these primitives
 
-- **Sealed master at rest is free**: 1.19 µs. Boot can seal at process
-  start and the cost is invisible.
+- **Measured seal cost**: 1.19 µs for this input/host. Product boot and key-
+  lifecycle cost require an end-to-end packaged measurement.
 - **Child derivation under 3 µs**: per-day ratchet across 365 days
   totals < 1 ms even if recomputed on every cold boot.
 - **Sealed sign matches Row 1 sign cost (~250 µs)** with the ~100 µs
   extra for unseal + keygen + zeroize.
-- **Attestation verify cost = single hybrid verify (~50 µs) + 10 µs
-  transcript rebuild**. A peer can re-verify on every reconnect
-  without breaking a sweat.
-- **TPM-rooted attestation costs ~35 ms** dominated by the TPM ECDSA
-  sign. The TPM is on a slow bus; this is normal. Daemons should
+- **Envelope signature verification measured ~60 µs**; this verifies the
+  signed bytes, not a vendor hardware root by itself.
+- **The PCP platform-key signature call measured ~35 ms** on this host.
+  Daemons should
   issue at most a few attestations per peer per session, not per
   message.
 

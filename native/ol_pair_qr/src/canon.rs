@@ -192,9 +192,13 @@ impl Writer {
             b.len() <= MAX_FIELD_BYTES,
             "ol_pair_qr: write_var slice exceeds cap"
         );
-        let len = b.len().min(MAX_FIELD_BYTES) as u16;
+        let bounded_len = b.len().min(MAX_FIELD_BYTES);
+        let len = match u16::try_from(bounded_len) {
+            Ok(len) => len,
+            Err(error) => panic!("MAX_FIELD_BYTES must fit the u16 wire prefix: {error}"),
+        };
         self.write_u16(len);
-        self.buf.extend_from_slice(&b[..len as usize]);
+        self.buf.extend_from_slice(&b[..usize::from(len)]);
     }
 
     /// Consume the writer, returning the produced bytes.
@@ -261,7 +265,10 @@ mod tests {
     #[test]
     fn reader_refuses_oversize_var_before_allocation() {
         // length prefix says MAX_FIELD_BYTES + 1
-        let too_big = (MAX_FIELD_BYTES + 1) as u16;
+        let too_big = match u16::try_from(MAX_FIELD_BYTES + 1) {
+            Ok(len) => len,
+            Err(error) => panic!("test field length must fit u16: {error}"),
+        };
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&too_big.to_be_bytes());
         let mut r = Reader::new(&bytes);

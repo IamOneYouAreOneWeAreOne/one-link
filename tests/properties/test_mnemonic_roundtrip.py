@@ -10,7 +10,6 @@ last word'.
 """
 from __future__ import annotations
 
-import secrets
 
 from hypothesis import given, settings, strategies as st
 

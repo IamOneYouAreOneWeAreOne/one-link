@@ -1,4 +1,8 @@
 #![no_main]
+// The legacy quick-rejection helper remains public for compatibility and
+// benchmark callers. Production classification uses the authenticated helper,
+// but malformed-input/panic coverage for the compatibility API is deliberate.
+#![allow(deprecated)]
 //! Fuzz the `is_cover_payload` sentinel-check against arbitrary
 //! byte slices. Must never panic; output is a bool but each call
 //! exercises the prefix-comparison and the underlying slice indexing.

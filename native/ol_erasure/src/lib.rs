@@ -35,7 +35,10 @@ pub mod error;
 pub mod stripe;
 
 pub use error::ErasureError;
-pub use stripe::{decode_stripe, encode_stripe, Shard, ShardRole, StripeId, StripeParams};
+pub use stripe::{
+    decode_stripe, encode_stripe, Shard, ShardRole, StripeId, StripeParams, MAX_SHARD_BYTES,
+    MAX_STRIPE_PLAINTEXT_BYTES,
+};
 
 /// Crate version embedded for diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

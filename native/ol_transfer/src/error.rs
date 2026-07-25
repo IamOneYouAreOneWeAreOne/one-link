@@ -36,10 +36,10 @@ pub enum TransferError {
         fingerprint_hex_prefix: String,
     },
 
-    /// Peer reported the requested chunk_id is not stored at their end.
+    /// Peer reported the requested `chunk_id` is not stored at their end.
     #[error("chunk not found at peer: {chunk_id_hex_prefix}")]
     ChunkNotFound {
-        /// Hex prefix of the missing chunk_id (8 bytes = 16 hex chars).
+        /// Hex prefix of the missing `chunk_id` (8 bytes = 16 hex chars).
         chunk_id_hex_prefix: String,
     },
 
@@ -59,9 +59,9 @@ pub enum TransferError {
     /// TLS makes the latter implausible, but defense-in-depth is cheap.
     #[error("chunk_id mismatch: requested {requested_hex_prefix}, got {got_hex_prefix}")]
     ChunkIdMismatch {
-        /// Hex prefix of the chunk_id we asked for.
+        /// Hex prefix of the `chunk_id` we asked for.
         requested_hex_prefix: String,
-        /// Hex prefix of the chunk_id the peer sent.
+        /// Hex prefix of the `chunk_id` the peer sent.
         got_hex_prefix: String,
     },
 
@@ -85,6 +85,23 @@ pub enum TransferError {
     /// Engine was closed and a subsequent call was made.
     #[error("transfer engine closed")]
     Closed,
+
+    /// A synchronous store lock was poisoned by an earlier panic.  Store
+    /// operations fail closed rather than continuing with potentially
+    /// half-mutated in-memory indexes.
+    #[error("internal store lock poisoned")]
+    StoreLockPoisoned,
+
+    /// A caller or peer exceeded a bounded collection/resource limit.
+    #[error("resource limit exceeded for {resource}: got {got}, max {max}")]
+    ResourceLimit {
+        /// Bounded resource name.
+        resource: &'static str,
+        /// Supplied count/size.
+        got: usize,
+        /// Maximum accepted count/size.
+        max: usize,
+    },
 }
 
 /// Helper: 8-byte hex prefix for error messages.
@@ -94,8 +111,8 @@ pub(crate) fn hex_prefix_8(bytes: &[u8]) -> String {
     let n = bytes.len().min(8);
     let mut out = String::with_capacity(n * 2);
     for &b in &bytes[..n] {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0F) as usize] as char);
+        out.push(char::from(HEX[usize::from(b >> 4)]));
+        out.push(char::from(HEX[usize::from(b & 0x0F)]));
     }
     out
 }

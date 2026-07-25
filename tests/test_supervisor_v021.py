@@ -8,9 +8,7 @@ assert exact behavior without ever launching a real subprocess.
 """
 from __future__ import annotations
 
-import logging
 import os
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -236,7 +234,7 @@ def test_pid_file_written_and_cleaned_up(isolated_data_dir):
 def test_daemon_argv_source_mode(monkeypatch):
     monkeypatch.setattr(supervisor.sys, "frozen", False, raising=False)
     argv = supervisor._daemon_argv()
-    assert argv[1:] == ["-m", "one_link.cli", "daemon", "-v"]
+    assert argv[1:] == ["-P", "-m", "one_link.cli", "daemon", "-v"]
 
 
 def test_daemon_argv_frozen_mode(monkeypatch):
@@ -337,9 +335,12 @@ def test_spawn_supervisor_uses_correct_argv_source_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod.sys, "frozen", False, raising=False)
     app_mod._spawn_supervisor()
     if os.name == "nt":
-        assert captured["args"][-2:] == ["-m", "one_link.cli"] or (
-            captured["args"][1:] == ["-m", "one_link.cli", "supervisor"]
-        )
+        assert captured["args"][1:] == [
+            "-P",
+            "-m",
+            "one_link.cli",
+            "supervisor",
+        ]
         # The supervisor subcommand is what differentiates this from
         # _spawn_daemon. Be tolerant of how _spawn_daemon_windows_detached
         # builds the argv but insist 'supervisor' is the last token.
