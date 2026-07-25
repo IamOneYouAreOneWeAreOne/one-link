@@ -30,6 +30,15 @@ on:
         required: false
         type: string
 
+# Publishing REPLACES the asset set (delete-then-upload), so two overlapping
+# runs could interleave into a half-empty release -- exactly the broken
+# download button this workflow exists to prevent. Serialize globally (not
+# per-ref), and never cancel: cancelling mid-publish is what would strand the
+# release with assets deleted and nothing uploaded.
+concurrency:
+  group: publish-rolling-prerelease
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -41,7 +50,7 @@ jobs:
     permissions:
       contents: write # update the auto-latest prerelease and its assets
       id-token: write # provenance attestation signing identity
-      attestations: write
+      attestations: write # write the provenance attestation for each artifact
       actions: read # read the gating workflow conclusions + artifacts
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
