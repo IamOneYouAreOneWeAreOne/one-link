@@ -1,0 +1,184 @@
+name: publish rolling prerelease
+
+# The website's /download/* routes resolve to the `auto-latest` prerelease.
+# Continuous builds deliberately hold NO release authority (enforced by
+# tests/test_supply_chain_v072.py), which is correct -- but it left that
+# prerelease frozen on a months-old commit while every fix landed on master
+# unseen. Users were downloading binaries missing the entire reliability and
+# security wave. Stale-and-unsigned is strictly worse than current-and-unsigned.
+#
+# This workflow is the deliberate publishing act, kept OUT of the per-push
+# pipeline on purpose:
+#   * it never runs on push -- a human (or a maintainer's explicit dispatch)
+#     decides when the public download moves;
+#   * it refuses to publish a commit whose gating workflows are not green, so
+#     the download can never move to code CI rejected;
+#   * it republishes the whole asset set, so a platform that stops building
+#     cannot leave a stale binary sitting beside fresh ones;
+#   * every artifact gets a GitHub build-provenance attestation -- verifiable
+#     with `gh attestation verify` -- which the old prerelease never had.
+#
+# It does NOT change the trust tier: this stays a clearly labelled rolling
+# prerelease. `release.yml` remains the only tagged, reproducible,
+# Sigstore-signed distribution path, and nothing here signs code.
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Commit SHA on master to publish (defaults to master HEAD)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: publish auto-latest from a gated commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # update the auto-latest prerelease and its assets
+      id-token: write # provenance attestation signing identity
+      attestations: write
+      actions: read # read the gating workflow conclusions + artifacts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: resolve target commit
+        id: target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED: ${{ inputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$REQUESTED" ]; then
+            SHA="$REQUESTED"
+          else
+            SHA=$(gh api "repos/$GITHUB_REPOSITORY/commits/master" --jq '.sha')
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Publishing from commit $SHA"
+
+      - name: require the gating workflows to be green for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.target.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The public download must never move to a commit CI rejected.
+          for wf in "tests" "security" "auto-build standalone binary"; do
+            conclusion=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$SHA&per_page=100" \
+              --jq "[.workflow_runs[] | select(.name == \"$wf\")] | first | .conclusion // \"missing\"")
+            echo "$wf -> $conclusion"
+            if [ "$conclusion" != "success" ]; then
+              echo "refusing to publish: '$wf' is '$conclusion' for $SHA" >&2
+              exit 1
+            fi
+          done
+
+      - name: download the continuous-build artifacts for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.target.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$SHA&per_page=100" \
+            --jq '[.workflow_runs[] | select(.name == "auto-build standalone binary" and .conclusion == "success")] | first | .id')
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "no successful auto-build run for $SHA" >&2
+            exit 1
+          fi
+          echo "using auto-build run $RUN_ID"
+          mkdir -p artifacts
+          gh run download "$RUN_ID" --dir artifacts
+
+      - name: flatten + verify the complete download set
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          find artifacts -name '*.zip' -exec cp {} out/ \;
+          find artifacts -name '*.dmg' -exec cp {} out/ \;
+          find artifacts -name '*.AppImage' -exec cp {} out/ \;
+          find artifacts -name '*.sha256' -exec cp {} out/ \;
+          find artifacts -name 'one-link-setup-*.exe' -exec cp {} out/ \;
+          # These exact names are what src/worker.js redirects to on the
+          # website. A missing one means a broken download button, so fail
+          # loudly rather than publish a partial set.
+          for required in \
+            one-link-setup-x86_64.exe \
+            one-link-setup-arm64.exe \
+            one-link-macos-arm64.dmg \
+            one-link-macos-arm64.zip \
+            one-link-linux-x86_64.AppImage \
+            one-link-linux-arm64.AppImage \
+            one-link-linux-x86_64.zip \
+            one-link-linux-arm64.zip; do
+            if [ ! -f "out/$required" ]; then
+              echo "missing required download asset: $required" >&2
+              exit 1
+            fi
+          done
+          cd out
+          : > manifest.txt
+          for f in *.zip *.dmg *.AppImage one-link-setup-*.exe; do
+            [ -f "$f" ] || continue
+            sha256sum "$f" >> manifest.txt
+          done
+          cat manifest.txt
+
+      - name: attest build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: |
+            out/*.exe
+            out/*.dmg
+            out/*.AppImage
+            out/*.zip
+
+      - name: replace the auto-latest asset set
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.target.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG=auto-latest
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            gh release create "$TAG" --prerelease --target "$SHA" \
+              --title "Rolling build (master $SHA)" --notes "initialising"
+          fi
+          for existing in $(gh release view "$TAG" --json assets --jq '.assets[].name'); do
+            gh release delete-asset "$TAG" "$existing" --yes || true
+          done
+          gh release upload "$TAG" out/* --clobber
+          {
+            echo "Rolling continuous build from master \`$SHA\`."
+            echo
+            echo "Published only after \`tests\`, \`security\`, and the platform"
+            echo "build matrix were green for this exact commit."
+            echo
+            echo "Every artifact carries a GitHub build-provenance attestation:"
+            echo
+            echo '```'
+            echo "gh attestation verify <downloaded-file> --repo $GITHUB_REPOSITORY"
+            echo '```'
+            echo
+            echo "**This is not a signed, reproducible release.** That pipeline is"
+            echo "\`release.yml\`, fires only on \`v*\` tags, and remains the only"
+            echo "channel intended for production trust. SHA-256 for every artifact"
+            echo "is in \`manifest.txt\` and the per-file \`.sha256\` sidecars."
+          } > notes.md
+          gh release edit "$TAG" \
+            --title "Rolling build (master $SHA)" \
+            --notes-file notes.md \
+            --prerelease

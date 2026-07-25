@@ -317,7 +317,61 @@ def test_write_scoped_jobs_execute_only_first_party_actions():
                     assert action.startswith("actions/"), (
                         f"{path.name}:{job_name}: third-party action has write token: {action}"
                     )
-    assert write_jobs == [("release.yml", "publish")]
+    # EXACT allowlist: granting a job write authority must be a deliberate,
+    # reviewed act, not something that accretes. Both entries are bounded by
+    # dedicated tests below.
+    #   release.yml:publish        -- the tagged, reproducible, signed channel.
+    #   publish_rolling.yml:publish -- refreshes the `auto-latest` prerelease
+    #     the website's download button resolves. It exists because continuous
+    #     builds correctly hold no release authority, which had frozen the
+    #     public download on a months-old commit while every fix landed on
+    #     master unseen; shipping users stale binaries is not a safer default.
+    assert write_jobs == [
+        ("publish_rolling.yml", "publish"),
+        ("release.yml", "publish"),
+    ]
+
+
+def test_rolling_publisher_is_deliberate_gated_and_unsigned():
+    """The rolling publisher may refresh a prerelease, and nothing more.
+
+    It holds write authority, so its blast radius is pinned here rather than
+    left to reviewer memory: never automatic, never publishing a commit CI
+    rejected, never claiming the signed-release tier.
+    """
+    workflows = dict(_workflow_documents())
+    path = _WORKFLOWS / "publish_rolling.yml"
+    workflow = workflows[path]
+    text = path.read_text(encoding="utf-8")
+
+    # Deliberate: dispatch only. A push trigger would make the public download
+    # move on every commit, which is exactly what the continuous-build policy
+    # forbids.
+    triggers = workflow[True] if True in workflow else workflow["on"]
+    assert set(triggers) == {"workflow_dispatch"}
+
+    # Gated: it must verify the gating workflows concluded successfully for
+    # the exact commit before the public download moves.
+    assert "conclusion" in text and "refusing to publish" in text
+    for gate in ('"tests"', '"security"', '"auto-build standalone binary"'):
+        assert gate in text, f"rolling publisher does not require {gate}"
+
+    # Unsigned tier, honestly labelled: prerelease, no code-signing primitive,
+    # and it must not touch a tagged release.
+    assert "--prerelease" in text
+    # Forbid INVOKING a signing tool, not naming one: the release notes must
+    # stay free to say "this is not a Sigstore-signed release", which is the
+    # very disclaimer that keeps the tier honest.
+    for signing_primitive in ("codesign", "signtool", "notarytool", "cosign", "sigstore"):
+        invocation = re.compile(
+            rf"(?mi)^\s*(?:-\s*)?(?:run:\s*)?{signing_primitive}\b[^:]*$"
+        )
+        assert not invocation.search(text), (
+            f"rolling publisher appears to invoke {signing_primitive}"
+        )
+        assert f"uses: {signing_primitive}" not in text.lower()
+    assert "auto-latest" in text
+    assert "gh release create v" not in text
 
 
 def test_workflows_use_frozen_uv_and_explicit_root_for_native_builds():
