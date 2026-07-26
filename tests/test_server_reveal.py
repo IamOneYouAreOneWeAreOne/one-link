@@ -111,6 +111,43 @@ async def test_file_reveal_404_for_missing(tmp_path: Path, monkeypatch):
     popen.assert_not_called()
 
 
+def _reveal_binary_available() -> bool:
+    """True iff this host actually has the platform's reveal utility.
+
+    The handler resolves the binary through ``resolve_system_executable``
+    (trusted system directories only) and fails closed when it is absent.
+    A headless container -- CI's Linux runner, a server install -- has no
+    ``xdg-open``, so a test asserting "the right argv was passed to Popen"
+    cannot run there: the handler correctly returns 500 long before Popen.
+    Probe with the product's own resolver rather than a heuristic so this
+    guard can never disagree with the code under test.
+    """
+    from one_link.process_security import resolve_system_executable
+
+    name = (
+        "explorer.exe" if sys.platform == "win32"
+        else "open" if sys.platform == "darwin"
+        else "xdg-open"
+    )
+    platform_name = "nt" if sys.platform == "win32" else "posix"
+    try:
+        resolve_system_executable(name, platform_name=platform_name)
+    except Exception:
+        return False
+    return True
+
+
+_NO_REVEAL_BINARY = pytest.mark.skipif(
+    not _reveal_binary_available(),
+    reason=(
+        "no platform reveal utility on this host (headless container); "
+        "the fail-closed path is covered by "
+        "test_file_reveal_translates_oserror_to_500"
+    ),
+)
+
+
+@_NO_REVEAL_BINARY
 @pytest.mark.asyncio
 async def test_file_reveal_invokes_correct_platform_command(tmp_path: Path, monkeypatch):
     """When the file exists, the handler runs the right platform-specific
@@ -190,6 +227,7 @@ async def test_file_reveal_translates_oserror_to_500(tmp_path: Path, monkeypatch
     assert b"reveal failed" in resp.body
 
 
+@_NO_REVEAL_BINARY
 @pytest.mark.asyncio
 async def test_inbox_reveal_invokes_correct_platform_command(tmp_path: Path, monkeypatch):
     """Inbox reveal opens the inbox folder itself — no /select."""
