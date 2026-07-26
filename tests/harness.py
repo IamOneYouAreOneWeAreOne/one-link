@@ -417,9 +417,20 @@ def _bring_up(home: Path, log: Path, label: str, mdns_type: str | None = None) -
         # tasks. ui.token + server.port get written by the HTTP server's
         # startup hook, and tests that read those files via
         # ``home/"data"/"ui.token"`` can race the writes under load.
-        # Wait up to 6s for both files to appear before returning so
-        # the test never sees a missing-file FileNotFoundError.
-        http_deadline = time.time() + 6.0
+        # Wait for both files to appear before returning so the test never
+        # sees a missing-file FileNotFoundError.
+        #
+        # The budget was a flat 6s, which measured RUNNER LOAD rather than
+        # daemon correctness: a shared CI box that has just compiled the
+        # native engine needs longer than a warm dev machine to get a
+        # first-boot daemon (identity mint, key authority, SQLCipher schema)
+        # to the point of writing these files, and the whole live-integration
+        # step failed on that alone. Per-test timeouts already bound a genuine
+        # hang, so this only needs to be generous enough that a slow-but-
+        # healthy boot is never called a failure. Overridable for operators
+        # running on constrained hardware.
+        startup_budget = float(os.environ.get("ONE_LINK_TEST_DAEMON_BOOT_S", "45"))
+        http_deadline = time.time() + startup_budget
         ui_token_path = home / "data" / "ui.token"
         server_port_path = home / "data" / "server.port"
         while time.time() < http_deadline:
@@ -439,7 +450,8 @@ def _bring_up(home: Path, log: Path, label: str, mdns_type: str | None = None) -
         else:
             raise RuntimeError(
                 f"daemon {label} HTTP server did not write ui.token + "
-                f"server.port within 6s\n--- log ---\n{_read_log(log)}"
+                f"server.port within {startup_budget:g}s"
+                f"\n--- log ---\n{_read_log(log)}"
             )
         return DaemonHandle(
             home=home,

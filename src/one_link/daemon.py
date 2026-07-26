@@ -69,7 +69,7 @@ from collections import OrderedDict, deque
 
 from one_link._coerce import to_int
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import (
     IO,
     BinaryIO,
@@ -12844,7 +12844,16 @@ class Daemon:
         return rel
 
     def _safe_transfer_name(self, value) -> str:
-        name = Path(str(value or "")).name
+        # Take the basename against BOTH separators regardless of host.
+        # ``Path(...).name`` only understands the local one, so on POSIX a
+        # peer-supplied "C:\\Windows\\System32\\evil.dll" survived whole and
+        # was stored with its backslashes intact. That is harmless where it
+        # lands -- backslash is an ordinary character on POSIX -- but this is
+        # a FILE TRANSFER product: that artifact travels, and the same name on
+        # a Windows machine is a traversal path. A received name must never
+        # carry another platform's separators.
+        raw = str(value or "").replace("\\", "/")
+        name = PurePosixPath(raw).name
         if not name or name in (".", ".."):
             return "unnamed.bin"
         # v0.20.7 (security audit H16):
