@@ -859,7 +859,18 @@ def validate_installed_bundle(root: Path, *, expected_executable: str) -> Bundle
     except OSError as exc:
         raise UpdateArchiveError(f"managed bundle is absent or unreadable: {bundle}") from exc
     if _is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
-        raise UpdateArchiveError("managed bundle root is not a non-reparse directory")
+        # Say which of the two rejections happened, and say it without a
+        # double negative. An operator reading "is not a non-reparse
+        # directory" cannot tell whether their bundle root was a symlink, a
+        # junction, or simply a file.
+        reason = (
+            "a symbolic link or reparse point"
+            if _is_link_or_reparse(metadata)
+            else "not a directory"
+        )
+        raise UpdateArchiveError(
+            f"managed bundle root must be a real directory; {bundle} is {reason}"
+        )
     manifest_path = bundle / "BUNDLE_SHA256SUMS"
     try:
         raw = read_bytes_if_exists(

@@ -115,12 +115,22 @@ def mock_releases(tmp_path):
     # Locate the prebuilt wheel from native/target/wheels/
     repo = Path(__file__).resolve().parent.parent
     wheels = list((repo / "native" / "target" / "wheels").glob("*.whl"))
-    if not wheels:
+    # Take a wheel this HOST can install, not merely the first one present.
+    # The install plan matches against packaging's real host tag set, so a
+    # leftover wheel for another platform (a Windows wheel in a checkout also
+    # used from WSL, an older cross-build) made the plan answer "no_match" and
+    # the test fail where it should have skipped. Ask the product's own matcher
+    # so the fixture can never disagree with the code under test.
+    from one_link.updater import _wheel_matches_host
+
+    installable = [wheel for wheel in wheels if _wheel_matches_host(wheel.name)]
+    if not installable:
         pytest.skip(
-            "no native wheel built — run `cd native && python -m maturin "
-            "build --release` first to create one_link_native wheels"
+            "no native wheel for this host in native/target/wheels "
+            f"(found {[w.name for w in wheels] or 'none'}) — run "
+            "`cd native && python -m maturin build --release` first"
         )
-    wheel = wheels[0]
+    wheel = installable[0]
 
     # Compute its real SHA-256 + write a SHA256SUMS file.
     h = hashlib.sha256(wheel.read_bytes()).hexdigest()
