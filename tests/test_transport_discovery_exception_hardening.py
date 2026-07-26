@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import socket
 import sys
 from types import ModuleType, SimpleNamespace
@@ -265,7 +266,15 @@ def test_default_gateway_probe_failure_is_diagnosable(
     with caplog.at_level(logging.DEBUG, logger="one_link.lan_discovery"):
         assert lan_discovery._default_gateway() == ""
 
-    assert "windows_default_gateway" in caplog.text
+    # The probe is named per platform (windows_default_gateway /
+    # posix_default_gateway). Asserting the Windows label unconditionally
+    # made this pass only on Windows while the real contract under test --
+    # the failure is diagnosable, and the raw message never leaks -- holds
+    # on every platform.
+    expected_probe = (
+        "windows_default_gateway" if os.name == "nt" else "posix_default_gateway"
+    )
+    assert expected_probe in caplog.text
     assert "error_type=ValueError" in caplog.text
     assert "trusted route utility unavailable" not in caplog.text
 
