@@ -148,7 +148,14 @@ def test_concurrent_drk_first_boot_converges(tmp_path: Path) -> None:
 
 def test_cap_root_corruption_is_preserved_and_never_reminted(tmp_path: Path) -> None:
     path = tmp_path / cap_root_key.CAP_ROOT_KEY_FILENAME
-    corrupt = b"existing-corrupt-capability-root"
+    # The previous fixture, b"existing-corrupt-capability-root", is EXACTLY 32
+    # bytes -- the valid cap-root length. On Windows it still raised because
+    # DPAPI unprotect fails on arbitrary bytes, so the test looked healthy;
+    # on POSIX the on-disk format is raw 32 bytes, so that "corrupt" file was
+    # indistinguishable from a real key and the integrity path was never
+    # exercised at all. Use a length that is invalid on every platform.
+    corrupt = b"corrupt"
+    assert len(corrupt) != cap_root_key.CAP_ROOT_KEY_LEN_BYTES
     path.write_bytes(corrupt)
     with pytest.raises(km.KeyMaterialError):
         cap_root_key.load_or_create_cap_root_key(tmp_path)
