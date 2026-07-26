@@ -1119,6 +1119,20 @@ class FolderEngine:
                 and stat.S_ISREG(current.st_mode)
                 and self._disk_evidence(current) == guard.baseline_evidence
             )
+        if not unchanged and guard.baseline_blob_hash:
+            # Metadata is only a FAST PATH for "is the live name still the
+            # baseline generation?". On POSIX the evidence tuple includes
+            # st_ctime_ns, and rename(2) bumps ctime -- so the recovery path,
+            # which restores an interrupted pre-image BY RENAME, changed the
+            # very evidence it is then judged against. The guard concluded the
+            # user had modified the file and declined to finish, meaning
+            # crash recovery could never complete a moved pre-image on
+            # Linux/macOS. Windows never saw it because ctime is deliberately
+            # zeroed there. When metadata disagrees, ask the authoritative
+            # question -- content -- before declaring a local change.
+            probe = self._stable_path_hash(dst)
+            if probe is not None and probe[0] == guard.baseline_blob_hash:
+                unchanged = True
         if unchanged:
             return True
         try:
