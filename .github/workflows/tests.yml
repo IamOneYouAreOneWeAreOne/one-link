@@ -43,6 +43,16 @@ jobs:
   test:
     name: ${{ matrix.os }} / py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
+    # Without a cap a wedged hosted runner never concludes, and this gate is
+    # load-bearing: publish_rolling.yml refuses to move the public download
+    # unless `tests` reports SUCCESS for the exact commit. One stuck runner
+    # therefore froze the download button indefinitely (observed: a run whose
+    # jobs sat 3 hours with no step progress after 30 s). A timeout turns
+    # "stuck forever" into a definite verdict CI can act on. 40 min is
+    # generous for the longest real leg -- the 320-iteration call-reliability
+    # soak -- and short enough that a wedge is caught within one cycle.
+    # Mirrors the same guard auto_build.yml already carries.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -100,6 +110,9 @@ jobs:
     name: build Windows binary
     runs-on: windows-latest
     needs: test
+    # Same reason as `test` above: this job gates the run's overall
+    # conclusion, so it must never be able to hang without a verdict.
+    timeout-minutes: 30
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
 
     steps:
