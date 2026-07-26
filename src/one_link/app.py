@@ -39,6 +39,7 @@ from one_link.process_security import (
     hidden_creationflags,
     launch_explicit_command,
     launch_loopback_url,
+    resolve_current_interpreter,
     resolve_explicit_executable,
     resolve_system_executable,
     sanitized_process_env,
@@ -496,10 +497,10 @@ def _spawn_daemon() -> subprocess.Popen:
     _rotate_daemon_launch_log(log_path)
 
     if getattr(sys, "frozen", False):
-        daemon_cmd = [resolve_explicit_executable(sys.executable), "daemon", "-v"]
+        daemon_cmd = [resolve_current_interpreter(), "daemon", "-v"]
     else:
         daemon_cmd = [
-            resolve_explicit_executable(sys.executable),
+            resolve_current_interpreter(),
             "-P",
             "-m",
             "one_link.cli",
@@ -578,10 +579,10 @@ def _spawn_supervisor() -> subprocess.Popen:
         pass
     _rotate_daemon_launch_log(log_path)
     if getattr(sys, "frozen", False):
-        cmd = [resolve_explicit_executable(sys.executable), "supervisor"]
+        cmd = [resolve_current_interpreter(), "supervisor"]
     else:
         cmd = [
-            resolve_explicit_executable(sys.executable),
+            resolve_current_interpreter(),
             "-P",
             "-m",
             "one_link.cli",
@@ -1035,7 +1036,7 @@ def _spawn_splash() -> Optional[subprocess.Popen]:
     process exiting) makes it dismiss itself. No IPC protocol.
     """
     try:
-        executable = resolve_explicit_executable(sys.executable)
+        executable = resolve_current_interpreter()
         if getattr(sys, "frozen", False):
             cmd = [executable, "splash"]
         else:

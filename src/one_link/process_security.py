@@ -170,7 +170,12 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
-def _validate_executable(path: Path, *, trusted_roots: Sequence[Path] | None) -> str:
+def _validate_executable(
+    path: Path,
+    *,
+    trusted_roots: Sequence[Path] | None,
+    preserve_path: bool = False,
+) -> str:
     if not path.is_absolute():
         raise ProcessSecurityError("executable path must be absolute")
     try:
@@ -198,18 +203,55 @@ def _validate_executable(path: Path, *, trusted_roots: Sequence[Path] | None) ->
             raise ProcessSecurityError(
                 f"system executable escaped trusted OS directories: {resolved}",
             )
-    return str(resolved)
+    # Every check above ran against the fully resolved target. Returning the
+    # caller's own path is for the one case where the symlink IS the identity
+    # (see resolve_current_interpreter); containment-checked system tools
+    # always get the resolved path.
+    return str(path) if preserve_path and trusted_roots is None else str(resolved)
 
 
-def resolve_explicit_executable(executable: str | os.PathLike[str]) -> str:
-    """Validate an explicitly selected absolute application/helper path."""
+def resolve_explicit_executable(
+    executable: str | os.PathLike[str],
+    *,
+    preserve_path: bool = False,
+) -> str:
+    """Validate an explicitly selected absolute application/helper path.
+
+    ``preserve_path`` returns the supplied path instead of its realpath after
+    the identical checks. Reserved for re-launching this very interpreter --
+    use :func:`resolve_current_interpreter` rather than passing it directly.
+    """
 
     path = Path(executable)
     if os.name == "nt" and path.suffix.lower() not in {".com", ".exe"}:
         # Windows can route .bat/.cmd through a command processor even when
         # ``shell=False``. Restrict this boundary to native executable images.
         raise ProcessSecurityError("Windows executable must be a .exe or .com image")
-    return _validate_executable(path, trusted_roots=None)
+    return _validate_executable(path, trusted_roots=None, preserve_path=preserve_path)
+
+
+def resolve_current_interpreter() -> str:
+    """Validate ``sys.executable`` for re-launch WITHOUT collapsing symlinks.
+
+    Every safety check in :func:`resolve_explicit_executable` still runs --
+    absolute, exists, regular file, executable, not group/world-writable --
+    but the interpreter's own path is returned instead of its realpath.
+
+    Collapsing the symlink is actively WRONG here. A virtualenv interpreter
+    is a symlink to the system Python, and that path is precisely what makes
+    the venv's ``site-packages`` importable. Resolving
+    ``/venv/bin/python`` to ``/usr/bin/python3`` and spawning THAT starts a
+    different environment where ``one_link`` cannot be imported at all, so
+    the daemon fails to start on every Linux/macOS source install. Windows
+    hid the bug because its venv launcher is a real image, not a symlink.
+
+    The realpath hardening exists to stop an attacker-controlled symlink
+    escaping a trusted directory. It cannot apply to the interpreter this
+    process is already executing: that binary's identity is established by
+    the fact that it is running us.
+    """
+
+    return resolve_explicit_executable(sys.executable, preserve_path=True)
 
 
 def resolve_system_executable(name: str, *, platform_name: str | None = None) -> str:

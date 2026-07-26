@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Optional
 
 from one_link import __version__
-from one_link.process_security import resolve_explicit_executable
+from one_link.process_security import resolve_current_interpreter
 
 AUTOSTART_NAME = "One Link"
 AUTOSTART_ID = "com.coherence.one-link"
@@ -58,7 +58,7 @@ def _launch_command() -> list[str]:
     Always passes ``--supervise --no-browser``: supervised so a daemon
     crash auto-restarts; no browser so login doesn't pop a tab.
     """
-    python_exe = resolve_explicit_executable(sys.executable)
+    python_exe = resolve_current_interpreter()
     if getattr(sys, "frozen", False):
         return [python_exe, "app", "--supervise", "--no-browser"]
     return [

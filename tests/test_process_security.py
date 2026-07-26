@@ -376,12 +376,13 @@ def test_autostart_python_fallback_uses_safe_path_mode(
 
     python_exe = str(Path(sys.executable).resolve())
 
-    def resolve_only_python(candidate: object) -> str:
-        if Path(candidate).resolve() == Path(python_exe):
-            return python_exe
-        raise FileNotFoundError(str(candidate))
-
-    monkeypatch.setattr(autostart, "resolve_explicit_executable", resolve_only_python)
+    # autostart re-launches THIS interpreter, so it resolves through
+    # resolve_current_interpreter (which deliberately preserves a virtualenv
+    # symlink instead of collapsing it to the system python). The stub takes
+    # no argument because the function reads sys.executable itself.
+    monkeypatch.setattr(
+        autostart, "resolve_current_interpreter", lambda: python_exe
+    )
     monkeypatch.setattr(autostart.sys, "frozen", False, raising=False)
     command = autostart._launch_command()
     assert command[:4] == [python_exe, "-P", "-m", "one_link.cli"]

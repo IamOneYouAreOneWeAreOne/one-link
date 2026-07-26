@@ -43,7 +43,7 @@ from one_link.fault_observability import report_best_effort_failure
 from one_link.paths import data_dir
 from one_link.process_security import (
     hidden_creationflags,
-    resolve_explicit_executable,
+    resolve_current_interpreter,
     sanitized_process_env,
 )
 
@@ -97,9 +97,9 @@ def _daemon_argv() -> list[str]:
     on what "the daemon" is.
     """
     if getattr(sys, "frozen", False):
-        return [resolve_explicit_executable(sys.executable), "daemon", "-v"]
+        return [resolve_current_interpreter(), "daemon", "-v"]
     return [
-        resolve_explicit_executable(sys.executable),
+        resolve_current_interpreter(),
         "-P",
         "-m",
         "one_link.cli",

@@ -36,7 +36,7 @@ from one_link import daemon as daemon_mod
 from one_link.paths import data_dir
 from one_link.process_security import (
     hidden_creationflags,
-    resolve_explicit_executable,
+    resolve_current_interpreter,
     sanitized_process_env,
 )
 
@@ -80,7 +80,7 @@ def _spawn_daemon() -> tuple[subprocess.Popen, int]:
         )
     proc = subprocess.Popen(
         [
-            resolve_explicit_executable(sys.executable),
+            resolve_current_interpreter(),
             "-P",
             "-m",
             "one_link.cli",
