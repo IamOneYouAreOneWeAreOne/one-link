@@ -350,16 +350,36 @@ def _ensure_library() -> Path:
 
     src = cache / f"ol_native_cdc_{digest}.c"
     src.write_text(_SOURCE, encoding="utf-8")
-    compiler = _find_c_compiler()
-    if compiler is None:
+    candidates = _candidate_c_compilers()
+    if not candidates:
         raise RuntimeError("no C compiler found for native CDC")
-    _compile(compiler, src, lib)
-    try:
-        validate_native_cdc_library(lib)
-    except Exception:
-        lib.unlink(missing_ok=True)
-        raise
-    return lib
+    # Try every compiler before giving up. A driver that exists is not proof
+    # it can link (MSVC-target clang without a developer environment fails at
+    # LNK1181), and the accelerator being unavailable blocks the whole
+    # installer build -- so one unusable toolchain must not mask a working
+    # one sitting next to it.
+    failures: list[str] = []
+    for index, compiler in enumerate(candidates):
+        try:
+            _compile(compiler, src, lib)
+            validate_native_cdc_library(lib)
+        except Exception as exc:
+            lib.unlink(missing_ok=True)
+            failures.append(f"{Path(compiler).name}: {exc}")
+            if index + 1 < len(candidates):
+                log.warning(
+                    "native CDC: %s could not produce a valid library (%s); "
+                    "trying the next available compiler",
+                    Path(compiler).name,
+                    type(exc).__name__,
+                )
+                continue
+            raise RuntimeError(
+                "native CDC compile failed with every available compiler: "
+                + "; ".join(failures)
+            ) from exc
+        return lib
+    raise RuntimeError("no C compiler found for native CDC")
 
 
 def native_library_name() -> str:
@@ -476,20 +496,40 @@ def _bundled_library() -> Path | None:
     return None
 
 
-def _find_c_compiler() -> str | None:
+def _candidate_c_compilers() -> list[str]:
+    """Every usable C compiler on this host, best first.
+
+    Returning the whole list rather than the first hit is what makes the
+    build survive a toolchain that is *present but not linkable*. An
+    MSVC-target clang on a GitHub Windows runner is the live example: the
+    driver exists, so a first-hit search commits to it, and then the link
+    fails with LNK1181 because the MSVC library environment is only
+    populated inside a developer shell. A GNU gcc sitting right there in
+    MSYS2 would have linked fine. The caller tries these in order.
+
+    ``CC`` still wins outright when set: an explicit operator choice must
+    not be silently second-guessed.
+    """
     env_compiler = str(os.environ.get("CC") or "").strip()
     if env_compiler:
         try:
             if Path(env_compiler).is_absolute():
-                return resolve_explicit_executable(env_compiler)
+                return [resolve_explicit_executable(env_compiler)]
             # A bare CC name is accepted only when it names an OS-owned tool;
             # flags and relative paths are deliberately rejected.
-            return resolve_system_executable(env_compiler)
+            return [resolve_system_executable(env_compiler)]
         except (OSError, ValueError):
-            return None
+            return []
+
+    found: list[str] = []
+
+    def _add(path: str) -> None:
+        if path not in found:
+            found.append(path)
+
     for name in ("gcc", "clang", "cl"):
         try:
-            return resolve_system_executable(name)
+            _add(resolve_system_executable(name))
         except (OSError, ValueError):
             continue
     for candidate in (
@@ -498,10 +538,16 @@ def _find_c_compiler() -> str | None:
         r"C:\Program Files\LLVM\bin\clang.exe",
     ):
         try:
-            return resolve_explicit_executable(candidate)
+            _add(resolve_explicit_executable(candidate))
         except (OSError, ValueError):
             continue
-    return None
+    return found
+
+
+def _find_c_compiler() -> str | None:
+    """First usable compiler, or None. Kept for callers that want one name."""
+    candidates = _candidate_c_compilers()
+    return candidates[0] if candidates else None
 
 
 def _compile(compiler: str, src: Path, lib: Path) -> None:

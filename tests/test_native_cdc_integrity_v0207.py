@@ -45,6 +45,68 @@ def test_windows_msvc_native_cdc_link_is_reproducible(tmp_path):
     assert command[-2:] == ["/link", "/Brepro"]
 
 
+def test_unlinkable_compiler_falls_through_to_a_working_one(tmp_path, monkeypatch):
+    """A compiler that EXISTS is not proof it can link.
+
+    An MSVC-target clang on a GitHub Windows runner is the live case: the
+    driver resolves, so a first-hit search commits to it, then the link dies
+    at LNK1181 because the MSVC library environment only exists inside a
+    developer shell -- while a perfectly good MSYS2 gcc sits next to it. The
+    compiled scanner is required for a releasable artifact, so one unusable
+    toolchain masking a working one blocked every download.
+    """
+    calls: list[str] = []
+
+    def fake_compile(compiler, src, lib):
+        calls.append(Path(compiler).name)
+        if "broken" in Path(compiler).name:
+            raise RuntimeError("simulated link failure (LNK1181)")
+        lib.write_bytes(b"fake native cdc library")
+
+    monkeypatch.setattr(
+        native_cdc,
+        "_candidate_c_compilers",
+        lambda: ["/opt/broken-cc", "/opt/working-cc"],
+    )
+    monkeypatch.setattr(native_cdc, "_compile", fake_compile)
+    monkeypatch.setattr(native_cdc, "_bundled_library", lambda: None)
+    monkeypatch.setattr(native_cdc, "validate_native_cdc_library", lambda _p: None)
+    monkeypatch.setattr(
+        native_cdc, "user_cache_dir", lambda *_a, **_k: str(tmp_path)
+    )
+
+    library = native_cdc._ensure_library()
+
+    assert library.is_file()
+    assert calls == ["broken-cc", "working-cc"], (
+        "the builder must try the next compiler instead of failing on the first"
+    )
+
+
+def test_every_compiler_failing_reports_all_of_them(tmp_path, monkeypatch):
+    """With no usable toolchain the error must name each attempt, so the
+    build log says WHY rather than just naming the last one tried."""
+
+    def always_fail(compiler, src, lib):
+        raise RuntimeError(f"nope: {Path(compiler).name}")
+
+    monkeypatch.setattr(
+        native_cdc,
+        "_candidate_c_compilers",
+        lambda: ["/opt/cc-one", "/opt/cc-two"],
+    )
+    monkeypatch.setattr(native_cdc, "_compile", always_fail)
+    monkeypatch.setattr(native_cdc, "_bundled_library", lambda: None)
+    monkeypatch.setattr(
+        native_cdc, "user_cache_dir", lambda *_a, **_k: str(tmp_path)
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        native_cdc._ensure_library()
+    message = str(excinfo.value)
+    assert "cc-one" in message and "cc-two" in message
+
+
 def test_windows_msvc_target_clang_uses_lld_link_switches(tmp_path, monkeypatch):
     """An msvc-triple clang drives lld-link, which parses GNU ld switches as
     input files (`could not open '0x180000000'`) — it must receive the

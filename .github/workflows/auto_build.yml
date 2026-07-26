@@ -235,14 +235,18 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: |
-          # --allow-native-cdc-fallback: the native CDC scanner is an
-          # OPTIONAL accelerator — the app runs correctly in pure
-          # Python without it (same philosophy as the maturin/Rust
-          # crate, which already ships pure-Python on build failure).
-          # Without this flag a flaky gcc compile (cold-runner timeout)
-          # hard-failed the whole installer build, blocking every
-          # download. The fallback ships a working pure-Python
-          # installer instead of nothing.
+          # No --allow-native-cdc-fallback here, deliberately: the flag still
+          # exists but build_binary.py now REFUSES it for stable artifacts
+          # (exit 12, "non-releasable"), because a pure-Python fallback ships
+          # a binary whose advertised chunking performance is not the one
+          # measured. This comment used to describe the flag as if it were
+          # passed; it never was, and the script would reject it.
+          #
+          # Resilience lives one level down instead: native_cdc tries EVERY
+          # available compiler before giving up, so a driver that exists but
+          # cannot link (MSVC-target clang with no developer environment)
+          # can no longer mask a working gcc beside it and block every
+          # download.
           uv run --frozen --extra release python scripts/build_binary.py --gui
 
       - name: stamp build metadata
