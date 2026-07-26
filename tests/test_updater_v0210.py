@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -360,23 +361,33 @@ def test_build_install_plan_no_release_when_fetch_fails(monkeypatch):
 
 
 def test_build_install_plan_no_match_when_wheel_missing(monkeypatch):
-    """If the release ships e.g. only Linux wheels and we're on
-    Windows, plan.status is 'no_match' and we DON'T fall back to
-    a wrong wheel."""
+    """If the release ships only wheels for a DIFFERENT platform,
+    plan.status is 'no_match' and we DON'T fall back to a wrong wheel.
+
+    Wheel selection matches against packaging's real host tag set, which no
+    monkeypatch of ``host_wheel_tag`` can influence -- so hard-coding a Linux
+    wheel here only produced "no match" on a Windows runner, and on Linux the
+    wheel matched and a later check answered instead. Derive the foreign
+    platform from the actual host so the intended condition holds everywhere.
+    """
     from one_link import updater as u_mod
+
+    foreign_platform = "linux_x86_64" if os.name == "nt" else "win_amd64"
 
     def fake_fetch_json(url, timeout):
         return {
             "tag_name": "v0.22.0",
             "assets": [
                 {
-                    "name": "one_link_native-0.22.0a0-cp311-abi3-linux_x86_64.whl",
+                    "name": (
+                        "one_link_native-0.22.0a0-cp311-abi3-"
+                        f"{foreign_platform}.whl"
+                    ),
                     "size": 2_400_000,
-                    "browser_download_url": "https://example.test/linux.whl",
+                    "browser_download_url": "https://example.test/foreign.whl",
                 },
             ],
         }
-    monkeypatch.setattr(u_mod, "host_wheel_tag", lambda: "cp311-abi3-win_amd64")
 
     plan = u_mod.build_install_plan(fetch_json=fake_fetch_json)
     assert plan.status == "no_match"
@@ -385,21 +396,28 @@ def test_build_install_plan_no_match_when_wheel_missing(monkeypatch):
 
 
 def test_build_install_plan_unverified_when_no_sha256sums(monkeypatch):
-    """A SHA-only/signature-incomplete release is never ready to install."""
+    """A SHA-only/signature-incomplete release is never ready to install.
+
+    The wheel must MATCH this host for the plan to get far enough to judge
+    verification, and selection uses packaging's real host tag set. A
+    hard-coded win_amd64 wheel therefore stopped at 'no_match' on Linux and
+    never exercised the contract, so build the name from the actual host tag.
+    """
     from one_link import updater as u_mod
+
+    host_tag = u_mod.host_wheel_tag()
 
     def fake_fetch_json(url, timeout):
         return {
             "tag_name": "v0.22.0",
             "assets": [
                 {
-                    "name": "one_link_native-0.22.0a0-cp311-abi3-win_amd64.whl",
+                    "name": f"one_link_native-0.22.0a0-{host_tag}.whl",
                     "size": 2_400_000,
                     "browser_download_url": "https://example.test/w.whl",
                 },
             ],
         }
-    monkeypatch.setattr(u_mod, "host_wheel_tag", lambda: "cp311-abi3-win_amd64")
 
     plan = u_mod.build_install_plan(fetch_json=fake_fetch_json)
     assert plan.status == "unverified"
