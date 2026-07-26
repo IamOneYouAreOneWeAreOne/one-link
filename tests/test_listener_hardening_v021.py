@@ -118,7 +118,29 @@ def test_acquire_instance_lock_defence_in_depth_pid_check(daemon_src):
     [
         (["python", "-m", "one_link.cli", "daemon", "-v"], True),
         (["python", "-P", "-m", "one_link.cli", "daemon", "-v"], True),
-        ([r"C:\\Program Files\\One Link\\one-link.exe", "daemon"], True),
+        # A Windows install path is only parseable as a path ON Windows:
+        # pathlib does not treat "\\" as a separator on POSIX, so basename
+        # extraction cannot work there. No Linux process will ever present
+        # this argv, so gate the case rather than assert it everywhere.
+        pytest.param(
+            [r"C:\\Program Files\\One Link\\one-link.exe", "daemon"],
+            True,
+            marks=pytest.mark.skipif(
+                os.name != "nt",
+                reason="Windows install path is not a path on POSIX",
+            ),
+        ),
+        # The POSIX frozen form had NO coverage: the frozen-daemon branch was
+        # only ever exercised through its Windows spelling, so PID-reuse
+        # protection for a packaged Linux/macOS daemon went unasserted.
+        pytest.param(
+            ["/opt/One Link/one-link", "daemon"],
+            True,
+            marks=pytest.mark.skipif(
+                os.name == "nt",
+                reason="POSIX install path form",
+            ),
+        ),
         (["python", "-c", "from multiprocessing.spawn import spawn_main"], False),
         (["one-link.exe", "supervisor"], False),
     ],
