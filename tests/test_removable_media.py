@@ -61,8 +61,16 @@ def test_removable_event_detector_can_emit_initial_targets(tmp_path: Path, monke
     first = RemovableEventDetector(emit_initial=True).poll()
 
     assert first["changed"] is True
-    assert [event["kind"] for event in first["events"]] == ["attached"]
-    assert first["targets"][0]["label"] == "USB"
+    # ONE_LINK_COURIER_MEDIA_ROOTS ADDS a root; it does not replace the
+    # platform ones, and that is the correct product behaviour -- a
+    # configured extra root must never hide a real USB drive. So a host with
+    # /media or /mnt populated (any Linux box, and WSL where /mnt/c exists)
+    # legitimately reports more than one target. Assert the contract that is
+    # actually under test: every initial event is an "attached", and our
+    # known drive is among them.
+    assert {event["kind"] for event in first["events"]} == {"attached"}
+    labels = {target["label"] for target in first["targets"]}
+    assert "USB" in labels, labels
 
 
 def test_removable_event_source_status_describes_event_contract():

@@ -114,14 +114,20 @@ def test_out_of_tree_symlink_is_rejected(tmp_path):
     outside.write_text("do not ship", encoding="utf-8")
     link = bundle / "escape"
     try:
-        link.symlink_to(outside)
+        # RELATIVE, so the escape rule is what rejects this. Pointing at the
+        # absolute path instead trips the "target is absolute" check first --
+        # which is how this test used to pass while never once exercising the
+        # containment rule it is named for.
+        link.symlink_to(Path("..") / "secret")
     except OSError:
         pytest.skip("symbolic links are unavailable on this host")
     # On Windows every symlink is a reparse point, and the packager rejects
     # that whole class before target classification (junction/reparse
     # semantics are their own attack surface, and Windows bundles never ship
     # links). Both messages are the same fail-closed outcome.
-    expected = "reparse point" if os.name == "nt" else "escapes bundle"
+    expected = (
+        "reparse point" if os.name == "nt" else "escapes relocated archive"
+    )
     with pytest.raises(module.BundleError, match=expected):
         module.package_bundle(
             bundle,
