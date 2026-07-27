@@ -1,6 +1,6 @@
 [package]
 name = "one_link_native"
-version = "0.21.0"
+version = "0.22.0-alpha.0"
 edition = "2021"
 description = "One Link file engine v2: pyo3 binding crate for hot-path Rust crates"
 license = "AGPL-3.0-or-later"

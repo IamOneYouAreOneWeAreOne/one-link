@@ -68,8 +68,12 @@ def test_stale_port_files_dont_break_daemon():
                 stderr=subprocess.STDOUT,
             )
         try:
-            # Wait up to 5s for new ports to be written
-            deadline = time.time() + 8.0
+            # The assertion is that stale ports get REPLACED, not that boot is
+            # fast: a fixed short deadline made this red whenever a loaded CI
+            # runner spent >8s in cold-start + identity keygen + ACL rounds.
+            # Give a generous ceiling; the check still fails honestly if the
+            # daemon never rewrites the file.
+            deadline = time.time() + 45.0
             ctrl = None
             while time.time() < deadline:
                 try:

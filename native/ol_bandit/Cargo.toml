@@ -1,6 +1,6 @@
 [package]
 name = "ol_bandit"
-version = "0.21.0"
+version = "0.22.0-alpha.0"
 edition = "2021"
 description = "One Link file engine: policy-neutral Thompson-sampling bandit; production-wired for route selection"
 license = "AGPL-3.0-or-later"

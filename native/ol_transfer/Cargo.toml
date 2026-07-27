@@ -1,6 +1,6 @@
 [package]
 name = "ol_transfer"
-version = "0.21.0"
+version = "0.22.0-alpha.0"
 edition = "2021"
 description = "One Link file engine: TransferEngine wiring chunk_store + QUIC + Bloom-init per ADR-0013"
 license = "AGPL-3.0-or-later"

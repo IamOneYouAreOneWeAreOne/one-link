@@ -1,6 +1,6 @@
 [package]
 name = "ol_device_mesh"
-version = "0.21.0"
+version = "0.22.0-alpha.0"
 edition = "2021"
 description = "One Link Coherence Mesh: Row 8 Layer 1 — identity stack for the Personal Device Mesh (master + per-device subkeys + field-bind + daily ratchet + cross-witness attestation)."
 license = "AGPL-3.0-or-later"

@@ -1,6 +1,6 @@
 [package]
 name = "ol_fec"
-version = "0.21.0"
+version = "0.22.0-alpha.0"
 edition = "2021"
 description = "One Link file engine: Reed-Solomon FEC over GF(2^8) (Cauchy systematic) per ADR-0016"
 license = "AGPL-3.0-or-later"

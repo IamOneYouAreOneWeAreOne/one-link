@@ -1,6 +1,6 @@
 [package]
 name = "ol_onion"
-version = "0.21.0"
+version = "0.22.0-alpha.0"
 edition = "2021"
 description = "One Link Coherence Mesh: nested-AEAD onion circuits (Phase F3, row 5 of COHERENCE_MESH_PLAN)."
 license = "AGPL-3.0-or-later"

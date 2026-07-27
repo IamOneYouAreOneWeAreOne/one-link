@@ -1,6 +1,6 @@
 [package]
 name = "ol_threshold_recovery"
-version = "0.21.0"
+version = "0.22.0-alpha.0"
 edition = "2021"
 description = "One Link Coherence Mesh: Shamir threshold secret sharing with coherence-field-bound recovery (Phase F1, COHERENCE_MESH_PLAN.md)."
 license = "AGPL-3.0-or-later"

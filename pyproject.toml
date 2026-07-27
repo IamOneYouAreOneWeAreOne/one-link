@@ -1,6 +1,6 @@
 [project]
 name = "one_link"
-version = "0.21.0"
+version = "0.22.0-alpha"
 description = "Direct-first encrypted chat, calls, resilient file transfer, and sync with optional discovery and relay."
 requires-python = ">=3.11"
 authors = [{ name = "One Link contributors", email = "weareone@oneunity.earth" }]
