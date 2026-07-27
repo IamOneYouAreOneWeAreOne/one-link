@@ -101,9 +101,22 @@ def _assert_durable_sync_receipt(
     response: dict,
     *,
     expected_entries: int,
-    expected_wants: int,
+    expected_wants: int | frozenset[int],
 ) -> dict:
-    """Validate the sender's exact, channel-bound folder commit proof."""
+    """Validate the sender's exact, channel-bound folder commit proof.
+
+    ``expected_wants`` accepts a set when the count is legitimately
+    timing-dependent: the 250ms-debounced folder watcher and the explicit
+    /sync call are BOTH real delivery paths, so a file written after
+    registration may already be on the receiver when the explicit sync
+    runs (wants=0) or not yet (wants=1). Betting on which path wins made
+    this test hang or fail by machine load; the invariants that must hold
+    regardless are the manifest entry count, path verification, root
+    binding, and byte-exact convergence (asserted by the callers).
+    """
+    allowed_wants = (
+        {expected_wants} if isinstance(expected_wants, int) else set(expected_wants)
+    )
     assert response.get("ok") is True, response
     results = response.get("results")
     assert isinstance(results, list) and len(results) == 1, response
@@ -111,7 +124,8 @@ def _assert_durable_sync_receipt(
     assert result.get("status") == "pushed", result
     assert result.get("ok") is True, result
     assert result.get("durable_receipt") is True, result
-    assert result.get("wants") == expected_wants, result
+    wants = result.get("wants")
+    assert wants in allowed_wants, result
 
     sync_id = result.get("folder_sync_id")
     assert isinstance(sync_id, str) and sync_id, result
@@ -121,7 +135,9 @@ def _assert_durable_sync_receipt(
     assert receipt.get("sync_id") == sync_id, receipt
     assert isinstance(receipt.get("verify_id"), str) and receipt["verify_id"]
     assert receipt.get("entry_count") == expected_entries, receipt
-    assert receipt.get("wanted_count") == expected_wants, receipt
+    # The receipt must agree with the live result about how many blobs the
+    # receiver still wanted, whichever delivery path won the race.
+    assert receipt.get("wanted_count") == wants, receipt
     assert receipt.get("paths_verified") == expected_entries, receipt
     assert receipt.get("source_root") == result.get("merkle_root"), receipt
     _assert_hex64(receipt.get("source_root"), field="source_root")
@@ -209,7 +225,7 @@ async def test_full_duplex_both_directions_one_connection():
             # ONE bidirectional sync initiated by A.
             res = await _sync(s, base_a, tok_a, "fd")
             _assert_durable_sync_receipt(
-                res, expected_entries=1, expected_wants=1,
+                res, expected_entries=1, expected_wants=frozenset({0, 1}),
             )
 
             # B must receive A's file AND A must receive B's file.
@@ -269,7 +285,7 @@ async def test_full_duplex_forward_only():
             await asyncio.sleep(1.5)
             res = await _sync(s, base_a, tok_a, "fo")
             _assert_durable_sync_receipt(
-                res, expected_entries=1, expected_wants=1,
+                res, expected_entries=1, expected_wants=frozenset({0, 1}),
             )
             assert await _wait_file(local_b / "only.bin", pay, timeout=30)
             expected = {"only.bin": pay}
