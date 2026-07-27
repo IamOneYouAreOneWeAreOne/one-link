@@ -27355,6 +27355,36 @@ class Daemon:
         }
         return cls._power_cache
 
+    @classmethod
+    async def _power_state_async(cls) -> dict:
+        """``_power_state`` off the event loop.
+
+        The refresh path shells out to PowerShell to ask WinRT about metered
+        connections (see :meth:`_detect_metered`). Called directly from a
+        coroutine that blocks the ENTIRE event loop for the whole spawn --
+        nothing else the daemon serves makes progress meanwhile. The comment on
+        that method budgets ~150ms, which is optimistic for a PowerShell cold
+        start on a loaded machine, and its own subprocess timeout is 2.0s, so
+        the loop could stall for seconds once per cache window.
+
+        That was observed as an e2e read timeout on /api/power/status with a 5s
+        client budget, but the request that times out need not be the one that
+        blocked: any concurrent request is stalled just as long. A UI polling
+        this endpoint would freeze unrelated traffic every 30s.
+
+        Threads are safe here: the cache is replaced by a single name rebind, so
+        two racing refreshes cost one redundant probe and never a torn value.
+        """
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, cls._power_state)
+
+    async def _sync_paused_or_quiet_async(self) -> tuple[bool, str]:
+        """``_sync_paused_or_quiet`` off the event loop, for the same reason."""
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._sync_paused_or_quiet)
+
     @staticmethod
     def _detect_on_battery() -> bool:
         """Windows: GetSystemPowerStatus().ACLineStatus.
@@ -31963,7 +31993,7 @@ class Daemon:
         # metered. Skip the push entirely if the rules say no
         # syncing now. The watcher will re-trigger naturally when
         # things change next.
-        skip, reason = self._sync_paused_or_quiet()
+        skip, reason = await self._sync_paused_or_quiet_async()
         if skip:
             return {
                 "ok": True, "deferred": True, "reason": reason,

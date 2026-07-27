@@ -28530,8 +28530,10 @@ class UIServer:
                 "on_battery": False, "metered": False,
                 "sync_paused": False, "reason": "",
             })
-        state = self.daemon._power_state()
-        skip, reason = self.daemon._sync_paused_or_quiet()
+        # Off-loop: the refresh path shells out to PowerShell for metered
+        # detection, which blocked every other request for the duration.
+        state = await self.daemon._power_state_async()
+        skip, reason = await self.daemon._sync_paused_or_quiet_async()
         return web.json_response({
             "on_battery": state.get("on_battery", False),
             "metered": state.get("metered", False),
