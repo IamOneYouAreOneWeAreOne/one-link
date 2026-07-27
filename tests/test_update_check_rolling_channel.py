@@ -136,6 +136,84 @@ def test_a_real_tagged_release_wins_over_rolling() -> None:
     assert len(calls) == 1
 
 
+def test_a_rolling_build_tracks_its_own_channel_even_after_a_tag_exists() -> None:
+    """The post-first-release trap: a rolling build's version string is
+    frozen, so the moment any tagged release exists the tagged channel
+    answers 'same'/'older' authoritatively and a tagged-first order would
+    make rolling builds silently stale FOREVER -- the exact failure this
+    module exists to prevent, recreated one release later. A build stamped
+    channel=rolling therefore compares commits against rolling first."""
+
+    tagged = {
+        "tag_name": "v0.21.0",
+        "name": "v0.21.0",
+        "published_at": "2026-08-01T00:00:00Z",
+        "prerelease": False,
+        "draft": False,
+        "assets": [],
+    }
+
+    def _fetch(url: str, timeout: float) -> dict:
+        if "releases/tags/auto-latest" in url:
+            return _rolling_payload(_REMOTE)
+        if "releases/latest" in url:
+            return tagged
+        raise AssertionError(f"unexpected url {url}")
+
+    result = update_check.check_for_update(
+        "0.21.0",
+        local_commit=_LOCAL,
+        local_channel="rolling",
+        fetch=_fetch,
+    )
+    assert result.status == "newer", result
+    assert result.channel == "rolling"
+    assert result.latest_commit == _REMOTE
+
+    # And when its own channel is current, the verdict is 'same' -- a
+    # rolling build is by definition at or ahead of the stable tag, so the
+    # tagged channel must not be allowed to demote the answer.
+    result = update_check.check_for_update(
+        "0.21.0",
+        local_commit=_REMOTE,
+        local_channel="rolling",
+        fetch=_fetch,
+    )
+    assert result.status == "same", result
+    assert result.channel == "rolling"
+
+
+def test_a_rolling_build_falls_back_to_tagged_when_rolling_disappears() -> None:
+    """If the rolling prerelease is ever retired, a rolling build should
+    still learn about tagged releases rather than going silent."""
+
+    tagged = {
+        "tag_name": "v0.22.0",
+        "name": "v0.22.0",
+        "published_at": "2026-08-01T00:00:00Z",
+        "prerelease": False,
+        "draft": False,
+        "assets": [],
+    }
+
+    def _fetch(url: str, timeout: float) -> dict:
+        if "releases/tags/auto-latest" in url:
+            raise urllib.error.HTTPError(url, 404, "Not Found", None, None)  # type: ignore[arg-type]
+        if "releases/latest" in url:
+            return tagged
+        raise AssertionError(f"unexpected url {url}")
+
+    result = update_check.check_for_update(
+        "0.21.0",
+        local_commit=_LOCAL,
+        local_channel="rolling",
+        fetch=_fetch,
+    )
+    assert result.status == "newer", result
+    assert result.channel == "release"
+    assert result.latest_version == "v0.22.0"
+
+
 def test_rolling_release_without_a_commit_is_unknown_not_stale() -> None:
     """A release whose title lost its commit must not imply staleness."""
 

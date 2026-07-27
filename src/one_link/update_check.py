@@ -457,6 +457,7 @@ def check_for_update(
     local_version: str | None = None,
     *,
     local_commit: str | None = None,
+    local_channel: str | None = None,
     owner: str = DEFAULT_OWNER,
     repo: str = DEFAULT_REPO,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
@@ -464,15 +465,23 @@ def check_for_update(
 ) -> CheckResult:
     """The one call a caller should make: "am I running the newest build?"
 
-    Tries the tagged-release channel first and falls back to the rolling
-    prerelease, because today there IS no tagged release -- ``releases/latest``
-    404s -- and the rolling prerelease is what every /download/* route serves.
-    Preferring the tagged channel means this needs no change on the day
-    release.yml finally cuts one.
+    Channel order follows the build's own stamped channel:
 
-    Falls back only when the tagged channel yields nothing usable, never to
-    downgrade a real answer: a tagged release that says 'same' or 'older' is the
-    authoritative verdict and is returned as-is.
+    * A ``rolling`` build compares against the rolling prerelease FIRST. Its
+      version string is frozen, so the moment any tagged release exists the
+      tagged channel would answer 'same' or 'older' authoritatively and a
+      rolling build could never again learn that master moved -- the exact
+      silent-staleness failure this module exists to prevent, recreated one
+      release later. Commit identity against its own channel is the truth.
+    * A ``release`` build (and an unstamped source/pip runtime) asks the
+      tagged channel first and only falls back to rolling while no tagged
+      release exists, so nothing changes the day release.yml cuts one --
+      and today's unstamped installs are pulled onto the tagged channel,
+      where the transactional one-click installer can serve them.
+
+    Falls back only when the preferred channel yields nothing usable, never
+    to downgrade a real answer: a preferred channel that says 'same' or
+    'older' is the authoritative verdict and is returned as-is.
     """
 
     if local_version is None:
@@ -483,29 +492,43 @@ def check_for_update(
         from one_link.build_info import build_commit
 
         local_commit = build_commit()
+    if local_channel is None:
+        from one_link.build_info import build_channel
 
-    tagged = fetch_latest(
-        local_version, owner=owner, repo=repo, timeout=timeout, fetch=fetch
-    )
-    if tagged.status != "unknown":
-        return tagged
+        local_channel = build_channel()
 
-    rolling = fetch_rolling(
-        local_version,
-        local_commit=local_commit,
-        owner=owner,
-        repo=repo,
-        timeout=timeout,
-        fetch=fetch,
+    def _tagged() -> CheckResult:
+        return fetch_latest(
+            local_version, owner=owner, repo=repo, timeout=timeout, fetch=fetch
+        )
+
+    def _rolling() -> CheckResult:
+        return fetch_rolling(
+            local_version,
+            local_commit=local_commit,
+            owner=owner,
+            repo=repo,
+            timeout=timeout,
+            fetch=fetch,
+        )
+
+    first, second = (
+        (_rolling, _tagged) if local_channel == "rolling" else (_tagged, _rolling)
     )
-    if rolling.status != "unknown":
-        return rolling
+    preferred = first()
+    if preferred.status != "unknown":
+        return preferred
+    fallback = second()
+    if fallback.status != "unknown":
+        return fallback
     # Both unknown: report the rolling reason, since that is the channel a user
-    # actually downloads from, but keep the tagged error when rolling had none.
+    # actually downloads from, but keep the other error when rolling had none.
+    rolling_result = preferred if local_channel == "rolling" else fallback
+    other_result = fallback if local_channel == "rolling" else preferred
     return CheckResult(
         status="unknown",
         local_version=local_version,
         local_commit=local_commit,
         channel="rolling",
-        error=rolling.error or tagged.error,
+        error=rolling_result.error or other_result.error,
     )
