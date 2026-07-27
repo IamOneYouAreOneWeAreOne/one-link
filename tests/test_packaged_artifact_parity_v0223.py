@@ -25,6 +25,11 @@ import pytest
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "validate_packaged_artifact.py"
 from one_link.build_identity import STABLE_FROZEN_EXCLUDED_MODULE_PREFIXES
 
+# The validator compares native_version against the REAL project version, so
+# fixtures must track it dynamically or every release bump breaks them here.
+from one_link import __version__ as _CORE_VERSION
+
+_NATIVE_VERSION_FIXTURE = f"{_CORE_VERSION}.0"
 
 EXPECTED_STABLE_EXCLUDES = STABLE_FROZEN_EXCLUDED_MODULE_PREFIXES
 
@@ -126,6 +131,7 @@ def _complete_macos_inventory_bundle(app: Path) -> Path:
 
 def _good_spec() -> str:
     from one_link.build_identity import EXPECTED_STABLE_RUNTIME_MODULES
+    from one_link.build_info import STAMP_FILENAME
     from one_link.native_cdc import native_library_name, native_platform_tag
 
     native_name = native_library_name()
@@ -137,6 +143,7 @@ def _good_spec() -> str:
             "datas = [('src/one_link/web', 'one_link/web'), "
             "('src/one_link/data', 'one_link/data'), "
             "('build/release-contract/runtime-source-manifest.json', 'one_link/_build'), "
+            f"('build/release-contract/{STAMP_FILENAME}', 'one_link'), "
             f"('build/native-cdc/{native_tag}/{native_name}.sha256', "
             f"'one_link/native/{native_tag}')]",
             f"binaries = [('build/native-cdc/{native_tag}/{native_name}', "
@@ -946,7 +953,7 @@ def test_validate_runtime_imports_requires_loadable_stable_and_absent_preview(
         ),
         "present_forbidden_runtime_modules": [],
         "native_package_status": "IMPORTED",
-        "native_version": "0.21.0-alpha.0",
+        "native_version": _NATIVE_VERSION_FIXTURE,
         "native_runtime_modules": native_modules,
         "native_runtime_module_count": len(native_modules),
         "native_runtime_module_manifest_sha256": (
@@ -1019,7 +1026,7 @@ def test_validate_runtime_imports_rejects_stale_bytecode_and_native_abi(
         ),
         "present_forbidden_runtime_modules": [],
         "native_package_status": "IMPORTED",
-        "native_version": "0.21.0-alpha.0",
+        "native_version": _NATIVE_VERSION_FIXTURE,
         "native_runtime_modules": native_modules,
         "native_runtime_module_count": len(native_modules),
         "native_runtime_module_manifest_sha256": (

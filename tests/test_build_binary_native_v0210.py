@@ -19,6 +19,13 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "build_binary.py"
+
+# The packager's version gates compare against the REAL one_link.__version__,
+# so the fakes must track it dynamically or every release bump breaks here.
+from one_link import __version__ as _CORE_VERSION  # noqa: E402
+
+_FAKE_SMOKE_STDOUT = f"one-link, version {_CORE_VERSION}"
+_FAKE_NATIVE_VERSION = f"{_CORE_VERSION}.0"
 NATIVE_BUILD_SCRIPT = SCRIPT.with_name("build_native_cdc.py")
 PACKAGED_VALIDATOR_SCRIPT = SCRIPT.with_name("validate_packaged_artifact.py")
 
@@ -91,7 +98,7 @@ def _install_fake_runner(
     helper_rc: int = 0,
     smoke_rc: int = 0,
     smoke_failure: str | None = None,
-    smoke_stdout: str = "one-link, version 0.21.0-alpha",
+    smoke_stdout: str = _FAKE_SMOKE_STDOUT,
     legacy_onefile_output: bool = False,
 ):
     captured_cmds: list[list[str]] = []
@@ -113,7 +120,7 @@ def _install_fake_runner(
     # so each test reaches its stage regardless of the host; the gate itself
     # keeps its own dedicated test that blocks this import explicitly.
     fake_native = types.ModuleType("one_link_native")
-    fake_native.__version__ = "0.21.0-alpha.0"
+    fake_native.__version__ = _FAKE_NATIVE_VERSION
     monkeypatch.setitem(sys.modules, "one_link_native", fake_native)
     # The fake runner writes sentinel DLL bytes. Native ABI behavior is covered
     # by dedicated compiled-library tests; packaging unit tests keep their
@@ -195,7 +202,7 @@ def _install_fake_runner(
             )
         return FakeCompleted(
             returncode=0,
-            stdout="one-link, version 0.21.0-alpha",
+            stdout=_FAKE_SMOKE_STDOUT,
         )
 
     monkeypatch.setattr(mod.subprocess, "run", fake_run)
