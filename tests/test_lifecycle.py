@@ -139,13 +139,22 @@ def _spawn_daemon(home: Path, log: Path) -> subprocess.Popen:
     # daemons on the LAN while the lifecycle test exercises port/token.
     env["ONE_LINK_MDNS_SERVICE_TYPE"] = private_mdns_type()
     log.parent.mkdir(parents=True, exist_ok=True)
-    return subprocess.Popen(
+    # CREATE_NEW_PROCESS_GROUP is load-bearing: teardown delegates to the
+    # harness _stop, whose Windows graceful path is CTRL_BREAK_EVENT --
+    # and a break event aimed at a non-group-leader broadcasts to the
+    # ENTIRE console, putting a CI pwsh step host into its debugger.
+    proc = subprocess.Popen(
         [sys.executable, "-m", "one_link.cli", "daemon"],
         env=env,
         stdin=subprocess.DEVNULL,
         stdout=open(log, "wb"),
         stderr=subprocess.STDOUT,
+        creationflags=(
+            subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        ),
     )
+    proc._one_link_new_process_group = os.name == "nt"  # type: ignore[attr-defined]
+    return proc
 
 
 def _stop(proc: subprocess.Popen, *, home: Path) -> None:
