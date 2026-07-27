@@ -230,28 +230,47 @@ def test_perf_gate_sidecar_write_stays_near_raw_disk_cost(tmp_path: Path) -> Non
     # Baseline: the exact durability primitive persist_sidecar uses —
     # same-directory temp, write, flush, fsync, atomic replace — with the
     # same payload bytes. 100 reps, median, same as the gated measurement.
+    # INTERLEAVED, because the ratio is only disk-invariant if both halves see
+    # the SAME disk conditions. Measuring all 100 baseline reps first and all
+    # 100 gated reps afterwards silently assumes the machine does not change in
+    # between, and on a shared runner it does: this gate failed at 12x with a
+    # 5365 us baseline, meaning the disk was ALREADY pathological (a healthy
+    # fsync is well under 2 ms) and got worse while the second loop ran. Nothing
+    # about the code under test had changed. Alternating which operation goes
+    # first also keeps neither one permanently paying for the other's cache
+    # warming. The 8x cap and the 5 ms floor below are deliberately unchanged --
+    # this makes the gate harder to fool, not easier to pass.
     baseline_dir = tmp_path / "baseline"
     baseline_dir.mkdir()
     baseline_target = baseline_dir / "baseline.json"
     baseline_durations: list[float] = []
-    for i in range(100):
-        tmp_file = baseline_dir / f".baseline_{i}.tmp"
-        t0 = time.perf_counter()
+    durations: list[float] = []
+
+    def _timed_baseline(index: int) -> float:
+        tmp_file = baseline_dir / f".baseline_{index}.tmp"
+        start = time.perf_counter()
         with tmp_file.open("x", encoding="utf-8", newline="") as f:
             f.write(payload)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_file, baseline_target)
-        baseline_durations.append(time.perf_counter() - t0)
-    baseline_us = statistics.median(baseline_durations) * 1e6
+        return time.perf_counter() - start
 
-    # 100 round-trips, take the median so a single GC pause
-    # doesn't blow up the average.
-    durations: list[float] = []
-    for _ in range(100):
-        t0 = time.perf_counter()
+    def _timed_sidecar() -> float:
+        start = time.perf_counter()
         persist_sidecar(inbox, sc)
-        durations.append(time.perf_counter() - t0)
+        return time.perf_counter() - start
+
+    for i in range(100):
+        if i % 2 == 0:
+            baseline_durations.append(_timed_baseline(i))
+            durations.append(_timed_sidecar())
+        else:
+            durations.append(_timed_sidecar())
+            baseline_durations.append(_timed_baseline(i))
+
+    # Medians, so a single GC pause or scanner hit does not move the verdict.
+    baseline_us = statistics.median(baseline_durations) * 1e6
     median_us = statistics.median(durations) * 1e6
 
     cap_us = max(5000.0, 8.0 * baseline_us)

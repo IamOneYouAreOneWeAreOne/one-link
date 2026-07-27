@@ -189,32 +189,56 @@ def test_native_split_meaningfully_faster_than_python_split():
     from one_link import threshold_recovery_native as tr
 
     secret = os.urandom(32)
-    iters = 100
+    rounds = 7
+    per_round = 20
 
     # Warm up both paths so allocator + jit caches are populated.
     _ = tr.split_compat(secret, threshold=3, num_shares=5)
     _ = py_threshold.split(secret=secret, threshold=3, num_shares=5)
 
-    t_native_start = time.perf_counter()
-    for _ in range(iters):
-        tr.split_compat(secret, threshold=3, num_shares=5)
-    t_native = time.perf_counter() - t_native_start
+    # INTERLEAVED ROUNDS, BEST-OF-N -- not one timed batch each.
+    #
+    # The original measured a single 100-iteration batch per path, one after the
+    # other, and compared the two wall-clock totals. On a co-tenanted CI runner
+    # that compares two different moments in time: whichever batch happens to
+    # share the box with someone else's build looks slower. It failed on
+    # ubuntu AND windows at 1.69x while the same machine-local measurement of
+    # this code is ~8x, and the inflation was almost entirely on the native
+    # side (native 9x slower than local, python only 1.8x) -- the signature of
+    # interference landing in one batch, not of a regression.
+    #
+    # Interleaving exposes both paths to the same drift, and the MINIMUM is the
+    # right estimator for "how fast can this go": noise only ever ADDS time, so
+    # the fastest observed round is the least contaminated one. The 2x floor is
+    # deliberately UNCHANGED -- this makes the gate harder to fool, not easier
+    # to pass, and a genuine regression below 2x still fails.
+    native_rounds: list[float] = []
+    python_rounds: list[float] = []
+    for _ in range(rounds):
+        start = time.perf_counter()
+        for _ in range(per_round):
+            tr.split_compat(secret, threshold=3, num_shares=5)
+        native_rounds.append(time.perf_counter() - start)
 
-    t_py_start = time.perf_counter()
-    for _ in range(iters):
-        py_threshold.split(secret=secret, threshold=3, num_shares=5)
-    t_py = time.perf_counter() - t_py_start
+        start = time.perf_counter()
+        for _ in range(per_round):
+            py_threshold.split(secret=secret, threshold=3, num_shares=5)
+        python_rounds.append(time.perf_counter() - start)
 
+    t_native = min(native_rounds)
+    t_py = min(python_rounds)
     ratio = t_py / t_native if t_native > 0 else float("inf")
     print(
-        f"split_compat: native={t_native * 1000:.2f}ms, "
-        f"python={t_py * 1000:.2f}ms over {iters} iters; "
+        f"split_compat best-of-{rounds}: native={t_native * 1000:.2f}ms, "
+        f"python={t_py * 1000:.2f}ms per {per_round} iters; "
         f"speedup={ratio:.1f}×"
     )
     assert ratio >= 2.0, (
         f"native split should be ≥2× faster than python; "
         f"got {ratio:.2f}× (native={t_native * 1000:.2f}ms, "
-        f"python={t_py * 1000:.2f}ms)"
+        f"python={t_py * 1000:.2f}ms, best of {rounds} interleaved rounds)\n"
+        f"native rounds ms: {[round(v * 1000, 2) for v in native_rounds]}\n"
+        f"python rounds ms: {[round(v * 1000, 2) for v in python_rounds]}"
     )
 
 
