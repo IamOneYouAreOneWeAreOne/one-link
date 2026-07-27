@@ -2416,6 +2416,57 @@ def _read_runtime_ascii_scalar(path: Path, *, max_bytes: int = 64) -> str:
     return raw.decode("ascii", errors="strict").strip()
 
 
+def _atomic_replace(
+    temporary: str | os.PathLike[str],
+    target: str | os.PathLike[str],
+    *,
+    attempts: int = 12,
+) -> None:
+    """``os.replace`` that survives Windows' transient sharing violations.
+
+    A POSIX ``rename(2)`` over an existing entry always succeeds. Windows does
+    not work that way: any process holding either path open WITHOUT
+    ``FILE_SHARE_DELETE`` makes the rename fail, and on a real machine that
+    happens constantly for a file that was created milliseconds ago -- Defender
+    and every other scanner, indexer, or backup agent opens new files to inspect
+    them. The rename fails with ERROR_ACCESS_DENIED (5) or
+    ERROR_SHARING_VIOLATION (32) and the operation is lost.
+
+    This is not hypothetical. The daemon CRASHED ON STARTUP with
+
+        PermissionError: [WinError 5] Access is denied:
+        '...\\data\\.control.port.9076.<hex>.tmp'
+
+    raised out of the port-file publish, because that publish had no tolerance
+    for a condition Windows produces routinely. A user with antivirus installed
+    would see One Link simply fail to start, intermittently and for no reason
+    they could act on.
+
+    Retrying is the correct remedy rather than a workaround: the condition is
+    transient by nature (the scanner closes the handle), and a bounded retry
+    changes nothing about the ATOMICITY the callers rely on -- the replace
+    either happened or it did not. POSIX keeps the single unretried call, so a
+    genuine error there still surfaces immediately, and a non-transient Windows
+    error (anything other than 5/32) is re-raised at once instead of being
+    slept over.
+    """
+
+    if os.name != "nt":
+        os.replace(temporary, target)
+        return
+    delay = 0.005
+    for attempt in range(max(1, attempts)):
+        try:
+            os.replace(temporary, target)
+            return
+        except PermissionError as exc:
+            transient = getattr(exc, "winerror", None) in (5, 32)
+            if not transient or attempt == max(1, attempts) - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.2)
+
+
 def _publish_runtime_ascii_scalar(path: Path, value: str, *, max_bytes: int = 64) -> None:
     """Atomically publish a bounded port/PID hint without following ``path``.
 
@@ -2456,7 +2507,7 @@ def _publish_runtime_ascii_scalar(path: Path, value: str, *, max_bytes: int = 64
         os.fsync(fd)
         os.close(fd)
         fd = None
-        os.replace(temporary, target)
+        _atomic_replace(temporary, target)
         if os.name != "nt":
             directory_fd = os.open(str(target.parent), os.O_RDONLY)
             try:
@@ -4130,7 +4181,7 @@ class Daemon:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
                 tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-                os.replace(tmp, path)
+                _atomic_replace(tmp, path)
         except Exception as exc:
             log.debug("call resume ledger save failed: %s", exc)
 
@@ -13118,7 +13169,7 @@ class Daemon:
                         raise OSError(f"short chunk-cache write: {written} of {len(data)}")
                     fh.flush()
                     os.fsync(fh.fileno())
-                os.replace(tmp, dst)
+                _atomic_replace(tmp, dst)
             finally:
                 with contextlib.suppress(OSError):
                     tmp.unlink()
@@ -16075,7 +16126,7 @@ class Daemon:
                 shutil.copyfileobj(src, dst, length=1024 * 1024)
                 dst.flush()
                 os.fsync(dst.fileno())
-            os.replace(tmp, f.out_path)
+            _atomic_replace(tmp, f.out_path)
             f.handle = open(f.out_path, "rb")
             log.info(
                 "copy fast-path: %s <- %s (skip cache-read for %d chunk(s))",
@@ -38990,7 +39041,7 @@ def _atomic_write_lifecycle_record(path: Path, payload: dict[str, Any]) -> None:
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        _atomic_replace(tmp, path)
         _fsync_record_parent(path)
     finally:
         if fd >= 0:
