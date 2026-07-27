@@ -101,6 +101,28 @@ jobs:
           version: "0.11.31"
           enable-cache: true
 
+      # The native CDC scanner needs a LINKABLE C compiler. windows-latest
+      # images vary: some ship C:\msys64 with a ucrt64 gcc, others surface
+      # only an MSVC-target clang whose link dies (LNK1181) outside a
+      # developer shell. Install MSYS2 gcc explicitly and put its bin on
+      # PATH for every later step, so the compiler ladder always has a
+      # linkable candidate regardless of which image the run lands on.
+      - name: setup native CDC compiler (Windows x86_64)
+        if: matrix.os == 'windows-latest'
+        id: msys2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          install: mingw-w64-ucrt-x86_64-gcc
+      - name: expose MSYS2 gcc to every later step
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $bin = Join-Path "${{ steps.msys2.outputs.msys2-location }}" "ucrt64\bin"
+          if (-not (Test-Path (Join-Path $bin "gcc.exe"))) { throw "gcc.exe missing under $bin" }
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+
       - name: install Rust toolchain
         # Moved BEFORE pip install: cryptography has no win_arm64 wheel
         # in any release as of 2026-05, so on that leg ``pip install -e .``

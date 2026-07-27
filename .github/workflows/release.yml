@@ -526,6 +526,31 @@ jobs:
           version: "0.11.31"
           enable-cache: false
 
+      # The standalone bundle build compiles the native CDC scanner and
+      # REFUSES to package without it. windows-latest images vary: some
+      # ship a linkable C:\msys64 gcc, others surface only an MSVC-target
+      # clang that dies at LNK1181 outside a developer shell. Guarantee a
+      # linkable gcc and expose it to every later step. Mirrors
+      # auto_build.yml / tests.yml exactly.
+      - name: setup native CDC compiler (Windows x86_64)
+        # Keyed on the matrix artifact contract, not an OS-name fork: the
+        # staging gate (rightly) rejects windows-latest conditionals so
+        # packaging stays matrix-driven.
+        if: matrix.native_artifact == 'native-wheel-windows-x86_64'
+        id: msys2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          install: mingw-w64-ucrt-x86_64-gcc
+      - name: expose MSYS2 gcc to every later step
+        if: matrix.native_artifact == 'native-wheel-windows-x86_64'
+        shell: pwsh
+        run: |
+          $bin = Join-Path "${{ steps.msys2.outputs.msys2-location }}" "ucrt64\bin"
+          if (-not (Test-Path (Join-Path $bin "gcc.exe"))) { throw "gcc.exe missing under $bin" }
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+
       - name: install Rust toolchain
         # Needed BEFORE ``pip install -e .`` on win_arm64 because
         # cryptography has no win_arm64 wheel and falls through to a
