@@ -281,6 +281,9 @@ def _spawn(home: Path, log: Path, mdns_type: str | None = None) -> tuple[subproc
         stderr=subprocess.STDOUT,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
     )
+    # Popen does not retain creationflags; _stop needs proof this process
+    # leads its own group before it may send CTRL_BREAK_EVENT (see _stop).
+    proc._one_link_new_process_group = True  # type: ignore[attr-defined]
     return proc, f
 
 
@@ -383,10 +386,23 @@ def _stop(
     if proc.poll() is None:
         try:
             if os.name == "nt":
-                proc.send_signal(signal.CTRL_BREAK_EVENT)
+                # CTRL_BREAK_EVENT is only scoped when the target leads its
+                # own process group (CREATE_NEW_PROCESS_GROUP). Sent at a
+                # non-leader pid, GenerateConsoleCtrlEvent falls back to the
+                # WHOLE console group -- which in CI includes the pwsh step
+                # host, and PowerShell treats Ctrl+Break as "enter the
+                # debugger", wedging the job ("Entering debug mode"). Only
+                # break-signal processes our spawners tagged as group
+                # leaders; everything else gets terminate() below.
+                if getattr(proc, "_one_link_new_process_group", False) or (
+                    getattr(proc, "creationflags", 0)
+                    & subprocess.CREATE_NEW_PROCESS_GROUP
+                ):
+                    proc.send_signal(signal.CTRL_BREAK_EVENT)
+                    sent_graceful = True
             else:
                 proc.send_signal(signal.SIGTERM)
-            sent_graceful = True
+                sent_graceful = True
         except Exception:
             pass
 
