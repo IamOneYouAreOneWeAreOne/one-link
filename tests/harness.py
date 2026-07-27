@@ -102,17 +102,52 @@ class DaemonPair:
     tmp: Path
 
 
-def _read_port(home: Path, name: str, timeout: float = 15.0) -> int:
+def _read_port(
+    home: Path,
+    name: str,
+    timeout: float = 15.0,
+    *,
+    proc: subprocess.Popen | None = None,
+    log: Path | None = None,
+) -> int:
+    """Wait for a daemon port file, and on failure say WHY.
+
+    The old version raised a bare "port file did not appear", which made an
+    intermittent Windows CI failure unexplainable: it reported neither whether
+    the daemon was still running, nor its exit status, nor the log it had
+    already written. Three tests failed that way on a single run with nothing
+    to act on. Passing ``proc``/``log`` turns the same failure into evidence.
+
+    It also fails FAST when the child is already dead instead of waiting out
+    the whole budget for a file that can no longer be written.
+    """
+
     p = home / "data" / name
-    end = time.time() + timeout
-    while time.time() < end:
+    started = time.monotonic()
+    end = started + timeout
+    while True:
         if p.exists():
             try:
                 return int(p.read_text().strip())
             except (ValueError, OSError):
+                # A partially written file: keep waiting for the full value.
                 pass
+        exited = proc.poll() if proc is not None else None
+        if exited is not None:
+            raise RuntimeError(
+                f"daemon exited with code {exited} before writing {p} "
+                f"after {time.monotonic() - started:.2f}s; log tail:\n"
+                f"{_read_log(log) if log is not None else '<no log captured>'}"
+            )
+        if time.monotonic() >= end:
+            break
         time.sleep(0.05)
-    raise RuntimeError(f"port file did not appear: {p}")
+    alive = "alive" if proc is not None and proc.poll() is None else "not running"
+    raise RuntimeError(
+        f"port file did not appear: {p} (waited "
+        f"{time.monotonic() - started:.2f}s of {timeout:.2f}s, daemon {alive}); "
+        f"log tail:\n{_read_log(log) if log is not None else '<no log captured>'}"
+    )
 
 
 def _wait_port(port: int, timeout: float = 5.0) -> bool:
@@ -396,8 +431,13 @@ def _read_log(p: Path, n: int = 4000) -> str:
 def _bring_up(home: Path, log: Path, label: str, mdns_type: str | None = None) -> DaemonHandle:
     proc, log_fh = _spawn(home, log, mdns_type=mdns_type)
     try:
-        ctrl = _read_port(home, "control.port")
-        peer = _read_port(home, "peer.port")
+        # 15 s was too tight for a loaded Windows hosted runner: three
+        # unrelated live tests failed on one run purely because the daemon had
+        # not finished booting. A longer budget costs nothing now that a dead
+        # child raises immediately above -- it only helps the case where the
+        # runner is merely slow, and never hides a daemon that actually failed.
+        ctrl = _read_port(home, "control.port", timeout=60.0, proc=proc, log=log)
+        peer = _read_port(home, "peer.port", timeout=60.0, proc=proc, log=log)
         secret_path = home / "data" / control_ipc.CONTROL_SECRET_FILE
         secret_deadline = time.time() + 8.0
         while time.time() < secret_deadline and not secret_path.is_file():
