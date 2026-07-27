@@ -811,6 +811,28 @@ def _transport_diagnostics(page: Page) -> dict[str, Any]:
                 label: channel.label,
                 readyState: channel.readyState,
             })),
+            // Pairing state was missing here, which is why a remote_hello
+            // stall on CI produced a bare "Timeout 10000ms exceeded" with
+            // nothing to diagnose. An abort (wrong signer, self-pair, hello
+            // timeout) leaves its reason ONLY in #pair-status, so capture it.
+            pairing: (() => {
+                const pairing = window.__oneLinkPeer?.state?.pairing;
+                return {
+                    present: Boolean(pairing),
+                    sentHello: pairing?.sent_hello ?? null,
+                    hasRemoteHello: Boolean(pairing?.remote_hello),
+                    finished: pairing?.finished ?? null,
+                    finalizing: pairing?.finalizing ?? null,
+                    hasPinnedSigner: Boolean(
+                        pairing?.session?.remote_signal_signer_pubkey_b64u,
+                    ),
+                    identityUnlocked: Boolean(
+                        window.__oneLinkPeer?.state?.rec,
+                    ),
+                    statusText:
+                        document.querySelector('#pair-status')?.textContent || '',
+                };
+            })(),
         })"""
     )
 
@@ -967,11 +989,38 @@ def test_two_isolated_peer_pages_complete_manual_webrtc_and_exchange_probe(
         page_a.locator("#btn-webrtc-accept").click()
         _wait_for_control_open(page_a)
         _wait_for_control_open(page_b)
-        for page in (page_a, page_b):
-            page.wait_for_function(
-                "() => Boolean(window.__oneLinkPeer.state.pairing?.remote_hello)",
-                timeout=10_000,
-            )
+        # This wait failed on a ubuntu/chromium run with a bare "Timeout
+        # 10000ms exceeded" and no evidence, unlike its instrumented
+        # neighbour _wait_for_control_open -- so the cause could not be
+        # determined afterwards. Report the same diagnostics (now including
+        # pairing state and any abort reason from #pair-status), and use the
+        # 20 s budget every other wait in this test already uses: 10 s was the
+        # outlier here, not a considered value.
+        for label, page in (("a", page_a), ("b", page_b)):
+            try:
+                page.wait_for_function(
+                    "() => Boolean(window.__oneLinkPeer.state.pairing?.remote_hello)",
+                    timeout=20_000,
+                )
+            except PlaywrightTimeoutError as exc:
+                pytest.fail(
+                    f"peer {label} never received a pair hello: "
+                    + json.dumps(_transport_diagnostics(page), sort_keys=True)
+                    + f" ({exc})"
+                )
+
+        # Run the diagnostics on the SUCCESS path too. Code that only executes
+        # when a test fails is never exercised, so a JS error in it would
+        # surface as an exception inside the failure reporter and bury the very
+        # cause it exists to reveal. Asserting the healthy snapshot here keeps
+        # the reporter honest and pins what a good pairing looks like.
+        for label, page in (("a", page_a), ("b", page_b)):
+            snapshot = _transport_diagnostics(page)["pairing"]
+            assert snapshot["present"] is True, label
+            assert snapshot["sentHello"] is True, label
+            assert snapshot["hasRemoteHello"] is True, label
+            assert snapshot["hasPinnedSigner"] is True, label
+            assert snapshot["identityUnlocked"] is True, label
 
         trust_bindings = {
             "a": page_a.evaluate(
