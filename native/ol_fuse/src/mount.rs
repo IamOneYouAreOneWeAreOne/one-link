@@ -303,6 +303,13 @@ mod tests {
         assert!(matches!(err, MountError::InvalidMountpoint(_)));
     }
 
+    // The comment below always promised "Linux with feature => real fuser
+    // mount (test doesn't run)" -- but the cfg saying so was never written.
+    // Under --all-features on Linux the mount genuinely SUCCEEDS and fuser
+    // blocks serving the tempdir forever, which is how the workspace test
+    // step hung to its 55-minute timeout. Compile the test out exactly when
+    // the real kernel path is compiled in.
+    #[cfg(not(all(target_os = "linux", feature = "linux-mount")))]
     #[test]
     fn mount_with_valid_mountpoint_errors_without_active_backend() {
         let tmp = tempfile::tempdir().unwrap();

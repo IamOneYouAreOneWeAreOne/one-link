@@ -50,6 +50,14 @@ mod tpm_benches {
     }
 
     pub(crate) fn run() {
+        // GitHub-hosted Windows runners expose no usable TPM, and under
+        // `cargo test --all-targets` a panicking bench turns "no hardware
+        // present" into a workspace-wide test failure. No TPM means there is
+        // nothing to measure: probe once, say so, and exit cleanly.
+        if let Err(err) = TpmAttestationKey::acquire_or_create("OL-confidential-bench-v1") {
+            eprintln!("skipping TPM benches: no usable TPM available ({err:?})");
+            return;
+        }
         let mut criterion = Criterion::default().configure_from_args();
         bench_tpm_sign(&mut criterion);
         bench_tpm_public_blob_export(&mut criterion);
