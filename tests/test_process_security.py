@@ -369,6 +369,57 @@ def test_updater_script_generation_is_unconditionally_disabled(tmp_path: Path) -
         )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits only")
+def test_group_writable_interpreter_relaunches_but_other_binaries_still_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A group-writable Python must not make this app unstartable.
+
+    GitHub's hosted toolcache ships /opt/hostedtoolcache/Python/*/bin/python
+    as mode 0775, which made every autostart/supervisor re-launch raise
+    ProcessSecurityError on CI while passing locally. Refusing to re-exec the
+    interpreter that is ALREADY executing us protects nothing, so that one
+    case is waived -- and this test pins that the waiver does not leak to any
+    other executable.
+    """
+
+    from one_link.process_security import (
+        ProcessSecurityError,
+        resolve_current_interpreter,
+        resolve_explicit_executable,
+    )
+
+    interpreter = tmp_path / "python3"
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o775)  # exactly the hosted-toolcache mode
+    assert interpreter.stat().st_mode & stat.S_IWGRP
+
+    # The interpreter running us: permitted, and returned verbatim.
+    monkeypatch.setattr(sys, "executable", str(interpreter))
+    assert resolve_current_interpreter() == str(interpreter)
+
+    # The SAME file as a chosen helper: still refused. The waiver is scoped to
+    # self-relaunch, not to "group-writable is fine now".
+    with pytest.raises(ProcessSecurityError, match="writable by group/others"):
+        resolve_explicit_executable(interpreter)
+
+    # preserve_path alone -- the EXACT pre-fix call resolve_current_interpreter
+    # made -- still raises, which is what broke CI. This pins the differential:
+    # the waiver comes from self_relaunch, not from path preservation.
+    with pytest.raises(ProcessSecurityError, match="writable by group/others"):
+        resolve_explicit_executable(interpreter, preserve_path=True)
+
+    # And a self-relaunch is still not a blanket bypass: every other check
+    # holds, so a directory or a missing path fails as before.
+    monkeypatch.setattr(sys, "executable", str(tmp_path))
+    with pytest.raises(ProcessSecurityError, match="not a regular file"):
+        resolve_current_interpreter()
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "absent"))
+    with pytest.raises(FileNotFoundError):
+        resolve_current_interpreter()
+
+
 def test_autostart_python_fallback_uses_safe_path_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

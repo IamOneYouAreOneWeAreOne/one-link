@@ -175,6 +175,7 @@ def _validate_executable(
     *,
     trusted_roots: Sequence[Path] | None,
     preserve_path: bool = False,
+    self_relaunch: bool = False,
 ) -> str:
     if not path.is_absolute():
         raise ProcessSecurityError("executable path must be absolute")
@@ -188,7 +189,7 @@ def _validate_executable(
     if os.name != "nt":
         if not os.access(resolved, os.X_OK):
             raise ProcessSecurityError(f"file is not executable: {resolved}")
-        if file_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        if file_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not self_relaunch:
             raise ProcessSecurityError(
                 f"executable is writable by group/others: {resolved}",
             )
@@ -214,12 +215,15 @@ def resolve_explicit_executable(
     executable: str | os.PathLike[str],
     *,
     preserve_path: bool = False,
+    self_relaunch: bool = False,
 ) -> str:
     """Validate an explicitly selected absolute application/helper path.
 
     ``preserve_path`` returns the supplied path instead of its realpath after
-    the identical checks. Reserved for re-launching this very interpreter --
-    use :func:`resolve_current_interpreter` rather than passing it directly.
+    the identical checks. ``self_relaunch`` additionally waives the
+    group/world-writable rejection. BOTH are reserved for re-launching this
+    very interpreter -- use :func:`resolve_current_interpreter` rather than
+    passing them directly.
     """
 
     path = Path(executable)
@@ -227,15 +231,21 @@ def resolve_explicit_executable(
         # Windows can route .bat/.cmd through a command processor even when
         # ``shell=False``. Restrict this boundary to native executable images.
         raise ProcessSecurityError("Windows executable must be a .exe or .com image")
-    return _validate_executable(path, trusted_roots=None, preserve_path=preserve_path)
+    return _validate_executable(
+        path,
+        trusted_roots=None,
+        preserve_path=preserve_path,
+        self_relaunch=self_relaunch,
+    )
 
 
 def resolve_current_interpreter() -> str:
     """Validate ``sys.executable`` for re-launch WITHOUT collapsing symlinks.
 
     Every safety check in :func:`resolve_explicit_executable` still runs --
-    absolute, exists, regular file, executable, not group/world-writable --
-    but the interpreter's own path is returned instead of its realpath.
+    absolute, exists, regular file, executable -- but the interpreter's own
+    path is returned instead of its realpath, and the group/world-writable
+    rejection is waived (see both rationales below).
 
     Collapsing the symlink is actively WRONG here. A virtualenv interpreter
     is a symlink to the system Python, and that path is precisely what makes
@@ -249,9 +259,26 @@ def resolve_current_interpreter() -> str:
     escaping a trusted directory. It cannot apply to the interpreter this
     process is already executing: that binary's identity is established by
     the fact that it is running us.
+
+    The group/world-writable rejection is waived for the SAME reason, and only
+    here. That check is a real defense when we choose to launch some OTHER
+    binary: a permissive mode means a third party could have replaced it
+    between our decision and the exec. It buys nothing against the interpreter
+    already running this code -- if it had been tampered with, the tampered
+    code is what is asking the question, so refusing to re-launch protects
+    nothing an attacker has not already taken. What it DOES do is make the
+    daemon unstartable on any host that ships a group-writable Python, which
+    includes GitHub's hosted toolcache (``/opt/hostedtoolcache/Python/*``,
+    mode 0775). Eight autostart/supervisor tests failed there for this reason
+    while passing on every developer machine. Other executables keep the
+    check: it stays mandatory in the ``trusted_roots`` system-tool path.
     """
 
-    return resolve_explicit_executable(sys.executable, preserve_path=True)
+    return resolve_explicit_executable(
+        sys.executable,
+        preserve_path=True,
+        self_relaunch=True,
+    )
 
 
 def resolve_system_executable(name: str, *, platform_name: str | None = None) -> str:
