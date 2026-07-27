@@ -212,7 +212,10 @@ def test_container_version_and_operator_docs_match_source_version():
 
     assert f'ONE_LINK_VERSION: "{version}"' in compose
     assert f'__version__ = "{version}"' in init
-    assert f"X-AppImage-Version={version}" in desktop
+    # Match the complete line: a bare substring check let 0.21.0 "match"
+    # X-AppImage-Version=0.21.0-alpha, shipping a stale desktop version
+    # behind a green gate.
+    assert f"X-AppImage-Version={version}\n" in desktop
     assert not re.search(r"(?m)^\s*(?:image:|docker run).+onelink/rendezvous:", operator_docs)
     assert "onelink/rendezvous:0.5.3" not in operator_docs
     assert "Do not pull `onelink/rendezvous:latest`" in operator_docs
