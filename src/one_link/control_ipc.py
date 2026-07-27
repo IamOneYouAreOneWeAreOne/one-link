@@ -38,7 +38,18 @@ CONTROL_NONCE_BYTES = 32
 CONTROL_HANDSHAKE_MAX_BYTES = 4 * 1024
 CONTROL_REQUEST_MAX_BYTES = 1024 * 1024
 CONTROL_RESPONSE_MAX_BYTES = 8 * 1024 * 1024
-CONTROL_HANDSHAKE_TIMEOUT_S = 3.0
+# Per-step cap on the mutual handshake. This exists to REAP A STUCK peer, not to
+# enforce responsiveness, so it must sit above worst-case event-loop scheduling
+# jitter on a loaded host rather than near typical localhost latency. At 3.0s it
+# did not: the daemon aborted handshakes that every client was still waiting on
+# (this module's own default round trip is 5.0s and the test harness allows 30s),
+# and because the daemon reports every handshake failure as the same
+# "unauthorized" frame, the result surfaced as a phantom authentication error on
+# busy CI runners. Deciding how long to wait for a REPLY belongs to the client;
+# this timeout only decides when the daemon stops holding a half-open connection.
+# Raising it is bounded by CONTROL_MAX_CONCURRENT_CONNECTIONS (64) on a
+# loopback-only socket, so the slow-client exposure stays capped either way.
+CONTROL_HANDSHAKE_TIMEOUT_S = 10.0
 CONTROL_RESPONSE_WRITE_TIMEOUT_S = 5.0
 CONTROL_CLOSE_TIMEOUT_S = 1.0
 CONTROL_MAX_CONCURRENT_CONNECTIONS = 64

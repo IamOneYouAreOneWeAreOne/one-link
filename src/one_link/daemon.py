@@ -35336,7 +35336,29 @@ class Daemon:
                 control_ipc.ControlProtocolError,
                 asyncio.TimeoutError,
                 OSError,
-            ):
+            ) as handshake_error:
+                # The RESPONSE stays byte-identical for every cause on purpose --
+                # a local prober must not learn which half of the handshake
+                # failed. But discarding the cause entirely made a slow host
+                # indistinguishable from a wrong secret: a handshake that merely
+                # exceeded CONTROL_HANDSHAKE_TIMEOUT_S was reported to the client
+                # as "unauthorized", and this daemon logged nothing at all. An
+                # operator then hunts a credential problem that does not exist.
+                # (Observed as an intermittent ControlAuthenticationError on
+                # loaded CI runners.) The cause goes to OUR log, never the wire.
+                if isinstance(handshake_error, asyncio.TimeoutError):
+                    log.warning(
+                        "control handshake TIMED OUT after %.1fs -- the client is "
+                        "being told 'unauthorized', but this is a slow/overloaded "
+                        "host, not a bad control secret",
+                        control_ipc.CONTROL_HANDSHAKE_TIMEOUT_S,
+                    )
+                else:
+                    log.warning(
+                        "control handshake rejected: %s: %s",
+                        type(handshake_error).__name__,
+                        handshake_error,
+                    )
                 with contextlib.suppress(Exception):
                     await self._unauthenticated_control_error(writer)
                 return
