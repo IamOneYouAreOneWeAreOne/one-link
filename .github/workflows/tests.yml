@@ -176,11 +176,23 @@ jobs:
           enable-cache: true
 
       - name: setup native CDC compiler
+        id: msys2
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
         with:
           msystem: UCRT64
           path-type: inherit
           install: mingw-w64-ucrt-x86_64-gcc
+      # setup-msys2 only wires gcc into its own msys2 shell wrapper; later
+      # pwsh/bash steps never see it, and it installs under RUNNER_TEMP --
+      # a location no compiler-ladder candidate probes. Put ucrt64\bin on
+      # PATH for every subsequent step so the ladder always has a linkable
+      # gcc even on images whose C:\msys64 lacks one.
+      - name: expose MSYS2 gcc to every later step
+        shell: pwsh
+        run: |
+          $bin = Join-Path "${{ steps.msys2.outputs.msys2-location }}" "ucrt64\bin"
+          if (-not (Test-Path (Join-Path $bin "gcc.exe"))) { throw "gcc.exe missing under $bin" }
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
 
       # build_binary.py treats one_link_native as MANDATORY for a stable
       # artifact and fails closed without it ("could not be imported"). This
