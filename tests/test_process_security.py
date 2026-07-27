@@ -399,16 +399,23 @@ def test_group_writable_interpreter_relaunches_but_other_binaries_still_rejected
     monkeypatch.setattr(sys, "executable", str(interpreter))
     assert resolve_current_interpreter() == str(interpreter)
 
-    # The SAME file as a chosen helper: still refused. The waiver is scoped to
-    # self-relaunch, not to "group-writable is fine now".
-    with pytest.raises(ProcessSecurityError, match="writable by group/others"):
-        resolve_explicit_executable(interpreter)
+    # And permitted through the PLAIN entry point with no flag threaded
+    # through. This is the class-closure property: updater's
+    # _resolve_target_python_executable resolves sys.executable itself and
+    # still failed on CI after the first fix, because that fix only taught
+    # resolve_current_interpreter about the waiver. Any call site that resolves
+    # the running interpreter is now covered, including ones not yet written.
+    assert resolve_explicit_executable(interpreter) == str(interpreter.resolve())
 
-    # preserve_path alone -- the EXACT pre-fix call resolve_current_interpreter
-    # made -- still raises, which is what broke CI. This pins the differential:
-    # the waiver comes from self_relaunch, not from path preservation.
+    # A DIFFERENT group-writable binary is still refused. The waiver is scoped
+    # to the interpreter executing us, not to "group-writable is fine now".
+    helper = tmp_path / "helper"
+    helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    helper.chmod(0o775)
     with pytest.raises(ProcessSecurityError, match="writable by group/others"):
-        resolve_explicit_executable(interpreter, preserve_path=True)
+        resolve_explicit_executable(helper)
+    with pytest.raises(ProcessSecurityError, match="writable by group/others"):
+        resolve_explicit_executable(helper, preserve_path=True)
 
     # And a self-relaunch is still not a blanket bypass: every other check
     # holds, so a directory or a missing path fails as before.

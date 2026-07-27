@@ -247,10 +247,19 @@ def _resolve_target_python_executable(
     environment. Preserve the absolute venv entry point only when its
     ``pyvenv.cfg`` proves the environment boundary; otherwise retain the
     stricter canonical executable returned by the process-security layer.
+
+    Re-launching THIS interpreter also waives the group/world-writable
+    rejection, for the reason given in :func:`resolve_current_interpreter`: the
+    binary already running this code cannot be made safer by refusing to run it
+    again. Without that, a host whose Python is group-writable -- GitHub's
+    hosted toolcache ships mode 0775 -- could not verify an update at all.
     """
 
     path = Path(executable)
-    validated_target = resolve_explicit_executable(path)
+    # Derived, never assumed: only the interpreter already executing us gets
+    # the waiver, so passing any OTHER interpreter here keeps the strict check.
+    self_relaunch = str(path) == sys.executable
+    validated_target = resolve_explicit_executable(path, self_relaunch=self_relaunch)
     if not path.is_absolute() or not path.is_symlink():
         return validated_target
     venv_config = path.parent.parent / "pyvenv.cfg"

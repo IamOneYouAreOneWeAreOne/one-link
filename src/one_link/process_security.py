@@ -170,6 +170,25 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
+def _is_running_interpreter(resolved: Path) -> bool:
+    """Is this path the very interpreter executing this process?
+
+    The group/world-writable rejection is waived for the running interpreter
+    (see :func:`resolve_current_interpreter` for why refusing to re-launch it
+    protects nothing). Detecting that here, rather than only honouring an
+    explicit caller flag, closes the whole class: the first fix threaded a
+    ``self_relaunch`` flag through :func:`resolve_current_interpreter`, and a
+    SECOND call site -- updater's ``_resolve_target_python_executable``, which
+    independently resolves ``sys.executable`` -- still failed on CI for exactly
+    the same reason. A new call site would have been just as easy to forget.
+    """
+
+    try:
+        return resolved == Path(sys.executable).resolve(strict=True)
+    except OSError:
+        return False
+
+
 def _validate_executable(
     path: Path,
     *,
@@ -189,7 +208,9 @@ def _validate_executable(
     if os.name != "nt":
         if not os.access(resolved, os.X_OK):
             raise ProcessSecurityError(f"file is not executable: {resolved}")
-        if file_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not self_relaunch:
+        if file_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not (
+            self_relaunch or _is_running_interpreter(resolved)
+        ):
             raise ProcessSecurityError(
                 f"executable is writable by group/others: {resolved}",
             )
