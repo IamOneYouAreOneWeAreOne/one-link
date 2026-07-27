@@ -67,11 +67,14 @@ def test_tagged_channel_404_falls_back_to_rolling_and_reports_stale() -> None:
     assert result.latest_commit == _REMOTE
     assert result.local_commit == _LOCAL
 
-    # The user must be told what to DO, because nothing can self-install.
+    # The user must be told what to DO. A rolling build can never
+    # self-install -- continuous builds hold no release authority -- so the
+    # honest action is a download, and the note says why.
     payload = result.to_dict()
     assert payload["can_self_install"] is False
     assert payload["action"] == "download"
     assert "weareone-link.org/download" in payload["action_url"]
+    assert "install authority" in payload["action_note"]
 
 
 def test_matching_commit_is_reported_same_not_stale() -> None:
@@ -263,8 +266,16 @@ def test_the_packager_stamps_the_real_commit(tmp_path) -> None:
     if len(head) != 40:
         return  # no git available; the packager's own warning path covers this
 
-    out = bb._write_build_stamp(tmp_path / "build-stamp.json")
+    out = bb._write_build_stamp(tmp_path)
     assert out is not None and out.is_file()
+    # PyInstaller keeps the source basename when bundling into a destination
+    # directory, and build_info reads only STAMP_FILENAME — a stamp under any
+    # other name ships but is invisible to the running app forever.
+    from one_link.build_info import STAMP_FILENAME
+
+    assert out.name == STAMP_FILENAME, (
+        "stamp written under a name build_info can never read back"
+    )
     written = json.loads(out.read_text(encoding="utf-8"))
     assert written["commit"] == head, "stamped a commit other than the one packaged"
     assert written["channel"] in {"rolling", "release"}

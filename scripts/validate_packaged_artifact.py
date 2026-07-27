@@ -55,6 +55,10 @@ REQUIRED_DATA_FRAGMENTS = (
     "one_link/web",
     "one_link/data",
     "one_link/_build",
+    # The build-identity stamp (build_info.STAMP_FILENAME). Without it an
+    # installed artifact cannot tell it is older than the published build,
+    # so a stampless spec is a distribution-contract failure, not a warning.
+    "one_link",
 )
 REQUIRED_STABLE_SUBMODULE_COLLECTORS = (
     "aiohttp",
@@ -615,10 +619,15 @@ def _stable_spec_structure_failures(text: str) -> list[str]:
         native_destination = f"one_link/native/{native_platform_tag()}"
         expected_destinations = {*REQUIRED_DATA_FRAGMENTS, native_destination}
         destinations = [destination for _source, destination in data_rows]
+        from one_link.build_info import STAMP_FILENAME
+
         expected_source_suffixes = {
             "one_link/web": "/src/one_link/web",
             "one_link/data": "/src/one_link/data",
             "one_link/_build": "/build/release-contract/runtime-source-manifest.json",
+            # PyInstaller keeps the source basename, and build_info reads
+            # only STAMP_FILENAME, so the exact name is part of the contract.
+            "one_link": "/build/release-contract/" + STAMP_FILENAME,
             native_destination: "/" + native_library_name() + ".sha256",
         }
         def _source_matches(source: str, suffix: str) -> bool:

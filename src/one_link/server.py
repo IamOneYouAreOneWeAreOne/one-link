@@ -28753,6 +28753,32 @@ class UIServer:
             preset_name=preset_value,
         )
 
+    async def _overlay_self_install_truth(self, payload: dict) -> dict:
+        """Overlay runtime install truth onto a pure CheckResult payload.
+
+        ``can_self_install`` becomes True exactly when the newer build is a
+        tagged release -- the rolling channel never carries install authority
+        -- AND this exact process proved the external-helper capability. It is
+        computed per response rather than stored in the 15-minute check cache
+        because the capability proof has its own shorter cache and can change
+        independently (a bundle member edited on disk must revoke the button).
+        """
+
+        if payload.get("status") != "newer" or payload.get("channel") == "rolling":
+            return payload
+        capability = await self._external_update_capability()
+        if not capability.available:
+            return payload
+        return {
+            **payload,
+            "can_self_install": True,
+            "action": "install",
+            "action_note": (
+                "A newer release is published. One Link can install it "
+                "in-app through the authenticated external updater."
+            ),
+        }
+
     async def api_update_check(self, request: web.Request) -> web.Response:
         import time as _time
         from one_link import __version__ as _local_ver
@@ -28777,6 +28803,7 @@ class UIServer:
         if not force_fresh and self._update_cache is not None:
             ts, payload = self._update_cache
             if now - ts < self._update_cache_ttl_s:
+                payload = await self._overlay_self_install_truth(payload)
                 return web.json_response({**payload, "cached": True})
 
         # fetch_latest is synchronous (one urllib call). Bounce off the
@@ -28824,6 +28851,7 @@ class UIServer:
             )
 
         self._update_cache = (now, payload)
+        payload = await self._overlay_self_install_truth(payload)
         return web.json_response({**payload, "cached": False})
 
     # ─── /api/update/plan ───────────────────────────────────────────

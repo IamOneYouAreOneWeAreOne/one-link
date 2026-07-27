@@ -13976,6 +13976,19 @@
   // latest CheckResult cached at ``state._updateInfo``. The modal's
   // CTAs read from there; dismissal of either banner or chip writes
   // the same localStorage key so the surfaces stay consistent.
+  // The rolling channel's tag is `auto-latest` forever, so a version-keyed
+  // dismissal would hide EVERY future rolling update after one click. Key
+  // rolling dismissals by the published build commit instead — a new build
+  // means a new commit means the banner honestly returns.
+  function _updateDismissKey(info) {
+    const id = info.channel === "rolling" && info.latest_commit
+      ? info.latest_commit
+      : info.latest_version;
+    return `ol_update_dismissed:${id}`;
+  }
+  function _shortCommit(commit) {
+    return typeof commit === "string" ? commit.slice(0, 9) : "";
+  }
   async function checkForUpdate() {
     const banner = $("#update-banner");
     const chip   = $("#header-update-chip");
@@ -13993,7 +14006,7 @@
       chip?.classList.remove("show");
       return;
     }
-    const dismissKey = `ol_update_dismissed:${info.latest_version}`;
+    const dismissKey = _updateDismissKey(info);
     if (localStorage.getItem(dismissKey) === "1") {
       banner?.classList.remove("show");
       chip?.classList.remove("show");
@@ -14003,21 +14016,33 @@
     const txt = $("#update-banner-text");
     const link = $("#update-banner-link");
     if (txt) {
-      // Honest, install-method-agnostic copy. The banner now nudges
-      // the user toward the in-app modal with the exact release and
-      // verification contract.
-      txt.textContent =
-        ` Latest is ${info.latest_version}; you're on v${info.local_version}.`;
+      // Honest, install-method-agnostic copy. A rolling build's version
+      // string never changes ("auto-latest" vs "0.21.0-alpha" says
+      // nothing), so its identity is the build commit.
+      if (info.channel === "rolling") {
+        const latest = _shortCommit(info.latest_commit);
+        const local = _shortCommit(info.local_commit);
+        txt.textContent = local
+          ? ` A newer build (${latest}) is published; you're running ${local}.`
+          : ` A newer build (${latest}) is published.`;
+      } else {
+        txt.textContent =
+          ` Latest is ${info.latest_version}; you're on v${info.local_version}.`;
+      }
     }
     if (link && info.latest_url) {
       link.href = info.latest_url;
     }
     // The executable handoff is dynamic capability truth, not an environment
     // opt-in. /api/me exposes it only after hashing the complete managed
-    // bundle and the separately frozen updater helper.
+    // bundle and the separately frozen updater helper — AND the server must
+    // say this exact newer build carries install authority
+    // (can_self_install): rolling builds never do, so offering the button
+    // for one would promise an install that must fail closed.
     const installBtn = $("#update-banner-install");
     if (installBtn) {
-      const canInstall = state.me?.update_install_available === true;
+      const canInstall = state.me?.update_install_available === true
+        && info.can_self_install === true;
       installBtn.style.display = canInstall ? "" : "none";
       installBtn.textContent = "Install update";
     }
@@ -14029,7 +14054,9 @@
       if (labelEl) labelEl.textContent = "Update";
       chip.setAttribute(
         "title",
-        `Update to ${info.latest_version} (you're on v${info.local_version}) — click for release notes`,
+        info.channel === "rolling"
+          ? `Update to build ${_shortCommit(info.latest_commit)} — click for release notes`
+          : `Update to ${info.latest_version} (you're on v${info.local_version}) — click for release notes`,
       );
     }
   }
@@ -14037,11 +14064,20 @@
     const info = state._updateInfo;
     const backdrop = $("#update-modal-backdrop");
     if (!backdrop || !info) return;
-    // Versions
+    // Versions. Rolling builds all call themselves the same version, so
+    // the honest identity to diff is the build commit.
     const cur = $("#um-current-version");
     const nxt = $("#um-latest-version");
-    if (cur) cur.textContent = "v" + (info.local_version || "?");
-    if (nxt) nxt.textContent = info.latest_version || "latest";
+    if (info.channel === "rolling") {
+      if (cur) {
+        cur.textContent = _shortCommit(info.local_commit)
+          || "v" + (info.local_version || "?");
+      }
+      if (nxt) nxt.textContent = _shortCommit(info.latest_commit) || "latest";
+    } else {
+      if (cur) cur.textContent = "v" + (info.local_version || "?");
+      if (nxt) nxt.textContent = info.latest_version || "latest";
+    }
     // Release-notes body — re-uses the renderMarkdownDoc renderer
     // built for chat. info.latest.body is the GitHub Release's
     // markdown notes; some releases have none, so we degrade
@@ -14074,10 +14110,14 @@
       releaseLink.href = info.latest_url;
     }
     if (dl) {
-      const canInstall = state.me?.update_install_available === true;
+      const rolling = info.channel === "rolling";
+      const canInstall = state.me?.update_install_available === true
+        && info.can_self_install === true;
       dl.href = canInstall
         ? "#install-authenticated-update"
-        : (info.latest_url || "https://github.com/IamOneYouAreOneWeAreOne/one-link/releases");
+        : rolling
+          ? (info.action_url || "https://weareone-link.org/download/")
+          : (info.latest_url || "https://github.com/IamOneYouAreOneWeAreOne/one-link/releases");
       dl.style.display = "";
       if (canInstall) {
         dl.removeAttribute("target");
@@ -14090,17 +14130,28 @@
       if (label) {
         label.textContent = canInstall
           ? "Install verified update"
-          : "Inspect exact release";
+          : rolling
+            ? "Download latest build"
+            : "Inspect exact release";
       }
     }
     if (howto) {
-      if (state.me?.update_install_available === true) {
+      const canInstall = state.me?.update_install_available === true
+        && info.can_self_install === true;
+      if (canInstall) {
         howto.textContent =
           'One Link will hand this exact release to a separate authenticated '
           + 'updater. It independently verifies the tagged release workflow, '
           + 'Sigstore bundles, SHA-256 evidence, SBOM, complete application '
           + 'tree, rollback order, and post-restart daemon/UI health. The old '
           + 'bundle stays recoverable unless every check passes.';
+      } else if (info.channel === "rolling") {
+        howto.textContent =
+          'This update comes from the rolling channel, which is refreshed by '
+          + 'downloading and reinstalling: only tagged, Sigstore-signed '
+          + 'releases carry in-app install authority. Download the latest '
+          + 'build and install it over this one — your data lives outside '
+          + 'the application folder and stays in place.';
       } else {
         howto.textContent =
           'This runtime is not a validated standalone bundle, so in-app '
@@ -14120,10 +14171,7 @@
     const info = state._updateInfo;
     if (info && info.latest_version) {
       try {
-        localStorage.setItem(
-          `ol_update_dismissed:${info.latest_version}`,
-          "1",
-        );
+        localStorage.setItem(_updateDismissKey(info), "1");
       } catch (_e) {}
     }
     $("#update-banner")?.classList.remove("show");
@@ -14131,7 +14179,10 @@
   }
 
   async function installAuthenticatedUpdate() {
-    if (state.me?.update_install_available !== true) {
+    if (
+      state.me?.update_install_available !== true
+      || state._updateInfo?.can_self_install !== true
+    ) {
       openUpdateModal();
       return;
     }
@@ -14239,7 +14290,11 @@
     const install = document.getElementById("update-modal-download");
     cancel?.addEventListener("click", closeUpdateModal);
     install?.addEventListener("click", (ev) => {
+      // Hijack the anchor into the in-app install ONLY when this exact
+      // newer build carries install authority; otherwise the anchor is a
+      // plain download/inspect link and must stay one.
       if (state.me?.update_install_available !== true) return;
+      if (state._updateInfo?.can_self_install !== true) return;
       ev.preventDefault();
       installAuthenticatedUpdate();
     });

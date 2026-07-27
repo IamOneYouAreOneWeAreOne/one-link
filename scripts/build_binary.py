@@ -354,7 +354,7 @@ def _resolve_build_commit(repo: Path) -> str:
     return candidate
 
 
-def _write_build_stamp(destination: Path) -> Path | None:
+def _write_build_stamp(destination_dir: Path) -> Path | None:
     """Write the bundled build stamp, or None when the commit is unknown.
 
     An unstamped artifact degrades to "cannot compare" rather than claiming a
@@ -362,6 +362,11 @@ def _write_build_stamp(destination: Path) -> Path | None:
     would make every installed copy nag about an update forever. In CI the
     commit is always known, so this refusing path only affects an exported
     source tree with no git and no override.
+
+    The file name comes from build_info.STAMP_FILENAME, never from here:
+    PyInstaller keeps the source basename when bundling into a destination
+    directory, and build_info only ever reads that exact name, so a locally
+    chosen name would ship a stamp the running app can never find.
     """
 
     repo = Path(__file__).resolve().parent.parent
@@ -375,14 +380,14 @@ def _write_build_stamp(destination: Path) -> Path | None:
         return None
     sys.path.insert(0, str(repo / "src"))
     try:
-        from one_link.build_info import write_stamp
+        from one_link.build_info import STAMP_FILENAME, write_stamp
     finally:
         sys.path.pop(0)
     ref = (os.environ.get("GITHUB_REF") or "").strip()
     channel = "release" if ref.startswith("refs/tags/v") else "rolling"
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination_dir.mkdir(parents=True, exist_ok=True)
     stamp = write_stamp(
-        destination,
+        destination_dir / STAMP_FILENAME,
         commit=commit,
         built_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         channel=channel,
@@ -789,7 +794,7 @@ def main(
     # Bundled as data rather than written into a .py because the build hashes
     # the source tree for its own manifest, and rewriting a module during
     # packaging would make that record describe bytes never present in git.
-    build_stamp = _write_build_stamp(build / "release-contract" / "build-stamp.json")
+    build_stamp = _write_build_stamp(build / "release-contract")
     add_build_stamp = [f"{build_stamp}{sep}one_link"] if build_stamp else []
     add_native: list[str] = []
     add_native_sidecar: list[str] = []

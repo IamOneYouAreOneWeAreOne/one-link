@@ -208,9 +208,42 @@ def test_check_for_update_uses_dynamic_install_capability():
     html = WEB_INDEX.read_text(encoding="utf-8")
     fn_start = html.find("async function checkForUpdate")
     assert fn_start > 0
-    fn_body = html[fn_start:fn_start + 3000]
+    fn_body = html[fn_start:fn_start + 4500]
     assert "state.me?.update_install_available === true" in fn_body
+    # Both halves of the predicate: the bundle proved the helper capability
+    # AND the server says this exact newer build carries install authority.
+    assert "info.can_self_install === true" in fn_body
     assert 'installBtn.style.display = canInstall ? "" : "none"' in fn_body
+
+
+def test_rolling_channel_never_offers_the_install_button():
+    """A rolling 'newer' must never render the in-app install CTA. The
+    install planner only accepts tagged, Sigstore-signed releases, so the
+    button would promise an install that is guaranteed to fail closed.
+    Every install entry point therefore also requires the server's
+    can_self_install bit, and the rolling modal offers the download."""
+    html = WEB_INDEX.read_text(encoding="utf-8")
+    # Render sites (banner button, modal CTA, modal howto) require it true…
+    assert html.count("can_self_install === true") >= 3
+    # …and the two install entry points (guard, anchor intercept) bail
+    # when it is anything else.
+    assert html.count("can_self_install !== true") >= 2
+    assert "Download latest build" in html
+    assert "only tagged, Sigstore-signed" in html
+
+
+def test_rolling_dismissal_is_keyed_by_commit_not_the_frozen_tag():
+    """The rolling tag is `auto-latest` forever, so a version-keyed
+    dismissal would silence EVERY future rolling update after one click.
+    Rolling dismissals key on the published build commit instead."""
+    html = WEB_INDEX.read_text(encoding="utf-8")
+    fn_start = html.find("function _updateDismissKey")
+    assert fn_start > 0, "shared dismiss-key helper missing"
+    fn_body = html[fn_start:fn_start + 600]
+    assert 'info.channel === "rolling"' in fn_body
+    assert "info.latest_commit" in fn_body
+    # Both the show path and the dismiss path use the shared key.
+    assert html.count("_updateDismissKey(info)") >= 2
 
 
 def test_install_button_calls_only_confirmed_install_endpoint():
@@ -237,7 +270,7 @@ def test_banner_opens_details_and_modal_owns_confirmed_install():
     html = WEB_INDEX.read_text(encoding="utf-8")
     handler_idx = html.find("// The banner first opens the confirmation/details surface")
     assert handler_idx > 0, "JS handler for update-banner-install not found"
-    body = html[handler_idx:handler_idx + 2000]
+    body = html[handler_idx:handler_idx + 3000]
     assert 'getElementById("update-banner-install")' in body
     assert "openUpdateModal();" in body
     assert 'getElementById("update-modal-download")' in body

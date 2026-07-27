@@ -90,9 +90,12 @@ class CheckResult:
     local_commit: str = ""
     latest_commit: str = ""
     channel: str = "release"     # 'release' | 'rolling'
-    # In-place update is disabled until transactional full-app rollback exists
-    # (see updater.write_updater_script), so a stale build must tell the user to
-    # re-download rather than imply a button will do it.
+    # Whether THIS newer build can be installed in-place by the authenticated
+    # external helper. The pure checker cannot know the runtime, and a rolling
+    # build can never self-install -- continuous builds deliberately hold no
+    # release authority; only tagged, Sigstore-signed releases do. The server
+    # overlays True exactly when the newer build is a tagged release AND this
+    # exact process proved the external-helper capability.
     can_self_install: bool = False
 
     def to_dict(self) -> dict:
@@ -101,14 +104,22 @@ class CheckResult:
         if self.latest:
             d["latest_url"] = self.latest.html_url
             d["latest_published_at"] = self.latest.published_at
-        # Say what the user should DO, since nothing here can install for them.
+        # Say what the user should DO. The server upgrades this to an in-app
+        # install exactly when the runtime proves it can perform one.
         if self.status == "newer":
             d["action"] = "download"
             d["action_url"] = "https://weareone-link.org/download/"
-            d["action_note"] = (
-                "A newer build is published. This app cannot update itself yet, "
-                "so download and reinstall to get it."
-            )
+            if self.channel == "rolling":
+                d["action_note"] = (
+                    "A newer build is published. Rolling builds are refreshed "
+                    "by downloading and reinstalling; only tagged, "
+                    "Sigstore-signed releases carry in-app install authority."
+                )
+            else:
+                d["action_note"] = (
+                    "A newer release is published. Download and reinstall "
+                    "to get it."
+                )
         return d
 
 

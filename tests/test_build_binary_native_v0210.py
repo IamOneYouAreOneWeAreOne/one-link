@@ -302,6 +302,11 @@ def test_build_binary_collects_native_modules_without_local_build_metadata(
         mod,
         isolated_output_root,
     )
+    # The fake runner intercepts `git rev-parse` too, so without this the
+    # build-identity stamp exists exactly when the ambient environment
+    # provides GITHUB_SHA (CI yes, laptop no) and the spec gate flips with
+    # it. Pin the commit so the packaged contract is identical everywhere.
+    monkeypatch.setenv("ONE_LINK_BUILD_COMMIT", "5f" * 20)
 
     assert mod.main(output_root=isolated_output_root) == 0
     assert fake_exe.is_file()

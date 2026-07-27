@@ -321,6 +321,112 @@ async def test_api_update_check_returns_check_result(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_tagged_newer_with_proven_capability_offers_in_app_install(monkeypatch):
+    """can_self_install turns True exactly when the newer build is a TAGGED
+    release and this process proved the external-helper capability — and it
+    is per-response truth: losing the capability revokes the install action
+    even while the 15-minute check cache is still warm."""
+    monkeypatch.setenv("ONE_LINK_UPDATE_CHECK", "1")
+    from one_link.server import UIServer
+    from one_link import update_check as uc_mod
+
+    def fake_fetch_latest(local_version, *, owner=None, repo=None,
+                          timeout=None, fetch=None):
+        return uc_mod.CheckResult(
+            status="newer",
+            local_version=local_version,
+            latest_version="v0.22.0",
+            latest=uc_mod.ReleaseInfo(
+                tag="v0.22.0",
+                name="One Link v0.22.0",
+                html_url="https://github.com/x/y/releases/tag/v0.22.0",
+                published_at="2026-05-12T12:00:00Z",
+            ),
+        )
+    monkeypatch.setattr(uc_mod, "fetch_latest", fake_fetch_latest)
+
+    daemon = SimpleNamespace(
+        state=None,
+        discovery=None,
+        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa", hostname="me"),
+    )
+    server = UIServer(daemon)
+    server._update_cache = None
+
+    async def proven_capability(*, fresh=False):
+        return SimpleNamespace(
+            available=True, reason="available", platform="windows-x86_64"
+        )
+    monkeypatch.setattr(server, "_external_update_capability", proven_capability)
+
+    body = json.loads((await server.api_update_check(SimpleNamespace(query={}))).text)
+    assert body["can_self_install"] is True
+    assert body["action"] == "install"
+
+    async def lost_capability(*, fresh=False):
+        return SimpleNamespace(
+            available=False,
+            reason="managed_bundle_validation_failed",
+            platform=None,
+        )
+    monkeypatch.setattr(server, "_external_update_capability", lost_capability)
+
+    body = json.loads((await server.api_update_check(SimpleNamespace(query={}))).text)
+    assert body["cached"] is True
+    assert body["can_self_install"] is False
+    assert body["action"] == "download"
+
+
+@pytest.mark.asyncio
+async def test_rolling_newer_never_offers_in_app_install(monkeypatch):
+    """Even a fully proven standalone bundle must not be offered an in-app
+    install of a ROLLING build: continuous builds hold no release authority
+    and the install planner would fail closed. The honest action is a
+    download."""
+    monkeypatch.setenv("ONE_LINK_UPDATE_CHECK", "1")
+    from one_link.server import UIServer
+    from one_link import update_check as uc_mod
+
+    def fake_check(*args, **kwargs):
+        return uc_mod.CheckResult(
+            status="newer",
+            local_version="0.21.0-alpha",
+            latest_version="auto-latest",
+            latest=uc_mod.ReleaseInfo(
+                tag="auto-latest",
+                name=f"Rolling build (master {'e' * 40})",
+                html_url="https://github.com/x/y/releases/tag/auto-latest",
+                published_at="2026-07-27T12:00:00Z",
+            ),
+            local_commit="a" * 40,
+            latest_commit="e" * 40,
+            channel="rolling",
+        )
+    monkeypatch.setattr(uc_mod, "check_for_update", fake_check)
+
+    daemon = SimpleNamespace(
+        state=None,
+        discovery=None,
+        me=SimpleNamespace(fingerprint="aa" * 32, short_id="aaaaaaaa", hostname="me"),
+    )
+    server = UIServer(daemon)
+    server._update_cache = None
+
+    async def proven_capability(*, fresh=False):
+        return SimpleNamespace(
+            available=True, reason="available", platform="windows-x86_64"
+        )
+    monkeypatch.setattr(server, "_external_update_capability", proven_capability)
+
+    body = json.loads((await server.api_update_check(SimpleNamespace(query={}))).text)
+    assert body["status"] == "newer"
+    assert body["channel"] == "rolling"
+    assert body["can_self_install"] is False
+    assert body["action"] == "download"
+    assert "install authority" in body["action_note"]
+
+
+@pytest.mark.asyncio
 async def test_api_update_check_caches_within_ttl(monkeypatch):
     """Two back-to-back calls must hit the cache the second time so
     we don't hammer the GitHub API on every UI reload."""
