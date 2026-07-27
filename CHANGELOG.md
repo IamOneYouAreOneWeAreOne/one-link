@@ -23,6 +23,34 @@ chunk-store transport gained daemon integration, but this alpha changelog does
 not establish production readiness, full platform parity, or a verified
 release.
 
+### 2026-07-26 public download refreshed, and two defects that could stop a real install
+
+- The public download channel had been serving artifacts built on 2026-05-18
+  while every fix since then landed on master unseen. It is now published from
+  a commit whose `tests`, `security`, and platform-build gates were all green,
+  and every artifact carries a GitHub build-provenance attestation verifiable
+  with `gh attestation verify <file> --repo IamOneYouAreOneWeAreOne/one-link`.
+  Read that narrowly: it binds the bytes to the publishing workflow, so a third
+  party cannot substitute an upload. It is not a code signature, and it is not
+  reproducible-build evidence. There is still no signed, reproducible,
+  tagged release; `release.yml` remains the only channel intended for that and
+  has not yet been run.
+- The daemon could not start at all on a host whose Python is
+  group-writable. `process_security` refuses to execute a group/world-writable
+  binary, which is correct for a binary we choose to launch and meaningless for
+  the interpreter already executing us: if it had been tampered with, the
+  tampered code is what asks the question. The waiver is now scoped to that one
+  case and applies wherever the running interpreter is resolved. Every other
+  executable, including the containment-checked system-tool path, keeps the
+  rejection.
+- A folder-archive commit could abort with `folder_archive_source_changed`
+  after correctly defending itself. The final integrity check compared the
+  source inode's `ctime`, and POSIX `rename(2)`/`unlink(2)` update `ctime`
+  without touching content, so a pathname swap -- exactly the attack the
+  descriptor binding defeats -- failed the commit it had just protected. Content
+  integrity is unchanged: the whole file is still re-hashed through the bound
+  descriptor, and `dev`/`ino`/`size`/`mtime` remain hard rejects.
+
 ### 2026-07-23 live post-quantum daemon-channel handshake
 
 - Current daemon channels use a distinct v3 wire handshake with a signed,

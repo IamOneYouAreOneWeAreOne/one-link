@@ -232,6 +232,14 @@ def four_peer_swarm():
     finally:
         for d in daemons:
             _stop_daemon(d["proc"])
+            # Drop the cached control secret with the daemon that owns it. This
+            # cache is keyed by control port, and the OS recycles ephemeral
+            # ports between tests in the same process, so a leaked entry gets
+            # sent to whichever LATER daemon is handed the same port -- which
+            # rejects the MAC. That leak produced an intermittent
+            # ControlAuthenticationError on Windows from the shared harness, and
+            # this fixture had the identical defect with four ports per test.
+            _CONTROL_SECRETS.pop(int(d["control_port"]), None)
             try:
                 d["log_fh"].close()
             except Exception:

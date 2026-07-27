@@ -10,7 +10,7 @@ import time
 import pytest
 
 from one_link import control_ipc
-from tests.harness import _CONTROL_SECRETS, daemon_pair, request
+from tests.harness import control_secret_for, daemon_pair, request
 
 
 pytestmark = pytest.mark.timeout(120)
@@ -25,7 +25,7 @@ def _open_tail(control_port: int) -> tuple[socket.socket, list[dict]]:
     credential, exchange = control_ipc.begin_authenticated_request(
         s,
         {"cmd": "tail"},
-        secret=_CONTROL_SECRETS[control_port],
+        secret=control_secret_for(control_port),
     )
     stream = s.makefile("rb")
     first = stream.readline(control_ipc.CONTROL_RESPONSE_MAX_BYTES + 2)

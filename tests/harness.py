@@ -49,7 +49,11 @@ from one_link import control_ipc
 # _spawn_daemon), so it skips PER TEST: a hermetic test sharing a file
 # with a daemon-spawning one still runs in the default gate.
 LIVE_INTEGRATION_ENV = "ONE_LINK_RUN_LIVE_INTEGRATION"
-_CONTROL_SECRETS: dict[int, str] = {}
+# port -> (secret, home). The home is carried so teardown can purge
+# unconditionally and a stale entry can be re-read from its source of
+# truth: ephemeral control ports are recycled by the OS, so the port
+# alone is not a safe key for trust material.
+_CONTROL_SECRETS: dict[int, tuple[str, Path]] = {}
 
 
 def live_integration_enabled() -> bool:
@@ -188,13 +192,40 @@ def request(control_port: int, *, timeout: float = 30.0, **req) -> dict:
     max_attempts = len(backoff_s) + 1
     for attempt in range(max_attempts):
         try:
-            secret = _CONTROL_SECRETS[int(control_port)]
-            return control_ipc.request_control(
-                control_port,
-                req,
-                timeout=timeout,
-                secret=secret,
-            )
+            secret, home = _CONTROL_SECRETS[int(control_port)]
+            try:
+                return control_ipc.request_control(
+                    control_port,
+                    req,
+                    timeout=timeout,
+                    secret=secret,
+                )
+            except control_ipc.ControlAuthenticationError as auth_error:
+                # A cached secret can be STALE: this cache is keyed by control
+                # port, and the OS recycles ephemeral ports between tests. If a
+                # previous daemon's entry outlived it, a new daemon holding the
+                # same port is sent the wrong secret and rejects the MAC. Re-read
+                # the authoritative secret from this daemon's own home and retry
+                # once, so a leaked entry cannot fail a healthy daemon.
+                try:
+                    fresh = control_ipc.read_control_secret(home / "data")
+                except Exception:
+                    # The home may already be torn down. Surface the
+                    # AUTHENTICATION failure that actually happened rather than a
+                    # secret-file error raised by the recovery attempt, which
+                    # would replace the real diagnosis with a downstream symptom.
+                    raise auth_error from None
+                if fresh == secret:
+                    # The cached secret already matches the daemon's own file, so
+                    # the rejection is real. Never retry it into silence.
+                    raise
+                _CONTROL_SECRETS[int(control_port)] = (fresh, home)
+                return control_ipc.request_control(
+                    control_port,
+                    req,
+                    timeout=timeout,
+                    secret=fresh,
+                )
         except (ConnectionAbortedError, ConnectionResetError, OSError) as e:
             last_exc = e
         if attempt < len(backoff_s):
@@ -417,8 +448,53 @@ def _stop(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
-    if resolved_control_port is not None:
-        _CONTROL_SECRETS.pop(int(resolved_control_port), None)
+    # Purge by port when known, but NEVER rely on that alone: resolved_control_port
+    # comes from a best-effort _read_port that returns None once the daemon has
+    # removed its port file, and this cleanup used to be skipped entirely in that
+    # case. The leaked entry then poisoned whichever later daemon the OS handed
+    # the same recycled port, surfacing as an intermittent
+    # ControlAuthenticationError on Windows. Purging by home as well makes
+    # cleanup unconditional, because the home is what this teardown actually owns.
+    purge_control_secrets(port=resolved_control_port, home=resolved_home)
+
+
+def control_secret_for(port: int) -> str:
+    """The cached control secret for a daemon's control port.
+
+    Use this instead of indexing ``_CONTROL_SECRETS`` directly: the cache stores
+    ``(secret, home)`` so teardown can purge by home and a stale entry can be
+    re-read from source, and callers should not have to know that shape.
+    """
+
+    secret, _home = _CONTROL_SECRETS[int(port)]
+    return secret
+
+
+def purge_control_secrets(
+    *,
+    port: int | None = None,
+    home: Path | None = None,
+) -> None:
+    """Drop cached control secrets for a torn-down daemon.
+
+    Purging by port alone was NOT enough. The port comes from a best-effort
+    ``_read_port`` that returns None once the daemon has deleted its port file,
+    and the old cleanup was skipped entirely in that case. The leaked entry then
+    poisoned whichever later daemon the OS handed the same recycled ephemeral
+    port, surfacing as an intermittent ControlAuthenticationError on Windows
+    (which recycles ports aggressively). The home is what a teardown actually
+    owns, so purging by home makes the cleanup unconditional.
+    """
+
+    if port is not None:
+        _CONTROL_SECRETS.pop(int(port), None)
+    if home is not None:
+        for cached_port in [
+            cached_port
+            for cached_port, (_secret, cached_home) in _CONTROL_SECRETS.items()
+            if cached_home == home
+        ]:
+            _CONTROL_SECRETS.pop(cached_port, None)
 
 
 def _read_log(p: Path, n: int = 4000) -> str:
@@ -443,7 +519,7 @@ def _bring_up(home: Path, log: Path, label: str, mdns_type: str | None = None) -
         while time.time() < secret_deadline and not secret_path.is_file():
             time.sleep(0.05)
         secret = control_ipc.read_control_secret(home / "data")
-        _CONTROL_SECRETS[ctrl] = secret
+        _CONTROL_SECRETS[ctrl] = (secret, home)
         if not _wait_port(ctrl, timeout=8.0):
             raise RuntimeError(
                 f"daemon {label} control socket not responsive\n--- log ---\n"
