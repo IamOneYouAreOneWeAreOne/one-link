@@ -388,18 +388,25 @@ async def test_quiet_transition_waits_for_update_worker_to_really_return(
     entered = threading.Event()
     release = threading.Event()
 
-    def _fetch(local_version: str):
+    # Stub the function the handler actually calls. It moved from fetch_latest
+    # to check_for_update, which tries the tagged channel and falls back to the
+    # rolling prerelease -- /releases/latest excludes prereleases, so the old
+    # entry point could never see the channel users download from. The stub
+    # takes no required arguments because the handler passes none.
+    def _fetch(*_args, **_kwargs):
         entered.set()
         if not release.wait(timeout=5.0):
             raise TimeoutError("test did not release update worker")
         events.append("update:returned")
+        from one_link import __version__ as local_version
+
         return update_check.CheckResult(
             status="same",
             local_version=local_version,
             latest_version=local_version,
         )
 
-    monkeypatch.setattr(update_check, "fetch_latest", _fetch)
+    monkeypatch.setattr(update_check, "check_for_update", _fetch)
     state = _State("just_works")
     discovery = _Discovery(events, running=True)
     daemon = _daemon(state, discovery, events)

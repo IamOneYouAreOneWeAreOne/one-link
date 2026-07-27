@@ -64,7 +64,10 @@ def _stage_distribution_source(destination: Path) -> None:
 
 
 def test_stable_distribution_contract_exactly_matches_source_tree() -> None:
-    assert len(build_identity.EXPECTED_STABLE_RUNTIME_MODULES) == 202
+    # 203: one_link.build_info added 2026-07-27. It stamps the source commit
+    # into the artifact so an installed build can tell it is stale; being in
+    # this tuple is also what gets it bundled as a PyInstaller hidden import.
+    assert len(build_identity.EXPECTED_STABLE_RUNTIME_MODULES) == 203
     assert build_identity.EXPECTED_STABLE_RUNTIME_MODULES == tuple(
         sorted(set(build_identity.EXPECTED_STABLE_RUNTIME_MODULES))
     )
@@ -118,9 +121,11 @@ def test_distribution_source_contract_hashes_every_packaged_python_file() -> Non
         if "__pycache__" not in path.parts
     }
     packaged_python = {name for name in contract.payload_hashes if name.endswith(".py")}
-    assert len(source_python) == 218
+    # 219 / 238: one_link/build_info.py added 2026-07-27 so an installed
+    # build can compare its stamped commit against the published one.
+    assert len(source_python) == 219
     assert packaged_python == source_python
-    assert len(contract.payload_hashes) == 237
+    assert len(contract.payload_hashes) == 238
 
 
 def test_developer_only_modules_are_not_stable_distribution_requirements() -> None:

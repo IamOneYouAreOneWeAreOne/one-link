@@ -55,10 +55,12 @@ import argparse
 import hashlib
 import importlib
 import json
+import os
 import platform
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -313,6 +315,80 @@ def _runtime_source_manifest_bytes(repo: Path) -> bytes:
         "modules": modules,
     }
     return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _resolve_build_commit(repo: Path) -> str:
+    """The commit being packaged: CI's SHA, an explicit override, else git.
+
+    Order matters. GITHUB_SHA is authoritative in CI because the checkout may be
+    detached and `git rev-parse HEAD` on a merge ref can name a commit that does
+    not exist upstream.
+    """
+
+    for key in ("ONE_LINK_BUILD_COMMIT", "GITHUB_SHA"):
+        value = (os.environ.get(key) or "").strip().lower()
+        if len(value) == 40:
+            try:
+                bytes.fromhex(value)
+                return value
+            except ValueError:
+                pass
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    candidate = (out.stdout or "").strip().lower()
+    if out.returncode != 0 or len(candidate) != 40:
+        return ""
+    try:
+        bytes.fromhex(candidate)
+    except ValueError:
+        return ""
+    return candidate
+
+
+def _write_build_stamp(destination: Path) -> Path | None:
+    """Write the bundled build stamp, or None when the commit is unknown.
+
+    An unstamped artifact degrades to "cannot compare" rather than claiming a
+    version it cannot substantiate, which is the honest failure: a bogus commit
+    would make every installed copy nag about an update forever. In CI the
+    commit is always known, so this refusing path only affects an exported
+    source tree with no git and no override.
+    """
+
+    repo = Path(__file__).resolve().parent.parent
+    commit = _resolve_build_commit(repo)
+    if not commit:
+        print(
+            "[build] WARNING: no build commit available (no GITHUB_SHA, no "
+            "ONE_LINK_BUILD_COMMIT, no git). The artifact will not be able to "
+            "detect that it is out of date."
+        )
+        return None
+    sys.path.insert(0, str(repo / "src"))
+    try:
+        from one_link.build_info import write_stamp
+    finally:
+        sys.path.pop(0)
+    ref = (os.environ.get("GITHUB_REF") or "").strip()
+    channel = "release" if ref.startswith("refs/tags/v") else "rolling"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    stamp = write_stamp(
+        destination,
+        commit=commit,
+        built_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        channel=channel,
+    )
+    print(f"[build] stamped {channel} build {commit[:12]} -> {stamp.name}")
+    return stamp
 
 
 def _write_runtime_source_manifest(repo: Path, destination: Path) -> Path:
@@ -707,6 +783,14 @@ def main(
     add_runtime_contract = [
         f"{runtime_source_manifest}{sep}one_link/_build",
     ]
+    # Stamp WHICH COMMIT this artifact came from. Without it every rolling
+    # build reports the same __version__, so an installed copy cannot tell it is
+    # older than what the download button serves -- and cannot tell its user.
+    # Bundled as data rather than written into a .py because the build hashes
+    # the source tree for its own manifest, and rewriting a module during
+    # packaging would make that record describe bytes never present in git.
+    build_stamp = _write_build_stamp(build / "release-contract" / "build-stamp.json")
+    add_build_stamp = [f"{build_stamp}{sep}one_link"] if build_stamp else []
     add_native: list[str] = []
     add_native_sidecar: list[str] = []
     if staged_native_library is not None and staged_native_sidecar is not None:
@@ -1067,6 +1151,7 @@ def main(
         [add_data_web]
         + add_data_package
         + add_runtime_contract
+        + add_build_stamp
         + list(add_models[1::2])
         + list(add_native_sidecar[1::2])
     )

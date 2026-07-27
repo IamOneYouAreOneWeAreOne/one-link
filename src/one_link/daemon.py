@@ -4864,7 +4864,13 @@ class Daemon:
         # purely a "while the UI is open and nothing else has run"
         # nudge.
         try:
-            from one_link.update_check import fetch_latest
+            # check_for_update, not fetch_latest: /releases/latest excludes
+            # prereleases, and the rolling prerelease is the only release
+            # this project publishes, so fetch_latest always answered
+            # 'unknown' here. This background loop is the ONLY thing that
+            # ever tells a user their build is stale, and it was structurally
+            # unable to do so.
+            from one_link.update_check import check_for_update
         except Exception:
             return
         from one_link import __version__ as _local_ver
@@ -4937,7 +4943,7 @@ class Daemon:
                     # began while this loop was waiting for another request.
                     if not _check_enabled_live():
                         continue
-                    result = await loop.run_in_executor(None, lambda: fetch_latest(_local_ver))
+                    result = await loop.run_in_executor(None, check_for_update)
                 status = result.status
                 version = result.latest_version
                 # Privacy panel audit trail — record this outbound
@@ -4958,6 +4964,13 @@ class Daemon:
                         self.ui_server.broadcast({
                             "type": "update_status",
                             "status": status,
+                            # No self-install exists yet, so a stale build must
+                            # point at the download page rather than imply a
+                            # button will do it.
+                            "channel": result.channel,
+                            "local_commit": result.local_commit,
+                            "latest_commit": result.latest_commit,
+                            "can_self_install": result.can_self_install,
                             "local_version": _local_ver,
                             "latest_version": version,
                         })

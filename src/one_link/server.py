@@ -28756,7 +28756,7 @@ class UIServer:
     async def api_update_check(self, request: web.Request) -> web.Response:
         import time as _time
         from one_link import __version__ as _local_ver
-        from one_link.update_check import fetch_latest
+        from one_link.update_check import check_for_update
 
         # All update endpoints honor the same sovereignty resolver as the
         # background loop. The default Just Works preset discloses its
@@ -28795,7 +28795,16 @@ class UIServer:
                     }
                 )
             try:
-                result = await loop.run_in_executor(None, lambda: fetch_latest(_local_ver))
+                # check_for_update, not fetch_latest: the tagged channel
+                # (/releases/latest) 404s because the only release this
+                # project publishes is the rolling PRERELEASE that every
+                # download route serves, and that endpoint excludes
+                # prereleases. fetch_latest therefore always answered
+                # 'unknown' and the UI stayed silent while installed builds
+                # fell months behind. check_for_update prefers a real
+                # release and falls back to rolling, so this needs no edit
+                # on the day release.yml cuts one.
+                result = await loop.run_in_executor(None, check_for_update)
             except Exception as e:  # safety net — fetch_latest already swallows
                 log.warning("update_check unexpected error: %s", e)
                 payload = {

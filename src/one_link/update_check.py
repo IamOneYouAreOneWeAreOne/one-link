@@ -50,6 +50,14 @@ MAX_RELEASE_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_RELEASE_NOTES_CHARS = 64 * 1024
 _REPO_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 
+# The rolling prerelease every /download/* route resolves to.
+ROLLING_TAG = "auto-latest"
+
+# A rolling release has no version to compare -- its tag never changes. Its
+# identity is the commit it was built from, which the publisher writes into the
+# release title and body ("Rolling build (master <sha>)").
+_COMMIT_RE = re.compile(r"\b([0-9a-f]{40})\b")
+
 
 @dataclass
 class ReleaseInfo:
@@ -77,6 +85,15 @@ class CheckResult:
     latest_version: Optional[str] = None
     latest: Optional[ReleaseInfo] = None
     error: Optional[str] = None  # short reason when status='unknown'
+    # Rolling-channel identity. A rolling tag never changes, so the comparison
+    # is between build commits rather than versions.
+    local_commit: str = ""
+    latest_commit: str = ""
+    channel: str = "release"     # 'release' | 'rolling'
+    # In-place update is disabled until transactional full-app rollback exists
+    # (see updater.write_updater_script), so a stale build must tell the user to
+    # re-download rather than imply a button will do it.
+    can_self_install: bool = False
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -84,6 +101,14 @@ class CheckResult:
         if self.latest:
             d["latest_url"] = self.latest.html_url
             d["latest_published_at"] = self.latest.published_at
+        # Say what the user should DO, since nothing here can install for them.
+        if self.status == "newer":
+            d["action"] = "download"
+            d["action_url"] = "https://weareone-link.org/download/"
+            d["action_note"] = (
+                "A newer build is published. This app cannot update itself yet, "
+                "so download and reinstall to get it."
+            )
         return d
 
 
@@ -126,12 +151,38 @@ def compare_versions(local: str, remote: str) -> str:
 
 # ─── HTTP fetch ────────────────────────────────────────────────────────
 
-def _build_url(owner: str, repo: str) -> str:
+def _validate_repo(owner: str, repo: str) -> None:
     if not _REPO_COMPONENT_RE.fullmatch(str(owner)):
         raise ValueError("invalid update repository owner")
     if not _REPO_COMPONENT_RE.fullmatch(str(repo)):
         raise ValueError("invalid update repository name")
+
+
+def _build_url(owner: str, repo: str) -> str:
+    _validate_repo(owner, repo)
     return f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+
+
+def _build_rolling_url(owner: str, repo: str, tag: str = ROLLING_TAG) -> str:
+    """The rolling channel, which ``releases/latest`` cannot see.
+
+    ``/releases/latest`` EXCLUDES prereleases by definition. The rolling channel
+    is published as a prerelease on purpose, and it is the only release this
+    project has ever cut, so that endpoint returns a bare 404:
+
+        {"message": "Not Found", "status": "404"}
+
+    fetch_latest turned that into status='unknown' and the UI stayed silent, so
+    an installed build could not discover it was months behind -- including
+    behind fixes for a startup crash. Asking for the tag directly is the only
+    way to see the channel users actually download from.
+    """
+
+    _validate_repo(owner, repo)
+    return (
+        f"https://api.github.com/repos/{owner}/{repo}/releases/tags/"
+        f"{urllib.parse.quote(tag, safe='')}"
+    )
 
 
 # Type alias for the fetch hook — lets tests inject a fake without
@@ -163,6 +214,131 @@ def _default_fetch(url: str, timeout: float) -> dict:
         if len(raw) > MAX_RELEASE_RESPONSE_BYTES:
             raise ValueError("GitHub release response exceeds 2 MiB")
         return json.loads(raw.decode("utf-8", "strict"))
+
+
+def release_commit(payload: dict) -> str:
+    """The 40-hex commit a rolling release was built from, or "".
+
+    Read from the title first and the notes second, because the publisher writes
+    it into both and the title is the shorter, less forgeable surface. Never
+    guesses: without a commit the caller must report 'unknown', not 'newer'.
+    """
+
+    for key in ("name", "body"):
+        value = payload.get(key)
+        if not isinstance(value, str):
+            continue
+        match = _COMMIT_RE.search(value.lower())
+        if match:
+            return match.group(1)
+    return ""
+
+
+def compare_rolling(local_commit: str, remote_commit: str) -> str:
+    """Rolling channel status from commits alone.
+
+    There is no ordering here and none is invented: two different commits mean
+    "the published build is not the one you are running", which for a channel
+    that only ever moves forward is what a user needs to know. An unknown local
+    commit -- a source checkout, or an artifact built before stamping existed --
+    yields 'unknown' so a developer is never nagged and no false claim is made.
+    """
+
+    if not local_commit or not remote_commit:
+        return "unknown"
+    return "same" if local_commit == remote_commit else "newer"
+
+
+def fetch_rolling(
+    local_version: str,
+    *,
+    local_commit: str = "",
+    owner: str = DEFAULT_OWNER,
+    repo: str = DEFAULT_REPO,
+    tag: str = ROLLING_TAG,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    fetch: FetchFn = _default_fetch,
+) -> CheckResult:
+    """Check the rolling prerelease channel. Never raises."""
+
+    url = ""
+    try:
+        url = _build_rolling_url(owner, repo, tag)
+        payload = fetch(url, timeout)
+    except urllib.error.HTTPError as e:
+        log.info("update_check: rolling channel HTTP %s for %s", e.code, url)
+        return CheckResult(
+            status="unknown", local_version=local_version, error=f"http {e.code}"
+        )
+    except urllib.error.URLError as e:
+        return CheckResult(
+            status="unknown",
+            local_version=local_version,
+            error=f"network: {getattr(e, 'reason', e)}",
+        )
+    except (json.JSONDecodeError, TimeoutError, UnicodeError, ValueError) as e:
+        return CheckResult(
+            status="unknown", local_version=local_version, error=f"parse: {e}"
+        )
+    except Exception as e:
+        return CheckResult(
+            status="unknown",
+            local_version=local_version,
+            error=f"fetch: {type(e).__name__}",
+        )
+
+    if not isinstance(payload, dict):
+        return CheckResult(
+            status="unknown",
+            local_version=local_version,
+            error="rolling release payload is not an object",
+        )
+    remote_commit = release_commit(payload)
+    if not remote_commit:
+        return CheckResult(
+            status="unknown",
+            local_version=local_version,
+            error="rolling release does not record a build commit",
+        )
+
+    assets = payload.get("assets")
+    if not isinstance(assets, list) or len(assets) > 5_000:
+        return CheckResult(
+            status="unknown",
+            local_version=local_version,
+            error="malformed or excessive release assets",
+        )
+
+    def _bounded_text(value: object, limit: int) -> str:
+        return value[:limit] if isinstance(value, str) else ""
+
+    tag_value = payload.get("tag_name")
+    resolved_tag = tag_value.strip() if isinstance(tag_value, str) else tag
+    if not resolved_tag or len(resolved_tag) > 128:
+        resolved_tag = tag
+
+    info = ReleaseInfo(
+        tag=resolved_tag,
+        name=_bounded_text(payload.get("name"), 512) or resolved_tag,
+        html_url=(
+            f"https://github.com/{owner}/{repo}/releases/tag/"
+            f"{urllib.parse.quote(resolved_tag, safe='')}"
+        ),
+        published_at=_bounded_text(payload.get("published_at"), 64),
+        body=_bounded_text(payload.get("body"), MAX_RELEASE_NOTES_CHARS),
+        prerelease=bool(payload.get("prerelease")),
+        draft=bool(payload.get("draft")),
+        asset_count=len(assets),
+    )
+    return CheckResult(
+        status=compare_rolling(local_commit, remote_commit),
+        local_version=local_version,
+        latest_version=resolved_tag,
+        latest=info,
+        local_commit=local_commit,
+        latest_commit=remote_commit,
+        channel="rolling",
+    )
 
 
 def fetch_latest(
@@ -263,4 +439,62 @@ def fetch_latest(
         local_version=local_version,
         latest_version=tag,
         latest=info,
+    )
+
+
+def check_for_update(
+    local_version: str | None = None,
+    *,
+    local_commit: str | None = None,
+    owner: str = DEFAULT_OWNER,
+    repo: str = DEFAULT_REPO,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    fetch: FetchFn = _default_fetch,
+) -> CheckResult:
+    """The one call a caller should make: "am I running the newest build?"
+
+    Tries the tagged-release channel first and falls back to the rolling
+    prerelease, because today there IS no tagged release -- ``releases/latest``
+    404s -- and the rolling prerelease is what every /download/* route serves.
+    Preferring the tagged channel means this needs no change on the day
+    release.yml finally cuts one.
+
+    Falls back only when the tagged channel yields nothing usable, never to
+    downgrade a real answer: a tagged release that says 'same' or 'older' is the
+    authoritative verdict and is returned as-is.
+    """
+
+    if local_version is None:
+        from one_link import __version__ as local_version_default
+
+        local_version = local_version_default
+    if local_commit is None:
+        from one_link.build_info import build_commit
+
+        local_commit = build_commit()
+
+    tagged = fetch_latest(
+        local_version, owner=owner, repo=repo, timeout=timeout, fetch=fetch
+    )
+    if tagged.status != "unknown":
+        return tagged
+
+    rolling = fetch_rolling(
+        local_version,
+        local_commit=local_commit,
+        owner=owner,
+        repo=repo,
+        timeout=timeout,
+        fetch=fetch,
+    )
+    if rolling.status != "unknown":
+        return rolling
+    # Both unknown: report the rolling reason, since that is the channel a user
+    # actually downloads from, but keep the tagged error when rolling had none.
+    return CheckResult(
+        status="unknown",
+        local_version=local_version,
+        local_commit=local_commit,
+        channel="rolling",
+        error=rolling.error or tagged.error,
     )
