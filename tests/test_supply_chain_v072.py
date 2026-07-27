@@ -395,10 +395,12 @@ def test_workflows_use_frozen_uv_and_explicit_root_for_native_builds():
     assert sync_count >= 15
     # 10th audited site 2026-07-25: full_suite_and_e2e.yml builds the native
     # engine so the suite exercises the real fail-closed PQ channel path.
-    # 11 as of the tests.yml native build: the fast gate exercises
-    # tests/test_channel.py, whose live handshake fails closed without the
-    # native pqkem ABI, so it must build the engine like full_suite does.
-    assert nested_maturin_count == 11
+    # 12 as of the tests.yml native builds. Two were added there: the test
+    # matrix (test_channel's live handshake fails closed without the native
+    # pqkem ABI) and build_windows_binary (build_binary.py treats
+    # one_link_native as mandatory for a stable artifact). Both were invisible
+    # while the tests gate could not conclude.
+    assert nested_maturin_count == 12
 
 
 def test_windows_native_binding_uses_shell_matching_its_commands():

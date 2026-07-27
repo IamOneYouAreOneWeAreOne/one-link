@@ -182,8 +182,28 @@ jobs:
           path-type: inherit
           install: mingw-w64-ucrt-x86_64-gcc
 
+      # build_binary.py treats one_link_native as MANDATORY for a stable
+      # artifact and fails closed without it ("could not be imported"). This
+      # job never built it -- invisible until now, because `needs: test` kept
+      # the job skipped while the tests gate could not conclude. The MSYS2 gcc
+      # above is for the C CDC scanner; the pyo3 engine needs Rust + maturin,
+      # exactly as auto_build.yml and the test job do.
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup default 1.96.0
+
+      - name: Cache cargo target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: native
+
       - name: install
         run: uv sync --frozen --python python --extra dev --extra release
+
+      - name: Build native (release)
+        working-directory: native
+        run: uv run --project .. --frozen --extra release maturin develop --release --locked
 
       - name: build
         # NO --allow-native-cdc-fallback. build_binary.py now REFUSES that flag
