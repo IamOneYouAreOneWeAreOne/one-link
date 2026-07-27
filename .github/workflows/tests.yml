@@ -115,12 +115,22 @@ jobs:
         run: |
           uv run --frozen --extra dev --extra release python -m pytest tests/test_identity.py tests/test_wire.py tests/test_paths.py tests/test_channel.py tests/test_discovery.py tests/test_cli.py -v --timeout=120 --timeout-method=thread
 
+      # Step name is load-bearing: test_live_daemon_workflow_lanes_cannot_
+      # silently_skip finds this lane by exact name to prove it opts into real
+      # daemons. Renaming it makes that gate find zero steps and fail, so the
+      # four-peer swarm addition is described in the comment below instead.
       - name: integration tests (two-daemon, mDNS)
         # Live two-daemon + mDNS work is the likeliest place for a socket wait
         # to never return on a runner, so it gets a longer per-test budget than
         # the unit step but the same "name the hang" guarantee.
+        #
+        # test_four_peer_swarm is included because it was running NOWHERE: its
+        # four tests are gated behind ONE_LINK_RUN_LIVE_INTEGRATION, and the
+        # only steps that set that variable enumerate files explicitly and
+        # omitted it. Multi-peer swarm transfer is a shipped capability whose
+        # live tests had never executed in CI. They pass in 33 s.
         run: |
-          uv run --frozen --extra dev --extra release python -m pytest tests/test_integration.py tests/test_raw_protocol.py tests/test_resilience.py tests/test_tail.py -v --timeout=300 --timeout-method=thread
+          uv run --frozen --extra dev --extra release python -m pytest tests/test_integration.py tests/test_raw_protocol.py tests/test_resilience.py tests/test_tail.py tests/test_four_peer_swarm.py -v --timeout=600 --timeout-method=thread
         env:
           ONE_LINK_RUN_LIVE_INTEGRATION: "1"
           PYTHONUNBUFFERED: "1"
