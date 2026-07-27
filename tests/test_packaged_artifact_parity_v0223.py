@@ -1315,6 +1315,12 @@ def test_final_release_zip_is_safely_extracted_and_all_gates_run_from_download(
     bundle.mkdir()
     executable = bundle / "one-link.exe"
     executable.write_bytes(b"launcher")
+    # package_bundle REFUSES a POSIX bundle whose executable has no execute bit
+    # -- correctly, since such a zip is unusable once extracted. This fixture
+    # created a mode-0644 launcher, so the test only ever passed on Windows
+    # (where the check is skipped) and failed on Linux for a fixture defect
+    # rather than a product one. Model a real bundle instead.
+    executable.chmod(0o755)
     release_zip = tmp_path / "one-link-windows-x86_64.zip"
     packager.package_bundle(
         bundle,
