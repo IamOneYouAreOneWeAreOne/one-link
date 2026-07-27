@@ -166,10 +166,28 @@ jobs:
             gh release create "$TAG" --prerelease --target "$SHA" \
               --title "Rolling build (master $SHA)" --notes "initialising"
           fi
-          for existing in $(gh release view "$TAG" --json assets --jq '.assets[].name'); do
-            gh release delete-asset "$TAG" "$existing" --yes || true
-          done
+          # Upload FIRST, then prune. The original order deleted every asset
+          # before uploading any, so an upload that failed part-way left the
+          # release empty and every website download button returning 404 --
+          # precisely the outage this workflow exists to prevent. --clobber
+          # already replaces same-named assets, so the delete pass is only
+          # needed for assets absent from the new set, and it is safe to run
+          # afterwards: at no point is the release without a complete set.
           gh release upload "$TAG" out/* --clobber
+          published=""
+          for f in out/*; do
+            published="$published $(basename "$f")"
+          done
+          for existing in $(gh release view "$TAG" --json assets --jq '.assets[].name'); do
+            keep=0
+            for name in $published; do
+              if [ "$existing" = "$name" ]; then keep=1; break; fi
+            done
+            if [ "$keep" -eq 0 ]; then
+              echo "pruning stale asset: $existing"
+              gh release delete-asset "$TAG" "$existing" --yes || true
+            fi
+          done
           {
             echo "Rolling continuous build from master \`$SHA\`."
             echo

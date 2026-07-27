@@ -374,6 +374,30 @@ def test_rolling_publisher_is_deliberate_gated_and_unsigned():
     assert "gh release create v" not in text
 
 
+def test_rolling_publisher_never_empties_the_release_before_uploading():
+    """The download button must never see a release with no assets.
+
+    The first version of this workflow deleted every existing asset and THEN
+    uploaded the new set. An upload that failed part-way -- a network blip on a
+    2 GB transfer -- would leave the prerelease empty and every website
+    /download/* route returning 404, which is the exact outage the workflow
+    exists to prevent. Upload (with --clobber) must therefore come first, and
+    the prune of no-longer-produced assets second.
+    """
+    text = (_WORKFLOWS / "publish_rolling.yml").read_text(encoding="utf-8")
+    upload_at = text.find("gh release upload")
+    delete_at = text.find("gh release delete-asset")
+    assert upload_at != -1, "the publisher must upload the new asset set"
+    assert delete_at != -1, "the publisher must prune assets it no longer builds"
+    assert upload_at < delete_at, (
+        "publish_rolling.yml deletes assets before uploading: a failed upload "
+        "would strand the public download with an empty release"
+    )
+    # --clobber is what makes upload-first correct: without it, uploading over
+    # an existing asset name fails and the refresh silently keeps stale bytes.
+    assert "--clobber" in text
+
+
 def test_workflows_use_frozen_uv_and_explicit_root_for_native_builds():
     sync_count = 0
     nested_maturin_count = 0
