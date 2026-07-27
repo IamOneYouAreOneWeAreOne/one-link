@@ -350,14 +350,28 @@ def _ensure_library() -> Path:
 
     src = cache / f"ol_native_cdc_{digest}.c"
     src.write_text(_SOURCE, encoding="utf-8")
+    compile_with_compiler_fallback(src, lib)
+    return lib
+
+
+def compile_with_compiler_fallback(src: Path, lib: Path) -> str:
+    """Compile the CDC source trying EVERY usable compiler; return the winner.
+
+    A driver that exists is not proof it can link (MSVC-target clang without
+    a developer environment fails at LNK1181), and the accelerator being
+    unavailable blocks the whole installer build -- so one unusable toolchain
+    must not mask a working one sitting next to it.
+
+    This is the ONE compile path for both the runtime self-build and
+    scripts/build_native_cdc.py. The 636bc7c fallback originally lived only
+    inside the runtime cache path, and the packaging script kept calling the
+    first-hit search directly -- so CI kept dying at LNK1181 on runner images
+    whose PATH surfaced clang first, exactly the failure the fix existed for.
+    """
+
     candidates = _candidate_c_compilers()
     if not candidates:
         raise RuntimeError("no C compiler found for native CDC")
-    # Try every compiler before giving up. A driver that exists is not proof
-    # it can link (MSVC-target clang without a developer environment fails at
-    # LNK1181), and the accelerator being unavailable blocks the whole
-    # installer build -- so one unusable toolchain must not mask a working
-    # one sitting next to it.
     failures: list[str] = []
     for index, compiler in enumerate(candidates):
         try:
@@ -378,7 +392,7 @@ def _ensure_library() -> Path:
                 "native CDC compile failed with every available compiler: "
                 + "; ".join(failures)
             ) from exc
-        return lib
+        return compiler
     raise RuntimeError("no C compiler found for native CDC")
 
 

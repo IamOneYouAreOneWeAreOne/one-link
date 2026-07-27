@@ -664,12 +664,17 @@ def test_build_native_cdc_explicit_output_does_not_touch_package_tree(
         if path.is_file()
     }
     output_dir = tmp_path / "native-stage"
-    monkeypatch.setattr(native_cdc, "_find_c_compiler", lambda: "fake-cc")
+    # This test pins OUTPUT-DIR ISOLATION, not compilation. The script now
+    # compiles through the shared try-every-compiler ladder, which also
+    # ABI-validates the produced library -- so the fake bytes need the
+    # candidate list and the validator stubbed alongside _compile.
+    monkeypatch.setattr(native_cdc, "_candidate_c_compilers", lambda: ["fake-cc"])
     monkeypatch.setattr(
         native_cdc,
         "_compile",
         lambda _compiler, _source, library: library.write_bytes(b"fresh-cdc"),
     )
+    monkeypatch.setattr(native_cdc, "validate_native_cdc_library", lambda _lib: None)
     monkeypatch.setattr(
         sys,
         "argv",

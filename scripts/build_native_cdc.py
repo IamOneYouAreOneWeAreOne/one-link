@@ -22,8 +22,8 @@ def main() -> int:
 
     from one_link.native_cdc import (
         _SOURCE,
-        _compile,
-        _find_c_compiler,
+        _candidate_c_compilers,
+        compile_with_compiler_fallback,
         native_library_name,
         native_platform_tag,
     )
@@ -42,8 +42,11 @@ def main() -> int:
     )
     ns = ap.parse_args()
 
-    compiler = _find_c_compiler()
-    if compiler is None:
+    # Presence check only -- selection happens inside the fallback ladder.
+    # Importing the first-hit search here is what silently bypassed the
+    # try-every-compiler fix and kept CI dying at LNK1181 on images whose
+    # PATH surfaced an unlinkable MSVC-target clang first.
+    if not _candidate_c_compilers():
         msg = "[native-cdc] no C compiler found; package will use Python fallback"
         print(msg)
         return 2 if ns.required else 0
@@ -59,9 +62,9 @@ def main() -> int:
     src.write_text(_SOURCE, encoding="utf-8")
 
     try:
-        _compile(compiler, src, lib)
+        compiler = compile_with_compiler_fallback(src, lib)
     except Exception as exc:
-        print(f"[native-cdc] build failed with {compiler}: {exc}")
+        print(f"[native-cdc] build failed: {exc}")
         return 1 if ns.required else 0
 
     size = lib.stat().st_size
