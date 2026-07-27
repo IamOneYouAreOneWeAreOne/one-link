@@ -26849,9 +26849,10 @@
   // points at the GitHub repo's CHANGELOG.
   const WHATS_NEW_KEY = "one_link.last_seen_version";
   const WHATS_NEW_HIGHLIGHTS = {
-    "0.21.0-alpha": {
-      headline: "v0.21 · reliability and product polish",
+    "0.21.0": {
+      headline: "v0.21 · reliability, polish, and a self-updating One Link",
       items: [
+        "One Link now updates itself: one click hands the exact signed release to an external updater that verifies Sigstore signatures, checksums, and the SBOM, swaps A/B with automatic rollback, and only commits after the new build proves healthy.",
         "Send button never silently hangs — every outbound message gets a status pill (Sending → Queued → Failed → Retry) and a 25s hard timeout that falls into the offline queue.",
         "Click any photo to open a fullscreen lightbox. Arrow keys / swipe move between every photo in this conversation.",
         "Long pasted messages collapse to a preview with a Show more toggle so the chat stays readable.",
@@ -26964,7 +26965,7 @@
   // so we surface a clear "restart One Link" banner instead of
   // letting the user smack into mysterious 404s on endpoints the
   // running daemon doesn't have yet. Bump on every release.
-  const PAGE_BUILT_FOR = "0.21.0-alpha";
+  const PAGE_BUILT_FOR = "0.21.0";
   const PAGE_SOURCE_FINGERPRINT = "__ONE_LINK_SOURCE_FINGERPRINT__";
 
   // v0.21.x: silent-retry helper for boot-time API calls. The

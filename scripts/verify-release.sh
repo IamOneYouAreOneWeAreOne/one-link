@@ -48,8 +48,8 @@ Usage:
   bash scripts/verify-release.sh <artifact-path> <release-tag>
 
 Examples:
-  bash scripts/verify-release.sh one-link-linux-x86_64.zip v0.21.0-alpha
-  bash scripts/verify-release.sh one_link-0.21.0a0-py3-none-any.whl v0.21.0-alpha
+  bash scripts/verify-release.sh one-link-linux-x86_64.zip v0.21.0
+  bash scripts/verify-release.sh one_link-0.21.0-py3-none-any.whl v0.21.0
 
 The directory containing <artifact-path> must also contain:
   - SHA256SUMS         (signed hash manifest)

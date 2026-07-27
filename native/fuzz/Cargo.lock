@@ -682,7 +682,7 @@ dependencies = [
 
 [[package]]
 name = "ol_capability"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "subtle",
@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "ol_chunk"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "fastcdc",
@@ -704,14 +704,14 @@ dependencies = [
 
 [[package]]
 name = "ol_codegen"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "ol_confidential"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -729,7 +729,7 @@ dependencies = [
 
 [[package]]
 name = "ol_crdt"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "thiserror",
@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "ol_device_mesh"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "argon2",
  "blake3",
@@ -755,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "ol_discovery"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "ol_duress"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "subtle",
@@ -806,21 +806,21 @@ dependencies = [
 
 [[package]]
 name = "ol_grammar"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "ol_homology"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "ol_hwkey"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "subtle",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "ol_onion"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "aead",
  "blake3",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "ol_pair_qr"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "ol_pqsig"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -874,14 +874,14 @@ dependencies = [
 
 [[package]]
 name = "ol_prefetch"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "ol_proximity_pair"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "thiserror",
@@ -889,14 +889,14 @@ dependencies = [
 
 [[package]]
 name = "ol_routing"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "ol_threshold_recovery"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "rand_core 0.6.4",
@@ -907,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "ol_wal"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "crc32c",
  "fs2",

@@ -1916,7 +1916,7 @@ wheels = [
 
 [[package]]
 name = "one-link"
-version = "0.21.0a0"
+version = "0.21.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -2068,7 +2068,7 @@ release-tools = [
 
 [[package]]
 name = "one-link-native"
-version = "0.21.0a0"
+version = "0.21.0"
 source = { directory = "native" }
 
 [[package]]

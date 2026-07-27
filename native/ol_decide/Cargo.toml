@@ -1,6 +1,6 @@
 [package]
 name = "ol_decide"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 edition = "2021"
 description = "One Link: universal Decide trait + Context struct for per-event context-aware decisions"
 license = "AGPL-3.0-or-later"

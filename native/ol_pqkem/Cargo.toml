@@ -1,6 +1,6 @@
 [package]
 name = "ol_pqkem"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 edition = "2021"
 description = "One Link file engine: PQ-hybrid KEM (ML-KEM-768 + X25519, BLAKE3 combiner) per ADR-0017"
 license = "AGPL-3.0-or-later"

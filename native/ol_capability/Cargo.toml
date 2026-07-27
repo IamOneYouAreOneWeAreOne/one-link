@@ -1,6 +1,6 @@
 [package]
 name = "ol_capability"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 edition = "2021"
 description = "One Link file engine: macaroon-style capability layer per ADR-0021"
 license = "AGPL-3.0-or-later"

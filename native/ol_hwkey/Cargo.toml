@@ -1,6 +1,6 @@
 [package]
 name = "ol_hwkey"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 edition = "2021"
 description = "One Link file engine: hardware-bound keys (TOFU-degrading) per ADR-0023"
 license = "AGPL-3.0-or-later"

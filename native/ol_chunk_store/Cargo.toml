@@ -1,6 +1,6 @@
 [package]
 name = "ol_chunk_store"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 edition = "2021"
 description = "One Link file engine: chunk_log + manifest_log + LSM index + bloom filter front (ADR-0003, ADR-0005)"
 license = "AGPL-3.0-or-later"

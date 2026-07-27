@@ -1197,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "ol_aead"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "ol_align"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "proptest",
  "thiserror 1.0.69",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "ol_bandit"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -1241,7 +1241,7 @@ dependencies = [
 
 [[package]]
 name = "ol_bloom"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "criterion",
  "hex",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "ol_canon"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -1263,7 +1263,7 @@ dependencies = [
 
 [[package]]
 name = "ol_capability"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1276,7 +1276,7 @@ dependencies = [
 
 [[package]]
 name = "ol_chunk"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1292,7 +1292,7 @@ dependencies = [
 
 [[package]]
 name = "ol_chunk_store"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "bloomfilter",
  "criterion",
@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "ol_codegen"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "ol_coherence_field"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -1328,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "ol_compress"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "lz4_flex",
  "proptest",
@@ -1338,7 +1338,7 @@ dependencies = [
 
 [[package]]
 name = "ol_confidential"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -1361,7 +1361,7 @@ dependencies = [
 
 [[package]]
 name = "ol_crdt"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1372,14 +1372,14 @@ dependencies = [
 
 [[package]]
 name = "ol_decide"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "ol_device_mesh"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "argon2",
  "blake3",
@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "ol_discovery"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "ol_duress"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1438,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "ol_erasure"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "ol_fec"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "criterion",
  "hex",
@@ -1462,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "ol_fountain"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1474,7 +1474,7 @@ dependencies = [
 
 [[package]]
 name = "ol_fskit"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "ol_fuse",
  "tempfile",
@@ -1483,7 +1483,7 @@ dependencies = [
 
 [[package]]
 name = "ol_fuse"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1495,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "ol_grammar"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "ol_homology"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -1513,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "ol_hwkey"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "ol_netcode"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "proptest",
@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "ol_onion"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "aead",
  "blake3",
@@ -1558,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "ol_pair_qr"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1576,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "ol_pqkem"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1593,7 +1593,7 @@ dependencies = [
 
 [[package]]
 name = "ol_pqsig"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1611,7 +1611,7 @@ dependencies = [
 
 [[package]]
 name = "ol_prefetch"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -1620,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "ol_proximity_pair"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1630,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "ol_quic"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "ol_radio_batcher"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "proptest",
  "thiserror 1.0.69",
@@ -1662,7 +1662,7 @@ dependencies = [
 
 [[package]]
 name = "ol_ratchet"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1676,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "ol_routing"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -1685,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "ol_selector"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "ol_decide",
  "proptest",
@@ -1694,7 +1694,7 @@ dependencies = [
 
 [[package]]
 name = "ol_threshold_recovery"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1707,7 +1707,7 @@ dependencies = [
 
 [[package]]
 name = "ol_transfer"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "ol_wal"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "crc32c",
  "criterion",
@@ -1746,7 +1746,7 @@ dependencies = [
 
 [[package]]
 name = "ol_winfs"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "ol_fuse",
  "tempfile",
@@ -1761,7 +1761,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "one_link_native"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 dependencies = [
  "bytes",
  "curve25519-dalek",

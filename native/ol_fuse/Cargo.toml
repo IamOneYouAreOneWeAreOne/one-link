@@ -1,6 +1,6 @@
 [package]
 name = "ol_fuse"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 edition = "2021"
 description = "One Link file engine: filesystem backend with a real Linux FUSE mount adapter."
 license = "AGPL-3.0-or-later"

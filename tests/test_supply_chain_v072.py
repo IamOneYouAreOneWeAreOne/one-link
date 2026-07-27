@@ -147,7 +147,14 @@ def test_uv_lock_native_dependency_is_local_and_version_aligned():
     packages = {package["name"]: package for package in lock["package"]}
     native = packages["one-link-native"]
     assert native["source"] == {"directory": "native"}
-    assert native["version"] == "0.21.0a0"
+    # Alignment means the LOCKED native version is the PEP 440 normalization
+    # of the real project version -- derive it, so a release bump cannot
+    # leave this asserting a stale literal while claiming alignment.
+    from packaging.version import Version
+
+    from one_link import __version__ as core_version
+
+    assert Version(native["version"]) == Version(core_version)
 
 
 # ─── pyproject.toml: [tool.bandit] ─────────────────────────────────

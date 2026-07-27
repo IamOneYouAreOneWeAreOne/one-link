@@ -1,6 +1,6 @@
 [package]
 name = "ol_quic"
-version = "0.21.0-alpha.0"
+version = "0.21.0"
 edition = "2021"
 description = "One Link file engine: QUIC transport via quinn, identity-bound TLS per ADR-0009 + ADR-0010"
 license = "AGPL-3.0-or-later"

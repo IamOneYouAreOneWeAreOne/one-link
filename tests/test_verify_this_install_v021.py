@@ -683,8 +683,12 @@ def test_runtime_import_smoke_imports_every_stable_module_and_rejects_preview(
         bundle / "_internal" / "one_link_native" / f"one_link_native{extension_suffix}"
     )
     native_package.one_link_native = native_extension
-    native_package.__version__ = "0.21.0-alpha.0"
-    native_package.chunk_version = "0.21.0-alpha.0"
+    # The smoke compares native against the REAL core version; track it
+    # dynamically so a release bump cannot strand this fixture.
+    from one_link import __version__ as _core_version
+
+    native_package.__version__ = f"{_core_version}.0"
+    native_package.chunk_version = f"{_core_version}.0"
     native_modules = {}
     for module in build_identity.EXPECTED_NATIVE_RUNTIME_SUBMODULES:
         short_name = module.rsplit(".", 1)[1]
