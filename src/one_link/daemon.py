@@ -30465,8 +30465,17 @@ class Daemon:
             )
             self.state.set_peer_trust(peer_fp, "rejected", actor="pairing")
         try:
-            await self._send_control(
-                peer, make_msg("PAIR_REJECT", self.me.short_id),
+            # The rejection is already durable locally; telling the peer is
+            # BEST-EFFORT by contract, so it must carry a hard deadline. The
+            # dial is bounded, but the channel handshake beyond it is not --
+            # a peer that accepts TCP and then stalls the handshake was able
+            # to hang this await, and with it the UI's Reject button and the
+            # /api/peers/*/pair-reject request, indefinitely.
+            await asyncio.wait_for(
+                self._send_control(
+                    peer, make_msg("PAIR_REJECT", self.me.short_id),
+                ),
+                timeout=10.0,
             )
         except Exception as exc:
             # Peer may already be unreachable; that's fine.
@@ -39394,6 +39403,14 @@ async def run() -> None:
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await heartbeat_task
         await daemon.stop()
+        # A gracefully exiting daemon removes its own runtime publications:
+        # they describe THIS live process (ports, UI token), and leaving them
+        # behind is exactly the "launcher spins on a port that will never
+        # answer" class the reader-side GC only heals on the NEXT read.
+        # Eager removal here; the lazy path still covers crashes.
+        _clear_stale_runtime_files()
+        with contextlib.suppress(OSError):
+            (data_dir() / "ui.token").unlink()
 
 
 def read_control_port(clear_stale: bool = True) -> int:
