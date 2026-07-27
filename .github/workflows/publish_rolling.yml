@@ -200,6 +200,14 @@ jobs:
             echo "gh attestation verify <downloaded-file> --repo $GITHUB_REPOSITORY"
             echo '```'
             echo
+            echo "Read that attestation precisely. It proves the file was emitted"
+            echo "by this repository's \`publish_rolling.yml\` on a GitHub-hosted"
+            echo "runner, so a third party cannot substitute their own upload. Its"
+            echo "\`sourceRepositoryDigest\` is the commit the PUBLISHER ran from,"
+            echo "which is not necessarily the commit the binary was COMPILED from"
+            echo "(\`$SHA\`, named in the title above). It is not a reproducible"
+            echo "build claim: it does not let you rebuild these bytes and compare."
+            echo
             echo "**This is not a signed, reproducible release.** That pipeline is"
             echo "\`release.yml\`, fires only on \`v*\` tags, and remains the only"
             echo "channel intended for production trust. SHA-256 for every artifact"
