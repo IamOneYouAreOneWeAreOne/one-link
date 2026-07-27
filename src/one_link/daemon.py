@@ -16877,6 +16877,19 @@ class Daemon:
                 if _hash_open_file(archive_handle) != archive_blob:
                     raise FolderArchiveCommitError("folder_archive_hash_changed")
                 final_source_stat = os.fstat(archive_handle.fileno())
+                # ctime is deliberately NOT in this tuple. POSIX rename(2) and
+                # unlink(2) mark the inode's ctime for update, so a pathname
+                # swap -- the very attack this descriptor binding defeats --
+                # bumps ctime on a source whose CONTENT never changed. Keeping
+                # it here turned a successfully defended A->B->A race into
+                # folder_archive_source_changed, so the strongest guarantee in
+                # this function was unprovable on the only platform that can
+                # run the race (Windows' descriptor lock denies the rename, so
+                # it never noticed). Content integrity does not rest on ctime:
+                # the check immediately above re-hashed the ENTIRE file through
+                # this same descriptor and required byte-equality with
+                # archive_blob, and dev/ino/size/mtime_ns below still pin the
+                # inode. A write cannot hide behind any of those.
                 if any(
                     int(getattr(final_source_stat, field, 0) or 0) != int(source_identity[key])
                     for field, key in (
@@ -16884,7 +16897,6 @@ class Daemon:
                         ("st_ino", "ino"),
                         ("st_size", "size"),
                         ("st_mtime_ns", "mtime_ns"),
-                        ("st_ctime_ns", "ctime_ns"),
                     )
                 ):
                     raise FolderArchiveCommitError("folder_archive_source_changed")

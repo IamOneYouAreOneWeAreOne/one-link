@@ -2580,6 +2580,89 @@ def test_folder_archive_path_swap_cannot_change_descriptor_bound_extraction(
         state.close()
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "os.pwrite is POSIX-only, and Windows' descriptor sharing rules deny a "
+        "concurrent write to the open source at all -- a kernel-enforced form "
+        "of the same invariant, as the A->B->A swap test documents."
+    ),
+)
+def test_folder_archive_in_place_source_rewrite_is_still_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dropping ctime from the identity tuple must not cost real detection.
+
+    ctime was removed as a reject condition because POSIX rename(2) bumps it
+    on a source whose content never changed (see the A->B->A swap test). This
+    pins that the guard still catches the thing ctime was imagined to catch: a
+    genuine in-place rewrite of the source, at the SAME byte length so the
+    size check cannot be what fires. Detection rests on the full re-hash
+    through the bound descriptor plus dev/ino/size/mtime_ns.
+    """
+
+    daemon, state, _peer = _receiver(tmp_path, monkeypatch)
+    try:
+        magic = inbox_dir() / daemon._FOLDER_ARCHIVE_MAGIC
+        magic.mkdir(parents=True, exist_ok=True)
+        archive_path = magic / "rewrite-proof.zip"
+        with zipfile.ZipFile(
+            archive_path,
+            "w",
+            compression=zipfile.ZIP_STORED,
+        ) as archive:
+            archive.writestr("payload.txt", b"safe")
+        expected_blob = blake3.blake3(archive_path.read_bytes()).hexdigest()
+        original = archive_path.read_bytes()
+
+        real_zip_file = zipfile.ZipFile
+        zip_opens = 0
+        rewritten = False
+
+        def _rewrite_after_second_open(file, *args, **kwargs):
+            nonlocal zip_opens, rewritten
+            zip_opens += 1
+            handle = real_zip_file(file, *args, **kwargs)
+            if zip_opens == 2 and not rewritten:
+                # Rewrite in place AFTER the directory has been parsed, at the
+                # same length, flipping a trailing byte the member reads never
+                # touch. Extraction therefore succeeds on content it already
+                # committed to, and only the source attestation can catch it.
+                mutated = bytearray(original)
+                mutated[-1] ^= 0xFF
+                fd = os.open(archive_path, os.O_WRONLY)
+                try:
+                    os.pwrite(fd, bytes(mutated), 0)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                assert archive_path.stat().st_size == len(original)
+                rewritten = True
+            return handle
+
+        monkeypatch.setattr(zipfile, "ZipFile", _rewrite_after_second_open)
+
+        # Assert the mutation actually happened BEFORE asserting the rejection.
+        # A hook that silently never fires would otherwise read as whichever
+        # outcome the run order produced, proving nothing either way.
+        with pytest.raises(
+            FolderArchiveCommitError,
+            match="folder_archive_hash_changed|folder_archive_source_changed",
+        ) as rejection:
+            daemon._maybe_extract_folder_archive(
+                archive_path,
+                expected_blob=expected_blob,
+                defer_source_cleanup=True,
+            )
+        assert rewritten, "the rewrite hook never fired -- nothing was proven"
+        assert archive_path.read_bytes() != original
+        assert str(rejection.value)
+        assert not (inbox_dir() / "rewrite-proof").exists()
+    finally:
+        state.close()
+
+
 def test_folder_archive_io_failure_leaves_no_partial_publish(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
