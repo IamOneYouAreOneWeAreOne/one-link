@@ -231,7 +231,12 @@ jobs:
   release_quality_windows:
     name: tagged commit quality / Windows
     runs-on: windows-latest
-    timeout-minutes: 90
+    # The full suite with the live tier measured 71+ minutes on these
+    # runners BEFORE the MSYS2 toolchain setup and the bounded-rerun
+    # shepherding were added; a 90-minute ceiling then timed the job out
+    # twice at the finish line (GitHub reports a job timeout as
+    # "cancelled"). 150 matches the measured cost with honest headroom.
+    timeout-minutes: 150
     permissions:
       contents: read
     steps:
