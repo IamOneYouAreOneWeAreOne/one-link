@@ -476,13 +476,16 @@ jobs:
           enable-cache: false
 
       - name: install locked build tooling
-        run: uv sync --frozen --python python --only-group release-tools
+        # wheel-tools, not release-tools: the full group's sigstore dependency
+        # pulls cryptography, which has no win_arm64 wheel and needs an
+        # OpenSSL toolchain this pure-maturin job rightly does not have.
+        run: uv sync --frozen --python python --only-group wheel-tools
 
       - name: build native wheel (abi3, release)
         working-directory: native
         env:
           SOURCE_DATE_EPOCH: ${{ needs.build.outputs.source_date_epoch }}
-        run: uv run --project .. --frozen --only-group release-tools maturin build --release --strip --locked
+        run: uv run --project .. --frozen --only-group wheel-tools maturin build --release --strip --locked
 
       - name: upload native wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
