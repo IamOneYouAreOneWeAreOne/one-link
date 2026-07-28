@@ -713,7 +713,7 @@ async def test_api_peers_lists_other_peer():
 
 @pytest.mark.asyncio
 async def test_api_send_text_round_trip():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         base_a, tok_a = _server_addr(p.a.home)
         async with aiohttp.ClientSession() as s:
             status, j = await _post_json(
@@ -761,7 +761,7 @@ async def test_api_send_missing_fields_400():
 
 @pytest.mark.asyncio
 async def test_api_send_file_round_trip(tmp_path: Path):
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         base_a, tok_a = _server_addr(p.a.home)
         # Build a real uploaded file
         sample = tmp_path / "via_api.bin"
@@ -792,7 +792,7 @@ async def test_api_send_file_round_trip(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_api_send_file_sanitizes_uploaded_filename():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         base_a, tok_a = _server_addr(p.a.home)
         payload = b"safe upload name"
 
@@ -1416,7 +1416,7 @@ async def test_api_send_file_offline_paired_peer_queues_staged_upload(
 
 @pytest.mark.asyncio
 async def test_api_files_lists_and_downloads():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         # Send a file from A to B first so B has something in inbox
         from tests.harness import request as ctrl_request
         src = p.tmp / "for_listing.bin"
@@ -1527,7 +1527,7 @@ async def test_api_messages_returns_list():
 
 @pytest.mark.asyncio
 async def test_websocket_event_stream_pushes_messages():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         base_b, tok_b = _server_addr(p.b.home)
         ws_url = base_b.replace("http://", "ws://") + "/api/events"
         async with aiohttp.ClientSession() as s:
@@ -1561,7 +1561,7 @@ async def test_websocket_event_stream_pushes_messages():
 
 @pytest.mark.asyncio
 async def test_api_search_finds_message_by_word():
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         from tests.harness import request as ctrl_request
         ctrl_request(p.a.control_port, cmd="send", peer=p.b.short_id, body="the quick brown fox")
         ctrl_request(p.a.control_port, cmd="send", peer=p.b.short_id, body="lazy dog")
