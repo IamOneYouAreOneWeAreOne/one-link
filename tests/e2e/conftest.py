@@ -255,4 +255,12 @@ def browser_context_args(browser_context_args):
         # screenshot diffs are stable.
         "color_scheme": "dark",
         "ignore_https_errors": True,
+        # The app ships a strict script-src CSP (no unsafe-eval), and the
+        # wait_for_function/evaluate polls these tests rely on execute in
+        # the MAIN world -- whether the injection beats the CSP arriving
+        # with the document is a Chromium race that flaked release run #5
+        # after passing identically in run #4. Playwright's documented
+        # answer for strict-CSP apps is bypass_csp; CSP CONTENT is pinned
+        # by the JavaScript static-contract gates, not by e2e.
+        "bypass_csp": True,
     }
