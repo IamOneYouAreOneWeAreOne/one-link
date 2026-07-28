@@ -2144,6 +2144,28 @@ def verify_this_install(as_json, expected_rollup, inventory_only):
             data_root_label = _bundle_label(data_root)
             package_root_label = _bundle_label(package_root_in_bundle)
             native_root_label = _bundle_label(native_root_in_bundle)
+            # The material native contract in a FROZEN bundle is the compiled
+            # extension: PyInstaller absorbs the pure __init__.py shim into
+            # the PYZ, and the bundle-content gate rightly forbids loose .py
+            # files -- so the historical "__init__.py exists as a file"
+            # expectation was unsatisfiable by construction and failed the
+            # first release binaries ever gated, on every platform at once.
+            # The extension's exact name is platform-suffixed; find it, and
+            # fall back to a deterministic MISSING label when absent.
+            native_extension_in_bundle = None
+            if native_root_in_bundle.is_dir():
+                for _candidate in sorted(native_root_in_bundle.iterdir()):
+                    if (
+                        _candidate.is_file()
+                        and _candidate.name.startswith("one_link_native")
+                        and _candidate.suffix in (".pyd", ".so", ".dylib")
+                    ):
+                        native_extension_in_bundle = _candidate
+                        break
+            if native_extension_in_bundle is None:
+                native_extension_in_bundle = (
+                    native_root_in_bundle / "one_link_native.pyd"
+                )
             expectations: list[tuple[str, Path, str, str | None]] = [
                 ("bundle/<root>", inventory_root, "directory", None),
                 (
@@ -2215,8 +2237,8 @@ def verify_this_install(as_json, expected_rollup, inventory_only):
                     runtime_root_label,
                 ),
                 (
-                    _bundle_label(native_root_in_bundle / "__init__.py"),
-                    native_root_in_bundle / "__init__.py",
+                    _bundle_label(native_extension_in_bundle),
+                    native_extension_in_bundle,
                     "file",
                     native_root_label,
                 ),
