@@ -994,15 +994,29 @@ def _inspect_physical_python_archives(artifact: Path) -> tuple[int, int]:
     return archive_count, module_count
 
 
+_MODULE_ARTIFACT_SUFFIXES = (".py", ".pyc", ".pyd", ".so", ".dylib", ".dll")
+
+
 def _path_contains_forbidden_namespace(relative: str) -> bool:
     components = tuple(
         component.lower()
         for component in relative.replace("\\", "/").strip("/").split("/")
         if component
     )
+    if not components:
+        return False
+    # Namespace roots describe PACKAGES, which manifest as directories
+    # (numpy/..., wheel-0.47.dist-info/...) or as importable module files
+    # (id.cpython-312.pyd). Applying the directory rules to terminal
+    # FILENAMES flagged innocent data that merely shares a name -- every
+    # dist-info/WHEEL metadata file matched the `wheel` package, Tcl's
+    # Indonesian locale id.msg matched sigstore's `id`, and ttk's
+    # notebook.tcl matched `notebook` -- which refused the first release
+    # binaries ever built. Terminal files count only as module artifacts.
+    *directories, terminal = components
     for namespace in FORBIDDEN_STABLE_PHYSICAL_NAMESPACE_ROOTS:
         distribution = namespace.replace("_", "-")
-        for component in components:
+        for component in directories:
             if component == namespace or component.startswith(namespace + "."):
                 return True
             if component.startswith(namespace + "_") or component.startswith(
@@ -1014,6 +1028,10 @@ def _path_contains_forbidden_namespace(relative: str) -> bool:
                 or component.startswith(distribution + "-")
             ):
                 return True
+        if terminal.startswith((namespace + ".", namespace + "_")) and terminal.endswith(
+            _MODULE_ARTIFACT_SUFFIXES
+        ):
+            return True
     return False
 
 
