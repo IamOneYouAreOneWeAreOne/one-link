@@ -1,0 +1,36 @@
+# The Python distribution's payload is EXACTLY what
+# tests/test_python_distribution_contract.py stages: LICENSE, NOTICE,
+# README.md, pyproject.toml, setup.py, and src/. A full git checkout
+# contains far more, and an sdist built from one (release.yml) must not
+# sweep it in -- v0.21.0 release run #7 reached the publication chain for
+# the first time and its sdist gate refused an archive carrying the whole
+# tests/ tree. Prune everything outside the contract; the exact-layout
+# validator (scripts/validate_python_distributions.py) remains the
+# authority and fails loudly if anything else ever sneaks in.
+prune tests
+# Platform-native fast paths ship in the separately built one_link_native
+# wheels; a dev tree may carry locally staged CDC binaries here and the
+# universal py3-none-any distribution must never absorb them.
+prune src/one_link/native
+prune native
+prune scripts
+prune docs
+prune deploy
+prune packaging
+prune benchmarks
+prune bench_baselines
+prune assets
+prune stubs
+prune build
+prune dist
+prune audit_extracts_may21
+prune script_dump
+prune __pycache__
+prune .github
+exclude AUDIT_*.md CHANGELOG.md CONTRIBUTING.md ROADMAP.md
+exclude *.log *.lock .gitignore .gitattributes
+# Exclude the manifest itself so a checkout build and the staged-source
+# build (which never copies this file) produce identical archives.
+exclude MANIFEST.in
+global-exclude *.py[cod]
+global-exclude __pycache__
