@@ -250,6 +250,29 @@ jobs:
           version: "0.11.31"
           enable-cache: false
 
+      # Live-tier daemons self-build the native CDC scanner at runtime; on
+      # images whose only compiler is an unlinkable MSVC-target clang they
+      # silently fall back to Python chunking, and the 16 MiB throughput
+      # floor then fails at ~50x -- exactly run #3's Windows perf red.
+      # Same guarantee as every other Windows build lane.
+      - name: setup native CDC compiler
+        id: msys2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          install: mingw-w64-ucrt-x86_64-gcc
+      - name: expose MSYS2 gcc to every later step
+        shell: pwsh
+        env:
+          # Routed through env, never template-expanded into the script:
+          # the Actions security gate (rightly) rejects ${{ }} in run blocks.
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          $bin = Join-Path $env:MSYS2_LOCATION "ucrt64\bin"
+          if (-not (Test-Path (Join-Path $bin "gcc.exe"))) { throw "gcc.exe missing under $bin" }
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+
       - name: install pinned Rust toolchain
         run: |
           rustup toolchain install 1.96.0 --profile minimal --no-self-update

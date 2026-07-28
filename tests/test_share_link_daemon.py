@@ -146,7 +146,7 @@ def test_claim_share_link_from_peer_end_to_end(tmp_path: Path) -> None:
     src = tmp_path / "claim-payload.bin"
     payload = b"claim-share-link" * 32
     src.write_bytes(payload)
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         mint = request(p.a.control_port, cmd="create_share_link", path=str(src))
         assert mint.get("ok"), mint
         # Warm B → A channel so send_to has somewhere to land.
@@ -190,7 +190,7 @@ def test_share_link_redeem_wire_frame_triggers_file_offer(tmp_path: Path) -> Non
     src = tmp_path / "shared-payload.bin"
     payload = b"share-link-end-to-end" * 32
     src.write_bytes(payload)
-    with daemon_pair() as p:
+    with daemon_pair(pin_trust=True) as p:
         # A is the sender + share-link minter.
         mint = request(p.a.control_port, cmd="create_share_link", path=str(src))
         assert mint.get("ok"), mint
