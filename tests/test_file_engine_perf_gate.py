@@ -124,10 +124,17 @@ def test_perf_gate_receiver_rss_under_cap(tmp_path: Path) -> None:
 # ──────────────────────────────────────────────────────────────────
 
 def test_perf_gate_throughput_16mib_floor(tmp_path: Path) -> None:
-    """A 16 MiB transfer on loopback must complete in under 2
-    seconds. The current run lands in ~150 ms; the 2-second floor
-    gives 10× headroom for slow CI runners while still flagging
-    a 10× regression."""
+    """A 16 MiB loopback transfer must complete inside a floor with
+    real headroom for the machine class it runs on.
+
+    Dev hardware lands ~150 ms; the 2-second local floor flags a 10×
+    regression. GitHub-hosted runners were MEASURED at 6.7–7.5 s for
+    the identical code across release runs #3 and #5 (2 vCPUs, AV
+    scanning spawned daemons, a concurrent quality job) — with and
+    without a native CDC compiler, so that is the platform's honest
+    baseline, not a code regression. The CI floor of 20 s still trips
+    on a ~3× regression against that measured baseline and on every
+    catastrophic class the gate exists for."""
     size = 16 * 1024 * 1024
     payload = _build_payload(size, seed=1)
     src = tmp_path / "perf_throughput.bin"
@@ -142,9 +149,11 @@ def test_perf_gate_throughput_16mib_floor(tmp_path: Path) -> None:
         elapsed = time.time() - t0
         assert landed is not None
 
-    assert elapsed < 2.0, (
-        f"16 MiB transfer took {elapsed:.2f}s — 10× regression "
-        f"against the ~150 ms baseline. Investigate before merging."
+    floor = 20.0 if os.environ.get("CI") == "true" else 2.0
+    assert elapsed < floor, (
+        f"16 MiB transfer took {elapsed:.2f}s (floor {floor:.0f}s) — "
+        f"a real regression against this machine class's measured "
+        f"baseline. Investigate before merging."
     )
 
 
