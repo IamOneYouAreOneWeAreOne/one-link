@@ -148,6 +148,10 @@ STABLE_FROZEN_ALLOWED_THIRD_PARTY_ROOTS = frozenset(
         "AppKit",  # pyobjc / pystray on macOS
         "CoreFoundation",
         "Foundation",
+        # pyobjc's pure-Python helper package (KeyValueCoding, AppHelper...)
+        # ships alongside the objc/AppKit roots already reviewed above; the
+        # first macOS release bundle ever gated surfaced it in the PYZ.
+        "PyObjCTools",
         "OpenSSL",
         "PIL",
         "Quartz",
