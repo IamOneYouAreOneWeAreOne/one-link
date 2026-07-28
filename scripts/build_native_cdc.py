@@ -69,9 +69,15 @@ def main() -> int:
 
     size = lib.stat().st_size
     digest = hashlib.sha256(lib.read_bytes()).hexdigest()
+    # newline="\n" is load-bearing: text-mode writes on Windows turn \n into
+    # \r\n, and the packaged-artifact gate binds the sidecar's RAW bytes into
+    # the bundle inventory while re-deriving the expected line through
+    # universal-newline reads -- a CRLF sidecar hashes differently and failed
+    # the first Windows release binaries ever gated.
     lib.with_suffix(lib.suffix + ".sha256").write_text(
         f"{digest}  {lib.name}\n",
         encoding="ascii",
+        newline="\n",
     )
     print(f"[native-cdc] built {lib} ({size:,} bytes) using {compiler}")
     return 0

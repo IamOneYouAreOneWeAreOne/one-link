@@ -1504,3 +1504,25 @@ def test_forbidden_namespace_terminal_files_are_module_artifacts_only():
     assert matches("_internal/wheel-0.47.0.dist-info/METADATA")
     assert matches("_internal/id.cpython-312-x86_64-linux-gnu.so")
     assert matches("_internal/sigstore/py.typed")
+
+
+def test_sysconfigdata_platform_module_is_stdlib_not_a_leak():
+    """CPython's build-config module carries a platform-specific name that
+    sys.stdlib_module_names does not list; it refused the first Linux
+    release bundle ever gated. Genuine third-party roots stay refused."""
+    mod = _load_module()
+    assert mod._unexpected_python_roots(
+        {"_sysconfigdata__linux_x86_64-linux-gnu", "_sysconfigdata__linux_aarch64-linux-gnu"}
+    ) == []
+    assert mod._unexpected_python_roots({"totally_unreviewed_pkg"}) == ["totally_unreviewed_pkg"]
+
+
+def test_cdc_sidecar_is_written_with_lf_bytes():
+    """The packaged-artifact gate binds the sidecar's RAW bytes into the
+    inventory; a CRLF sidecar (Windows text-mode default) hashes
+    differently from the universal-newline line the gate re-derives and
+    failed the first Windows release binaries ever gated."""
+    producer = SCRIPT.with_name("build_native_cdc.py")
+    text = producer.read_text(encoding="utf-8")
+    needle = "newline=" + chr(34) + chr(92) + "n" + chr(34)
+    assert needle in text, "sidecar writer must force LF bytes"

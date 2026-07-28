@@ -889,7 +889,17 @@ def _unexpected_python_roots(modules: tuple[str, ...] | set[str]) -> list[str]:
         | set(STABLE_FROZEN_ALLOWED_THIRD_PARTY_ROOTS)
         | {"one_link"}
     )
-    return sorted({module.split(".", 1)[0] for module in modules} - allowed)
+    return sorted(
+        root
+        for root in {module.split(".", 1)[0] for module in modules}
+        if root not in allowed
+        # CPython generates its build-configuration module with a
+        # platform-specific name (_sysconfigdata__linux_x86_64-linux-gnu,
+        # aarch64 and darwin variants...) that is stdlib but absent from
+        # sys.stdlib_module_names -- it refused the first Linux release
+        # bundle ever gated. It is stdlib by construction, not a leak.
+        and not root.startswith("_sysconfigdata_")
+    )
 
 
 def _zip_python_modules(path: Path) -> tuple[str, ...]:
