@@ -718,3 +718,29 @@ def test_build_binary_rejects_native_cdc_fallback_for_stable_artifacts(
     )
     assert not fake_exe.exists()
     assert not captured_cmds
+
+
+def test_materialize_bundle_symlinks_replaces_links_and_rejects_escapes(tmp_path):
+    """Linux PyInstaller output carries versioned .so SYMLINKS; a portable
+    bundle must hold real files (ZIP round-trips, link-refusing gate). An
+    escaping or dangling link is a packaging error, not something to ship."""
+    mod = _load_module()
+    bundle = tmp_path / "bundle"
+    (bundle / "sub").mkdir(parents=True)
+    real = bundle / "sub" / "libx.so.4.1.0"
+    real.write_bytes(b"shared-object-bytes")
+    link = bundle / "sub" / "libx.so.4"
+    try:
+        link.symlink_to(real.name)  # relative sibling link, PyInstaller-style
+    except OSError:
+        pytest.skip("symlinks unavailable on this host")
+    assert mod._materialize_bundle_symlinks(bundle) == 1
+    assert not link.is_symlink()
+    assert link.read_bytes() == b"shared-object-bytes"
+    assert real.read_bytes() == b"shared-object-bytes"
+
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+    (bundle / "evil").symlink_to(outside)
+    with pytest.raises(RuntimeError, match="dangles or escapes"):
+        mod._materialize_bundle_symlinks(bundle)

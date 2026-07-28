@@ -1483,3 +1483,24 @@ def test_cert_chain_probe_falls_back_to_python_ssl(monkeypatch):
     out = mod.validate_cert_chain_with_openssl("https://127.0.0.1:7118", None)
     assert out == "TLS serves a chain with 2 certificates"
     assert called == [("127.0.0.1", 7118)]
+
+
+def test_forbidden_namespace_terminal_files_are_module_artifacts_only():
+    """Release run #9 regression pins. Package-namespace roots must flag
+    directories and importable module files -- never innocent data files
+    that share a name (dist-info/WHEEL vs the wheel package, Tcl's
+    Indonesian id.msg vs sigstore's id, ttk's notebook.tcl)."""
+    mod = _load_module()
+    matches = mod._path_contains_forbidden_namespace
+    # The exact false positives that refused the first binaries ever built.
+    assert not matches("_internal/_tcl_data/msgs/id.msg")
+    assert not matches("_internal/_tcl_data/msgs/id_id.msg")
+    assert not matches("_internal/_tk_data/ttk/notebook.tcl")
+    assert not matches("_internal/attrs-26.1.0.dist-info/WHEEL")
+    assert not matches("_internal/cryptography-49.0.0.dist-info/WHEEL")
+    # Real leaks must still be refused: package directories, dist-info of
+    # the forbidden distribution itself, and compiled module artifacts.
+    assert matches("_internal/numpy/core/multiarray.dat")
+    assert matches("_internal/wheel-0.47.0.dist-info/METADATA")
+    assert matches("_internal/id.cpython-312-x86_64-linux-gnu.so")
+    assert matches("_internal/sigstore/py.typed")

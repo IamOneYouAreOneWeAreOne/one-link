@@ -396,6 +396,31 @@ def _write_build_stamp(destination_dir: Path) -> Path | None:
     return stamp
 
 
+def _materialize_bundle_symlinks(bundle_root: Path) -> int:
+    """Replace intra-bundle symlinks with real copies of their targets.
+
+    A link whose target dangles or escapes the bundle is a packaging error
+    and fails the build rather than shipping a broken member.
+    """
+
+    root = bundle_root.resolve()
+    replaced = 0
+    for path in sorted(bundle_root.rglob("*")):
+        if not path.is_symlink():
+            continue
+        target = path.resolve(strict=False)
+        if not target.is_file() or not target.is_relative_to(root):
+            raise RuntimeError(
+                f"bundle symlink dangles or escapes the bundle: {path} -> {target}"
+            )
+        data = target.read_bytes()
+        path.unlink()
+        path.write_bytes(data)
+        shutil.copystat(target, path)
+        replaced += 1
+    return replaced
+
+
 def _write_runtime_source_manifest(repo: Path, destination: Path) -> Path:
     """Freeze the exact stable Python source/code contract used by this build."""
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1252,6 +1277,18 @@ def main(
         if dist.exists() and not _remove_tree_required(dist):
             print("[build] WARNING: failed to remove incomplete PyInstaller dist tree")
         return 3
+
+    # PyInstaller on Linux emits versioned shared objects as SYMLINKS
+    # (e.g. libSvtAv1Enc-*.so.4 -> sibling). A portable bundle must survive
+    # ZIP round-trips onto filesystems with no symlink support, and the
+    # packaged-artifact gate fails closed on any contained link -- so
+    # materialize them into independent real files before anything hashes
+    # the tree. macOS .app bundles keep their mandatory Framework links;
+    # the gate hashes those through its dedicated safe-relative-link path.
+    if platform.system() == "Linux" and final_bundle is not None:
+        replaced_links = _materialize_bundle_symlinks(final_bundle)
+        if replaced_links:
+            print(f"[build] materialized {replaced_links} bundle symlink(s) into real files")
 
     # The updater must execute outside the directory it replaces. Build a
     # separately frozen one-file helper with the complete Sigstore verifier
