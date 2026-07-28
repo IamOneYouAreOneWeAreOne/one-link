@@ -1384,7 +1384,16 @@ def runtime_import_smoke(as_json):
         if not isinstance(path, (str, os.PathLike)):
             return False
         try:
-            candidate = Path(path).resolve(strict=True)
+            # The ROOT must exist and resolve strictly. The CANDIDATE must
+            # not: a frozen package absorbed into the PYZ reports a virtual
+            # __file__ (…/_internal/one_link_native/__init__.py) that has no
+            # on-disk entry, and strict resolution turned that into OSError →
+            # "outside the runtime root" for every native module on every
+            # platform in the first release binaries to reach this smoke.
+            # Non-strict resolution still normalizes traversal and resolves
+            # links through every EXISTING ancestor, so containment keeps its
+            # meaning for real files.
+            candidate = Path(path).resolve(strict=False)
             root = expected_root.resolve(strict=True)
         except OSError:
             return False
