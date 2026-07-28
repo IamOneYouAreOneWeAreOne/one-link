@@ -179,6 +179,13 @@ security = [
 ]
 
 [dependency-groups]
+# The native-wheel matrix needs exactly maturin. The full release-tools
+# group drags in sigstore -> cryptography, which has no win_arm64 wheel and
+# demands an OpenSSL toolchain that a pure maturin job should never need --
+# that transitive build is what failed the first windows-11-arm wheel job.
+wheel-tools = [
+  "maturin>=1.14.1,<2",
+]
 # Non-distributed build/signing environment for jobs that do not need One
 # Link's runtime graph. `--only-group release-tools` avoids compiling or
 # downloading application dependencies merely to build a wheel or sign files.
