@@ -273,9 +273,15 @@ def test_control_status_and_shutdown_contract(monkeypatch):
             assert isinstance(status["ui_server_port"], int)
             assert status["ui_server_port"] == ui_port
 
-            from one_link.app import _resolve_running_daemon
+            # The launcher's production path is _wait_for_daemon -- a retry
+            # loop around the single-shot 2-second probe. Asserting on one
+            # bare probe made this red whenever a loaded CI runner missed a
+            # single 2s window (observed at the 97% mark of a 71-minute
+            # suite, with the daemon demonstrably answering status right
+            # before). Exercise the contract the launcher actually relies on.
+            from one_link.app import _wait_for_daemon
 
-            resolved = _resolve_running_daemon()
+            resolved = _wait_for_daemon(timeout=30.0)
             assert resolved is not None
             assert resolved.control_port == ctrl
             assert resolved.server_port == ui_port
