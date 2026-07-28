@@ -96,6 +96,13 @@ dev = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
   "pytest-timeout>=2.4,<3",
+  # Bounded retries for the LIVE-DAEMON tier in the release quality gates
+  # only: ~150 real-daemon tests per platform under shared-runner
+  # contention lose a different single-test lottery almost every run
+  # (rotation probe, launcher probe, WebRTC hello -- each passing
+  # everywhere else). A deterministic failure still fails every rerun;
+  # the hermetic gates do not pass --reruns and are unaffected.
+  "pytest-rerunfailures>=15,<16",
   # Parse every workflow with duplicate-key rejection in the supply-chain
   # regression suite before GitHub ever attempts to schedule it.
   "PyYAML>=6.0.3,<7",

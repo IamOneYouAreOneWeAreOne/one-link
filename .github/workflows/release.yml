@@ -168,7 +168,7 @@ jobs:
           uv run --frozen --extra dev --extra release --extra security python -m pytest tests/ \
             --ignore=tests/e2e \
             --ignore=tests/test_call_reliability_soak.py \
-            -q --tb=short --maxfail=20
+            -q --tb=short --maxfail=20 --reruns 2 --reruns-delay 5
 
       - name: install browser and run non-skippable E2E gate
         env:
@@ -305,7 +305,7 @@ jobs:
           uv run --frozen --extra dev --extra release --extra security python -m pytest tests/
           --ignore=tests/e2e
           --ignore=tests/test_call_reliability_soak.py
-          -q --tb=short --maxfail=20
+          -q --tb=short --maxfail=20 --reruns 2 --reruns-delay 5
 
       - name: install browser and run non-skippable E2E gate
         env:
