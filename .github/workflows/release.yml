@@ -266,6 +266,13 @@ jobs:
         with:
           msystem: UCRT64
           path-type: inherit
+          # location is LOAD-BEARING: the compiler ladder never consults
+          # PATH (resolve_system_executable searches OS-owned directories
+          # only) -- it probes the explicit candidate C:\msys64\ucrt64\bin\gcc.exe.
+          # The default RUNNER_TEMP install location left gcc invisible, so
+          # builds only succeeded on images that happened to ship their own
+          # C:\msys64.
+          location: C:\msys64
           install: mingw-w64-ucrt-x86_64-gcc
       - name: expose MSYS2 gcc to every later step
         shell: pwsh
@@ -579,6 +586,13 @@ jobs:
         with:
           msystem: UCRT64
           path-type: inherit
+          # location is LOAD-BEARING: the compiler ladder never consults
+          # PATH (resolve_system_executable searches OS-owned directories
+          # only) -- it probes the explicit candidate C:\msys64\ucrt64\bin\gcc.exe.
+          # The default RUNNER_TEMP install location left gcc invisible, so
+          # builds only succeeded on images that happened to ship their own
+          # C:\msys64.
+          location: C:\msys64
           install: mingw-w64-ucrt-x86_64-gcc
       - name: expose MSYS2 gcc to every later step
         if: matrix.native_artifact == 'native-wheel-windows-x86_64'
