@@ -1458,7 +1458,30 @@ def validate_native_cdc_payload(artifact: Path) -> str:
     )
     expected_library_label = "bundle/" + library.relative_to(root).as_posix()
     expected_sidecar_label = "bundle/" + sidecar.relative_to(root).as_posix()
-    if library_labels != [expected_library_label] or sidecar_labels != [expected_sidecar_label]:
+    # PyInstaller's .app layout maintains a MIRRORED dual tree: every member
+    # under Contents/Frameworks is also reachable under Contents/Resources
+    # (one side real, the other its safe-link twin), so the CDC library and
+    # sidecar legitimately inventory at BOTH paths on macOS. The canonical
+    # locations stay mandatory; only the exact mirror twin is additionally
+    # tolerated. Onedir bundles have no mirror and keep the exact-set rule.
+    def _mirror_label(label: str) -> str:
+        if label.startswith("bundle/Contents/Frameworks/"):
+            return label.replace("bundle/Contents/Frameworks/", "bundle/Contents/Resources/", 1)
+        if label.startswith("bundle/Contents/Resources/"):
+            return label.replace("bundle/Contents/Resources/", "bundle/Contents/Frameworks/", 1)
+        return label
+
+    allowed_library_labels = {expected_library_label, _mirror_label(expected_library_label)}
+    allowed_sidecar_labels = {expected_sidecar_label, _mirror_label(expected_sidecar_label)}
+    libraries_ok = (
+        expected_library_label in library_labels
+        and set(library_labels) <= allowed_library_labels
+    )
+    sidecars_ok = (
+        expected_sidecar_label in sidecar_labels
+        and set(sidecar_labels) <= allowed_sidecar_labels
+    )
+    if not (libraries_ok and sidecars_ok):
         raise GateFailure(
             "frozen native CDC payload must contain one library and one sidecar at "
             "the platform layout: "
