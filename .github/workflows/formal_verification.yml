@@ -35,7 +35,14 @@ jobs:
           # verified present in the Adoptium GA index at that moment. Exact
           # pinning is kept deliberately: a floating "21" would let the
           # toolchain move under a release without anyone deciding to.
-          java-version: "21.0.12+8"
+          # 2026-07-29: setup-java's Temurin manifest rotated JDK 21 out
+          # entirely mid-campaign -- the runner's own error enumerated what
+          # it still offers (26.x, 25.x LTS, 24, 23, 22) and 21 was absent,
+          # so BOTH 21.0.11+10 and a same-line 21.0.12+8 repin failed. Pinned
+          # to the newest LTS the runner itself reports. Exact pinning stays:
+          # a floating "25" would let the verification toolchain move under a
+          # release without anyone deciding to. TLC runs on Java 11+.
+          java-version: "25.0.4+7.0.LTS"
 
       - name: download and authenticate pinned TLC
         shell: bash
