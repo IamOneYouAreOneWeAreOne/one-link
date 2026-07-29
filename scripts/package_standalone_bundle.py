@@ -41,6 +41,10 @@ class Entry:
 _ARCHIVE_ROOT = "one-link"
 _MANIFEST_NAME = "one-link/BUNDLE_SHA256SUMS"
 _BLOCK_SIZE = 1024 * 1024
+# Bound on link-chain resolution. Apple frameworks need two hops
+# (Python -> Versions/Current/Python -> Versions/3.x/Python); the ceiling
+# turns any link cycle into a definite error instead of a hang.
+_MAX_SYMLINK_HOPS = 8
 _MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 _WINDOWS_RESERVED_BASENAMES = frozenset(
     {"CLOCK$", "CON", "CONIN$", "CONOUT$", "PRN", "AUX", "NUL"}
@@ -291,6 +295,52 @@ def _collect(bundle: Path) -> list[Entry]:
     return entries
 
 
+def _resolve_archive_link(
+    parent: PurePosixPath,
+    target: PurePosixPath,
+    symlink_targets: dict[str, str],
+    *,
+    member: str,
+) -> str:
+    """Resolve a link target through intermediate link COMPONENTS.
+
+    Apple's framework layout puts the link in the middle of the path
+    (``Python.framework/Python`` -> ``Versions/Current/Python`` where
+    ``Versions/Current`` is itself a link to ``Versions/3.x``), so resolution
+    must walk component by component rather than testing only the whole
+    path. Every intermediate result must stay under the archive root with no
+    ``..``; substitutions are bounded so a link cycle is a definite error.
+    """
+
+    def _checked(parts: tuple[str, ...]) -> tuple[str, ...]:
+        if parts[:1] != (_ARCHIVE_ROOT,) or ".." in parts:
+            raise BundleError(f"symlink target escapes or is absent: {member}")
+        return parts
+
+    parts = _checked(PurePosixPath(posixpath.normpath(str(parent / target))).parts)
+    for _substitution in range(_MAX_SYMLINK_HOPS):
+        # Substitute the SHORTEST link prefix, then restart: a link component
+        # in the middle of the path can expose another one ahead of it.
+        for index in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:index])
+            link = symlink_targets.get(prefix)
+            if link is None:
+                continue
+            substituted = PurePosixPath(
+                posixpath.normpath(
+                    str(
+                        PurePosixPath("/".join(parts[: index - 1]))
+                        / link.replace("\\", "/")
+                    )
+                )
+            ).parts
+            parts = _checked(substituted + parts[index:])
+            break
+        else:
+            return "/".join(parts)
+    raise BundleError(f"symlink chain is unresolvable: {member}")
+
+
 def validate_bundle_archive(archive_path: Path, *, expected_executable: str) -> None:
     """Independently re-hash every ZIP member against BUNDLE_SHA256SUMS."""
     from one_link.build_identity import (
@@ -370,6 +420,16 @@ def validate_bundle_archive(archive_path: Path, *, expected_executable: str) -> 
                 raise BundleError(f"invalid manifest kind/size for {name!r}")
             rows[name] = (digest, kind, size, target)
 
+        # Manifest-declared link targets, used to walk a link CHAIN below.
+        # Sourced from the manifest rows (already digest-bound and, for every
+        # member, cross-checked against the archived bytes) so chain
+        # resolution never trusts anything unverified.
+        symlink_targets = {
+            name: target
+            for name, (_digest, kind, _size, target) in rows.items()
+            if kind == "SYMLINK"
+        }
+
         expected_names = set(names) - {_MANIFEST_NAME}
         if set(rows) != expected_names:
             raise BundleError(
@@ -419,19 +479,24 @@ def validate_bundle_archive(archive_path: Path, *, expected_executable: str) -> 
                     or windows_target.root
                 ):
                     raise BundleError(f"symlink target is unsafe: {info.filename}")
-                relocated = PurePosixPath(
-                    posixpath.normpath(
-                        str(PurePosixPath(info.filename).parent / target_path)
-                    )
+                # Resolve the link CHAIN, not one hop. A macOS .app carries
+                # Apple's canonical framework layout -- Python.framework/Python
+                # -> Versions/Current/Python, where Versions/Current is itself
+                # a link to Versions/3.x -- so a single textual hop lands on a
+                # path that exists only THROUGH another link, and a one-hop
+                # check called the real bundle malformed. Every hop is still
+                # required to stay under the archive root with no "..", the
+                # chain is bounded against link cycles, and the final target
+                # must exist as a member or a member directory.
+                relocated_name = _resolve_archive_link(
+                    PurePosixPath(info.filename).parent,
+                    target_path,
+                    symlink_targets,
+                    member=info.filename,
                 )
-                relocated_name = relocated.as_posix()
-                if (
-                    relocated.parts[:1] != (_ARCHIVE_ROOT,)
-                    or ".." in relocated.parts
-                    or not (
-                        relocated_name in names
-                        or any(name.startswith(relocated_name + "/") for name in names)
-                    )
+                if not (
+                    relocated_name in names
+                    or any(name.startswith(relocated_name + "/") for name in names)
                 ):
                     raise BundleError(f"symlink target escapes or is absent: {info.filename}")
             elif target:

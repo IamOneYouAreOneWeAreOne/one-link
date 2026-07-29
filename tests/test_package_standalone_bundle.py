@@ -355,3 +355,122 @@ def test_archive_revalidation_rejects_member_tampering(tmp_path):
             tampered,
             expected_executable="one-link/one-link",
         )
+
+
+def test_apple_framework_two_hop_symlink_chain_is_resolved(tmp_path):
+    """macOS .app bundles carry Apple's canonical framework layout:
+    Python.framework/Python -> Versions/Current/Python, where
+    Versions/Current is itself a link to Versions/3.x. A one-hop textual
+    check called that real bundle malformed and blocked the first macOS
+    release binary; the chain must resolve while every safety property
+    (no escape, no '..', bounded hops, target must exist) holds."""
+    if os.name == "nt":
+        pytest.skip("Windows bundles never ship links (reparse class refused)")
+    module = _module()
+    bundle = tmp_path / "one-link"
+    versions = bundle / "_internal" / "Python.framework" / "Versions"
+    (versions / "3.12").mkdir(parents=True)
+    (versions / "3.12" / "Python").write_bytes(b"framework-binary")
+    executable = bundle / "one-link"
+    executable.write_bytes(b"launcher")
+    executable.chmod(0o755)
+    try:
+        (versions / "Current").symlink_to("3.12")
+        (bundle / "_internal" / "Python.framework" / "Python").symlink_to(
+            "Versions/Current/Python"
+        )
+    except OSError:
+        pytest.skip("symbolic links are unavailable on this host")
+
+    output = tmp_path / "bundle.zip"
+    module.package_bundle(bundle, output, executable="one-link", epoch=1_700_000_000)
+    with zipfile.ZipFile(output) as archive:
+        names = set(archive.namelist())
+    assert "one-link/_internal/Python.framework/Python" in names
+    assert "one-link/_internal/Python.framework/Versions/Current" in names
+
+
+def test_symlink_cycle_is_refused_not_hung(tmp_path):
+    """Chain resolution is bounded: a link cycle must be a definite error."""
+    if os.name == "nt":
+        pytest.skip("Windows bundles never ship links (reparse class refused)")
+    module = _module()
+    bundle = tmp_path / "one-link"
+    (bundle / "_internal").mkdir(parents=True)
+    executable = bundle / "one-link"
+    executable.write_bytes(b"launcher")
+    executable.chmod(0o755)
+    try:
+        (bundle / "_internal" / "a").symlink_to("b")
+        (bundle / "_internal" / "b").symlink_to("a")
+    except OSError:
+        pytest.skip("symbolic links are unavailable on this host")
+
+    output = tmp_path / "bundle.zip"
+    with pytest.raises(module.BundleError):
+        module.package_bundle(bundle, output, executable="one-link", epoch=1_700_000_000)
+
+
+def _synthetic_archive(path, members):
+    """Build a ZIP with real symlink modes + a matching manifest.
+
+    Lets the chain resolver be exercised on hosts (Windows) where creating
+    on-disk symlinks is impossible, so the macOS framework contract is
+    pinned everywhere rather than skipped exactly where it regressed.
+    """
+    rows = ["# sha256\tkind\tbytes\tpath\ttarget"]
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, kind, payload in members:
+            data = payload.encode("utf-8") if isinstance(payload, str) else payload
+            info = zipfile.ZipInfo(name, date_time=(2024, 1, 1, 0, 0, 0))
+            mode = 0o120777 if kind == "SYMLINK" else 0o100755
+            info.external_attr = mode << 16
+            info.create_system = 3
+            archive.writestr(info, data)
+            digest = hashlib.sha256(data).hexdigest()
+            target = payload if kind == "SYMLINK" else ""
+            rows.append(f"{digest}\t{kind}\t{len(data)}\t{name}\t{target}")
+        manifest = ("\n".join(rows) + "\n").encode("utf-8")
+        info = zipfile.ZipInfo("one-link/BUNDLE_SHA256SUMS", date_time=(2024, 1, 1, 0, 0, 0))
+        info.external_attr = 0o100644 << 16
+        info.create_system = 3
+        archive.writestr(info, manifest)
+
+
+def test_framework_chain_resolves_and_cycles_refuse_on_every_host(tmp_path):
+    """Host-independent proof of the macOS framework contract."""
+    module = _module()
+    good = tmp_path / "good.zip"
+    _synthetic_archive(
+        good,
+        [
+            ("one-link/one-link", "FILE", b"launcher"),
+            ("one-link/_internal/Python.framework/Versions/3.12/Python", "FILE", b"fw"),
+            ("one-link/_internal/Python.framework/Versions/Current", "SYMLINK", "3.12"),
+            ("one-link/_internal/Python.framework/Python", "SYMLINK", "Versions/Current/Python"),
+        ],
+    )
+    module.validate_bundle_archive(good, expected_executable="one-link/one-link")
+
+    cyclic = tmp_path / "cyclic.zip"
+    _synthetic_archive(
+        cyclic,
+        [
+            ("one-link/one-link", "FILE", b"launcher"),
+            ("one-link/_internal/a", "SYMLINK", "b"),
+            ("one-link/_internal/b", "SYMLINK", "a"),
+        ],
+    )
+    with pytest.raises(module.BundleError):
+        module.validate_bundle_archive(cyclic, expected_executable="one-link/one-link")
+
+    escaping = tmp_path / "escaping.zip"
+    _synthetic_archive(
+        escaping,
+        [
+            ("one-link/one-link", "FILE", b"launcher"),
+            ("one-link/_internal/hop", "SYMLINK", "../../outside"),
+        ],
+    )
+    with pytest.raises(module.BundleError):
+        module.validate_bundle_archive(escaping, expected_executable="one-link/one-link")
