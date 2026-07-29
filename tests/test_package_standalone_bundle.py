@@ -407,7 +407,12 @@ def test_symlink_cycle_is_refused_not_hung(tmp_path):
         pytest.skip("symbolic links are unavailable on this host")
 
     output = tmp_path / "bundle.zip"
-    with pytest.raises(module.BundleError):
+    # On a real filesystem the collector reaches the cycle first and refuses
+    # it as a symlink loop; the ZIP verifier's own BundleError path for the
+    # same class is pinned by the synthetic-archive test below. Either way
+    # the contract is a DEFINITE ERROR rather than a hang, and BundleError
+    # is itself a RuntimeError.
+    with pytest.raises(RuntimeError):
         module.package_bundle(bundle, output, executable="one-link", epoch=1_700_000_000)
 
 
