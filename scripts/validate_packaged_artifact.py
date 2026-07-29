@@ -262,6 +262,12 @@ RUNTIME_FEATURE_EXPECTED_STATUSES = {
 # exactly this, on every Linux leg.
 RUNTIME_FEATURE_ALLOWED_ENVIRONMENT_STATUSES: dict[str, set[str]] = {
     "pystray_backend": {"NOT_APPLICABLE_HEADLESS_NO_DISPLAY"},
+    # pyproject excludes aiortc (and its PyAV dependency) on Windows ARM64 by
+    # environment marker -- upstream ships no cp3*-win_arm64 wheels -- and the
+    # browser-datachannel path documents itself as unsupported on that binary.
+    # Demanding OK there made this gate contradict the dependency contract.
+    "aiortc_datachannel": {"NOT_APPLICABLE_NO_UPSTREAM_WIN_ARM64_WHEELS"},
+    "pyav_primitives": {"NOT_APPLICABLE_NO_UPSTREAM_WIN_ARM64_WHEELS"},
 }
 REQUIRED_PEER_HEADERS = {
     "cache-control": ("no-cache", "must-revalidate"),

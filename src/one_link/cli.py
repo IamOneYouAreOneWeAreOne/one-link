@@ -1620,6 +1620,10 @@ def runtime_feature_smoke(as_json):
     allowed_statuses["pystray_backend"] |= frozenset(
         {"NOT_APPLICABLE_HEADLESS_NO_DISPLAY"}
     )
+    for _media_feature in ("aiortc_datachannel", "pyav_primitives"):
+        allowed_statuses[_media_feature] |= frozenset(
+            {"NOT_APPLICABLE_NO_UPSTREAM_WIN_ARM64_WHEELS"}
+        )
     features = {name: "NOT_RUN" for name in expected_statuses}
     errors: dict[str, str] = {}
 
@@ -1787,8 +1791,23 @@ def runtime_feature_smoke(as_json):
         if process.pid != os.getpid():
             raise RuntimeError("psutil resolved the wrong current process")
 
+    def _win_arm64_media_stack_absent() -> bool:
+        # pyproject EXCLUDES aiortc (and its PyAV dependency) on Windows
+        # ARM64 by environment marker: upstream ships no cp3*-win_arm64
+        # wheels. Demanding those features there made the release gate
+        # contradict the project's own deliberate dependency contract.
+        import platform as _platform
+
+        return _sys.platform == "win32" and _platform.machine().upper() in {
+            "ARM64",
+            "AARCH64",
+        }
+
     def _aiortc_datachannel() -> None:
         import asyncio
+
+        if _win_arm64_media_stack_absent():
+            raise _FeatureNotApplicable("NOT_APPLICABLE_NO_UPSTREAM_WIN_ARM64_WHEELS")
 
         from aiortc import RTCConfiguration, RTCPeerConnection
 
@@ -1838,6 +1857,9 @@ def runtime_feature_smoke(as_json):
         validate_native_cdc_library(scanner.library)
 
     def _pyav_primitives() -> None:
+        if _win_arm64_media_stack_absent():
+            raise _FeatureNotApplicable("NOT_APPLICABLE_NO_UPSTREAM_WIN_ARM64_WHEELS")
+
         import av
 
         packet = av.Packet(b"one-link")
