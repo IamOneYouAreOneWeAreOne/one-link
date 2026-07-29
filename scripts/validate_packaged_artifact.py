@@ -2439,7 +2439,7 @@ def validate_release_archive(
                 for info in infos:
                     name = info.filename
                     try:
-                        packager._validate_portable_archive_path(name)
+                        packager._validate_portable_archive_path(name, archive_root)
                     except Exception as exc:
                         raise GateFailure(
                             f"release ZIP member path is unsafe: {name!r}: {exc}"
@@ -2489,6 +2489,7 @@ def validate_release_archive(
                                 target_path,
                                 symlink_targets,
                                 member=name,
+                                archive_root=archive_root,
                             )
                         except packager.BundleError as exc:
                             raise GateFailure(
