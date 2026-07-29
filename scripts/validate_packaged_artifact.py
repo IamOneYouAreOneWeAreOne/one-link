@@ -2325,7 +2325,12 @@ def validate_release_archive(
         executable_relative = source_executable.relative_to(source_root).as_posix()
     except ValueError as exc:
         raise GateFailure("source artifact executable is outside its inventory root") from exc
-    expected_member = f"one-link/{executable_relative}"
+    # The archive root mirrors the source bundle: a macOS .app ships as
+    # "one-link.app/..." so the extracted download IS an application (its
+    # bootloader recognizes a bundle by that path shape); every other
+    # platform ships "one-link/...".
+    archive_root = "one-link.app" if source_root.name.lower().endswith(".app") else "one-link"
+    expected_member = f"{archive_root}/{executable_relative}"
     # Extracted members carry their archived permission bits, and a DLL
     # extracted read-only cannot be deleted on Windows -- TemporaryDirectory's
     # cleanup then raises PermissionError(WinError 5) AFTER every validation
@@ -2508,7 +2513,7 @@ def validate_release_archive(
         if _stable_file_sha256(snapshot) != snapshot_digest.hexdigest():
             raise GateFailure("private release ZIP snapshot changed during validation/extraction")
 
-        extracted_artifact = extraction / "one-link"
+        extracted_artifact = extraction / archive_root
         original_hashes = _independent_bundle_hashes(source_artifact)
         extracted_hashes = _independent_bundle_hashes(extracted_artifact)
         extracted_hashes.pop("bundle/BUNDLE_SHA256SUMS", None)
