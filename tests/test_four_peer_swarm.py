@@ -39,7 +39,15 @@ from one_link import control_ipc
 _CONTROL_SECRETS: dict[int, str] = {}
 
 
-pytestmark = pytest.mark.timeout(180)
+# reruns=0 is load-bearing, not a preference. The release quality suites run
+# with --reruns 2 to absorb shared-runner contention, but re-entering a test
+# whose 4-daemon fixture is still finalizing trips pytest's own bookkeeping
+# ("assert not self._finalizers" inside _get_active_fixturedef) and ERRORS the
+# REST of this module at setup -- which is exactly how a green 9188-test
+# Windows run was failed by two setup errors. The per-module mark overrides
+# the CLI, so the retry net keeps protecting every other module while this
+# one, with the heaviest fixture in the suite, stays single-shot.
+pytestmark = [pytest.mark.timeout(180), pytest.mark.flaky(reruns=0)]
 
 
 def _native_loadable_in_subprocess() -> bool:
