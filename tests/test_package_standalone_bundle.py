@@ -479,3 +479,60 @@ def test_framework_chain_resolves_and_cycles_refuse_on_every_host(tmp_path):
     )
     with pytest.raises(module.BundleError):
         module.validate_bundle_archive(escaping, expected_executable="one-link/one-link")
+
+
+def test_macos_app_is_archived_as_an_app_so_the_download_is_launchable(tmp_path):
+    """A .app must stay a .app inside the release ZIP.
+
+    PyInstaller's bootloader recognizes an app bundle by the
+    '.app/Contents/MacOS/<exe>' path shape. Archiving it under a bare
+    'one-link' root produced a download whose bootloader fell back to onedir
+    semantics and searched for _internal beside the executable -- it could
+    not start at all, and Finder showed a folder rather than an application.
+    """
+    module = _module()
+    app = tmp_path / "one-link.app"
+    macos = app / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    (app / "Contents" / "Info.plist").write_text("<plist/>", encoding="utf-8")
+    executable = macos / "one-link"
+    executable.write_bytes(b"launcher")
+    executable.chmod(0o755)
+
+    output = tmp_path / "one-link-macos-arm64.zip"
+    module.package_bundle(
+        app,
+        output,
+        executable="Contents/MacOS/one-link",
+        epoch=1_700_000_000,
+    )
+    with zipfile.ZipFile(output) as archive:
+        names = archive.namelist()
+    assert "one-link.app/Contents/MacOS/one-link" in names
+    assert "one-link.app/BUNDLE_SHA256SUMS" in names
+    assert not any(name.startswith("one-link/") for name in names)
+    # The archive must still verify against its own declared root.
+    module.validate_bundle_archive(
+        output, expected_executable="one-link.app/Contents/MacOS/one-link"
+    )
+
+
+def test_onedir_bundles_keep_the_plain_root(tmp_path):
+    """Only .app sources change shape; every other platform is untouched."""
+    module = _module()
+    bundle = tmp_path / "one-link"
+    (bundle / "_internal").mkdir(parents=True)
+    executable = bundle / ("one-link.exe" if os.name == "nt" else "one-link")
+    executable.write_bytes(b"launcher")
+    executable.chmod(0o755)
+    (bundle / "_internal" / "payload.bin").write_bytes(b"payload")
+
+    output = tmp_path / "one-link-linux-x86_64.zip"
+    module.package_bundle(
+        bundle, output, executable=executable.name, epoch=1_700_000_000
+    )
+    with zipfile.ZipFile(output) as archive:
+        names = archive.namelist()
+    assert f"one-link/{executable.name}" in names
+    assert "one-link/BUNDLE_SHA256SUMS" in names
+    assert not any(name.startswith("one-link.app/") for name in names)

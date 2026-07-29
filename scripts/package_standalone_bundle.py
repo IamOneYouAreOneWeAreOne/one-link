@@ -39,7 +39,26 @@ class Entry:
 
 
 _ARCHIVE_ROOT = "one-link"
-_MANIFEST_NAME = "one-link/BUNDLE_SHA256SUMS"
+# A macOS .app must stay an .app inside the archive. PyInstaller's bootloader
+# recognizes an app bundle by the ".app/Contents/MacOS/<exe>" path pattern, so
+# archiving it under a bare "one-link" root produced a download whose
+# bootloader fell back to onedir semantics and hunted for _internal beside the
+# executable -- it could not start at all. Finder likewise shows a plain
+# folder rather than an application. The root therefore mirrors the source
+# bundle, and both spellings are accepted when validating an archive.
+_ARCHIVE_ROOT_APP = "one-link.app"
+_ACCEPTED_ARCHIVE_ROOTS = (_ARCHIVE_ROOT, _ARCHIVE_ROOT_APP)
+
+
+def _archive_root_for(bundle: Path) -> str:
+    return _ARCHIVE_ROOT_APP if bundle.name.lower().endswith(".app") else _ARCHIVE_ROOT
+
+
+def _manifest_name_for(root: str) -> str:
+    return f"{root}/BUNDLE_SHA256SUMS"
+
+
+_MANIFEST_NAME = _manifest_name_for(_ARCHIVE_ROOT)
 _BLOCK_SIZE = 1024 * 1024
 # Bound on link-chain resolution. Apple frameworks need two hops
 # (Python -> Versions/Current/Python -> Versions/3.x/Python); the ceiling
@@ -101,14 +120,14 @@ def _validate_portable_component(component: str, *, context: str) -> None:
         raise BundleError(f"Windows-reserved path component in {context}: {component!r}")
 
 
-def _validate_portable_archive_path(value: str) -> None:
+def _validate_portable_archive_path(value: str, root: str = _ARCHIVE_ROOT) -> None:
     if _unsafe_control(value) or "\\" in value or value.startswith("/"):
         raise BundleError(f"unsafe archive path: {value!r}")
     path = PurePosixPath(value)
     if (
         path.is_absolute()
         or ".." in path.parts
-        or path.parts[:1] != (_ARCHIVE_ROOT,)
+        or path.parts[:1] != (root,)
         # PurePosixPath collapses repeated separators, dot components, and a
         # trailing separator. Accepting a non-canonical spelling would let two
         # distinct ZIP member names extract to the same destination.
@@ -149,7 +168,7 @@ def _zip_timestamp(epoch: int) -> tuple[int, int, int, int, int, int]:
     )
 
 
-def _collect(bundle: Path) -> list[Entry]:
+def _collect(bundle: Path, archive_root: str = _ARCHIVE_ROOT) -> list[Entry]:
     from one_link.build_identity import (
         STABLE_FROZEN_MAX_BUNDLE_BYTES,
         STABLE_FROZEN_MAX_DIRECTORIES,
@@ -204,10 +223,10 @@ def _collect(bundle: Path) -> list[Entry]:
     for source in sorted(discovered, key=lambda item: item.relative_to(root).as_posix()):
         relative = source.relative_to(root)
         archive = (
-            PurePosixPath(_ARCHIVE_ROOT) / PurePosixPath(relative.as_posix())
+            PurePosixPath(archive_root) / PurePosixPath(relative.as_posix())
         ).as_posix()
-        _validate_portable_archive_path(archive)
-        if _collision_key(archive) == _collision_key(_MANIFEST_NAME):
+        _validate_portable_archive_path(archive, archive_root)
+        if _collision_key(archive) == _collision_key(_manifest_name_for(archive_root)):
             raise BundleError(f"bundle collides with reserved manifest: {relative}")
         metadata = source.lstat()
         if _is_reparse(metadata) and os.name == "nt":
@@ -231,7 +250,7 @@ def _collect(bundle: Path) -> list[Entry]:
             relocated = posixpath.normpath(
                 str(PurePosixPath(archive).parent / PurePosixPath(target.replace("\\", "/")))
             )
-            if relocated != _ARCHIVE_ROOT and not relocated.startswith(f"{_ARCHIVE_ROOT}/"):
+            if relocated != archive_root and not relocated.startswith(f"{archive_root}/"):
                 raise BundleError(
                     f"symbolic link escapes relocated archive: {relative} -> {target}"
                 )
@@ -301,6 +320,7 @@ def _resolve_archive_link(
     symlink_targets: dict[str, str],
     *,
     member: str,
+    archive_root: str = _ARCHIVE_ROOT,
 ) -> str:
     """Resolve a link target through intermediate link COMPONENTS.
 
@@ -313,7 +333,7 @@ def _resolve_archive_link(
     """
 
     def _checked(parts: tuple[str, ...]) -> tuple[str, ...]:
-        if parts[:1] != (_ARCHIVE_ROOT,) or ".." in parts:
+        if parts[:1] != (archive_root,) or ".." in parts:
             raise BundleError(f"symlink target escapes or is absent: {member}")
         return parts
 
@@ -366,8 +386,19 @@ def validate_bundle_archive(archive_path: Path, *, expected_executable: str) -> 
         folded = [_collision_key(name) for name in names]
         if len(names) != len(set(names)) or len(folded) != len(set(folded)):
             raise BundleError("ZIP contains duplicate or portable-name-colliding members")
+        # The archive declares its own root: a macOS bundle legitimately
+        # ships as "one-link.app/..." so that the extracted download IS an
+        # application, while every other platform ships "one-link/...".
+        roots = {name.split("/", 1)[0] for name in names}
+        if len(roots) != 1 or not roots <= set(_ACCEPTED_ARCHIVE_ROOTS):
+            raise BundleError(
+                "ZIP must contain exactly one accepted bundle root: "
+                f"{sorted(roots)!r}"
+            )
+        archive_root = roots.pop()
+        manifest_name = _manifest_name_for(archive_root)
         for name in names:
-            _validate_portable_archive_path(name)
+            _validate_portable_archive_path(name, archive_root)
         symlink_names = {
             info.filename for info in infos if stat.S_ISLNK(info.external_attr >> 16)
         }
@@ -385,12 +416,12 @@ def validate_bundle_archive(archive_path: Path, *, expected_executable: str) -> 
                 "ZIP contains unexpected explicit directory members: "
                 + ", ".join(directory_members[:12])
             )
-        if names.count(_MANIFEST_NAME) != 1:
+        if names.count(manifest_name) != 1:
             raise BundleError("ZIP must contain exactly one BUNDLE_SHA256SUMS")
         if names.count(expected_executable) != 1:
             raise BundleError("ZIP must contain exactly one declared bundle executable")
 
-        with archive.open(_MANIFEST_NAME, "r") as stream:
+        with archive.open(manifest_name, "r") as stream:
             raw_manifest = stream.read(_MAX_MANIFEST_BYTES + 1)
         if len(raw_manifest) > _MAX_MANIFEST_BYTES:
             raise BundleError("BUNDLE_SHA256SUMS exceeds its byte budget")
@@ -407,8 +438,8 @@ def validate_bundle_archive(archive_path: Path, *, expected_executable: str) -> 
             if len(fields) != 5:
                 raise BundleError("BUNDLE_SHA256SUMS has a malformed row")
             digest, kind, size_text, name, target = fields
-            _validate_portable_archive_path(name)
-            if name == _MANIFEST_NAME or name in rows:
+            _validate_portable_archive_path(name, archive_root)
+            if name == manifest_name or name in rows:
                 raise BundleError(f"duplicate/reserved manifest row: {name!r}")
             if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
                 raise BundleError(f"invalid manifest digest for {name!r}")
@@ -430,7 +461,7 @@ def validate_bundle_archive(archive_path: Path, *, expected_executable: str) -> 
             if kind == "SYMLINK"
         }
 
-        expected_names = set(names) - {_MANIFEST_NAME}
+        expected_names = set(names) - {manifest_name}
         if set(rows) != expected_names:
             raise BundleError(
                 "BUNDLE_SHA256SUMS member set mismatch: "
@@ -438,7 +469,7 @@ def validate_bundle_archive(archive_path: Path, *, expected_executable: str) -> 
                 f"unexpected={sorted(set(rows) - expected_names)!r}"
             )
         for info in infos:
-            if info.filename == _MANIFEST_NAME:
+            if info.filename == manifest_name:
                 continue
             expected_digest, kind, expected_size, target = rows[info.filename]
             mode = info.external_attr >> 16
@@ -493,6 +524,7 @@ def validate_bundle_archive(archive_path: Path, *, expected_executable: str) -> 
                     target_path,
                     symlink_targets,
                     member=info.filename,
+                    archive_root=archive_root,
                 )
                 if not (
                     relocated_name in names
@@ -538,8 +570,9 @@ def package_bundle(
     if _inside(output.resolve(strict=False), root):
         raise BundleError("release output must not be inside the input bundle")
 
-    entries = _collect(bundle)
-    expected_executable = (PurePosixPath(_ARCHIVE_ROOT) / executable_path).as_posix()
+    archive_root = _archive_root_for(bundle)
+    entries = _collect(bundle, archive_root)
+    expected_executable = (PurePosixPath(archive_root) / executable_path).as_posix()
     executable_entries = [entry for entry in entries if entry.archive_name == expected_executable]
     if len(executable_entries) != 1 or executable_entries[0].symlink_target is not None:
         raise BundleError(f"bundle executable is missing or not a regular file: {executable}")
@@ -657,7 +690,7 @@ def package_bundle(
                 )
 
             manifest_info = zipfile.ZipInfo(
-                _MANIFEST_NAME, date_time=timestamp
+                _manifest_name_for(archive_root), date_time=timestamp
             )
             manifest_info.create_system = 3
             manifest_info.external_attr = (stat.S_IFREG | 0o644) << 16
