@@ -11,6 +11,7 @@ is fatal to the native feature/release gates.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import hashlib
 import logging
@@ -261,6 +262,43 @@ def _is_link_like_path(path: Path) -> bool:
     return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag)
 
 
+def _frozen_bundle_roots() -> list[Path]:
+    """Directories a frozen application legitimately owns, resolved."""
+
+    roots: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if isinstance(meipass, str) and meipass:
+        with contextlib.suppress(OSError):
+            roots.append(Path(meipass).resolve(strict=True))
+    executable = getattr(sys, "executable", "") or ""
+    if getattr(sys, "frozen", False) and executable:
+        with contextlib.suppress(OSError):
+            resolved = Path(executable).resolve(strict=True)
+            # onedir: <root>/one-link; macOS .app: <root>.app/Contents/MacOS/one-link
+            roots.append(resolved.parent)
+            if len(resolved.parents) >= 3 and resolved.parents[1].name == "Contents":
+                roots.append(resolved.parents[2])
+    return roots
+
+
+def _link_stays_inside_bundle(path: Path) -> bool:
+    """True when a link and its target both live inside the frozen bundle."""
+
+    roots = _frozen_bundle_roots()
+    if not roots:
+        return False
+    try:
+        target = path.resolve(strict=True)
+        here = path.parent.resolve(strict=True)
+    except OSError:
+        return False
+
+    def _contained(candidate: Path) -> bool:
+        return any(candidate == root or root in candidate.parents for root in roots)
+
+    return _contained(target) and _contained(here)
+
+
 def _bundled_sidecar_path(library: Path) -> Path | None:
     """Locate the signed-hash sidecar in onedir and macOS BUNDLE layouts."""
     adjacent = library.with_suffix(library.suffix + ".sha256")
@@ -299,8 +337,15 @@ def _verify_bundled_library(p: Path) -> bool:
     sidecar = _bundled_sidecar_path(p)
     if sidecar is None:
         return False
-    if _is_link_like_path(p) or _is_link_like_path(sidecar):
-        return False
+    # A link is refused unless it is PyInstaller's own intra-bundle mirror:
+    # a macOS .app keeps Contents/Resources as links onto Contents/Frameworks,
+    # so importlib.resources legitimately hands back a link-like path and a
+    # blanket refusal made the frozen app reject its own verified library.
+    # A link whose target escapes the bundle is still refused outright, and
+    # the digest below is computed from the RESOLVED bytes either way.
+    for candidate in (p, sidecar):
+        if _is_link_like_path(candidate) and not _link_stays_inside_bundle(candidate):
+            return False
     try:
         line = sidecar.read_text(encoding="ascii")
         actual = hashlib.sha256(p.read_bytes()).hexdigest().lower()
