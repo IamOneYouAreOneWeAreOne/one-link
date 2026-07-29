@@ -1610,12 +1610,27 @@ def runtime_feature_smoke(as_json):
         "sqlcipher_roundtrip": "OK",
         "watchdog_observer": "OK",
     }
+    # Some probes are inapplicable by ENVIRONMENT, not by packaging: the
+    # allowed set per feature captures every honest terminal status, and a
+    # probe declares inapplicability by raising _FeatureNotApplicable with
+    # the exact status string.
+    allowed_statuses = {
+        name: frozenset({status}) for name, status in expected_statuses.items()
+    }
+    allowed_statuses["pystray_backend"] |= frozenset(
+        {"NOT_APPLICABLE_HEADLESS_NO_DISPLAY"}
+    )
     features = {name: "NOT_RUN" for name in expected_statuses}
     errors: dict[str, str] = {}
+
+    class _FeatureNotApplicable(Exception):
+        pass
 
     def _probe(name: str, operation) -> None:
         try:
             operation()
+        except _FeatureNotApplicable as not_applicable:
+            features[name] = str(not_applicable)
         except Exception as exc:
             features[name] = "FAILED"
             errors[name] = type(exc).__name__
@@ -1660,6 +1675,18 @@ def runtime_feature_smoke(as_json):
             raise RuntimeError("tray status icon has an invalid Pillow representation")
 
     def _pystray_backend() -> None:
+        # On Linux, pystray's X11 backend resolves the DISPLAY at IMPORT
+        # time; on a headless host (CI runners, servers) that raises
+        # DisplayNameError before any packaging question can even be asked.
+        # Headless is an environment condition, not a bundle defect -- the
+        # module bytes are covered by the inventory and import gates -- so
+        # the probe reports NOT_APPLICABLE there, mirroring the existing
+        # sigstore-boundary pattern. A desktop session still exercises the
+        # real backend end to end.
+        if _sys.platform not in ("win32", "darwin") and not (
+            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+        ):
+            raise _FeatureNotApplicable("NOT_APPLICABLE_HEADLESS_NO_DISPLAY")
         backend_name = (
             "pystray._win32"
             if _sys.platform == "win32"
@@ -1877,7 +1904,10 @@ def runtime_feature_smoke(as_json):
         else final_numpy_status
     )
     failed = (
-        features != expected_statuses
+        set(features) != set(allowed_statuses)
+        or any(
+            features[name] not in allowed_statuses[name] for name in allowed_statuses
+        )
         or bool(errors)
         or numpy_status != "ABSENT"
     )
@@ -1897,7 +1927,7 @@ def runtime_feature_smoke(as_json):
         click.echo(_json.dumps(payload, indent=2, sort_keys=True))
     else:
         passed = sum(
-            status == expected_statuses[name]
+            status in allowed_statuses[name]
             for name, status in features.items()
         )
         click.echo(
