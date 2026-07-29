@@ -252,6 +252,15 @@ RUNTIME_FEATURE_EXPECTED_STATUSES = {
     "sqlcipher_roundtrip": "OK",
     "watchdog_observer": "OK",
 }
+# Environment-conditional statuses a feature may honestly report in addition
+# to its expected packaging status. pystray's X11 backend resolves DISPLAY at
+# import time, so a headless host (CI runners) cannot exercise it regardless
+# of bundle correctness -- the module bytes stay covered by the inventory and
+# import gates. First release binaries to reach the feature smoke failed on
+# exactly this, on every Linux leg.
+RUNTIME_FEATURE_ALLOWED_ENVIRONMENT_STATUSES: dict[str, set[str]] = {
+    "pystray_backend": {"NOT_APPLICABLE_HEADLESS_NO_DISPLAY"},
+}
 REQUIRED_PEER_HEADERS = {
     "cache-control": ("no-cache", "must-revalidate"),
     "etag": ('"',),
@@ -1899,7 +1908,18 @@ def validate_runtime_features(artifact: Path) -> str:
     if not isinstance(payload, dict):
         raise GateFailure("frozen runtime feature smoke must return a JSON object")
     features = payload.get("features")
-    if not isinstance(features, dict) or features != RUNTIME_FEATURE_EXPECTED_STATUSES:
+    if (
+        not isinstance(features, dict)
+        or set(features) != set(RUNTIME_FEATURE_EXPECTED_STATUSES)
+        or any(
+            features[name]
+            not in (
+                {RUNTIME_FEATURE_EXPECTED_STATUSES[name]}
+                | RUNTIME_FEATURE_ALLOWED_ENVIRONMENT_STATUSES.get(name, set())
+            )
+            for name in RUNTIME_FEATURE_EXPECTED_STATUSES
+        )
+    ):
         raise GateFailure(
             "frozen runtime feature statuses differ from the independent release contract: "
             f"{features!r}"
