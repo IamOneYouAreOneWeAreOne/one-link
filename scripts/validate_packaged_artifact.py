@@ -2396,6 +2396,20 @@ def validate_release_archive(
                     if stat.S_ISLNK(info.external_attr >> 16)
                 }
                 all_names = {info.filename.rstrip("/") for info in infos}
+                # Link targets for chain resolution, read from the archive the
+                # manifest verification above already bound digest-for-digest.
+                symlink_targets: dict[str, str] = {}
+                for info in infos:
+                    if not stat.S_ISLNK(info.external_attr >> 16):
+                        continue
+                    try:
+                        symlink_targets[info.filename.rstrip("/")] = archive.read(
+                            info
+                        ).decode("utf-8")
+                    except UnicodeDecodeError as exc:
+                        raise GateFailure(
+                            f"release ZIP symlink is not UTF-8: {info.filename!r}"
+                        ) from exc
                 for name in all_names:
                     parts = PurePosixPath(name).parts
                     prefixes = {"/".join(parts[:index]) for index in range(1, len(parts))}
@@ -2442,14 +2456,26 @@ def validate_release_archive(
                             or windows_target.root
                         ):
                             raise GateFailure(f"release ZIP symlink target is absolute: {name!r}")
-                        relocated = PurePosixPath(
-                            os.path.normpath(
-                                str(PurePosixPath(name).parent / target_path)
-                            ).replace("\\", "/")
-                        )
-                        if relocated.parts[:1] != ("one-link",) or ".." in relocated.parts:
-                            raise GateFailure(f"release ZIP symlink escapes bundle: {name!r}")
-                        relocated_name = relocated.as_posix().rstrip("/")
+                        # Resolve through the PACKAGER's chain resolver, not a
+                        # local copy: this extraction path had its own one-hop
+                        # implementation, so teaching the packager about
+                        # Apple's framework layout (Python ->
+                        # Versions/Current/Python, Versions/Current ->
+                        # Versions/3.x) fixed one gate and left this one
+                        # refusing the same real bundle. One resolver, both
+                        # callers -- escapes, cycles and absent targets stay
+                        # refused exactly as before.
+                        try:
+                            relocated_name = packager._resolve_archive_link(
+                                PurePosixPath(name).parent,
+                                target_path,
+                                symlink_targets,
+                                member=name,
+                            )
+                        except packager.BundleError as exc:
+                            raise GateFailure(
+                                f"release ZIP symlink escapes bundle: {name!r}: {exc}"
+                            ) from exc
                         if not (
                             relocated_name in all_names
                             or any(member.startswith(relocated_name + "/") for member in all_names)

@@ -1526,3 +1526,25 @@ def test_cdc_sidecar_is_written_with_lf_bytes():
     text = producer.read_text(encoding="utf-8")
     needle = "newline=" + chr(34) + chr(92) + "n" + chr(34)
     assert needle in text, "sidecar writer must force LF bytes"
+
+
+def test_archive_link_resolution_has_exactly_one_implementation():
+    """Twin-copy guard. The release ZIP is symlink-checked in TWO places --
+    the packager's manifest verifier and this validator's extraction path --
+    and they drifted: teaching the packager Apple's framework chain fixed
+    one gate while the other kept refusing the same real bundle with its own
+    one-hop copy. Both must call the single shared resolver."""
+    validator_source = SCRIPT.read_text(encoding="utf-8")
+    packager_source = SCRIPT.with_name("package_standalone_bundle.py").read_text(
+        encoding="utf-8"
+    )
+    assert packager_source.count("def _resolve_archive_link") == 1
+    assert "packager._resolve_archive_link(" in validator_source, (
+        "the extraction path must resolve links through the packager's resolver"
+    )
+    # The retired local copy computed a one-hop relocation inline; its return
+    # to either file means the twin has been reintroduced.
+    for source, label in ((validator_source, "validator"), (packager_source, "packager")):
+        assert "str(PurePosixPath(name).parent / target_path)" not in source, (
+            f"{label} reintroduced an inline one-hop symlink relocation"
+        )
