@@ -2208,11 +2208,19 @@ def validate_frozen_e2e(artifact: Path) -> str:
 
             # The authenticated shutdown command must let both daemons flush
             # state and unregister discovery without a kill signal.
-            for process, _log, _path, port, secret in processes:
+            # Ask BOTH daemons to stop BEFORE waiting on either. Stopping one
+            # at a time left the survivor actively dialing the daemon that was
+            # tearing down -- the CI logs show the reconnect churn (connected /
+            # connection reset / disconnected, repeatedly) -- so the first
+            # daemon kept servicing new peer work instead of finishing its
+            # exit. Quiescing the swarm first is what the shutdown contract
+            # actually means for a peer-to-peer pair.
+            for _process, _log, _path, port, secret in processes:
                 assert port is not None and secret is not None
                 response = _control(port, secret, cmd="shutdown")
                 if response != {"ok": True, "stopping": True}:
                     raise GateFailure(f"frozen daemon rejected graceful shutdown: {response!r}")
+            for process, _log, _path, port, secret in processes:
                 try:
                     # A frozen daemon that has just completed a real transfer
                     # unwinds a large graph on exit -- cover-traffic
