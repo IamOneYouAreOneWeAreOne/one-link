@@ -421,6 +421,54 @@ def _materialize_bundle_symlinks(bundle_root: Path) -> int:
     return replaced
 
 
+def _rebind_bundled_cdc_sidecars(bundle_root: Path) -> None:
+    """Rewrite every real CDC sidecar to bind the BUNDLED library bytes.
+
+    Bundling may legitimately rewrite the library after staging (macOS
+    ad-hoc code-signing); the sidecar's whole purpose is to bind the shipped
+    bytes exactly, so it is recomputed here. LF bytes are load-bearing (see
+    scripts/build_native_cdc.py). A sidecar with no resolvable library is a
+    packaging error and fails the build.
+    """
+
+    repo = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(repo / "src"))
+    try:
+        from one_link.native_cdc import native_library_name
+    finally:
+        sys.path.pop(0)
+    library_name = native_library_name()
+    sidecars = [
+        candidate
+        for candidate in bundle_root.rglob(library_name + ".sha256")
+        if candidate.is_file() and not candidate.is_symlink()
+    ]
+    if not sidecars:
+        # Nothing claims to bind the library (packaging-unit fixtures with a
+        # stubbed PyInstaller), so there is nothing to rebind. The release
+        # gate independently requires the real pair to exist.
+        return
+    libraries = [
+        candidate
+        for candidate in bundle_root.rglob(library_name)
+        if candidate.is_file()
+    ]
+    if not libraries:
+        raise RuntimeError(f"bundle contains no CDC library named {library_name}")
+    digest = hashlib.sha256(libraries[0].read_bytes()).hexdigest()
+    for other in libraries[1:]:
+        if hashlib.sha256(other.read_bytes()).hexdigest() != digest:
+            raise RuntimeError(
+                "bundle contains divergent CDC library copies: "
+                f"{libraries[0]} vs {other}"
+            )
+    line = f"{digest}  {library_name}\n"
+    for sidecar in sidecars:
+        if sidecar.read_text(encoding="ascii") != line:
+            sidecar.write_text(line, encoding="ascii", newline="\n")
+            print(f"[build] rebound CDC sidecar to shipped bytes: {sidecar}")
+
+
 def _write_runtime_source_manifest(repo: Path, destination: Path) -> Path:
     """Freeze the exact stable Python source/code contract used by this build."""
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1289,6 +1337,14 @@ def main(
         replaced_links = _materialize_bundle_symlinks(final_bundle)
         if replaced_links:
             print(f"[build] materialized {replaced_links} bundle symlink(s) into real files")
+
+    # The CDC sidecar must bind the bytes we SHIP, not the bytes we staged:
+    # on Apple Silicon PyInstaller ad-hoc code-signs every collected Mach-O
+    # during bundling, so the staged hash is stale by design there and the
+    # release gate refused the first macOS binaries to reach it. Recompute
+    # against the bundled library on every platform (a no-op where bundling
+    # left the bytes untouched).
+    _rebind_bundled_cdc_sidecars(final_bundle)
 
     # The updater must execute outside the directory it replaces. Build a
     # separately frozen one-file helper with the complete Sigstore verifier

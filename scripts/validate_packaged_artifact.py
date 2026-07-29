@@ -25,11 +25,13 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import contextlib
 import importlib.util
 import ipaddress
 import json
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
+import shutil
 import socket
 import ssl
 import stat
@@ -2212,7 +2214,14 @@ def validate_frozen_e2e(artifact: Path) -> str:
                 if response != {"ok": True, "stopping": True}:
                     raise GateFailure(f"frozen daemon rejected graceful shutdown: {response!r}")
                 try:
-                    return_code = process.wait(timeout=20.0)
+                    # A frozen daemon that has just completed a real transfer
+                    # unwinds a large graph on exit -- cover-traffic
+                    # scheduler, discovery unregistration, WAL flush, index
+                    # persistence -- and the CI logs show it doing exactly
+                    # that at the old 20-second mark on shared runners. The
+                    # contract is CLEAN EXIT WITHOUT A KILL SIGNAL, not
+                    # exit speed; give the orderly path room.
+                    return_code = process.wait(timeout=90.0)
                 except subprocess.TimeoutExpired as exc:
                     raise GateFailure("frozen daemon did not exit after authenticated shutdown") from exc
                 if return_code != 0:
@@ -2290,7 +2299,18 @@ def validate_release_archive(
     except ValueError as exc:
         raise GateFailure("source artifact executable is outside its inventory root") from exc
     expected_member = f"one-link/{executable_relative}"
-    with tempfile.TemporaryDirectory(prefix="one-link-release-zip-") as raw_root:
+    # Extracted members carry their archived permission bits, and a DLL
+    # extracted read-only cannot be deleted on Windows -- TemporaryDirectory's
+    # cleanup then raises PermissionError(WinError 5) AFTER every validation
+    # has already passed, failing the release on housekeeping. Restore write
+    # permission on the way out, then remove.
+    def _force_writable(func, path, _exc):
+        with contextlib.suppress(OSError):
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            func(path)
+
+    raw_root = tempfile.mkdtemp(prefix="one-link-release-zip-")
+    try:
         extraction = Path(raw_root)
         snapshot = extraction / "candidate.snapshot.zip"
         # Snapshot the untrusted release input once while binding the opened
@@ -2453,6 +2473,8 @@ def validate_release_archive(
         validate_runtime_features(extracted_artifact)
         if run_frozen_e2e:
             validate_frozen_e2e(extracted_artifact)
+    finally:
+        shutil.rmtree(raw_root, onerror=_force_writable)
     return (
         "final release ZIP manifest and every member digest revalidated; safely extracted "
         + ("and completed frozen two-daemon E2E" if run_frozen_e2e else "and executed")
