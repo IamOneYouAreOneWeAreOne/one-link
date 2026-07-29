@@ -28,7 +28,14 @@ jobs:
         uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
         with:
           distribution: temurin
-          java-version: "21.0.11+10"
+          # 2026-07-29: the previous exact pin (21.0.11+10) began resolving
+          # as "No matching version found" in setup-java mid-campaign --
+          # upstream index drift, not a model or code change; it failed the
+          # release for the first time in 26 runs. Repinned to a build
+          # verified present in the Adoptium GA index at that moment. Exact
+          # pinning is kept deliberately: a floating "21" would let the
+          # toolchain move under a release without anyone deciding to.
+          java-version: "21.0.12+8"
 
       - name: download and authenticate pinned TLC
         shell: bash
