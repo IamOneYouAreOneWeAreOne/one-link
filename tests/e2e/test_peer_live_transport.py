@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import ipaddress
 import json
+import os
 import queue
 import re
 import threading
@@ -25,6 +26,15 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import pytest
+
+# Live WebRTC handshakes (DTLS + SCTP between two browser contexts) are
+# measured in single-digit seconds on dev hardware and can legitimately take
+# far longer on a shared 2-vCPU CI runner already hosting two Chromium
+# processes and two daemons. A 20s ceiling failed the release E2E gate on
+# exactly that contention; the assertion is unchanged -- a handshake that
+# never completes still fails, just after an honest budget for the machine
+# class it runs on.
+_LIVE_RTC_TIMEOUT_MS = 60_000 if os.environ.get("CI") == "true" else 20_000
 from aiohttp import web
 from playwright.sync_api import (
     Browser,
@@ -257,7 +267,7 @@ def _open_real_peer(page: Page, peer_origin: str) -> str:
             window.__oneLinkPeer?.state?.envelope ||
             window.__oneLinkPeer?.state?.boot_error_msg
         )""",
-        timeout=20_000,
+        timeout=_LIVE_RTC_TIMEOUT_MS,
     )
     phase = page.evaluate(
         """() => ({
@@ -479,7 +489,7 @@ def test_peer_register_and_lookup_cross_origin_under_real_csp(
         page.wait_for_function(
             "() => document.querySelector('#rdz-status')?.textContent === "
             "'Signed presence published. Manual signaling is still required.'",
-            timeout=20_000,
+            timeout=_LIVE_RTC_TIMEOUT_MS,
         )
         assert page.locator("#rdz-ack-wrap").is_visible()
         assert ":" in page.locator("#rdz-ack-endpoint").inner_text()
@@ -759,7 +769,7 @@ def _wait_for_control_open(page: Page) -> None:
                 (channel) => channel.label === "one-link-control-v1" &&
                     channel.readyState === "open",
             )""",
-            timeout=20_000,
+            timeout=_LIVE_RTC_TIMEOUT_MS,
         )
     except PlaywrightTimeoutError as exc:
         pytest.fail(
@@ -933,7 +943,7 @@ def test_two_isolated_peer_pages_complete_manual_webrtc_and_exchange_probe(
         try:
             page_a.wait_for_function(
                 "() => document.querySelector('#webrtc-local').value.length > 100",
-                timeout=20_000,
+                timeout=_LIVE_RTC_TIMEOUT_MS,
             )
         except PlaywrightTimeoutError as exc:
             pytest.fail(
@@ -961,7 +971,7 @@ def test_two_isolated_peer_pages_complete_manual_webrtc_and_exchange_probe(
         page_b.locator("#btn-webrtc-accept").click()
         page_b.wait_for_function(
             "() => document.querySelector('#webrtc-local').value.length > 100",
-            timeout=20_000,
+            timeout=_LIVE_RTC_TIMEOUT_MS,
         )
         answer_status = page_b.locator("#webrtc-status").inner_text()
         answer = _signal_details(page_b, "#webrtc-local", "answer")
@@ -1000,7 +1010,7 @@ def test_two_isolated_peer_pages_complete_manual_webrtc_and_exchange_probe(
             try:
                 page.wait_for_function(
                     "() => Boolean(window.__oneLinkPeer.state.pairing?.remote_hello)",
-                    timeout=20_000,
+                    timeout=_LIVE_RTC_TIMEOUT_MS,
                 )
             except PlaywrightTimeoutError as exc:
                 pytest.fail(
