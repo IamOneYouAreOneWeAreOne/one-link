@@ -1548,3 +1548,31 @@ def test_archive_link_resolution_has_exactly_one_implementation():
         assert "str(PurePosixPath(name).parent / target_path)" not in source, (
             f"{label} reintroduced an inline one-hop symlink relocation"
         )
+
+
+def test_app_bundle_layout_is_detected_without_the_dot_app_suffix(tmp_path):
+    """The release ZIP archives every platform under the root member
+    'one-link', so the EXTRACTED macOS copy has no .app suffix while being
+    structurally an app bundle. Keying detection on the suffix made the
+    final packaging gate reject the same bundle its artifact-level pass had
+    just accepted (the mirror links Apple requires are legal only under the
+    app-bundle contract)."""
+    mod = _load_module()
+    extracted = tmp_path / "one-link"          # no .app suffix, as extracted
+    executable = extracted / "Contents" / "MacOS" / "one-link"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"launcher")
+    (extracted / "Contents" / "Info.plist").write_text("<plist/>", encoding="utf-8")
+
+    root, runtime_root, data_root, layout = mod._artifact_layout(extracted, executable)
+    assert layout == "frozen_macos_app_bundle"
+    assert root == extracted.resolve()
+    assert runtime_root == extracted.resolve() / "Contents" / "Frameworks"
+    assert data_root == extracted.resolve() / "Contents" / "Resources"
+
+    # A onedir tree that merely nests a MacOS directory must NOT be promoted.
+    onedir = tmp_path / "plain"
+    onedir_exe = onedir / "one-link"
+    onedir.mkdir()
+    onedir_exe.write_bytes(b"launcher")
+    assert mod._artifact_layout(onedir, onedir_exe)[3] == "frozen_onedir_bundle"
