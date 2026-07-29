@@ -1969,7 +1969,14 @@ def validate_frozen_e2e(artifact: Path) -> str:
 
     executable = _find_artifact_executable(artifact).resolve()
 
-    def _wait_file(path: Path, *, timeout: float = 30.0) -> str:
+    # First launch of a FRESHLY EXTRACTED bundle is the slowest start this
+    # binary will ever do: macOS verifies the signature of every Mach-O in the
+    # tree on first execution (hundreds of dylibs, cold page cache, temp
+    # volume), and Windows Defender scans the same way. The daemon in the
+    # failing run had already logged its launch and established its seed --
+    # it simply had not reached port publication inside 30s. The contract is
+    # THAT IT STARTS, not how fast a cold shared runner gets there.
+    def _wait_file(path: Path, *, timeout: float = 180.0) -> str:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
