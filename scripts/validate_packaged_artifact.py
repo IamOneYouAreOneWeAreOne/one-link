@@ -1210,10 +1210,23 @@ def _artifact_layout(
 ) -> tuple[Path, Path, Path, str]:
     """Return inventory root, runtime root, data root, and layout contract."""
     executable = executable.resolve()
+    # An app bundle is recognized by its STRUCTURE, not by the folder's name.
+    # The release ZIP archives every platform under the root member
+    # "one-link", so the extracted macOS copy is
+    # <tmp>/one-link/Contents/MacOS/one-link -- structurally an .app, but
+    # without the suffix. Requiring the suffix made the extracted copy fall
+    # through to the onedir contract, which forbids the Frameworks/Resources
+    # mirror links Apple's layout requires, and the final packaging gate
+    # rejected the very bundle its own artifact-level pass had accepted.
+    # Info.plist beside Contents/MacOS is the load-bearing marker.
+    contents_root = executable.parent.parent
     if (
         executable.parent.name == "MacOS"
-        and executable.parent.parent.name == "Contents"
-        and executable.parent.parent.parent.suffix.lower() == ".app"
+        and contents_root.name == "Contents"
+        and (
+            contents_root.parent.suffix.lower() == ".app"
+            or (contents_root / "Info.plist").is_file()
+        )
     ):
         app_root = executable.parent.parent.parent.resolve()
         return (
