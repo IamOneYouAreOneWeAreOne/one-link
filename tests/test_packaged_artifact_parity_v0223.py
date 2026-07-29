@@ -16,7 +16,7 @@ import ssl
 import subprocess
 import sys
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import zipfile
 
 import pytest
@@ -1576,3 +1576,38 @@ def test_app_bundle_layout_is_detected_without_the_dot_app_suffix(tmp_path):
     onedir.mkdir()
     onedir_exe.write_bytes(b"launcher")
     assert mod._artifact_layout(onedir, onedir_exe)[3] == "frozen_onedir_bundle"
+
+
+def test_release_zip_member_validation_accepts_the_app_root(tmp_path):
+    """Root-awareness must reach EVERY packager call the extraction path
+    makes. With the archive root changed to one-link.app, the member-path
+    validator was still called with the default 'one-link' root and rejected
+    every member of a correct macOS archive as unsafe."""
+    mod = _load_module()
+    packager_path = SCRIPT.with_name("package_standalone_bundle.py")
+    spec = importlib.util.spec_from_file_location("_pkg_root_probe", packager_path)
+    assert spec and spec.loader
+    packager = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = packager
+    spec.loader.exec_module(packager)
+
+    member = "one-link.app/Contents/Frameworks/AppKit/_AppKit.cpython-312-darwin.so"
+    # The exact call the extraction path makes, with the inferred root.
+    packager._validate_portable_archive_path(member, "one-link.app")
+    # Root mismatches must still be refused.
+    with pytest.raises(packager.BundleError):
+        packager._validate_portable_archive_path(member, "one-link")
+    with pytest.raises(packager.BundleError):
+        packager._validate_portable_archive_path("one-link/x", "one-link.app")
+    # Chain resolution honors the app root too.
+    resolved = packager._resolve_archive_link(
+        PurePosixPath("one-link.app/Contents/Frameworks/Python.framework"),
+        PurePosixPath("Versions/Current/Python"),
+        {"one-link.app/Contents/Frameworks/Python.framework/Versions/Current": "3.12"},
+        member="one-link.app/Contents/Frameworks/Python.framework/Python",
+        archive_root="one-link.app",
+    )
+    assert resolved == (
+        "one-link.app/Contents/Frameworks/Python.framework/Versions/3.12/Python"
+    )
+    assert mod is not None
