@@ -785,7 +785,14 @@ def test_server_logs_https_listener_up():
     misbehaves."""
     src = Path("src/one_link/server.py").read_text(encoding="utf-8")
     idx = src.find("async def _start_https_listener")
-    snippet = src[idx : idx + 3000]
+    # Scan the FUNCTION, not a byte count. A fixed window measures comment
+    # length as much as behaviour: documenting why cert building runs off the
+    # event loop pushed the log line past a 3000-char cutoff and failed this
+    # test without changing anything it is about.
+    next_def = src.find("\n    async def ", idx + 1)
+    if next_def == -1:
+        next_def = src.find("\n    def ", idx + 1)
+    snippet = src[idx : next_def if next_def != -1 else idx + 10000]
     assert "UI server HTTPS up" in snippet
 
 

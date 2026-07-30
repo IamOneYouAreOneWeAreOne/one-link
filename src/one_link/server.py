@@ -29559,7 +29559,19 @@ class UIServer:
             log.info("peer-https unavailable: %s", e)
             return
         try:
-            ctx = build_ssl_context(
+            # OFF THE EVENT LOOP, deliberately. Minting the cert enumerates
+            # this host's addresses, and that enumeration ends in
+            # socket.gethostbyname_ex(socket.gethostname()) -- a synchronous
+            # resolver call. On macOS the machine's own name is a .local name
+            # answered over mDNS, and on a host whose network is degraded
+            # that lookup blocks for tens of seconds. Run on the loop thread
+            # it froze the daemon whole: every listener still ACCEPTED
+            # connections (the kernel does that), nothing was ever read from
+            # them, and the daemon's log went silent because the code that
+            # would log was not running. It presented as a healthy daemon
+            # whose control plane answered nothing.
+            ctx = await asyncio.to_thread(
+                build_ssl_context,
                 data_dir(),
                 short_id=self.daemon.me.short_id,
             )
