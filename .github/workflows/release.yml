@@ -711,6 +711,17 @@ jobs:
             --release-archive "staged/${ASSET_NAME}" \
             --frozen-e2e
 
+      - name: preserve frozen-E2E daemon logs on failure
+        # A silent daemon is diagnosed by its COMPLETE log, and the job's own
+        # output truncates a single line at ~500 characters. Uploading the
+        # files ends that guessing game for whichever platform fails next.
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frozen-e2e-logs-${{ matrix.asset_name }}
+          path: frozen-e2e-logs/
+          if-no-files-found: ignore
+
       - name: upload binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
