@@ -887,7 +887,12 @@ class State:
             self.is_encrypted = True
             log.info(
                 "state.db: AES-256 at-rest encryption ACTIVE "
-                "(key from %s)", _kc.backend_label(),
+                "(key from %s)",
+                # Where the key ACTUALLY resolved from -- backend_label()
+                # names the backend merely INSTALLED here, which on a Mac
+                # with a locked login keychain claimed "macOS Keychain" one
+                # line after the log said the key went to the local file.
+                _kc.last_key_source_label() or _kc.backend_label(),
             )
             return conn
         except Exception as e:
