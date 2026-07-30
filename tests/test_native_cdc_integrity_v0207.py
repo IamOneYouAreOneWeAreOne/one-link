@@ -256,3 +256,68 @@ def test_macos_bundle_sidecar_is_resolved_from_resources(tmp_path, monkeypatch):
     monkeypatch.setattr(native_cdc, "native_library_name", lambda: library_name)
 
     assert native_cdc._bundled_sidecar_path(library) == sidecar
+
+
+def test_one_link_cc_pins_the_ladder_and_outranks_cc(monkeypatch, tmp_path):
+    r"""The CDC compiler must be pinnable WITHOUT hijacking every other build.
+
+    CI needs to point this ladder at an MSYS2 gcc that lives wherever
+    setup-msys2 happened to install it -- the ladder searches OS-owned
+    directories only and otherwise probes a hardcoded C:\msys64, so PATH
+    cannot reach it. ``CC`` is the obvious lever and the wrong one: cc-rs
+    reads it too, so pointing CC at a GNU gcc hands GNU objects to the
+    MSVC-target Rust link for ring/zstd-sys/blake3 and breaks the native
+    extension instead. ``ONE_LINK_CC`` pins this ladder alone.
+    """
+    pinned = tmp_path / "pinned-cc.exe"
+    pinned.write_text("#!/bin/sh\n", encoding="utf-8")
+    pinned.chmod(0o755)
+
+    monkeypatch.setenv("ONE_LINK_CC", str(pinned))
+    monkeypatch.setenv("CC", str(tmp_path / "some-other-cc.exe"))
+
+    assert native_cdc._candidate_c_compilers() == [str(pinned)], (
+        "ONE_LINK_CC must win outright over CC and over every probed candidate"
+    )
+
+    # Without it, CC keeps its documented meaning -- this is an addition, not
+    # a replacement.
+    monkeypatch.delenv("ONE_LINK_CC")
+    other = tmp_path / "some-other-cc.exe"
+    other.write_text("#!/bin/sh\n", encoding="utf-8")
+    other.chmod(0o755)
+    assert native_cdc._candidate_c_compilers() == [str(other)]
+
+
+def test_the_ci_lever_is_not_the_shared_one(monkeypatch):
+    """Guard the reason, not just the behaviour.
+
+    If someone later 'simplifies' the workflows back to CC, this ladder still
+    works and the breakage lands somewhere else entirely -- a Rust link
+    failure in an unrelated crate. Keep the rationale pinned to the source.
+    """
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "one_link" / "native_cdc.py"
+    ).read_text(encoding="utf-8")
+    assert "ONE_LINK_CC" in source
+    assert "cc-rs" in source, (
+        "the reason ONE_LINK_CC exists must stay next to the code that reads it"
+    )
+
+    workflows = (Path(__file__).resolve().parents[1] / ".github" / "workflows")
+    for name in ("release.yml", "tests.yml", "auto_build.yml"):
+        text = (workflows / name).read_text(encoding="utf-8")
+        if "setup-msys2" not in text:
+            continue
+        assert "ONE_LINK_CC=" in text, f"{name} installs MSYS2 but never binds the ladder to it"
+        # An ACTIVE key, not the string anywhere -- the comment explaining why
+        # this input is wrong necessarily contains the string.
+        active = [
+            line for line in text.splitlines()
+            if line.strip().startswith("location:")
+        ]
+        assert not active, (
+            f"{name}: setup-msys2 APPENDS msys64 to `location`, so this installs "
+            r"to C:\msys64\msys64 -- a path no ladder candidate probes: "
+            f"{active}"
+        )
