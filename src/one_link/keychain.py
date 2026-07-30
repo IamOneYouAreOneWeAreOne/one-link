@@ -147,6 +147,9 @@ KEYCHAIN_UNRESPONSIVE_COOLDOWN_SECONDS = 300.0
 _keychain_breaker_lock = threading.Lock()
 _keychain_unresponsive_until = 0.0
 
+# Where the state.db key was actually resolved from, for honest reporting.
+_last_key_source: str | None = None
+
 
 def _keychain_breaker_is_open() -> bool:
     """True while a recent timeout still speaks for this host."""
@@ -360,7 +363,13 @@ def _decode_local_key(blob: bytes) -> str:
 
 
 def _read_local_key() -> str | None:
-    return _read_local_key_at(_local_key_path())
+    # Provenance is recorded HERE rather than at each caller: three separate
+    # paths return this value, and a per-caller marker would be a twin-copy
+    # waiting for one of them to be forgotten.
+    key = _read_local_key_at(_local_key_path())
+    if key is not None:
+        _record_key_source(_local_key_source_label())
+    return key
 
 
 def _read_local_key_at(path) -> str | None:
@@ -501,10 +510,43 @@ def _exclusive_provision(lock_path=None) -> Iterator[None]:
             os.close(fd)
 
 
+def _record_key_source(label: str) -> str:
+    """Remember where the state key actually came from, and return it."""
+    global _last_key_source
+    with _keychain_breaker_lock:
+        _last_key_source = label
+    return label
+
+
+def last_key_source_label() -> str | None:
+    """Where the state.db key ACTUALLY came from, or None if not yet resolved.
+
+    Distinct from :func:`backend_label`, which names the keyring backend
+    *installed* on this host. The two disagree exactly when it matters most:
+    on a Mac with a locked login keychain the installed backend is still
+    "macOS Keychain" while the key is really in the local 0600 file, and the
+    boot log then contradicted itself one line apart --
+
+        keychain: no functional OS keychain backend on this host; minting
+                  the state key in the private local key file.
+        state.db: AES-256 at-rest encryption ACTIVE (key from macOS Keychain)
+
+    An operator auditing WHERE their encryption key lives was told the wrong
+    place. This reports the resolution that actually happened.
+    """
+    with _keychain_breaker_lock:
+        return _last_key_source
+
+
+def _local_key_source_label() -> str:
+    return f"local key file ({LOCAL_KEY_FILENAME})"
+
+
 def get_passphrase() -> str | None:
     """Return authority, or ``None`` only when every store proves absence."""
     env = os.environ.get(ENV_VAR, "").strip()
     if env:
+        _record_key_source(f"{ENV_VAR} environment override")
         return env
     if _disabled():
         # Don't even read the keychain — keep tests fully isolated
@@ -533,6 +575,7 @@ def get_passphrase() -> str | None:
                     )
                 if from_legacy:
                     _migrate_legacy_slot(kr, service, account, v)
+                _record_key_source(backend_label())
                 return v
         except Exception as e:
             if isinstance(e, KeyMaterialIntegrityError):
@@ -942,6 +985,7 @@ def ensure_passphrase() -> str | None:
                     "keychain: minted fresh state.db encryption key; stored "
                     "in the OS credential store and read back successfully."
                 )
+                _record_key_source(backend_label())
                 return new_pw
         else:
             log.warning(
@@ -957,6 +1001,7 @@ def ensure_passphrase() -> str | None:
                 "0600 local key file (%s). at-rest encryption ACTIVE.",
                 LOCAL_KEY_FILENAME,
             )
+            _record_key_source(_local_key_source_label())
             return new_pw
     # Could not obtain or persist a key anywhere. Returning None signals
     # the caller; state.py refuses to silently run plaintext unless the

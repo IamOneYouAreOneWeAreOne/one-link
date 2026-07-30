@@ -198,7 +198,10 @@ def check_at_rest_encryption(is_encrypted: bool) -> list[Finding]:
     findings: list[Finding] = []
     if is_encrypted:
         from one_link import keychain as _kc
-        backend = _kc.backend_label()
+        # The store the key IS in, not the store this host merely has: the
+        # whole point of this finding is letting an operator audit where
+        # their encryption key lives.
+        backend = _kc.last_key_source_label() or _kc.backend_label()
         findings.append(Finding(
             "info", "encryption",
             f"state.db: AES-256 at-rest encryption ACTIVE; key from {backend}.",
