@@ -31,6 +31,17 @@ on:
 permissions:
   contents: read
 
+# crates.io fetches failed two release runs in five -- "download of cfg-if
+# failed" and "failed to get arrayvec ... cargo metadata exited with an
+# error" -- each burning a ~2.5 hour cycle on a transient network fault
+# rather than anything in this repository. cargo retries three times by
+# default and gives up over a multiplexed HTTP/2 connection that a flaky
+# path can wedge; ten retries on a single-stream connection turns that
+# class into a slower fetch instead of a failed release.
+env:
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
