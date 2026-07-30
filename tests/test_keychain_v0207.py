@@ -31,6 +31,9 @@ def test_os_keychain_call_cannot_hang_the_daemon_forever():
         assert time.monotonic() - started < 5.0
     finally:
         keychain.KEYCHAIN_CALL_TIMEOUT_SECONDS = original
+        # That timeout armed the cooldown; clear it or every assertion below
+        # short-circuits on a verdict this test manufactured.
+        keychain.reset_keychain_breaker()
 
     # Normal results and errors are untouched by the wrapper.
     assert keychain._bounded_keychain_call(lambda a, b=0: a + b, 2, b=3) == 5
@@ -43,6 +46,74 @@ def test_os_keychain_call_cannot_hang_the_daemon_forever():
 
     with pytest.raises(_Boom):
         keychain._bounded_keychain_call(_raise)
+
+
+def test_one_timeout_is_not_paid_twice():
+    """The deadline bounds a call; the cooldown bounds a HOST.
+
+    Without this, a Mac with a locked login keychain pays the full deadline
+    on every keychain touch for as long as the daemon runs. Those calls are
+    made from the event-loop thread, so each one freezes the daemon whole:
+    listeners keep accepting connections the daemon will never read from,
+    and every authenticated control request times out against a daemon whose
+    own log looks perfectly healthy. That is how the frozen macOS release
+    binary failed its two-daemon E2E.
+    """
+    from one_link import keychain
+
+    original = keychain.KEYCHAIN_CALL_TIMEOUT_SECONDS
+    keychain.KEYCHAIN_CALL_TIMEOUT_SECONDS = 0.5
+    keychain.reset_keychain_breaker()
+    try:
+        with pytest.raises(keychain.KeychainUnresponsiveError):
+            keychain._bounded_keychain_call(lambda: time.sleep(30))
+
+        # The second call must not wait at all -- and must not reach the
+        # backend, which is the whole point.
+        reached = []
+        started = time.monotonic()
+        with pytest.raises(keychain.KeychainUnresponsiveError, match="not asking again"):
+            keychain._bounded_keychain_call(lambda: reached.append(1))
+        assert time.monotonic() - started < 0.2
+        assert reached == [], "breaker was open yet the backend was still called"
+
+        # A cooldown that never expires would strand a user who unlocks their
+        # Mac mid-session on the local key forever.
+        keychain.reset_keychain_breaker()
+        assert keychain._bounded_keychain_call(lambda: "answered") == "answered"
+    finally:
+        keychain.KEYCHAIN_CALL_TIMEOUT_SECONDS = original
+        keychain.reset_keychain_breaker()
+
+    assert keychain.KEYCHAIN_UNRESPONSIVE_COOLDOWN_SECONDS > 0
+
+
+def test_a_backend_that_answers_clears_the_cooldown():
+    """An answer -- even an error -- proves the host is not wedged."""
+    from one_link import keychain
+
+    original = keychain.KEYCHAIN_CALL_TIMEOUT_SECONDS
+    keychain.KEYCHAIN_CALL_TIMEOUT_SECONDS = 0.5
+    keychain.reset_keychain_breaker()
+    try:
+        with pytest.raises(keychain.KeychainUnresponsiveError):
+            keychain._bounded_keychain_call(lambda: time.sleep(30))
+        assert keychain._keychain_breaker_is_open() is True
+
+        keychain.reset_keychain_breaker()
+
+        class _Boom(RuntimeError):
+            pass
+
+        def _raise() -> None:
+            raise _Boom("the backend answered, with a refusal")
+
+        with pytest.raises(_Boom):
+            keychain._bounded_keychain_call(_raise)
+        assert keychain._keychain_breaker_is_open() is False
+    finally:
+        keychain.KEYCHAIN_CALL_TIMEOUT_SECONDS = original
+        keychain.reset_keychain_breaker()
 
 
 def test_every_keyring_call_is_deadline_bounded():

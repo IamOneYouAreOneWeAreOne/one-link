@@ -46,6 +46,7 @@ import os
 import secrets
 import stat
 import threading
+import time
 from collections.abc import Iterator
 
 from one_link.key_material import (
@@ -126,13 +127,67 @@ class KeychainUnresponsiveError(KeychainBackendError):
     """
 
 
+# How long one observed timeout suppresses further attempts.
+#
+# The deadline above bounds a SINGLE call. It does not bound a host: on a Mac
+# whose login keychain is locked (a fresh CI runner, an SSH session, a screen
+# that has not been unlocked yet) EVERY call costs the full deadline, and the
+# 15s is paid again and again for a verdict already reached. That is not a
+# theoretical cost -- these calls are made from the daemon's event-loop thread,
+# so each one freezes the whole daemon for the deadline: the control listener
+# still accepts TCP connections (the kernel does that), but nothing is ever
+# read from them and every authenticated request times out against a daemon
+# that looks perfectly healthy in its own log.
+#
+# So the verdict is remembered. It expires rather than latching forever,
+# because "unresponsive" is a statement about a moment: a user who unlocks
+# their Mac mid-session must get their real keychain back without restarting.
+KEYCHAIN_UNRESPONSIVE_COOLDOWN_SECONDS = 300.0
+
+_keychain_breaker_lock = threading.Lock()
+_keychain_unresponsive_until = 0.0
+
+
+def _keychain_breaker_is_open() -> bool:
+    """True while a recent timeout still speaks for this host."""
+    with _keychain_breaker_lock:
+        return time.monotonic() < _keychain_unresponsive_until
+
+
+def _trip_keychain_breaker() -> None:
+    global _keychain_unresponsive_until
+    with _keychain_breaker_lock:
+        _keychain_unresponsive_until = (
+            time.monotonic() + KEYCHAIN_UNRESPONSIVE_COOLDOWN_SECONDS
+        )
+
+
+def reset_keychain_breaker() -> None:
+    """Forget any recorded unresponsiveness (the backend just answered)."""
+    global _keychain_unresponsive_until
+    with _keychain_breaker_lock:
+        _keychain_unresponsive_until = 0.0
+
+
 def _bounded_keychain_call(operation, *args, **kwargs):
     """Run one keychain operation with a hard deadline.
 
     A thread that is blocked inside the OS keychain cannot be cancelled, so
     it is abandoned as a daemon thread rather than joined; the caller gets a
     typed backend error and proceeds to the local-key path.
+
+    A host that has already blown the deadline is not asked again until the
+    cooldown expires -- see ``KEYCHAIN_UNRESPONSIVE_COOLDOWN_SECONDS``.
     """
+
+    if _keychain_breaker_is_open():
+        raise KeychainUnresponsiveError(
+            "OS keychain did not respond within "
+            f"{KEYCHAIN_CALL_TIMEOUT_SECONDS:.0f}s on a recent call; not "
+            "asking again for "
+            f"{KEYCHAIN_UNRESPONSIVE_COOLDOWN_SECONDS:.0f}s and using the "
+            "local key file"
+        )
 
     outcome: dict[str, object] = {}
 
@@ -150,11 +205,15 @@ def _bounded_keychain_call(operation, *args, **kwargs):
     worker.start()
     worker.join(KEYCHAIN_CALL_TIMEOUT_SECONDS)
     if worker.is_alive():
+        _trip_keychain_breaker()
         raise KeychainUnresponsiveError(
             "OS keychain did not respond within "
             f"{KEYCHAIN_CALL_TIMEOUT_SECONDS:.0f}s; treating the backend as "
             "unavailable and using the local key file"
         )
+    # The backend answered -- even an error is an answer, and proves the host
+    # is not the wedged one the breaker exists for.
+    reset_keychain_breaker()
     error = outcome.get("error")
     if error is not None:
         raise error  # type: ignore[misc]

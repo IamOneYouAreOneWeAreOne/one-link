@@ -62,6 +62,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import unicodedata
 import uuid
 import zlib
@@ -2467,6 +2468,72 @@ def _atomic_replace(
             delay = min(delay * 2, 0.2)
 
 
+EVENT_LOOP_STALL_WARN_SECONDS = 5.0
+EVENT_LOOP_WATCHDOG_INTERVAL_SECONDS = 1.0
+
+
+def _start_event_loop_watchdog(
+    loop: asyncio.AbstractEventLoop,
+    *,
+    stall_seconds: float = EVENT_LOOP_STALL_WARN_SECONDS,
+    interval: float = EVENT_LOOP_WATCHDOG_INTERVAL_SECONDS,
+) -> threading.Event:
+    """Log a stack trace whenever the event loop stops answering.
+
+    A blocking call on the loop thread is invisible from outside and nearly
+    invisible from inside: the OS keeps accepting connections on every
+    listener the daemon opened, so the control plane and the UI look up and
+    healthy while nothing is ever read from them. The daemon's own log says
+    nothing at all, because the code that would log is not running.
+
+    Diagnosing that from the outside costs whole CI runs and reduces to
+    guesswork about which synchronous call is to blame. So the daemon names
+    it itself: a plain thread pings the loop once a second, and if the ping
+    is not acknowledged within ``stall_seconds`` it prints the loop thread's
+    live stack -- the exact frame that is blocking. Costs one wakeup per
+    second and stays silent on a healthy host.
+
+    Returns the stop event, so a caller can retire the watchdog.
+    """
+
+    stop = threading.Event()
+    loop_thread_id = threading.get_ident()
+
+    def _watch() -> None:
+        while not stop.is_set():
+            acknowledged = threading.Event()
+            try:
+                loop.call_soon_threadsafe(acknowledged.set)
+            except RuntimeError:
+                return  # loop closed; the daemon is going away
+            if not acknowledged.wait(stall_seconds):
+                frame = sys._current_frames().get(loop_thread_id)
+                where = (
+                    "".join(traceback.format_stack(frame))
+                    if frame is not None
+                    else "<loop thread stack unavailable>"
+                )
+                log.warning(
+                    "event loop has not answered for %.0fs -- something on the "
+                    "loop thread is blocking. Listeners still accept "
+                    "connections but no request can be served. Loop thread "
+                    "stack:\n%s",
+                    stall_seconds,
+                    where,
+                )
+                # Wait for the loop to come back before probing again, so one
+                # stall produces one report rather than a stream of them.
+                acknowledged.wait()
+            stop.wait(interval)
+
+    threading.Thread(
+        target=_watch,
+        name="one-link-loop-watchdog",
+        daemon=True,
+    ).start()
+    return stop
+
+
 def _publish_runtime_ascii_scalar(path: Path, value: str, *, max_bytes: int = 64) -> None:
     """Atomically publish a bounded port/PID hint without following ``path``.
 
@@ -3146,6 +3213,7 @@ class Daemon:
         self.discovery: Discovery | None = None
         self._peer_server: asyncio.base_events.Server | None = None
         self._control_server: asyncio.base_events.Server | None = None
+        self._loop_watchdog_stop: threading.Event | None = None
         self._tail_subs: set[asyncio.StreamWriter] = set()
         self._incoming_files: dict[str, IncomingFile] = {}
         self._outbound_file_gates: dict[str, _OutboundFileGate] = {}
@@ -37381,6 +37449,15 @@ class Daemon:
         )
         ctrl_port = self._control_server.sockets[0].getsockname()[1]
         _publish_runtime_ascii_scalar(_control_port_path(), str(ctrl_port))
+
+        # Armed from here on: from this line the daemon is externally
+        # reachable, so from this line a blocked loop is a user-visible
+        # outage rather than slow startup. Started on the loop thread on
+        # purpose -- the watchdog snapshots THIS thread's stack.
+        if self._loop_watchdog_stop is None:
+            self._loop_watchdog_stop = _start_event_loop_watchdog(
+                asyncio.get_running_loop()
+            )
 
         # M6: mDNS hostname privacy — never leak socket.gethostname() onto
         # the LAN by default. Prefer the user-chosen display_name, otherwise
