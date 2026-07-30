@@ -2313,7 +2313,17 @@ def validate_frozen_e2e(artifact: Path) -> str:
             # at ~500 characters -- so the daemon's last words, which are the
             # entire diagnostic value, were unreachable exactly when a
             # platform failed for an unknown reason.
+            # Preserve the COMPLETE logs as a job artifact. Tails answer
+            # "which line was last"; they cannot answer "what happened during
+            # the 62 seconds after startup finished", which is exactly the
+            # question a silent daemon poses. The copy lands in the workspace
+            # so the workflow can upload it on failure.
+            preserved = Path.cwd() / "frozen-e2e-logs"
+            with contextlib.suppress(OSError):
+                preserved.mkdir(parents=True, exist_ok=True)
             for index, (_process, _handle, log_path, _port, _secret) in enumerate(processes):
+                with contextlib.suppress(OSError):
+                    shutil.copy2(log_path, preserved / f"daemon-{index}-{log_path.name}")
                 print(f"--- frozen daemon {index} log tail: {log_path}", flush=True)
                 try:
                     tail = log_path.read_text(encoding="utf-8", errors="replace")[-8000:]
