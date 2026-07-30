@@ -52,3 +52,31 @@ def test_every_keyring_call_is_deadline_bounded():
     ).read_text(encoding="utf-8")
     unwrapped = re.findall(r"(?<!_bounded_keychain_call\()\bkr\.(?:get|set|delete)_password\(", source)
     assert not unwrapped, f"unbounded keychain calls: {unwrapped}"
+
+
+def test_read_timeout_falls_back_but_write_timeout_never_invents_a_key():
+    """The two timeouts are NOT the same and must not be conflated.
+
+    A lookup that never answers is side-effect-free: the host has no usable
+    credential store right now, which is the documented local-key case. A
+    WRITE that never answers may have succeeded, so inventing a local key
+    would orphan the encrypted database -- that call site must keep
+    refusing. Conflating them either hangs the daemon (too strict) or risks
+    data loss (too loose).
+    """
+    from one_link import keychain
+
+    assert keychain._keyring_has_no_backend(
+        keychain.KeychainUnresponsiveError("timed out")
+    ) is True
+    assert keychain._keyring_has_no_backend(
+        keychain.KeychainBackendError("some other failure")
+    ) is False
+    assert issubclass(keychain.KeychainUnresponsiveError, keychain.KeychainBackendError)
+
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "one_link" / "keychain.py"
+    ).read_text(encoding="utf-8")
+    assert "write outcome is unknown" in source, (
+        "the unknown-write refusal is a data-safety guarantee and must remain"
+    )
