@@ -57,6 +57,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
+from one_link.bounded_resolver import resolve_bounded
 from one_link.process_security import (
     hidden_creationflags,
     resolve_argv,
@@ -845,7 +846,14 @@ async def _fetch_ssdp_xml(url: str) -> Optional[str]:
             ip_obj = ipaddress.ip_address(host)
         except ValueError:
             try:
-                ip_obj = ipaddress.ip_address(socket.gethostbyname(host))
+                # Bounded: an SSDP LOCATION can name a host this network
+                # cannot resolve, and the wait is unbounded otherwise.
+                ip_obj = ipaddress.ip_address(resolve_bounded(
+                    socket.gethostbyname,
+                    host,
+                    default="",
+                    label="LAN discovery SSDP host resolution",
+                ))
             except (socket.gaierror, ValueError):
                 return None
         if not (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local):
@@ -1086,7 +1094,14 @@ async def _fetch_http(url: str, timeout_s: float = 1.2) -> str:
             ip_obj = ipaddress.ip_address(host)
         except ValueError:
             try:
-                ip_obj = ipaddress.ip_address(socket.gethostbyname(host))
+                # Bounded: an SSDP LOCATION can name a host this network
+                # cannot resolve, and the wait is unbounded otherwise.
+                ip_obj = ipaddress.ip_address(resolve_bounded(
+                    socket.gethostbyname,
+                    host,
+                    default="",
+                    label="LAN discovery SSDP host resolution",
+                ))
             except (socket.gaierror, ValueError):
                 return ""
         if not (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local):
@@ -1571,7 +1586,15 @@ async def enrich_via_reverse_dns(devices: list[DiscoveredDevice]) -> None:
 
     def _rev(ip: str) -> str:
         try:
-            host = socket.gethostbyaddr(ip)[0]
+            # A LAN with no reverse-DNS server makes this wait out the full
+            # resolver retry schedule per address. A missing friendly name is
+            # cosmetic; the wait is not.
+            host = resolve_bounded(
+                socket.gethostbyaddr,
+                ip,
+                default=("", [], []),
+                label="LAN discovery reverse lookup",
+            )[0]
             # Discard reverse-IP-style names that aren't useful.
             if not host or host == ip:
                 return ""
@@ -1851,8 +1874,15 @@ def _local_ips() -> list[str]:
     ourselves out of the discovery results)."""
     ips: set[str] = set()
     try:
-        for fam, _t, _p, _c, sockaddr in socket.getaddrinfo(
-            socket.gethostname(), None,
+        # Bounded: same own-name resolution that blocked a macOS daemon for
+        # 64s. Failing to filter ourselves out of discovery results is a
+        # cosmetic defect; stalling the caller is not.
+        for fam, _t, _p, _c, sockaddr in resolve_bounded(
+            socket.getaddrinfo,
+            socket.gethostname(),
+            None,
+            default=[],
+            label="LAN discovery self-address enumeration",
         ):
             if fam == socket.AF_INET:
                 ips.add(str(sockaddr[0]))
