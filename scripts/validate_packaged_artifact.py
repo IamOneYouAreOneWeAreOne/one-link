@@ -1988,6 +1988,23 @@ def validate_frozen_e2e(artifact: Path) -> str:
             time.sleep(0.05)
         raise GateFailure(f"frozen daemon did not create {path.name} within {timeout}s")
 
+    def _wait_control_secret(data_root: Path, *, timeout: float = 60.0) -> str:
+        """Return the daemon's published control secret once it is readable."""
+        deadline = time.monotonic() + timeout
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                value = control_ipc.read_control_secret(data_root)
+            except Exception as exc:  # not yet written / mid-write
+                last_error = exc
+                value = None
+            if isinstance(value, str) and value.strip():
+                return value
+            time.sleep(0.1)
+        raise GateFailure(
+            f"frozen daemon never published a readable control secret: {last_error}"
+        )
+
     def _control(port: int, secret: str, **request: Any) -> dict[str, Any]:
         last_error: Exception | None = None
         for delay in (0.0, 0.1, 0.4, 1.0):
@@ -2063,9 +2080,17 @@ def validate_frozen_e2e(artifact: Path) -> str:
                 )
                 processes.append((process, log_handle, log_path, None, None))
                 control_port = int(_wait_file(home / "data" / "control.port"))
-                secret = control_ipc.read_control_secret(home / "data")
                 server_port = int(_wait_file(home / "data" / "server.port"))
                 token = _wait_file(home / "data" / "ui.token")
+                # Read the control secret LAST, and only after the daemon has
+                # published its full runtime set. It used to be read the
+                # instant control.port appeared -- but the port is published
+                # early in startup, and this ONE value is reused for every
+                # later request. On a host where startup pauses after that
+                # point (macOS spends its keychain deadline there), the read
+                # landed before the secret was final and every authenticated
+                # control request then timed out against a healthy daemon.
+                secret = _wait_control_secret(home / "data")
                 info = _control(control_port, secret, cmd="peers")
                 if not info.get("ok") or not isinstance(info.get("me"), dict):
                     raise GateFailure(f"frozen daemon {label} control plane is unhealthy: {info!r}")
