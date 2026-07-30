@@ -114,6 +114,18 @@ def _load_keyring():
 KEYCHAIN_CALL_TIMEOUT_SECONDS = 15.0
 
 
+class KeychainUnresponsiveError(KeychainBackendError):
+    """The OS keychain did not answer inside the deadline.
+
+    Distinct from a generic backend error because a READ that never answers
+    is side-effect-free: the host demonstrably has no usable credential
+    store right now, which is semantically the same as having none at all,
+    so the documented local-key path is the correct and safe response. A
+    WRITE that times out is NOT covered by this reasoning -- its outcome is
+    genuinely unknown -- and that call site keeps refusing to invent a key.
+    """
+
+
 def _bounded_keychain_call(operation, *args, **kwargs):
     """Run one keychain operation with a hard deadline.
 
@@ -138,7 +150,7 @@ def _bounded_keychain_call(operation, *args, **kwargs):
     worker.start()
     worker.join(KEYCHAIN_CALL_TIMEOUT_SECONDS)
     if worker.is_alive():
-        raise KeychainBackendError(
+        raise KeychainUnresponsiveError(
             "OS keychain did not respond within "
             f"{KEYCHAIN_CALL_TIMEOUT_SECONDS:.0f}s; treating the backend as "
             "unavailable and using the local key file"
@@ -160,6 +172,10 @@ def _keyring_has_no_backend(exc: Exception) -> bool:
     honoring it does not weaken the absence-is-unproven rule for every other
     exception.
     """
+    # A deadline expiry on a side-effect-free lookup is the same statement:
+    # this host has no credential store we can actually use.
+    if isinstance(exc, KeychainUnresponsiveError):
+        return True
     try:
         from keyring.errors import NoKeyringError  # type: ignore[import-not-found]
     except Exception:  # pragma: no cover - keyring missing or broken
