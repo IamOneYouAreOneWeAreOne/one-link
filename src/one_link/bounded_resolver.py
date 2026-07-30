@@ -32,16 +32,21 @@ log = logging.getLogger("one_link.resolver")
 RESOLVE_TIMEOUT_SECONDS = 5.0
 
 T = TypeVar("T")
+# The fallback is deliberately a SEPARATE variable rather than the operation's
+# own return type. Binding both to one T makes an empty-literal default such
+# as ``default=[]`` bind T to ``list[Never]`` before the operation is ever
+# considered, and every real resolver call is then rejected against it.
+D = TypeVar("D")
 
 
 def resolve_bounded(
     operation: Callable[..., T],
     *args: Any,
-    default: T,
+    default: D,
     label: str,
     timeout: float | None = None,
     **kwargs: Any,
-) -> T:
+) -> T | D:
     """Run one resolver call with a deadline, or return ``default``.
 
     ``default`` is required and has no implicit value on purpose: every
