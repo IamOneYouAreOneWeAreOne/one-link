@@ -322,19 +322,6 @@ def _artifact_subprocess_environment(isolated_root: Path) -> dict[str, str]:
         {
             "APPDATA": str(config_dir),
             "HOME": str(root),
-            # This harness gives every daemon a SYNTHETIC HOME, which on
-            # macOS is exactly where Keychain Services looks for the login
-            # keychain -- there is none, so the call blocks until the
-            # bounded-call deadline, after which the code (correctly)
-            # refuses to mint a local key from an UNKNOWN write outcome and
-            # the daemon runs without persistence. ONE_LINK_PASSPHRASE is
-            # the product's documented operator configuration for exactly
-            # this situation (headless servers, containers): at-rest
-            # encryption stays ON and SQLCipher is still exercised, the OS
-            # keychain is simply not consulted. The frozen E2E therefore
-            # tests one supported configuration on every platform instead
-            # of depending on a runner keychain that cannot exist here.
-            "ONE_LINK_PASSPHRASE": "one-link-frozen-release-e2e-passphrase",
             "LOCALAPPDATA": str(data_dir),
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONNOUSERSITE": "1",
