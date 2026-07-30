@@ -2283,14 +2283,23 @@ def validate_frozen_e2e(artifact: Path) -> str:
                 finally:
                     log_handle.close()
         if failure is not None:
-            tails = []
-            for _process, _handle, log_path, _port, _secret in processes:
+            # Emit the tails LINE BY LINE. Embedding them in the exception
+            # produced one enormous log line, and CI truncates a single line
+            # at ~500 characters -- so the daemon's last words, which are the
+            # entire diagnostic value, were unreachable exactly when a
+            # platform failed for an unknown reason.
+            for index, (_process, _handle, log_path, _port, _secret) in enumerate(processes):
+                print(f"--- frozen daemon {index} log tail: {log_path}", flush=True)
                 try:
-                    tails.append(log_path.read_text(encoding="utf-8", errors="replace")[-3000:])
+                    tail = log_path.read_text(encoding="utf-8", errors="replace")[-8000:]
                 except OSError:
-                    tails.append("<missing log>")
+                    print("    <missing log>", flush=True)
+                    continue
+                for line in tail.splitlines()[-80:]:
+                    print(f"    {line}", flush=True)
             raise GateFailure(
-                f"frozen two-daemon E2E failed: {failure}; log tails={tails!r}"
+                f"frozen two-daemon E2E failed: {failure} "
+                "(per-daemon log tails printed above)"
             ) from failure
         for _process, _handle, log_path, _port, _secret in processes:
             text = log_path.read_text(encoding="utf-8", errors="replace")

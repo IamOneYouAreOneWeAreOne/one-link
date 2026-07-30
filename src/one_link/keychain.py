@@ -100,6 +100,55 @@ def _load_keyring():
         raise KeychainBackendError("keyring import failed") from exc
 
 
+# An OS keychain call must never be able to hang One Link forever. macOS
+# Keychain Services (and, more rarely, a stalled Secret Service) can block
+# indefinitely when the keychain is missing, locked, or unreachable from a
+# non-interactive session -- a locked Mac, an SSH shell, a fresh profile, a
+# corporate policy prompt. This module already promises a documented
+# fallback ("if the OS keychain is unavailable, One Link uses a
+# permission-hardened local key file and keeps SQLCipher enabled"), but an
+# unbounded call can never REACH that fallback: the daemon simply never
+# finishes starting. Every keychain operation therefore runs on a daemon
+# thread with a deadline, and a timeout is reported as exactly what it is --
+# the backend being unavailable.
+KEYCHAIN_CALL_TIMEOUT_SECONDS = 15.0
+
+
+def _bounded_keychain_call(operation, *args, **kwargs):
+    """Run one keychain operation with a hard deadline.
+
+    A thread that is blocked inside the OS keychain cannot be cancelled, so
+    it is abandoned as a daemon thread rather than joined; the caller gets a
+    typed backend error and proceeds to the local-key path.
+    """
+
+    outcome: dict[str, object] = {}
+
+    def _run() -> None:
+        try:
+            outcome["value"] = operation(*args, **kwargs)
+        except BaseException as exc:  # surfaced verbatim to the caller
+            outcome["error"] = exc
+
+    worker = threading.Thread(
+        target=_run,
+        name="one-link-keychain-call",
+        daemon=True,
+    )
+    worker.start()
+    worker.join(KEYCHAIN_CALL_TIMEOUT_SECONDS)
+    if worker.is_alive():
+        raise KeychainBackendError(
+            "OS keychain did not respond within "
+            f"{KEYCHAIN_CALL_TIMEOUT_SECONDS:.0f}s; treating the backend as "
+            "unavailable and using the local key file"
+        )
+    error = outcome.get("error")
+    if error is not None:
+        raise error  # type: ignore[misc]
+    return outcome.get("value")
+
+
 def _keyring_has_no_backend(exc: Exception) -> bool:
     """True iff ``exc`` is keyring's typed no-functional-backend signal.
 
@@ -165,7 +214,7 @@ def _migrate_legacy_slot(kr, service: str, account: str, value: str) -> None:
     falls back to the legacy entry again.
     """
     try:
-        kr.set_password(service, account, value)
+        _bounded_keychain_call(kr.set_password, service, account, value)
     except Exception as exc:
         log.warning(
             "keychain: could not migrate the legacy shared authority to the "
@@ -390,10 +439,10 @@ def get_passphrase() -> str | None:
     if kr is not None:
         try:
             service, account = keychain_target()
-            v = kr.get_password(service, account)
+            v = _bounded_keychain_call(kr.get_password, service, account)
             from_legacy = False
             if v is None:
-                v = kr.get_password(
+                v = _bounded_keychain_call(kr.get_password, 
                     ONE_LINK_KEYCHAIN_SERVICE, _LEGACY_KEYCHAIN_ACCOUNT
                 )
                 from_legacy = v is not None
@@ -537,9 +586,9 @@ def _configured_passphrase_at(data_root) -> str | None:
     kr = _load_keyring()
     if kr is not None:
         try:
-            value = kr.get_password(*keychain_target(data_root))
+            value = _bounded_keychain_call(kr.get_password, *keychain_target(data_root))
             if value is None:
-                value = kr.get_password(
+                value = _bounded_keychain_call(kr.get_password, 
                     ONE_LINK_KEYCHAIN_SERVICE,
                     _LEGACY_KEYCHAIN_ACCOUNT,
                 )
@@ -579,7 +628,7 @@ def _publish_recovered_passphrase(data_root, passphrase: str) -> str:
         if kr is not None:
             service, account = keychain_target(root)
             try:
-                kr.set_password(
+                _bounded_keychain_call(kr.set_password, 
                     service,
                     account,
                     passphrase,
@@ -592,7 +641,7 @@ def _publish_recovered_passphrase(data_root, passphrase: str) -> str:
                     )
                 else:
                     try:
-                        after = kr.get_password(service, account)
+                        after = _bounded_keychain_call(kr.get_password, service, account)
                     except Exception as read_exc:
                         raise KeychainBackendError(
                             "OS keychain recovery-key write outcome is unknown"
@@ -610,7 +659,7 @@ def _publish_recovered_passphrase(data_root, passphrase: str) -> str:
                     )
             else:
                 try:
-                    after = kr.get_password(service, account)
+                    after = _bounded_keychain_call(kr.get_password, service, account)
                 except Exception as exc:
                     raise KeychainBackendError(
                         "OS keychain recovery-key write could not be read back"
@@ -763,7 +812,7 @@ def ensure_passphrase() -> str | None:
         if kr is not None:
             service, account = keychain_target()
             try:
-                kr.set_password(
+                _bounded_keychain_call(kr.set_password, 
                     service, account, new_pw,
                 )
             except Exception as write_exc:
@@ -781,7 +830,7 @@ def ensure_passphrase() -> str | None:
                     # Prove the postcondition before deciding whether local
                     # creation is safe; a failed lookup is not absence.
                     try:
-                        after = kr.get_password(service, account)
+                        after = _bounded_keychain_call(kr.get_password, service, account)
                     except Exception as read_exc:
                         raise KeychainBackendError(
                             "OS keychain write outcome is unknown; refusing fallback creation"
@@ -803,7 +852,7 @@ def ensure_passphrase() -> str | None:
                     )
             else:
                 try:
-                    after = kr.get_password(service, account)
+                    after = _bounded_keychain_call(kr.get_password, service, account)
                 except Exception as exc:
                     raise KeychainBackendError(
                         "OS keychain write could not be read back"
@@ -862,13 +911,13 @@ def rotate_passphrase() -> str | None:
             return None
         service, account = keychain_target()
         try:
-            prior = kr.get_password(service, account)
+            prior = _bounded_keychain_call(kr.get_password, service, account)
             if prior is None:
                 # A not-yet-migrated install still holds its authority in the
                 # legacy shared slot; the rotated key goes to the scoped slot
                 # (reads prefer it), and the legacy slot is left untouched
                 # because other profiles may still depend on it.
-                prior = kr.get_password(
+                prior = _bounded_keychain_call(kr.get_password, 
                     ONE_LINK_KEYCHAIN_SERVICE, _LEGACY_KEYCHAIN_ACCOUNT
                 )
         except Exception as exc:
@@ -883,12 +932,12 @@ def rotate_passphrase() -> str | None:
             )
         new_pw = secrets.token_urlsafe(32)
         try:
-            kr.set_password(
+            _bounded_keychain_call(kr.set_password, 
                 service, account, new_pw,
             )
         except Exception as write_exc:
             try:
-                after = kr.get_password(service, account)
+                after = _bounded_keychain_call(kr.get_password, service, account)
             except Exception as read_exc:
                 raise KeychainBackendError(
                     "OS keychain rotation outcome is unknown"
@@ -904,7 +953,7 @@ def rotate_passphrase() -> str | None:
                 "OS keychain rotation produced unknown authority"
             ) from write_exc
         try:
-            after = kr.get_password(service, account)
+            after = _bounded_keychain_call(kr.get_password, service, account)
         except Exception as exc:
             raise KeychainBackendError(
                 "OS keychain rotation could not be read back"
@@ -957,7 +1006,7 @@ def forget_passphrase() -> bool:
         (ONE_LINK_KEYCHAIN_SERVICE, _LEGACY_KEYCHAIN_ACCOUNT),
     ):
         try:
-            kr.delete_password(*slot)
+            _bounded_keychain_call(kr.delete_password, *slot)
             removed = True
         except Exception as e:
             # Most backends raise PasswordDeleteError on "not found";
