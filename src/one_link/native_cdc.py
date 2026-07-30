@@ -566,10 +566,20 @@ def _candidate_c_compilers() -> list[str]:
     populated inside a developer shell. A GNU gcc sitting right there in
     MSYS2 would have linked fine. The caller tries these in order.
 
-    ``CC`` still wins outright when set: an explicit operator choice must
-    not be silently second-guessed.
+    ``ONE_LINK_CC`` -- then ``CC`` -- wins outright when set: an explicit
+    operator choice must not be silently second-guessed.
+
+    Two names, because ``CC`` is not ours alone. Anything else building C in
+    the same environment reads it too: ``cc-rs`` honours it for the build
+    scripts of ``ring``, ``zstd-sys`` and ``blake3``, so pointing ``CC`` at a
+    GNU gcc to fix *this* compile hands GNU objects to an MSVC-target Rust
+    link and breaks the native extension instead. ``ONE_LINK_CC`` pins the
+    CDC compiler alone, which is what an operator on a Windows host with
+    both toolchains actually wants.
     """
-    env_compiler = str(os.environ.get("CC") or "").strip()
+    env_compiler = str(
+        os.environ.get("ONE_LINK_CC") or os.environ.get("CC") or ""
+    ).strip()
     if env_compiler:
         try:
             if Path(env_compiler).is_absolute():

@@ -277,13 +277,14 @@ jobs:
         with:
           msystem: UCRT64
           path-type: inherit
-          # location is LOAD-BEARING: the compiler ladder never consults
-          # PATH (resolve_system_executable searches OS-owned directories
-          # only) -- it probes the explicit candidate C:\msys64\ucrt64\bin\gcc.exe.
-          # The default RUNNER_TEMP install location left gcc invisible, so
-          # builds only succeeded on images that happened to ship their own
-          # C:\msys64.
-          location: C:\msys64
+          # No ``location`` override, deliberately. The action APPENDS
+          # ``msys64`` to it, so ``location: C:\msys64`` installed into
+          # ``C:\msys64\msys64`` -- a path no ladder candidate probes. That
+          # override read as load-bearing and was a placebo: builds stayed
+          # green only while the runner image shipped its own C:\msys64 gcc,
+          # and went red the moment an image refresh stopped. Where MSYS2
+          # lands no longer matters -- the next step pins the ladder to the
+          # absolute path the action itself reports.
           install: mingw-w64-ucrt-x86_64-gcc
       - name: expose MSYS2 gcc to every later step
         shell: pwsh
@@ -293,8 +294,13 @@ jobs:
           MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         run: |
           $bin = Join-Path $env:MSYS2_LOCATION "ucrt64\bin"
-          if (-not (Test-Path (Join-Path $bin "gcc.exe"))) { throw "gcc.exe missing under $bin" }
+          $gcc = Join-Path $bin "gcc.exe"
+          if (-not (Test-Path $gcc)) { throw "gcc.exe missing under $bin" }
           Add-Content -Path $env:GITHUB_PATH -Value $bin
+          # ONE_LINK_CC, never CC: cc-rs reads CC too, and pointing it at a
+          # GNU gcc hands GNU objects to the MSVC-target Rust link for
+          # ring/zstd-sys/blake3. This name pins the CDC ladder alone.
+          Add-Content -Path $env:GITHUB_ENV -Value "ONE_LINK_CC=$gcc"
 
       - name: install pinned Rust toolchain
         run: |
@@ -597,13 +603,14 @@ jobs:
         with:
           msystem: UCRT64
           path-type: inherit
-          # location is LOAD-BEARING: the compiler ladder never consults
-          # PATH (resolve_system_executable searches OS-owned directories
-          # only) -- it probes the explicit candidate C:\msys64\ucrt64\bin\gcc.exe.
-          # The default RUNNER_TEMP install location left gcc invisible, so
-          # builds only succeeded on images that happened to ship their own
-          # C:\msys64.
-          location: C:\msys64
+          # No ``location`` override, deliberately. The action APPENDS
+          # ``msys64`` to it, so ``location: C:\msys64`` installed into
+          # ``C:\msys64\msys64`` -- a path no ladder candidate probes. That
+          # override read as load-bearing and was a placebo: builds stayed
+          # green only while the runner image shipped its own C:\msys64 gcc,
+          # and went red the moment an image refresh stopped. Where MSYS2
+          # lands no longer matters -- the next step pins the ladder to the
+          # absolute path the action itself reports.
           install: mingw-w64-ucrt-x86_64-gcc
       - name: expose MSYS2 gcc to every later step
         if: matrix.native_artifact == 'native-wheel-windows-x86_64'
@@ -614,8 +621,13 @@ jobs:
           MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         run: |
           $bin = Join-Path $env:MSYS2_LOCATION "ucrt64\bin"
-          if (-not (Test-Path (Join-Path $bin "gcc.exe"))) { throw "gcc.exe missing under $bin" }
+          $gcc = Join-Path $bin "gcc.exe"
+          if (-not (Test-Path $gcc)) { throw "gcc.exe missing under $bin" }
           Add-Content -Path $env:GITHUB_PATH -Value $bin
+          # ONE_LINK_CC, never CC: cc-rs reads CC too, and pointing it at a
+          # GNU gcc hands GNU objects to the MSVC-target Rust link for
+          # ring/zstd-sys/blake3. This name pins the CDC ladder alone.
+          Add-Content -Path $env:GITHUB_ENV -Value "ONE_LINK_CC=$gcc"
 
       - name: install Rust toolchain
         # Needed BEFORE ``pip install -e .`` on win_arm64 because
