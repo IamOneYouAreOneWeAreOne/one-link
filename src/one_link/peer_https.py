@@ -62,6 +62,7 @@ import socket
 import contextlib
 import ssl
 import struct
+import threading
 from pathlib import Path
 from typing import Optional, cast
 
@@ -367,13 +368,53 @@ def _detect_lan_addresses() -> list[str]:
         s.close()
     # All IPv4 addresses bound to this host.
     try:
-        hostname = socket.gethostname()
-        _, _, addrs = socket.gethostbyname_ex(hostname)
-        for a in addrs:
+        for a in _resolve_own_addresses_bounded():
             out.add(a)
     except OSError as exc:
         log.debug("peer-https: hostname LAN-address enumeration failed: %s", exc)
     return sorted(out)
+
+
+# A best-effort SAN entry is worth a few seconds, never a stalled daemon.
+OWN_ADDRESS_RESOLVE_TIMEOUT_SECONDS = 5.0
+
+
+def _resolve_own_addresses_bounded() -> list[str]:
+    """This host's own IPv4 addresses, or [] if the resolver is too slow.
+
+    ``socket.gethostbyname_ex`` takes no timeout and cannot be cancelled. On
+    macOS the machine's own name is typically a ``.local`` name answered over
+    mDNS, so on a host whose network is degraded this blocks for tens of
+    seconds. These addresses are only SAN sugar -- they let a phone reach the
+    daemon by LAN IP without a hostname-mismatch warning -- so a slow resolver
+    must cost a missing SAN entry, never a stalled caller. The worker is
+    abandoned as a daemon thread rather than joined, because there is no way
+    to interrupt a call that is already inside the system resolver.
+    """
+
+    result: list[str] = []
+
+    def _resolve() -> None:
+        with contextlib.suppress(OSError):
+            _, _, addrs = socket.gethostbyname_ex(socket.gethostname())
+            result.extend(addrs)
+
+    worker = threading.Thread(
+        target=_resolve,
+        name="one-link-own-address-resolve",
+        daemon=True,
+    )
+    worker.start()
+    worker.join(OWN_ADDRESS_RESOLVE_TIMEOUT_SECONDS)
+    if worker.is_alive():
+        log.info(
+            "peer-https: this host's resolver did not answer for its own "
+            "name within %.0fs; leaving LAN IP SAN entries out rather than "
+            "waiting on it",
+            OWN_ADDRESS_RESOLVE_TIMEOUT_SECONDS,
+        )
+        return []
+    return list(result)
 
 
 def _build_subject_alt_names(
