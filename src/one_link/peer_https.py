@@ -62,7 +62,6 @@ import socket
 import contextlib
 import ssl
 import struct
-import threading
 from pathlib import Path
 from typing import Optional, cast
 
@@ -72,6 +71,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+from one_link.bounded_resolver import resolve_bounded
 from one_link.key_material import (
     KeyMaterialIntegrityError,
     atomic_create_bytes,
@@ -392,29 +392,20 @@ def _resolve_own_addresses_bounded() -> list[str]:
     to interrupt a call that is already inside the system resolver.
     """
 
-    result: list[str] = []
-
-    def _resolve() -> None:
-        with contextlib.suppress(OSError):
-            _, _, addrs = socket.gethostbyname_ex(socket.gethostname())
-            result.extend(addrs)
-
-    worker = threading.Thread(
-        target=_resolve,
-        name="one-link-own-address-resolve",
-        daemon=True,
-    )
-    worker.start()
-    worker.join(OWN_ADDRESS_RESOLVE_TIMEOUT_SECONDS)
-    if worker.is_alive():
-        log.info(
-            "peer-https: this host's resolver did not answer for its own "
-            "name within %.0fs; leaving LAN IP SAN entries out rather than "
-            "waiting on it",
-            OWN_ADDRESS_RESOLVE_TIMEOUT_SECONDS,
+    with contextlib.suppress(OSError):
+        # The resolver call is passed to resolve_bounded directly rather than
+        # wrapped in a closure: a closure hides the call from the sweep that
+        # guards this whole class (tests/test_no_unbounded_resolution_v0210),
+        # and a guard that cannot see the thing it guards is not a guard.
+        _, _, addrs = resolve_bounded(
+            socket.gethostbyname_ex,
+            socket.gethostname(),
+            default=("", [], []),
+            label="peer-https own-address enumeration",
+            timeout=OWN_ADDRESS_RESOLVE_TIMEOUT_SECONDS,
         )
-        return []
-    return list(result)
+        return list(addrs)
+    return []
 
 
 def _build_subject_alt_names(

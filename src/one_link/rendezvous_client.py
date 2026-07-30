@@ -80,6 +80,7 @@ def _build_proxy_connector() -> aiohttp.BaseConnector | None:
         )
         return None
 
+from one_link.bounded_resolver import resolve_bounded
 from one_link.rendezvous_proto import (
     Endpoint,
     LookupAck,
@@ -383,7 +384,19 @@ def discover_local_endpoints(
     seen: set[str] = set()
     try:
         host = socket.gethostname()
-        for info in socket.getaddrinfo(host, None, family=socket.AF_INET):
+        # Bounded: this is the call the loop watchdog caught blocking a
+        # macOS daemon for 64 seconds, resolving its own .local name on a
+        # host with a degraded network. Advertising no local endpoints
+        # costs a NAT-local shortcut; blocking costs the whole daemon.
+        infos = resolve_bounded(
+            socket.getaddrinfo,
+            host,
+            None,
+            family=socket.AF_INET,
+            default=[],
+            label="rendezvous local-endpoint discovery",
+        )
+        for info in infos:
             # info[4] for AF_INET is (host, port); host is always str.
             addr_raw = info[4][0]
             if not isinstance(addr_raw, str):

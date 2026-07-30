@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
+from one_link.bounded_resolver import resolve_bounded
 from one_link.process_security import (
     hidden_creationflags,
     resolve_argv,
@@ -386,7 +387,18 @@ def _local_ip_addresses() -> tuple[str, ...]:
     addrs: set[str] = set()
     for family in (socket.AF_INET, socket.AF_INET6):
         try:
-            infos = socket.getaddrinfo(socket.gethostname(), None, family, socket.SOCK_DGRAM)
+            # Bounded: resolving this host's own name goes through mDNS for a
+            # .local name and blocks for a minute on a degraded network. An
+            # inventory entry is never worth stalling its caller.
+            infos = resolve_bounded(
+                socket.getaddrinfo,
+                socket.gethostname(),
+                None,
+                family,
+                socket.SOCK_DGRAM,
+                default=[],
+                label="hardware inventory local-address enumeration",
+            )
         except OSError:
             continue
         for info in infos:
