@@ -64,10 +64,12 @@ def _stage_distribution_source(destination: Path) -> None:
 
 
 def test_stable_distribution_contract_exactly_matches_source_tree() -> None:
-    # 203: one_link.build_info added 2026-07-27. It stamps the source commit
-    # into the artifact so an installed build can tell it is stale; being in
-    # this tuple is also what gets it bundled as a PyInstaller hidden import.
-    assert len(build_identity.EXPECTED_STABLE_RUNTIME_MODULES) == 203
+    # 204: one_link.bounded_resolver added 2026-07-30 -- the one place a
+    # blocking name-resolution call is given a deadline. Being in this tuple
+    # is also what gets it bundled as a PyInstaller hidden import, and a
+    # frozen daemon missing it would fail at the first resolver call.
+    # (203 before it: build_info, 2026-07-27.)
+    assert len(build_identity.EXPECTED_STABLE_RUNTIME_MODULES) == 204
     assert build_identity.EXPECTED_STABLE_RUNTIME_MODULES == tuple(
         sorted(set(build_identity.EXPECTED_STABLE_RUNTIME_MODULES))
     )
@@ -121,11 +123,13 @@ def test_distribution_source_contract_hashes_every_packaged_python_file() -> Non
         if "__pycache__" not in path.parts
     }
     packaged_python = {name for name in contract.payload_hashes if name.endswith(".py")}
-    # 219 / 238: one_link/build_info.py added 2026-07-27 so an installed
-    # build can compare its stamped commit against the published one.
-    assert len(source_python) == 219
+    # 220 / 239: one_link/bounded_resolver.py added 2026-07-30 -- the single
+    # place a blocking name-resolution call is given a deadline, after an
+    # unbounded one froze a macOS daemon's event loop for 64 seconds.
+    # (219 / 238 before it: build_info.py, 2026-07-27.)
+    assert len(source_python) == 220
     assert packaged_python == source_python
-    assert len(contract.payload_hashes) == 238
+    assert len(contract.payload_hashes) == 239
 
 
 def test_developer_only_modules_are_not_stable_distribution_requirements() -> None:
