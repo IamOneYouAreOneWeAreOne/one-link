@@ -321,3 +321,62 @@ def test_the_ci_lever_is_not_the_shared_one(monkeypatch):
             r"to C:\msys64\msys64 -- a path no ladder candidate probes: "
             f"{active}"
         )
+
+
+def test_a_rejected_determinism_flag_retries_the_same_compiler(tmp_path, monkeypatch):
+    """A linker-flavour mismatch must cost the pinned image base, not the build.
+
+    Which linker a Windows clang drives cannot be told reliably from its
+    triple. Release run #44 met a windows-11-arm image whose clang reported a
+    non-msvc machine yet still invoked lld-link, which read `--image-base` as
+    a GNU switch and `0x180000000` as an input FILE:
+
+        lld-link: warning: ignoring unknown argument '--no-insert-timestamp'
+        lld-link: error: could not open '0x180000000'
+
+    The accelerator is the product; the pinned base is a reproducibility
+    nicety. So the SAME compiler is retried with the flags dropped.
+    """
+    attempts: list[bool] = []
+
+    def fake_compile(compiler, src, lib, *, deterministic_link=True):
+        attempts.append(deterministic_link)
+        if deterministic_link:
+            raise RuntimeError("lld-link: could not open '0x180000000'")
+        lib.write_bytes(b"fake native cdc library")
+
+    monkeypatch.setattr(native_cdc, "_candidate_c_compilers", lambda: ["/opt/clang"])
+    monkeypatch.setattr(native_cdc, "_compile", fake_compile)
+    monkeypatch.setattr(native_cdc, "validate_native_cdc_library", lambda _p: None)
+
+    src = tmp_path / "cdc.c"
+    src.write_text("int main(void){return 0;}\n", encoding="utf-8")
+    lib = tmp_path / native_cdc.native_library_name()
+
+    winner = native_cdc.compile_with_compiler_fallback(src, lib)
+
+    assert winner == "/opt/clang"
+    assert attempts == [True, False], (
+        "the same compiler must be retried WITHOUT the determinism flags "
+        f"before the ladder moves on: {attempts}"
+    )
+    assert lib.is_file()
+
+
+def test_determinism_flags_are_actually_dropped_on_retry():
+    """The retry must change the COMMAND, or it is just a second failure."""
+    src = Path("cdc.c")
+    lib = Path("ol_native_cdc.dll")
+
+    pinned = native_cdc._compile_command(
+        "clang.exe", src, lib, target_os_name="nt", deterministic_link=True
+    )
+    plain = native_cdc._compile_command(
+        "clang.exe", src, lib, target_os_name="nt", deterministic_link=False
+    )
+
+    assert any("0x180000000" in a for a in pinned), pinned
+    assert not any("0x180000000" in a for a in plain), plain
+    assert not any(a.startswith("-Wl,") for a in plain), plain
+    # ...and the compile itself is otherwise identical.
+    assert [a for a in pinned if not a.startswith("-Wl,")] == plain
