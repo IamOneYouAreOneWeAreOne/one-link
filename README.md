@@ -418,8 +418,8 @@ full audit list and recommended ordering.
 
 Copyright (c) 2026 One Link contributors (weareone@oneunity.earth).
 Released under the **GNU Affero General Public License v3.0 or later**
-(AGPL-3.0-or-later). See [LICENSE](LICENSE) and the full text in
-[LICENSE.AGPL-3.0](LICENSE.AGPL-3.0).
+(AGPL-3.0-or-later). The full text is in [LICENSE](LICENSE); the copyright, SPDX identifier
+and MIT-era history are in [LICENSE-NOTICE](LICENSE-NOTICE).
 
 AGPL is a deliberate, for-the-people choice: it keeps One Link free and
 open even when run as a network service — anyone who offers it to others

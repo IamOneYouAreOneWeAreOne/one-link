@@ -49,7 +49,7 @@ def _stage_distribution_source(destination: Path) -> None:
     destination.mkdir()
     for relative in (
         "LICENSE",
-        "LICENSE.AGPL-3.0",
+        "LICENSE-NOTICE",
         "NOTICE",
         "README.md",
         "pyproject.toml",
@@ -272,7 +272,7 @@ def test_core_wheel_configuration_is_genuinely_universal() -> None:
     assert project["project"]["license"] == "AGPL-3.0-or-later"
     assert project["project"]["license-files"] == [
         "LICENSE",
-        "LICENSE.AGPL-3.0",
+        "LICENSE-NOTICE",
         "NOTICE",
     ]
     assert project["build-system"]["requires"] == [
