@@ -80,7 +80,11 @@ jobs:
           echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=-C target-feature=+crt-static -C debuginfo=0" >> "$GITHUB_ENV"
+          # NO RUSTFLAGS on purpose. release.yml builds the wheel with none, and
+          # a rebuild that uses different flags cannot speak for the released
+          # bytes. `-C target-feature=+crt-static` also broke every run of this
+          # workflow: it reaches proc-macro crates, which must be dylibs, and a
+          # static-CRT target cannot produce one.
 
       - name: Install pinned Rust toolchain
         # Pin to a specific version, not `stable`, for reproducibility.
@@ -165,7 +169,6 @@ jobs:
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
           CARGO_PROFILE_RELEASE_LTO: "fat"
           CARGO_INCREMENTAL: "0"
-          RUSTFLAGS: "-C target-feature=+crt-static -C debuginfo=0"
         working-directory: native
         run: |
           export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
