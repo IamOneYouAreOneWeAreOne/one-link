@@ -1013,11 +1013,23 @@ jobs:
               return 1
             fi
           }
+          # A DRAFT release is not addressable by tag: GitHub associates the
+          # tag only when the release is published, so
+          # `releases/tags/<tag>` returns 404 for exactly the draft this job
+          # just created (the release URL still reads `untagged-<hash>`).
+          # Resolving through the releases list is the only way to see a
+          # draft, and it keeps the guard fail-closed: an absent or
+          # non-draft release still refuses.
+          release_draft_state() {
+            gh api "repos/$GH_REPO/releases?per_page=100" --paginate \
+              --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .draft" \
+              2>/dev/null | head -n 1
+          }
           assert_release_is_draft() {
             local draft
-            draft="$(gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" --jq '.draft')"
+            draft="$(release_draft_state)"
             if [[ "$draft" != "true" ]]; then
-              echo "::error::Refusing to modify an already-public release: $RELEASE_TAG" >&2
+              echo "::error::Refusing to modify a release that is absent or already public: $RELEASE_TAG (draft=${draft:-<not found>})" >&2
               return 1
             fi
           }
@@ -1049,9 +1061,15 @@ jobs:
           # partially replaced public release. The create fallback is race-safe;
           # `--verify-tag` guarantees publication can never mint an unreviewed
           # release tag from a manually dispatched branch.
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+          # Same blind spot on the existence probe: a draft is invisible to a
+          # by-tag lookup, so without the list-based check a rerun would mint
+          # a SECOND draft for the same tag instead of reusing the first.
+          if [[ -z "$(release_draft_state)" ]]; then
             if ! gh release create "${create_args[@]}"; then
-              gh release view "$RELEASE_TAG" >/dev/null
+              if [[ -z "$(release_draft_state)" ]]; then
+                echo "::error::Release creation failed and no draft exists for $RELEASE_TAG" >&2
+                exit 1
+              fi
             fi
           fi
           assert_release_is_draft
