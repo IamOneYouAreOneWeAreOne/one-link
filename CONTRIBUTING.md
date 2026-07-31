@@ -84,4 +84,4 @@ Until the project incorporates as a non-profit foundation,
 contributions go to:
 
 - Maintainer: One Link contributors <weareone@oneunity.earth>
-- Code: https://github.com/IamOneYouAreOneWeAreOne/one-link
+- Code: https://github.com/coherence-energy-labs/one-link

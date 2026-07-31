@@ -285,7 +285,7 @@ def test_settings_about_has_report_a_bug_github_link(index_html):
     that opens issues/new in a new tab."""
     assert 'id="settings-about-report-bug"' in index_html
     # The link target is GitHub issues/new on the canonical repo.
-    assert "github.com/IamOneYouAreOneWeAreOne/one-link/issues/new" in index_html
+    assert "github.com/coherence-energy-labs/one-link/issues/new" in index_html
     assert 'target="_blank"' in index_html
     # Surrounding copy points the user at the Copy report button so
     # they include diagnostics with their issue.

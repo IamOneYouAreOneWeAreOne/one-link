@@ -559,7 +559,7 @@ def test_sigstore_verifier_pins_exact_workflow_tag(monkeypatch, tmp_path):
     command = captured["command"]
     identity_index = command.index("--cert-identity") + 1
     assert command[identity_index] == (
-        "https://github.com/IamOneYouAreOneWeAreOne/one-link/"
+        "https://github.com/coherence-energy-labs/one-link/"
         ".github/workflows/release.yml@refs/tags/v0.22.0"
     )
     assert captured["kwargs"]["shell"] is False

@@ -2652,7 +2652,7 @@ def _render_install_landing(
     networks. Sovereignty floor honored.
     """
     import html as _html
-    project_url = "https://github.com/IamOneYouAreOneWeAreOne/one-link"
+    project_url = "https://github.com/coherence-energy-labs/one-link"
     if valid:
         headline = "You've been invited to pair on One Link"
         code_block = (

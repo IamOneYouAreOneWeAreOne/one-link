@@ -29,7 +29,7 @@ release.
   while every fix since then landed on master unseen. It is now published from
   a commit whose `tests`, `security`, and platform-build gates were all green,
   and every artifact carries a GitHub build-provenance attestation verifiable
-  with `gh attestation verify <file> --repo IamOneYouAreOneWeAreOne/one-link`.
+  with `gh attestation verify <file> --repo coherence-energy-labs/one-link`.
   Read that narrowly: it binds the bytes to the publishing workflow, so a third
   party cannot substitute an upload. It is not a code signature, and it is not
   reproducible-build evidence. There is still no signed, reproducible,

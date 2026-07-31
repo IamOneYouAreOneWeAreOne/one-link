@@ -5,7 +5,7 @@
 #   bash scripts/verify-release.sh <artifact-path> <release-tag>
 #
 # Where <artifact-path> is a .tar.gz, .whl, or other release file
-# downloaded from https://github.com/IamOneYouAreOneWeAreOne/one-link/releases.
+# downloaded from https://github.com/coherence-energy-labs/one-link/releases.
 #
 # What this script does, in order:
 #   1. Verifies the signed SHA256SUMS manifest next to the artifact.
@@ -35,7 +35,7 @@
 
 set -euo pipefail
 
-REPO="IamOneYouAreOneWeAreOne/one-link"
+REPO="coherence-energy-labs/one-link"
 WORKFLOW_PATH=".github/workflows/release.yml"
 OIDC_ISSUER="https://token.actions.githubusercontent.com"
 

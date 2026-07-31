@@ -67,7 +67,7 @@ def _gh_payload(tag="v0.22.0", *, prerelease=False, draft=False,
     return {
         "tag_name": tag,
         "name": f"One Link {tag}",
-        "html_url": f"https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/tag/{tag}",
+        "html_url": f"https://github.com/coherence-energy-labs/one-link/releases/tag/{tag}",
         "published_at": published,
         "body": "## What's new\n\n* Native QUIC transport\n",
         "prerelease": prerelease,
@@ -93,7 +93,7 @@ def test_fetch_latest_newer_release():
     assert result.latest.asset_count == 4
     assert "0.22.0" in result.latest.html_url
     # The default repo coordinates flow through to the GitHub URL.
-    assert "IamOneYouAreOneWeAreOne/one-link" in captured["url"]
+    assert "coherence-energy-labs/one-link" in captured["url"]
     # Sane timeout — not 60 seconds.
     assert captured["timeout"] <= 10
 
@@ -220,7 +220,7 @@ def test_fetch_latest_uses_canonical_release_url_not_payload_url():
     result = fetch_latest("0.21.0", fetch=lambda url, timeout: payload)
     assert result.latest is not None
     assert result.latest.html_url == (
-        "https://github.com/IamOneYouAreOneWeAreOne/"
+        "https://github.com/coherence-energy-labs/"
         "one-link/releases/tag/v0.22.0"
     )
 

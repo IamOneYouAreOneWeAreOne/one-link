@@ -41,7 +41,7 @@ wheel fails the build; there is no pure-Python stable-artifact waiver.
 Install the matching native wheel before invoking this script, for example:
 
     pip install one_link_native --find-links \\
-      https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest
+      https://github.com/coherence-energy-labs/one-link/releases/latest
 
 The release workflow builds and installs the matching native wheel on each
 architecture-specific runner before invoking this script. It also requires a

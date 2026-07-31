@@ -43,7 +43,7 @@ log = logging.getLogger("one_link.update_check")
 # Default repo coordinates. Override via the explicit `repo` arg to
 # fetch_latest() in tests / forks. Hard-coded here so the daemon doesn't
 # need a config file just to point at a different fork.
-DEFAULT_OWNER = "IamOneYouAreOneWeAreOne"
+DEFAULT_OWNER = "coherence-energy-labs"
 DEFAULT_REPO = "one-link"
 DEFAULT_TIMEOUT_SECONDS = 4.0
 MAX_RELEASE_RESPONSE_BYTES = 2 * 1024 * 1024
