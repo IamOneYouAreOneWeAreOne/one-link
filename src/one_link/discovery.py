@@ -105,7 +105,16 @@ class _QuietUnreachableInterfaceFilter(logging.Filter):
 
 
 def _quiet_zeroconf_unreachable_interfaces() -> None:
-    """Install the filter once on the zeroconf logger."""
+    """Install the filter once on the zeroconf logger.
+
+    Attaching to ``zeroconf`` alone is sufficient, and that is a fact about
+    the library rather than an assumption: every module in the package calls
+    ``getLogger(__name__.split(".", maxsplit=1)[0])``, so they all emit
+    through this one logger and no child loggers exist. The distinction
+    matters -- a filter on a logger is NOT consulted for records emitted by
+    its descendants, so if zeroconf ever logged through ``zeroconf.asyncio``
+    this would silently stop working.
+    """
     zc_log = logging.getLogger("zeroconf")
     for existing in zc_log.filters:
         if isinstance(existing, _QuietUnreachableInterfaceFilter):
