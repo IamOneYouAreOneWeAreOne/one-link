@@ -389,6 +389,11 @@ async def scan_mdns_browse_all(
         log.warning("zeroconf unavailable: %s", e)
         return []
 
+    # Second zeroconf entry point in the package: the same unroutable-
+    # interface tracebacks would otherwise reach the log from here.
+    from one_link.discovery import _quiet_zeroconf_unreachable_interfaces
+
+    _quiet_zeroconf_unreachable_interfaces()
     aio = AsyncZeroconf()
     # Key by IP (the only stable cross-protocol identifier).
     by_ip: dict[str, DiscoveredDevice] = {}

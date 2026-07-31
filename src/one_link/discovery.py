@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import errno
 import ipaddress
 import logging
 import os
@@ -65,6 +66,51 @@ def _resolve_service_type() -> str:
 # subprocess that sets ONE_LINK_MDNS_SERVICE_TYPE picks it up here.
 SERVICE_TYPE = _resolve_service_type()
 ZEROCONF_IMPORT_TIMEOUT_S = 3.0
+
+# Per-interface send failures that mean "this NIC cannot carry mDNS right
+# now" -- a VPN that just dropped, a virtual/VM interface with no route, a
+# laptop between networks. One Link handles all of them: it keeps announcing
+# on the interfaces that do work.
+_UNREACHABLE_INTERFACE_ERRNOS = frozenset(
+    getattr(errno, name)
+    for name in ("EHOSTUNREACH", "ENETUNREACH", "ENETDOWN", "EADDRNOTAVAIL")
+    if hasattr(errno, name)
+)
+
+
+class _QuietUnreachableInterfaceFilter(logging.Filter):
+    """Keep zeroconf's per-interface send warnings; drop their tracebacks.
+
+    zeroconf logs these with ``exc_info``, so a routine condition prints a
+    full ``Traceback (most recent call last)`` into the user's daemon log.
+    That is alarming for something One Link has already handled, and it is
+    not only cosmetic: the release gate that scans a frozen daemon's log for
+    tracebacks reads it as a crash, so a CI host with one unroutable virtual
+    interface fails a build in which nothing actually went wrong.
+
+    The record is NOT suppressed. The warning still says which socket and
+    address failed and why -- only the stack, which describes zeroconf's
+    internals rather than anything actionable, is removed.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        exc_info = record.exc_info
+        if not exc_info:
+            return True
+        exc = exc_info[1]
+        if isinstance(exc, OSError) and exc.errno in _UNREACHABLE_INTERFACE_ERRNOS:
+            record.exc_info = None
+            record.exc_text = None
+        return True
+
+
+def _quiet_zeroconf_unreachable_interfaces() -> None:
+    """Install the filter once on the zeroconf logger."""
+    zc_log = logging.getLogger("zeroconf")
+    for existing in zc_log.filters:
+        if isinstance(existing, _QuietUnreachableInterfaceFilter):
+            return
+    zc_log.addFilter(_QuietUnreachableInterfaceFilter())
 
 log = logging.getLogger("one_link.discovery")
 
@@ -467,6 +513,9 @@ class Discovery:
             return
 
         loop = asyncio.get_running_loop()
+        # Before the first announcement, so no unroutable-interface traceback
+        # can reach the log.
+        _quiet_zeroconf_unreachable_interfaces()
         self._zc = AsyncZeroconf(ip_version=IPVersion.V4Only)
         local_ip = _best_local_ipv4()
         allow_same_host = str(os.environ.get("ONE_LINK_ALLOW_SAME_HOST_PEERS") or "").lower()

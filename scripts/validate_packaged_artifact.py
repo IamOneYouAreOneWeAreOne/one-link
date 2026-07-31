@@ -2336,10 +2336,38 @@ def validate_frozen_e2e(artifact: Path) -> str:
                 f"frozen two-daemon E2E failed: {failure} "
                 "(per-daemon log tails printed above)"
             ) from failure
-        for _process, _handle, log_path, _port, _secret in processes:
+        for index, (_process, _handle, log_path, _port, _secret) in enumerate(processes):
             text = log_path.read_text(encoding="utf-8", errors="replace")
-            if "Traceback (most recent call last)" in text or " CRITICAL " in text:
-                raise GateFailure(f"frozen daemon logged a traceback/critical failure: {log_path}")
+            if "Traceback (most recent call last)" not in text and " CRITICAL " not in text:
+                continue
+            # This check lives AFTER the E2E's own failure handling, so it
+            # used to raise with a path and nothing else -- and the path
+            # points inside a temp dir that dies with the job. A gate that
+            # says "something logged a traceback" without saying WHICH one
+            # costs a whole release cycle to re-provoke, so preserve the
+            # logs and quote the offending block here.
+            preserved = Path.cwd() / "frozen-e2e-logs"
+            with contextlib.suppress(OSError):
+                preserved.mkdir(parents=True, exist_ok=True)
+            with contextlib.suppress(OSError):
+                shutil.copy2(log_path, preserved / f"daemon-{index}-{log_path.name}")
+            lines = text.splitlines()
+            excerpt: list[str] = []
+            for n, line in enumerate(lines):
+                if "Traceback (most recent call last)" in line or " CRITICAL " in line:
+                    # The line BEFORE a traceback names what failed; the
+                    # lines after are the frames.
+                    excerpt = lines[max(0, n - 1):n + 12]
+                    break
+            print(f"--- frozen daemon {index} logged a traceback: {log_path}", flush=True)
+            for line in excerpt:
+                print(f"    {line}", flush=True)
+            first = excerpt[0].strip() if excerpt else "<unavailable>"
+            raise GateFailure(
+                "frozen daemon logged a traceback/critical failure: "
+                f"{log_path} -- first offending record: {first[:300]} "
+                "(full block printed above; complete logs preserved)"
+            )
     return (
         "two isolated frozen daemons passed authenticated health/UI, mutual pinning, "
         "real multichunk digest/exactly-once transfer, and graceful shutdown"

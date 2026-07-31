@@ -2522,8 +2522,12 @@ def _start_event_loop_watchdog(
                     where,
                 )
                 # Wait for the loop to come back before probing again, so one
-                # stall produces one report rather than a stream of them.
-                acknowledged.wait()
+                # stall produces one report rather than a stream of them --
+                # but keep checking the stop event, because a loop that never
+                # answers again is precisely what shutdown looks like, and an
+                # unbounded wait here would strand this thread forever.
+                while not stop.is_set() and not acknowledged.wait(interval):
+                    pass
             stop.wait(interval)
 
     threading.Thread(
@@ -39106,6 +39110,15 @@ class Daemon:
         if self._runtime_lifecycle is not None:
             _record_clean_shutdown(self._runtime_lifecycle)
             self._runtime_lifecycle = None
+        # Retire the loop watchdog LAST, so a shutdown that itself blocks the
+        # loop still gets named. Retiring it at all is not optional: a daemon
+        # thread outlives stop(), and a process that starts and stops many
+        # daemons -- every test session does -- would otherwise accumulate one
+        # live thread per daemon, each waking once a second forever to ping a
+        # loop nobody is running.
+        if self._loop_watchdog_stop is not None:
+            self._loop_watchdog_stop.set()
+            self._loop_watchdog_stop = None
         self._release_instance_lock()
 
 

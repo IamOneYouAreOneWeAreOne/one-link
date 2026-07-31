@@ -30,6 +30,8 @@ import contextlib
 import logging
 import os
 import socket
+import threading
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -359,6 +361,121 @@ class RendezvousClient:
             return
 
 
+# ─── this host's own addresses (cached; never resolved on the hot path) ──
+#
+# resolve_bounded caps a resolver call, but the join happens on the CALLING
+# thread -- so a bounded call still freezes an event loop for the deadline.
+# Five call sites reach discover_local_endpoints and TWO of them are
+# synchronous methods running on the loop (the endpoint-announcement
+# signature, and the UI's route-bootstrap token), which no to_thread wrapping
+# can reach without changing their signatures and every caller above them.
+#
+# The address list is ambient host state, not a per-request computation. So it
+# is cached and refreshed off-loop: a stale entry is served AS IS, because a
+# slightly old address list is worth incomparably more than a frozen daemon.
+_OWN_ADDR_TTL_SECONDS = 60.0
+# The first call may wait this long, so a healthy host (microseconds) still
+# advertises correct endpoints immediately instead of an empty list.
+_OWN_ADDR_FIRST_CALL_BUDGET_SECONDS = 1.0
+# The background refresh has its own thread and can afford longer -- but it
+# MUST finish, or the in-flight flag never clears and the cache freezes.
+_OWN_ADDR_REFRESH_BUDGET_SECONDS = 10.0
+
+_own_addr_lock = threading.Lock()
+_own_addr_value: list[str] = []
+_own_addr_deadline = 0.0
+_own_addr_populated = False
+_own_addr_refreshing = False
+
+
+def _resolve_own_ipv4(timeout: float) -> list[str]:
+    infos = resolve_bounded(
+        socket.getaddrinfo,
+        socket.gethostname(),
+        None,
+        family=socket.AF_INET,
+        default=[],
+        label="rendezvous local-endpoint discovery",
+        timeout=timeout,
+    )
+    out: list[str] = []
+    for info in infos:
+        # info[4] for AF_INET is (host, port); host is always str.
+        addr = info[4][0]
+        if isinstance(addr, str) and addr and addr not in out:
+            out.append(addr)
+    return out
+
+
+def _store_own_addresses(addrs: list[str]) -> None:
+    global _own_addr_value, _own_addr_deadline, _own_addr_populated
+    with _own_addr_lock:
+        _own_addr_value = list(addrs)
+        _own_addr_deadline = time.monotonic() + _OWN_ADDR_TTL_SECONDS
+        _own_addr_populated = True
+
+
+def _refresh_own_addresses_in_background() -> None:
+    def _run() -> None:
+        global _own_addr_refreshing
+        try:
+            _store_own_addresses(_resolve_own_ipv4(_OWN_ADDR_REFRESH_BUDGET_SECONDS))
+        except OSError:
+            # A resolver that answers with an error has still answered.
+            _store_own_addresses([])
+        finally:
+            with _own_addr_lock:
+                _own_addr_refreshing = False
+
+    threading.Thread(
+        target=_run, name="one-link-own-addr-refresh", daemon=True
+    ).start()
+
+
+def own_ipv4_addresses() -> list[str]:
+    """This host's IPv4 addresses, without ever stalling the caller twice.
+
+    Raw addresses only -- filtering stays with the caller, so one caller's
+    ``include_loopback`` choice is never baked in for the next one.
+
+    Network errors degrade to an empty list; a programming error propagates,
+    matching the convention elsewhere in this package.
+    """
+    global _own_addr_refreshing
+    now = time.monotonic()
+    with _own_addr_lock:
+        value = list(_own_addr_value)
+        fresh = _own_addr_populated and now < _own_addr_deadline
+        first_call = not _own_addr_populated
+        start_refresh = not fresh and not first_call and not _own_addr_refreshing
+        if start_refresh:
+            _own_addr_refreshing = True
+
+    if first_call:
+        try:
+            addrs = _resolve_own_ipv4(_OWN_ADDR_FIRST_CALL_BUDGET_SECONDS)
+        except OSError as e:
+            log.debug("own-address enumeration failed: %s", e)
+            addrs = []
+        _store_own_addresses(addrs)
+        return addrs
+
+    if start_refresh:
+        _refresh_own_addresses_in_background()
+    return value
+
+
+def reset_own_address_cache() -> None:
+    """Forget everything learned about this host's addresses (test seam)."""
+    global _own_addr_value, _own_addr_deadline, _own_addr_populated
+    global _own_addr_refreshing
+    with _own_addr_lock:
+        _own_addr_value = []
+        _own_addr_deadline = 0.0
+        _own_addr_populated = False
+        _own_addr_refreshing = False
+
+
 # ─── helper: enumerate local advertise-able endpoints ───────────────
 
 def discover_local_endpoints(
@@ -383,25 +500,12 @@ def discover_local_endpoints(
     out: list[Endpoint] = []
     seen: set[str] = set()
     try:
-        host = socket.gethostname()
-        # Bounded: this is the call the loop watchdog caught blocking a
-        # macOS daemon for 64 seconds, resolving its own .local name on a
-        # host with a degraded network. Advertising no local endpoints
-        # costs a NAT-local shortcut; blocking costs the whole daemon.
-        infos = resolve_bounded(
-            socket.getaddrinfo,
-            host,
-            None,
-            family=socket.AF_INET,
-            default=[],
-            label="rendezvous local-endpoint discovery",
-        )
-        for info in infos:
-            # info[4] for AF_INET is (host, port); host is always str.
-            addr_raw = info[4][0]
-            if not isinstance(addr_raw, str):
-                continue
-            addr: str = addr_raw
+        # From the cache, never the resolver: this is the call the loop
+        # watchdog caught blocking a macOS daemon for 64 seconds while it
+        # resolved its own .local name on a degraded network. Two of this
+        # function's callers are synchronous methods on the event loop, so
+        # the cache is the only thing keeping them off that path.
+        for addr in own_ipv4_addresses():
             if not addr or addr in seen:
                 continue
             seen.add(addr)
@@ -413,7 +517,7 @@ def discover_local_endpoints(
                 continue
             out.append(Endpoint(host=addr, port=int(peer_port)))
     except OSError as e:
-        log.debug("getaddrinfo failed: %s", e)
+        log.debug("local address enumeration failed: %s", e)
     # Also try the "what IP do I use to reach the public internet"
     # trick — opens a UDP socket and inspects the chosen source IP.
     try:
