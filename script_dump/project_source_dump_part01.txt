@@ -316,7 +316,7 @@
    1: name: pages
    2: 
    3: # Deploy docs/site/ to GitHub Pages whenever it changes on master.
-   4: # This is the public landing page at https://IamOneYouAreOneWeAreOne.github.io/one-link/
+   4: # This is the public landing page at https://coherence-energy-labs.github.io/one-link/
    5: # (or whatever Pages URL is enabled in repo settings).
    6: 
    7: on:
@@ -2166,7 +2166,7 @@
   82: contributions go to:
   83: 
   84: - Maintainer: One Link contributors <weareone@oneunity.earth>
-  85: - Code: https://github.com/IamOneYouAreOneWeAreOne/one-link
+  85: - Code: https://github.com/coherence-energy-labs/one-link
 <<<CONTENT_END>>>
 <<<FILE_END>>>
 
@@ -22479,13 +22479,13 @@
  183:        to 'unknown' (linked to releases page); JS sets it to a
  184:        direct asset URL on detection. -->
  185:   <a class="download-primary" id="download-primary"
- 186:      href="https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest"
+ 186:      href="https://github.com/coherence-energy-labs/one-link/releases/latest"
  187:      data-os="unknown">
  188:     <span class="text">Download for your platform</span>
  189:     <span class="arrow">↓</span>
  190:   </a>
  191:   <p class="download-meta" id="download-meta">
- 192:     <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest">All downloads + signatures →</a>
+ 192:     <a href="https://github.com/coherence-energy-labs/one-link/releases/latest">All downloads + signatures →</a>
  193:   </p>
  194: 
  195:   <details class="alt">
@@ -22495,9 +22495,9 @@
  199: one-link app</code></pre>
  200:     <p>Native fast path (QUIC + coherence-field):</p>
  201:     <pre><code>pip install one_link_native --find-links \
- 202:   https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest</code></pre>
+ 202:   https://github.com/coherence-energy-labs/one-link/releases/latest</code></pre>
  203:     <p>From source:</p>
- 204:     <pre><code>git clone https://github.com/IamOneYouAreOneWeAreOne/one-link
+ 204:     <pre><code>git clone https://github.com/coherence-energy-labs/one-link
  205: cd one-link
  206: pip install -e .
  207: one-link app</code></pre>
@@ -22547,13 +22547,13 @@
  251:   <h2>Threat model</h2>
  252:   <p>
  253:     The full threat model lives at
- 254:     <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link/blob/master/docs/SECURITY.md">docs/SECURITY.md</a>.
+ 254:     <a href="https://github.com/coherence-energy-labs/one-link/blob/master/docs/SECURITY.md">docs/SECURITY.md</a>.
  255:     Nine adversary classes (T1 casual snoop through T9 state
  256:     actor) with explicit defenses + honest "where the gaps are."
  257:   </p>
  258:   <p>
  259:     For responsible-disclosure of a vulnerability:
- 260:     <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link/blob/master/SECURITY.md">SECURITY.md</a>
+ 260:     <a href="https://github.com/coherence-energy-labs/one-link/blob/master/SECURITY.md">SECURITY.md</a>
  261:     at the repo root.
  262:   </p>
  263: 
@@ -22563,7 +22563,7 @@
  267:     <a href="https://www.gnu.org/licenses/agpl-3.0.html">AGPLv3</a>
  268:     so it can never be quietly enclosed inside a closed-source
  269:     corporate product. The full charter is in
- 270:     <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link/blob/master/NOTICE">NOTICE</a>.
+ 270:     <a href="https://github.com/coherence-energy-labs/one-link/blob/master/NOTICE">NOTICE</a>.
  271:     No accounts, no email, no phone number, no telemetry, no
  272:     advertising, no selling user data, no corporate substrate
  273:     dependency the user can't opt out of. Ever.
@@ -22571,9 +22571,9 @@
  275: 
  276:   <div class="footer">
  277:     Maintained by One Link contributors.
- 278:     Source <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link">on GitHub</a>.
+ 278:     Source <a href="https://github.com/coherence-energy-labs/one-link">on GitHub</a>.
  279:     Security disclosure
- 280:     <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link/blob/master/SECURITY.md">here</a>.
+ 280:     <a href="https://github.com/coherence-energy-labs/one-link/blob/master/SECURITY.md">here</a>.
  281:     AGPLv3 - copy, modify, share. Build something good.
  282:   </div>
  283: </main>
@@ -22586,7 +22586,7 @@
  290:   // that's optional (the page works without it).
  291:   (function () {
  292:     "use strict";
- 293:     const OWNER = "IamOneYouAreOneWeAreOne";
+ 293:     const OWNER = "coherence-energy-labs";
  294:     const REPO = "one-link";
  295:     const RELEASE_BASE =
  296:       `https://github.com/${OWNER}/${REPO}/releases`;
@@ -136248,7 +136248,7 @@
  120: -------
  121: 
  122:   - Maintainer: One Link contributors <weareone@oneunity.earth>
- 123:   - Code: https://github.com/IamOneYouAreOneWeAreOne/one-link
+ 123:   - Code: https://github.com/coherence-energy-labs/one-link
  124:   - Security disclosure: see SECURITY.md at the repository root
 <<<CONTENT_END>>>
 <<<FILE_END>>>
@@ -136290,7 +136290,7 @@
   32: # Users get the binary in seconds without needing Rust installed locally:
   33: #
   34: #     pip install one_link_native --find-links \
-  35: #       https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest
+  35: #       https://github.com/coherence-energy-labs/one-link/releases/latest
   36: #
   37: # Or download the OS+arch-matching wheel from the release page and
   38: # `pip install <wheel.whl>`. Source builds via `cd native && maturin build --release`.
@@ -136416,7 +136416,7 @@
   19: ## Download
   20: 
   21: Pick the artifact for your platform from the
-  22: [latest release](https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest).
+  22: [latest release](https://github.com/coherence-energy-labs/one-link/releases/latest).
   23: 
   24: | Platform | File | What you do |
   25: |---|---|---|
@@ -136450,7 +136450,7 @@
   53: For developers, or to run the daemon as a service:
   54: 
   55: ```bash
-  56: git clone https://github.com/IamOneYouAreOneWeAreOne/one-link
+  56: git clone https://github.com/coherence-energy-labs/one-link
   57: cd one-link
   58: pip install -e .
   59: one-link daemon --open
@@ -137607,7 +137607,7 @@
   36: build should run, before this script:
   37: 
   38:     pip install one_link_native --find-links \\
-  39:       https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest
+  39:       https://github.com/coherence-energy-labs/one-link/releases/latest
   40: 
   41: The release.yml workflow already publishes the native wheels per
   42: OS to GitHub Releases (Phase 1 of the production-install plan).
@@ -137905,7 +137905,7 @@
  334:             "[build] one_link_native not installed in this env — building "
  335:             "without native fast path. To include it: install the wheel "
  336:             "first via `pip install one_link_native --find-links "
- 337:             "https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest`"
+ 337:             "https://github.com/coherence-energy-labs/one-link/releases/latest`"
  338:         )
  339: 
  340:     # GUI mode = no console window. Use --windowed on Mac/Win, no-op on Linux.
@@ -142315,7 +142315,7 @@
    5: #   bash scripts/verify-release.sh <artifact-path>
    6: #
    7: # Where <artifact-path> is a .tar.gz, .whl, or other release file
-   8: # downloaded from https://github.com/IamOneYouAreOneWeAreOne/one-link/releases.
+   8: # downloaded from https://github.com/coherence-energy-labs/one-link/releases.
    9: #
   10: # What this script does, in order:
   11: #   1. Locates the matching SHA256SUMS + .sigstore bundle next to
@@ -142348,7 +142348,7 @@
   38: 
   39: set -euo pipefail
   40: 
-  41: REPO="IamOneYouAreOneWeAreOne/one-link"
+  41: REPO="coherence-energy-labs/one-link"
   42: WORKFLOW_PATH=".github/workflows/release.yml"
   43: OIDC_ISSUER="https://token.actions.githubusercontent.com"
   44: 
@@ -142930,7 +142930,7 @@
   17: ```
   18: 
   19: PGP key (recommended for credible reports): published at
-  20: [https://github.com/IamOneYouAreOneWeAreOne.gpg](https://github.com/IamOneYouAreOneWeAreOne.gpg)
+  20: [https://github.com/coherence-energy-labs.gpg](https://github.com/coherence-energy-labs.gpg)
   21: once we set up the multi-maintainer threshold-signing key. Until
   22: then, reports in plaintext to the address above are accepted and
   23: acknowledged within 72 hours.
@@ -209022,7 +209022,7 @@
   695:     networks. Sovereignty floor honored.
   696:     """
   697:     import html as _html
-  698:     project_url = "https://github.com/IamOneYouAreOneWeAreOne/one-link"
+  698:     project_url = "https://github.com/coherence-energy-labs/one-link"
   699:     if valid:
   700:         headline = "You've been invited to pair on One Link"
   701:         code_block = (
@@ -234407,7 +234407,7 @@
   40: # Default repo coordinates. Override via the explicit `repo` arg to
   41: # fetch_latest() in tests / forks. Hard-coded here so the daemon doesn't
   42: # need a config file just to point at a different fork.
-  43: DEFAULT_OWNER = "IamOneYouAreOneWeAreOne"
+  43: DEFAULT_OWNER = "coherence-energy-labs"
   44: DEFAULT_REPO = "one-link"
   45: DEFAULT_TIMEOUT_SECONDS = 4.0
   46: 
@@ -234880,7 +234880,7 @@
  270: 
  271: def build_install_plan(
  272:     *,
- 273:     owner: str = "IamOneYouAreOneWeAreOne",
+ 273:     owner: str = "coherence-energy-labs",
  274:     repo: str = "one-link",
  275:     timeout: float = 6.0,
  276:     fetch_json: Callable[[str, float], dict] | None = None,
@@ -242539,7 +242539,7 @@
  6262:     <div class="ub-actions">
  6263:       <button class="dismiss" id="update-banner-dismiss" type="button">Dismiss</button>
  6264:       <a id="update-banner-link"
- 6265:          href="https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest"
+ 6265:          href="https://github.com/coherence-energy-labs/one-link/releases/latest"
  6266:          target="_blank" rel="noopener noreferrer">View release</a>
  6267:       <!-- Hidden by default. JS unhides this only when /api/me reports
  6268:            autoinstall_enabled=true (the experimental gate). -->
@@ -244072,7 +244072,7 @@
  7795:             </p>
  7796:             <p class="settings-help">
  7797:               Built on Coherence; yes, we drank our own kool-aid.
- 7798:               <a href="https://github.com/IamOneYouAreOneWeAreOne/one-link" target="_blank" rel="noopener" class="learn-more">Source on GitHub</a>
+ 7798:               <a href="https://github.com/coherence-energy-labs/one-link" target="_blank" rel="noopener" class="learn-more">Source on GitHub</a>
  7799:             </p>
  7800:           </section>
  7801: 
@@ -257929,7 +257929,7 @@
 21652:       "",
 21653:       "_Generated by the in-app bug-report flow. Identifying info already stripped._",
 21654:     ].join("\n");
-21655:     const url = `https://github.com/IamOneYouAreOneWeAreOne/one-link/issues/new?title=${encodeURIComponent(summary)}&body=${encodeURIComponent(body)}`;
+21655:     const url = `https://github.com/coherence-energy-labs/one-link/issues/new?title=${encodeURIComponent(summary)}&body=${encodeURIComponent(body)}`;
 21656:     window.open(url, "_blank", "noopener,noreferrer");
 21657:     toast("GitHub opened in a new tab with the snapshot pre-filled.", "info", 4500);
 21658:   });
@@ -308898,7 +308898,7 @@
   44:     assert 'id="download-primary"' in html
   45:     # Default href is the releases page, used as fallback when
   46:     # OS detection fails — never a 404, never a /dev/null.
-  47:     assert "github.com/IamOneYouAreOneWeAreOne/one-link/releases" in html
+  47:     assert "github.com/coherence-energy-labs/one-link/releases" in html
   48: 
   49: 
   50: def test_landing_page_handles_all_three_desktop_oses():
@@ -308946,7 +308946,7 @@
   92:         "github.com",
   93:         "api.github.com",
   94:         "raw.githubusercontent.com",
-  95:         "IamOneYouAreOneWeAreOne.github.io",
+  95:         "coherence-energy-labs.github.io",
   96:         "www.gnu.org",  # GPL license link
   97:     }
   98:     suspicious = {h for h in hosts if h not in allowed}
@@ -308986,7 +308986,7 @@
  132:     security disclosure path. Users need to know where to read
  133:     the code and where to report vulnerabilities."""
  134:     html = _html()
- 135:     assert "github.com/IamOneYouAreOneWeAreOne/one-link" in html
+ 135:     assert "github.com/coherence-energy-labs/one-link" in html
  136:     assert "SECURITY.md" in html
 <<<CONTENT_END>>>
 <<<FILE_END>>>
@@ -345225,7 +345225,7 @@
  179:     pane_end = index_html.find("</section>", pane_idx)
  180:     assert pane_end > pane_idx
  181:     scope = index_html[pane_idx:pane_end]
- 182:     assert "github.com/IamOneYouAreOneWeAreOne/one-link" in scope
+ 182:     assert "github.com/coherence-energy-labs/one-link" in scope
  183: 
  184: 
  185: # ───────── version pin ───────────────────────────────────────────────
@@ -353995,7 +353995,7 @@
   63:     return {
   64:         "tag_name": tag,
   65:         "name": f"One Link {tag}",
-  66:         "html_url": f"https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/tag/{tag}",
+  66:         "html_url": f"https://github.com/coherence-energy-labs/one-link/releases/tag/{tag}",
   67:         "published_at": published,
   68:         "body": "## What's new\n\n* Native QUIC transport\n",
   69:         "prerelease": prerelease,
@@ -354021,7 +354021,7 @@
   89:     assert result.latest.asset_count == 4
   90:     assert "0.22.0" in result.latest.html_url
   91:     # The default repo coordinates flow through to the GitHub URL.
-  92:     assert "IamOneYouAreOneWeAreOne/one-link" in captured["url"]
+  92:     assert "coherence-energy-labs/one-link" in captured["url"]
   93:     # Sane timeout — not 60 seconds.
   94:     assert captured["timeout"] <= 10
   95: 

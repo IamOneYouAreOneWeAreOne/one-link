@@ -141,7 +141,7 @@ def build_standalone_install_plan(
 
     fetch = fetch_json or _default_fetch
     try:
-        payload = fetch(_build_url("IamOneYouAreOneWeAreOne", "one-link"), timeout)
+        payload = fetch(_build_url("coherence-energy-labs", "one-link"), timeout)
     except Exception as exc:
         return _plan_failure("no_release", f"release discovery failed: {exc}")
     if not isinstance(payload, dict):

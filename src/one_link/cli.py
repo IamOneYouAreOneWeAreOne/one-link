@@ -2000,7 +2000,7 @@ def verify_this_install(as_json, expected_rollup, inventory_only):
     with the exact tag and keep the workflow identity exact:
 
         python -m sigstore verify identity \\
-          --cert-identity 'https://github.com/IamOneYouAreOneWeAreOne/one-link/.github/workflows/release.yml@refs/tags/v<exact-version>' \\
+          --cert-identity 'https://github.com/coherence-energy-labs/one-link/.github/workflows/release.yml@refs/tags/v<exact-version>' \\
           --cert-oidc-issuer 'https://token.actions.githubusercontent.com' \\
           --bundle one-link.exe.sigstore \\
           one-link.exe
@@ -2664,7 +2664,7 @@ def verify_this_install(as_json, expected_rollup, inventory_only):
         click.echo("  python -m sigstore verify identity \\")
         click.echo(
             "    --cert-identity "
-            f"'https://github.com/IamOneYouAreOneWeAreOne/one-link/"
+            f"'https://github.com/coherence-energy-labs/one-link/"
             f".github/workflows/release.yml@refs/tags/v{__version__}' \\"
         )
         click.echo("    --cert-oidc-issuer 'https://token.actions.githubusercontent.com' \\")

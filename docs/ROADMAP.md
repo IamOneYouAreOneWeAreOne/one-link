@@ -647,7 +647,7 @@ acceptance gates per phase. Ordered by leverage:
    `/relays/` route on the website + new `OPERATORS` Durable
    Object that polls every registered relay's `/api/operator`
    hourly and aggregates into the directory page. New repo
-   `IamOneYouAreOneWeAreOne/one-link-relay-deploy` carrying
+   `coherence-energy-labs/one-link-relay-deploy` carrying
    the Docker compose file, Pi image build script,
    cloud-init templates, and provider-specific one-click
    deploy buttons. Defang contribution: a healthy

@@ -27,7 +27,7 @@ from one_link.update_metadata import (
 NOW = datetime(2026, 7, 23, 12, 0, 0, tzinfo=UTC)
 TAG = "v0.22.0"
 PLATFORM = "linux-x86_64"
-REPOSITORY = "IamOneYouAreOneWeAreOne/one-link"
+REPOSITORY = "coherence-energy-labs/one-link"
 
 
 def _url(name: str, *, tag: str = TAG) -> str:

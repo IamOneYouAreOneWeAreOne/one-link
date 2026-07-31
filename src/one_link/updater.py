@@ -61,7 +61,7 @@ from one_link.safe_http import validated_urlopen
 
 log = logging.getLogger("one_link.updater")
 
-UPDATE_REPO = "IamOneYouAreOneWeAreOne/one-link"
+UPDATE_REPO = "coherence-energy-labs/one-link"
 UPDATE_WORKFLOW_PATH = ".github/workflows/release.yml"
 UPDATE_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 MAX_UPDATE_METADATA_BYTES = 4 * 1024 * 1024
@@ -785,7 +785,7 @@ class contextlib_suppress:
 
 def build_install_plan(
     *,
-    owner: str = "IamOneYouAreOneWeAreOne",
+    owner: str = "coherence-energy-labs",
     repo: str = "one-link",
     timeout: float = 6.0,
     current_version: str | None = None,

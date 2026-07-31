@@ -168,7 +168,7 @@ def _document(
         "created_at": created_at,
         "expires_at": expires_at,
         "source": {
-            "repository": "IamOneYouAreOneWeAreOne/one-link",
+            "repository": "coherence-energy-labs/one-link",
             "workflow": ".github/workflows/release.yml",
             "oidc_issuer": "https://token.actions.githubusercontent.com",
             "commit_sha": commit,

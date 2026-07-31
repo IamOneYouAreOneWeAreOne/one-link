@@ -27,7 +27,7 @@ from packaging.version import InvalidVersion, Version
 
 
 UPDATE_METADATA_SCHEMA = "one-link-update-manifest/v1"
-UPDATE_REPOSITORY = "IamOneYouAreOneWeAreOne/one-link"
+UPDATE_REPOSITORY = "coherence-energy-labs/one-link"
 UPDATE_WORKFLOW = ".github/workflows/release.yml"
 UPDATE_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 UPDATE_METADATA_FILENAME = "UPDATE_MANIFEST.json"

@@ -31,7 +31,7 @@ I am One. You are One. We are One.
 For development evaluation, run a reviewed source commit with the frozen lock:
 
 ```bash
-git clone https://github.com/IamOneYouAreOneWeAreOne/one-link
+git clone https://github.com/coherence-energy-labs/one-link
 cd one-link
 git checkout <reviewed-commit-sha>
 uv sync --frozen --extra dev
@@ -130,7 +130,7 @@ Never substitute `latest`, `master`, or `auto-latest` for the exact tag.
 For developers, or to run the daemon as a service:
 
 ```bash
-git clone https://github.com/IamOneYouAreOneWeAreOne/one-link
+git clone https://github.com/coherence-energy-labs/one-link
 cd one-link
 git checkout <reviewed-commit-sha>
 uv sync --frozen --extra dev

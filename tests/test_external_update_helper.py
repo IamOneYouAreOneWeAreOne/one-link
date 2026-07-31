@@ -157,7 +157,7 @@ def _manifest(archive: Path):
         "created_at": "2026-07-01T00:00:00Z",
         "expires_at": "2026-12-01T00:00:00Z",
         "source": {
-            "repository": "IamOneYouAreOneWeAreOne/one-link",
+            "repository": "coherence-energy-labs/one-link",
             "workflow": ".github/workflows/release.yml",
             "oidc_issuer": "https://token.actions.githubusercontent.com",
             "commit_sha": "a" * 40,
@@ -628,7 +628,7 @@ def test_sigstore_verifier_uses_prehashed_public_api_and_exact_identity(tmp_path
     assert observed["offline"] is False
     assert observed["issuer"] == "https://token.actions.githubusercontent.com"
     assert observed["identity"] == (
-        "https://github.com/IamOneYouAreOneWeAreOne/one-link/"
+        "https://github.com/coherence-energy-labs/one-link/"
         ".github/workflows/release.yml@refs/tags/v0.22.0"
     )
 

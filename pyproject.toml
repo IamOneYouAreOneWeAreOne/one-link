@@ -76,7 +76,7 @@ dependencies = [
 # Users get the binary in seconds without needing Rust installed locally:
 #
 #     pip install one_link_native --find-links \
-#       https://github.com/IamOneYouAreOneWeAreOne/one-link/releases/latest
+#       https://github.com/coherence-energy-labs/one-link/releases/latest
 #
 # Or download the OS+arch-matching wheel from the release page and
 # `pip install <wheel.whl>`. Source builds via `cd native && maturin build --release`.

@@ -179,7 +179,7 @@ def test_about_pane_links_to_source(index_html: str):
     pane_end = index_html.find("</section>", pane_idx)
     assert pane_end > pane_idx
     scope = index_html[pane_idx:pane_end]
-    assert "github.com/IamOneYouAreOneWeAreOne/one-link" in scope
+    assert "github.com/coherence-energy-labs/one-link" in scope
 
 
 # ───────── version pin ───────────────────────────────────────────────

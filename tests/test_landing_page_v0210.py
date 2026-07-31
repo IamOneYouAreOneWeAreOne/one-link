@@ -92,7 +92,7 @@ def test_landing_page_does_not_call_non_github_hosts():
     allowed = {
         "github.com",
         "raw.githubusercontent.com",
-        "IamOneYouAreOneWeAreOne.github.io",
+        "coherence-energy-labs.github.io",
         "www.gnu.org",
     }
     suspicious = {host for host in hosts if host not in allowed}
@@ -109,5 +109,5 @@ def test_landing_page_advertises_bounded_product_terms():
 
 def test_landing_page_links_to_source_and_security_disclosure():
     html = _html()
-    assert "github.com/IamOneYouAreOneWeAreOne/one-link" in html
+    assert "github.com/coherence-energy-labs/one-link" in html
     assert "SECURITY.md" in html

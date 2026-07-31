@@ -89,7 +89,7 @@ that any release has passed it.
       ```
       python -m sigstore verify identity \
         --bundle <artifact>.sigstore \
-        --cert-identity 'https://github.com/IamOneYouAreOneWeAreOne/one-link/.github/workflows/release.yml@refs/tags/<tag>' \
+        --cert-identity 'https://github.com/coherence-energy-labs/one-link/.github/workflows/release.yml@refs/tags/<tag>' \
         --cert-oidc-issuer 'https://token.actions.githubusercontent.com' \
         <artifact>
       ```
