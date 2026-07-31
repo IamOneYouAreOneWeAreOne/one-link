@@ -1,0 +1,47 @@
+                    One Link License Notice
+
+Copyright (c) 2026 One Link contributors (weareone@oneunity.earth)
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public
+License along with this program.  If not, see
+<https://www.gnu.org/licenses/agpl-3.0.html>.
+
+The full text of the AGPLv3 ships in this repository at LICENSE,
+which is the legally operative license text.  This file
+(LICENSE-NOTICE) is the SPDX-friendly companion that identifies the
+license + copyright holder and records the MIT-era history below.
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+
+────────────────────────────────────────────────────────────────────
+History note (license change at v0.20.7+):
+
+Versions of One Link prior to commit `87d1b98` (released as
+v0.20.7+ in 2026-05) were distributed under the MIT License.
+Those releases remain under MIT, in perpetuity, by the original
+copyright holder — anyone in possession of an MIT-licensed
+release retains every right MIT granted them.
+
+Starting with the AGPLv3 license commit, all NEW contributions
+and NEW derivative works are governed by AGPLv3.  The change is
+deliberate and described in NOTICE: One Link is for the people,
+and AGPLv3 is the license that ensures forks built on top of
+One Link's privacy work can't be quietly enclosed inside a
+corporate product without sharing those modifications back to
+the people who use them.
+
+If you forked or built on the MIT version: nothing about your
+fork changes; you may continue under MIT until you choose to
+sync with a post-AGPLv3 commit (at which point AGPLv3 covers
+your sync).
+────────────────────────────────────────────────────────────────────
