@@ -420,7 +420,27 @@ def compile_with_compiler_fallback(src: Path, lib: Path) -> str:
     failures: list[str] = []
     for index, compiler in enumerate(candidates):
         try:
-            _compile(compiler, src, lib)
+            try:
+                _compile(compiler, src, lib)
+            except Exception as deterministic_exc:
+                # The determinism switches are linker-flavour specific, and
+                # which flavour a Windows clang drives cannot be told reliably
+                # from its triple: a runner image rotated to a clang whose
+                # -dumpmachine did not say "msvc" while it still invoked
+                # lld-link, which then read `--image-base` as a GNU flag and
+                # `0x180000000` as a FILE ("could not open '0x180000000'").
+                # A pinned image base is a reproducibility nicety; a working
+                # accelerator is the product. So retry the SAME compiler with
+                # the flags dropped rather than guessing harder, and say so.
+                lib.unlink(missing_ok=True)
+                log.warning(
+                    "native CDC: %s rejected the deterministic-link flags "
+                    "(%s); retrying without them -- the library will build "
+                    "but its preferred image base is not pinned",
+                    Path(compiler).name,
+                    type(deterministic_exc).__name__,
+                )
+                _compile(compiler, src, lib, deterministic_link=False)
             validate_native_cdc_library(lib)
         except Exception as exc:
             lib.unlink(missing_ok=True)
@@ -481,6 +501,7 @@ def _compile_command(
     lib: Path,
     *,
     target_os_name: str | None = None,
+    deterministic_link: bool = True,
 ) -> list[str]:
     """Build a deterministic native-CDC compiler command.
 
@@ -512,7 +533,13 @@ def _compile_command(
         str(src),
     ]
     if os_name == "nt":
-        if "clang" in name and _clang_targets_msvc(compiler):
+        # NOTE the nesting: dropping the determinism flags must not fall
+        # through to the POSIX branch and hand Windows a -fPIC it has no use
+        # for. (Caught by test_determinism_flags_are_actually_dropped_on_retry
+        # the first time this was written as one flat condition.)
+        if not deterministic_link:
+            pass
+        elif "clang" in name and _clang_targets_msvc(compiler):
             # lld-link's reproducibility switches: /Brepro pins the PE
             # timestamp/checksum, /base fixes the preferred image base.
             command.insert(4, "-Wl,/Brepro")
@@ -619,13 +646,17 @@ def _find_c_compiler() -> str | None:
     return candidates[0] if candidates else None
 
 
-def _compile(compiler: str, src: Path, lib: Path) -> None:
+def _compile(
+    compiler: str, src: Path, lib: Path, *, deterministic_link: bool = True
+) -> None:
     compiler = resolve_explicit_executable(compiler)
     env = trusted_process_env()
     compiler_dir = str(Path(compiler).parent)
     if compiler_dir and compiler_dir != ".":
         env["PATH"] = compiler_dir + os.pathsep + env["PATH"]
-    cmd = _compile_command(compiler, src, lib)
+    cmd = _compile_command(
+        compiler, src, lib, deterministic_link=deterministic_link
+    )
     # 2026-06-04: 30s was too tight for a cold CI runner (first gcc
     # invocation on a fresh image, no warm caches) and intermittently
     # timed out, hard-failing the whole installer build. 120s gives
