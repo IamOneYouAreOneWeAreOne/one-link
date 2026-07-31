@@ -324,6 +324,7 @@ EXPECTED_STABLE_RUNTIME_MODULES: tuple[str, ...] = (
     "one_link.bloom_init",
     "one_link.bloom_native",
     "one_link.body_engine",
+    "one_link.bounded_resolver",
     "one_link.build_identity",
     "one_link.build_info",
     "one_link.call_api",
