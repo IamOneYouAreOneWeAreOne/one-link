@@ -181,13 +181,20 @@ jobs:
             --ignore=tests/test_call_reliability_soak.py \
             -q --tb=short --maxfail=20 --reruns 2 --reruns-delay 5
 
+      # --timeout is LOAD-BEARING, not tidiness. A hung browser test eats the
+      # remainder of the JOB budget and is then reported as "cancelled",
+      # destroying its own evidence: pytest prints tracebacks when a run ENDS,
+      # and a run killed by the job ceiling never ends. Run #42 lost 77 minutes
+      # and produced a test name with no traceback. A per-test ceiling turns
+      # that into a fast failure with a full thread dump (timeout-method=
+      # thread). 600s is ~15x the measured local cost of the slowest of these.
       - name: install browser and run non-skippable E2E gate
         env:
           ONE_LINK_RUN_BROWSER_E2E: "1"
         run: |
           uv run --frozen --extra e2e playwright install --with-deps chromium firefox
-          uv run --frozen --extra e2e python -m pytest tests/e2e/ -v --tb=short --browser chromium
-          uv run --frozen --extra e2e python -m pytest tests/e2e/test_peer_live_transport.py::test_two_isolated_peer_pages_complete_manual_webrtc_and_exchange_probe tests/e2e/test_browser_identity_possession_live.py::test_required_mode_live_pair_owner_request_and_immediate_revoke tests/e2e/test_call_local_candidate_live.py::test_call_media_local_candidate_augmentation_uses_real_browser_ice -v --tb=short --browser firefox
+          uv run --frozen --extra e2e python -m pytest tests/e2e/ -v --tb=short --browser chromium --timeout=600 --timeout-method=thread
+          uv run --frozen --extra e2e python -m pytest tests/e2e/test_peer_live_transport.py::test_two_isolated_peer_pages_complete_manual_webrtc_and_exchange_probe tests/e2e/test_browser_identity_possession_live.py::test_required_mode_live_pair_owner_request_and_immediate_revoke tests/e2e/test_call_local_candidate_live.py::test_call_media_local_candidate_augmentation_uses_real_browser_ice -v --tb=short --browser firefox --timeout=600 --timeout-method=thread
 
       - name: exact JavaScript dependency and static-contract gates
         working-directory: tests/js
@@ -336,13 +343,20 @@ jobs:
           --ignore=tests/test_call_reliability_soak.py
           -q --tb=short --maxfail=20 --reruns 2 --reruns-delay 5
 
+      # --timeout is LOAD-BEARING, not tidiness. A hung browser test eats the
+      # remainder of the JOB budget and is then reported as "cancelled",
+      # destroying its own evidence: pytest prints tracebacks when a run ENDS,
+      # and a run killed by the job ceiling never ends. Run #42 lost 77 minutes
+      # and produced a test name with no traceback. A per-test ceiling turns
+      # that into a fast failure with a full thread dump (timeout-method=
+      # thread). 600s is ~15x the measured local cost of the slowest of these.
       - name: install browser and run non-skippable E2E gate
         env:
           ONE_LINK_RUN_BROWSER_E2E: "1"
         run: |
           uv run --frozen --extra e2e playwright install chromium firefox
-          uv run --frozen --extra e2e python -m pytest tests/e2e/ -v --tb=short --browser chromium
-          uv run --frozen --extra e2e python -m pytest tests/e2e/test_peer_live_transport.py::test_two_isolated_peer_pages_complete_manual_webrtc_and_exchange_probe tests/e2e/test_browser_identity_possession_live.py::test_required_mode_live_pair_owner_request_and_immediate_revoke tests/e2e/test_call_local_candidate_live.py::test_call_media_local_candidate_augmentation_uses_real_browser_ice -v --tb=short --browser firefox
+          uv run --frozen --extra e2e python -m pytest tests/e2e/ -v --tb=short --browser chromium --timeout=600 --timeout-method=thread
+          uv run --frozen --extra e2e python -m pytest tests/e2e/test_peer_live_transport.py::test_two_isolated_peer_pages_complete_manual_webrtc_and_exchange_probe tests/e2e/test_browser_identity_possession_live.py::test_required_mode_live_pair_owner_request_and_immediate_revoke tests/e2e/test_call_local_candidate_live.py::test_call_media_local_candidate_augmentation_uses_real_browser_ice -v --tb=short --browser firefox --timeout=600 --timeout-method=thread
 
   # Branch checks do not automatically follow a tag. Re-run the complete,
   # checksum-pinned TLA+ model inventory at this exact publication commit and
