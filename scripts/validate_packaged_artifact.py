@@ -2336,6 +2336,7 @@ def validate_frozen_e2e(artifact: Path) -> str:
                 f"frozen two-daemon E2E failed: {failure} "
                 "(per-daemon log tails printed above)"
             ) from failure
+        offenders: list[str] = []
         for index, (_process, _handle, log_path, _port, _secret) in enumerate(processes):
             text = log_path.read_text(encoding="utf-8", errors="replace")
             if "Traceback (most recent call last)" not in text and " CRITICAL " not in text:
@@ -2363,10 +2364,16 @@ def validate_frozen_e2e(artifact: Path) -> str:
             for line in excerpt:
                 print(f"    {line}", flush=True)
             first = excerpt[0].strip() if excerpt else "<unavailable>"
+            offenders.append(f"daemon {index}: {first[:200]}")
+        if offenders:
+            # EVERY offender, not just the first: two daemons can trip this for
+            # different reasons, and raising on the first turns one class of
+            # problem into one release cycle per cause.
             raise GateFailure(
-                "frozen daemon logged a traceback/critical failure: "
-                f"{log_path} -- first offending record: {first[:300]} "
-                "(full block printed above; complete logs preserved)"
+                f"frozen daemon logged a traceback/critical failure "
+                f"({len(offenders)} found) -- "
+                + " | ".join(offenders)
+                + " (full blocks printed above; complete logs preserved)"
             )
     return (
         "two isolated frozen daemons passed authenticated health/UI, mutual pinning, "
