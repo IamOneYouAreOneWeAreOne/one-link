@@ -30,7 +30,10 @@ fn short_inputs_do_not_slice_out_of_range() {
     // 5 bytes is the shape that crashed CI. Sweep every small length so a
     // future rewrite cannot reintroduce an end-past-the-buffer range.
     for len in 0..64usize {
-        let data: Vec<u8> = (0..len).map(|i| i as u8).collect();
+        // `i as u8` would be a truncating cast, which this workspace denies.
+        let data: Vec<u8> = (0..len)
+            .map(|i| u8::try_from(i % 256).unwrap_or(0))
+            .collect();
         let (real, decoy) = split_real_and_decoy(&data);
         assert!(
             real.len() <= 16,
