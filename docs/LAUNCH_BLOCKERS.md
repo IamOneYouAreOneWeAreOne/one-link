@@ -113,7 +113,7 @@ not daemon-repo. Audit findings (2026-05-25):
   | `/index.html:54` | Schema.org `operatingSystem: "Windows, macOS, Linux, Android, iOS"` | `"Windows, Linux"` (matches reality) |
   | `/roadmap/index.html:250–280` | "Will not build" section uses negative framing | Reframe as "What One Link stays focused on" |
 
-These are find/replace edits against `C:\Users\Josh\Projects\One_link_Website\`. Bounded scope, ~1-2 hours.
+These are find/replace edits against `<repo-root>\Projects\One_link_Website\`. Bounded scope, ~1-2 hours.
 
 ---
 
