@@ -795,10 +795,24 @@ def test_publish_is_draft_until_every_remote_asset_is_verified(workflow):
     assert command.count("--draft=false") == 1
     assert "--draft=true" not in command
     assert "--clobber" not in command
-    assert "Refusing to modify an already-public release" in command
+    # The guard still refuses anything that is not a draft; the wording widened
+    # to name WHICH failure occurred, because "absent" and "already public" are
+    # different problems and the operator needs to know which one they have.
+    assert "Refusing to modify a release that is absent or already public" in command
     assert "Existing draft asset differs; refusing destructive replacement" in command
     assert command.count("assert_release_is_draft") >= 4
-    assert 'gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG"' in command
+    # A DRAFT release is NOT addressable by tag: GitHub binds the tag only on
+    # publication, so `releases/tags/<tag>` 404s on the very draft this job
+    # just created (its URL still reads `untagged-<hash>`). This assertion used
+    # to pin that by-tag call, which is how the defect survived review -- the
+    # test encoded it. Pin the working lookup instead.
+    assert 'gh api "repos/$GH_REPO/releases?per_page=100"' in command, (
+        "the draft guard must resolve through the releases list"
+    )
+    assert "releases/tags/$RELEASE_TAG" not in command, (
+        "releases/tags/<tag> only resolves PUBLISHED releases; it cannot see "
+        "the draft this job creates"
+    )
     assert '(.digest // "MISSING")' in command
     assert 'local_digest="sha256:' in command
     assert "expected exactly ${#assets[@]}" in command
