@@ -2,7 +2,7 @@ Perfect! Now I have all the information I need. Let me compile my findings.
 
 ## Summary Report: QUIC File Chunk Transport Status
 
-**All searches conducted in:** `C:\Users\Josh\Projects\Coherence\One_link\`
+**All searches conducted in:** `<repo-root>\Projects\Coherence\One_link\`
 
 ---
 
