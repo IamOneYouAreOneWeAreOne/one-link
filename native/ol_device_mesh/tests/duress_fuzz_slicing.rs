@@ -32,8 +32,14 @@ fn short_inputs_do_not_slice_out_of_range() {
     for len in 0..64usize {
         let data: Vec<u8> = (0..len).map(|i| i as u8).collect();
         let (real, decoy) = split_real_and_decoy(&data);
-        assert!(real.len() <= 16, "real plaintext exceeded 16 bytes at len={len}");
-        assert!(decoy.len() <= 16, "decoy plaintext exceeded 16 bytes at len={len}");
+        assert!(
+            real.len() <= 16,
+            "real plaintext exceeded 16 bytes at len={len}"
+        );
+        assert!(
+            decoy.len() <= 16,
+            "decoy plaintext exceeded 16 bytes at len={len}"
+        );
         assert!(
             real.len() + decoy.len() <= data.len(),
             "split claimed more bytes than the input held at len={len}"

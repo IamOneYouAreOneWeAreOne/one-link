@@ -137,7 +137,11 @@ fn empty_path_prefix_is_refused_not_a_crash() {
     // caveat byte 0 -> tag % 5 == 2 -> PathPrefix; next byte 0 -> empty string.
     let input = harness_input(&[2u8, 0u8], 1);
     let refusals = replay(&input).expect("a refusal must not fail the harness");
-    assert_eq!(refusals.len(), 1, "expected exactly one refusal: {refusals:?}");
+    assert_eq!(
+        refusals.len(),
+        1,
+        "expected exactly one refusal: {refusals:?}"
+    );
     assert!(
         refusals[0].contains("PathPrefix"),
         "expected the empty PathPrefix to be the refused caveat: {refusals:?}"
@@ -150,7 +154,11 @@ fn empty_operation_name_is_refused_not_a_crash() {
     // empty name, which is refused for the same reason.
     let input = harness_input(&[3u8, 0u8, 0u8], 1);
     let refusals = replay(&input).expect("a refusal must not fail the harness");
-    assert_eq!(refusals.len(), 1, "expected exactly one refusal: {refusals:?}");
+    assert_eq!(
+        refusals.len(),
+        1,
+        "expected exactly one refusal: {refusals:?}"
+    );
     assert!(
         refusals[0].contains("OperationIn"),
         "expected the empty operation name to be the refused caveat: {refusals:?}"
@@ -163,7 +171,10 @@ fn a_valid_caveat_still_round_trips() {
     // pinning the empty case specifically rather than a broken harness.
     let input = harness_input(&[2u8, 3u8, b'a', b'b', b'c'], 1);
     let refusals = replay(&input).expect("a non-empty PathPrefix must round trip");
-    assert!(refusals.is_empty(), "a valid caveat must not be refused: {refusals:?}");
+    assert!(
+        refusals.is_empty(),
+        "a valid caveat must not be refused: {refusals:?}"
+    );
 }
 
 #[test]
@@ -187,10 +198,17 @@ fn replay_corpus_directory() {
             failures.push((name, reason));
         }
     }
-    eprintln!("replayed {checked} corpus inputs, {} failing", failures.len());
+    eprintln!(
+        "replayed {checked} corpus inputs, {} failing",
+        failures.len()
+    );
     for (name, reason) in &failures {
         eprintln!("  FAIL {name}: {reason}");
     }
     assert!(checked > 0, "corpus directory contained no inputs");
-    assert!(failures.is_empty(), "{} corpus inputs fail the harness", failures.len());
+    assert!(
+        failures.is_empty(),
+        "{} corpus inputs fail the harness",
+        failures.len()
+    );
 }
