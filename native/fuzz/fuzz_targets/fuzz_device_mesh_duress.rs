@@ -57,9 +57,20 @@ fuzz_target!(|data: &[u8]| {
     // 3. DuressEnvelope (small plaintext to keep Argon2 cost bounded).
     let witness = [data.first().copied().unwrap_or(0); 32];
     if data.len() > 4 {
-        let real_pt = &data[..data.len().min(16)];
-        let decoy_pt = &data
-            [data.len().min(16).min(data.len())..data.len().min(32).max(data.len().min(16) + 1)];
+        // The intent is: real plaintext is the first <=16 bytes, decoy is the
+        // NEXT chunk (16..32). The previous expression ended with
+        // `.max(data.len().min(16) + 1)`, which pushes the range END past the
+        // buffer whenever the input is shorter than 17 bytes -- for a 5-byte
+        // input it asked for `data[5..6]` and panicked. That was a slicing bug
+        // in this harness, not a finding about the duress code.
+        let split = data.len().min(16);
+        let decoy_end = data.len().min(32);
+        let real_pt = &data[..split];
+        let decoy_pt: &[u8] = if decoy_end > split {
+            &data[split..decoy_end]
+        } else {
+            &[]
+        };
         let real_code = &data[..1.min(data.len())];
         let decoy_code: &[u8] = b"decoy-fuzz-code-9";
         if !real_pt.is_empty()
