@@ -12820,7 +12820,7 @@
     return out;
   }
   // v0.21.x: middle-truncate a long path for display so the start
-  // (root anchor like C:\Users\Josh) AND the meaningful end (the
+  // (root anchor like C:\Users\you) AND the meaningful end (the
   // actual folder leaf) stay visible. The whole path goes in the
   // element's title= so hovering still reveals it. Splits on the
   // path separator first to keep segment boundaries clean; falls
@@ -22358,7 +22358,7 @@
 
   function _defaultLocalPathForOffer(folderName) {
     // Suggest <suggested_folder>/<folder_name> where suggested_folder
-    // is already pulled by /api/me (e.g. C:\Users\Josh\Documents\One Link).
+    // is already pulled by /api/me (e.g. C:\Users\you\Documents\One Link).
     const base = state.me?.suggested_folder || "";
     if (!base) return folderName || "";
     const sep = base.includes("\\") ? "\\" : "/";

@@ -74,3 +74,13 @@ _wsl_linux_report.json
 requirements.lock
 # This generated lock is a reviewed container build input, not local scratch.
 !deploy/rendezvous/requirements.lock
+
+# Cargo build output. `native/target/` was already covered but a stray
+# `native/target_d27/` (a Cargo dir, CACHEDIR.TAG and all) had been committed:
+# 329 files, and 90 of them embedded absolute developer paths in a public repo.
+native/target*/
+native/fuzz/target*/
+
+# One-off source dump from a developer machine. 17MB, references another
+# machine's home directory, and nothing in the build or test path reads it.
+script_dump/
