@@ -6,9 +6,9 @@
 //! replayed anywhere `cargo test` runs, which is what makes the failure
 //! reproducible off the CI box.
 //!
-//! Point it at a corpus with:
-//!     ONE_LINK_FUZZ_CORPUS=<dir> cargo test -p ol_capability --test fuzz_corpus_roundtrip -- --nocapture
-//! With no corpus set it is a no-op, so it never fails a normal run.
+//! Point it at a corpus by setting `ONE_LINK_FUZZ_CORPUS` to a directory and
+//! running this test with `--nocapture`. With no corpus set it is a no-op, so
+//! it never fails a normal run.
 
 use ol_capability::{Capability, Caveat};
 use zeroize::Zeroizing;
