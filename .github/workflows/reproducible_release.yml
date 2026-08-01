@@ -57,20 +57,34 @@ jobs:
         env:
           RELEASE_REF_NAME: ${{ github.ref_name }}
           RELEASE_REF_TYPE: ${{ github.ref_type }}
+          RELEASE_EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          # A tag run is a RELEASE claim and keeps the strict check: the tag
+          # must exist and must match the project version.
+          #
+          # A manual dispatch is a DIAGNOSTIC run. It proves nothing about a
+          # release and says so, but it is the only way to iterate on this
+          # workflow: the determinism comparison below had never executed even
+          # once, and refusing to run anywhere except a tag meant every attempt
+          # to repair it cost a full release cycle. A gate nobody can run is a
+          # gate nobody can fix.
           if [[ "$RELEASE_REF_TYPE" != "tag" ]]; then
-            echo "::error::Reproducible release builds must run from an existing v* tag"
-            exit 1
-          fi
-          project_version="$(awk -F'"' '/^version = "/ { print $2; exit }' pyproject.toml)"
-          if [[ -z "$project_version" ]]; then
-            echo "::error::Unable to read project version from pyproject.toml"
-            exit 1
-          fi
-          if [[ "${RELEASE_REF_NAME#v}" != "$project_version" ]]; then
-            echo "::error::Release tag $RELEASE_REF_NAME does not match pyproject version $project_version"
-            exit 1
+            if [[ "$RELEASE_EVENT" != "workflow_dispatch" ]]; then
+              echo "::error::Reproducible release builds must run from an existing v* tag"
+              exit 1
+            fi
+            echo "::notice::DIAGNOSTIC RUN on $RELEASE_REF_NAME. This measures build determinism only and is NOT evidence about any release."
+          else
+            project_version="$(awk -F'"' '/^version = "/ { print $2; exit }' pyproject.toml)"
+            if [[ -z "$project_version" ]]; then
+              echo "::error::Unable to read project version from pyproject.toml"
+              exit 1
+            fi
+            if [[ "${RELEASE_REF_NAME#v}" != "$project_version" ]]; then
+              echo "::error::Release tag $RELEASE_REF_NAME does not match pyproject version $project_version"
+              exit 1
+            fi
           fi
           # SOURCE_DATE_EPOCH from the tag commit, not the runner clock.
           export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
@@ -183,17 +197,88 @@ jobs:
       - name: Compare BLAKE3 hashes
         run: |
           uv run --frozen --only-group release-tools python - <<'PY'
-          import pathlib, blake3, sys
-          def hash_dir(d):
-              return {p.name: blake3.blake3(p.read_bytes()).hexdigest()
-                      for p in sorted(pathlib.Path(d).rglob("*"))
-                      if p.is_file() and p.suffix == ".whl"}
-          a = hash_dir("dist1")
-          b = hash_dir("dist2")
-          if a != b:
-              print("REPRODUCIBILITY FAILURE: byte-divergent rebuild")
-              print(f"  build 1: {a}")
-              print(f"  build 2: {b}")
-              sys.exit(1)
-          print("Linux native wheel reproducibility verified — byte-identical rebuild.")
+          import hashlib
+          import pathlib
+          import sys
+          import zipfile
+
+          import blake3
+
+
+          def wheels(d):
+              return {p.name: p for p in sorted(pathlib.Path(d).rglob("*.whl"))}
+
+
+          def digest(data):
+              return blake3.blake3(data).hexdigest()
+
+
+          a, b = wheels("dist1"), wheels("dist2")
+          names = sorted(set(a) | set(b))
+          diverged = []
+          for name in names:
+              pa, pb = a.get(name), b.get(name)
+              if pa is None or pb is None:
+                  diverged.append((name, "present in only one build"))
+                  continue
+              da, db = digest(pa.read_bytes()), digest(pb.read_bytes())
+              if da != db:
+                  diverged.append((name, f"{da[:16]} vs {db[:16]}"))
+
+          if not diverged:
+              print("Linux native wheel reproducibility verified - byte-identical rebuild.")
+              raise SystemExit(0)
+
+          print("REPRODUCIBILITY FAILURE: byte-divergent rebuild")
+          for name, why in diverged:
+              print(f"  {name}: {why}")
+
+          # A wheel-level hash says THAT the rebuild differs. It never says
+          # WHICH member differs, and that is the whole diagnosis: a differing
+          # RECORD points at metadata, a differing .so points at the linker
+          # (a random build-id is the usual Linux culprit). Report it here so
+          # one run answers the question instead of one run per guess.
+          for name, _ in diverged:
+              pa, pb = a.get(name), b.get(name)
+              if pa is None or pb is None:
+                  continue
+              with zipfile.ZipFile(pa) as za, zipfile.ZipFile(pb) as zb:
+                  na, nb = set(za.namelist()), set(zb.namelist())
+                  if na != nb:
+                      print(f"  member LIST differs for {name}:")
+                      for m in sorted(na - nb):
+                          print(f"    only in build 1: {m}")
+                      for m in sorted(nb - na):
+                          print(f"    only in build 2: {m}")
+                  print(f"  per-member comparison for {name}:")
+                  for member in sorted(na & nb):
+                      ba, bb = za.read(member), zb.read(member)
+                      if ba == bb:
+                          continue
+                      ha = hashlib.sha256(ba).hexdigest()[:16]
+                      hb = hashlib.sha256(bb).hexdigest()[:16]
+                      print(f"    DIFFERS {member}  ({len(ba)}B {ha}) vs ({len(bb)}B {hb})")
+                      # First differing offset localises it: an early offset is
+                      # a header/metadata field, a late one is usually content.
+                      if len(ba) == len(bb):
+                          for i, (x, y) in enumerate(zip(ba, bb)):
+                              if x != y:
+                                  lo = max(0, i - 16)
+                                  print(f"      first differing byte at offset {i} of {len(ba)}")
+                                  print(f"      build 1: {ba[lo:i + 16].hex()}")
+                                  print(f"      build 2: {bb[lo:i + 16].hex()}")
+                                  break
+                      else:
+                          print(f"      lengths differ: {len(ba)} vs {len(bb)}")
+          sys.exit(1)
           PY
+
+      - name: Preserve both wheels for offline comparison
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reproducibility-divergent-wheels
+          path: |
+            dist1/
+            dist2/
+          if-no-files-found: warn
