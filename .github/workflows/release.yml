@@ -1020,10 +1020,28 @@ jobs:
           # Resolving through the releases list is the only way to see a
           # draft, and it keeps the guard fail-closed: an absent or
           # non-draft release still refuses.
-          release_draft_state() {
+          # Every read of this release has to go through the list while it is a
+          # draft, not just the draft check: the asset verification below reads
+          # `.assets[]` too, and a by-tag read 404s there for the same reason.
+          release_field() {
             gh api "repos/$GH_REPO/releases?per_page=100" --paginate \
-              --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .draft" \
-              2>/dev/null | head -n 1
+              --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | $1" \
+              2>/dev/null
+          }
+          release_draft_state() {
+            release_field ".draft" | head -n 1
+          }
+          release_id() {
+            release_field ".id" | head -n 1
+          }
+          release_assets_tsv() {
+            local rid
+            rid="$(release_id)"
+            if [[ -z "$rid" ]]; then
+              return 1
+            fi
+            gh api "repos/$GH_REPO/releases/$rid" \
+              --jq '.assets[] | [.name, (.size | tostring), (.digest // "MISSING")] | @tsv'
           }
           assert_release_is_draft() {
             local draft
@@ -1115,10 +1133,7 @@ jobs:
                     state="mismatch"
                   fi
                 fi
-              done < <(
-                gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" \
-                  --jq '.assets[] | [.name, (.size | tostring), (.digest // "MISSING")] | @tsv'
-              )
+              done < <(release_assets_tsv)
               if [[ "$state" == "exact" ]]; then
                 return 0
               fi
@@ -1145,9 +1160,7 @@ jobs:
           done
 
           remote_index="$RUNNER_TEMP/tagged-release-assets.tsv"
-          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" \
-            --jq '.assets[] | [.name, (.size | tostring), (.digest // "MISSING")] | @tsv' \
-            > "$remote_index"
+          release_assets_tsv > "$remote_index"
           remote_count="$(wc -l < "$remote_index" | tr -d '[:space:]')"
           if [[ "$remote_count" != "${#assets[@]}" ]]; then
             echo "::error::Remote release contains $remote_count assets; expected exactly ${#assets[@]}"
