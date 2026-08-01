@@ -77,9 +77,25 @@ fuzz_target!(|data: &[u8]| {
         let Some(cav) = take_caveat(&mut input) else {
             return;
         };
-        cap = cap
-            .attenuate(cav)
-            .expect("fuzzer constructs only bounded caveats");
+        // A REFUSAL IS A DEFINED OUTCOME, NOT A CRASH.
+        //
+        // `take_string` computes `len = byte % max_len`, so a length byte of
+        // 0 (or any multiple of max_len) yields an EMPTY string. The
+        // capability layer refuses an empty PathPrefix and empty operation
+        // names on purpose: a zero-length prefix matches every path, which is
+        // the opposite of attenuation. This harness used to `.expect()` that
+        // every caveat it invented was acceptable, so the library's correct
+        // security refusal was reported as a fuzz crash -- which is what kept
+        // `fuzz (nightly)` red.
+        //
+        // Keep the pre-attenuation capability and carry on, so a refused
+        // caveat costs one caveat of coverage instead of aborting the run
+        // before the round trip is ever reached.
+        let before = cap.clone();
+        cap = match cap.attenuate(cav) {
+            Ok(next) => next,
+            Err(_) => before,
+        };
     }
 
     let wire = cap.encode();
