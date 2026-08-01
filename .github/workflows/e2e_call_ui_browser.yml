@@ -32,8 +32,23 @@ jobs:
           version: "0.11.31"
           enable-cache: true
 
+      - name: install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup default 1.96.0
+
       - name: install
-        run: uv sync --frozen --python python --extra dev
+        run: uv sync --frozen --python python --extra dev --extra release
+
+      # Without this the daemon starts, reports
+      #   "one_link_native.pqkem not installed ... PQ-hybrid KEM UNAVAILABLE"
+      # and the call never reaches media: the gate stops during incoming_call
+      # with caller_frames=0 receiver_frames=0. Every other e2e workflow builds
+      # the native engine first; this one never did, which is why this gate has
+      # been red on every run it has ever had.
+      - name: Build native (release)
+        working-directory: native
+        run: uv run --project .. --frozen --extra release maturin develop --release --locked
 
       - name: list available Chromium browsers
         run: |
