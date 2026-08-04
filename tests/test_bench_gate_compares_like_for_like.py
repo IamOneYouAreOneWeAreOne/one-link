@@ -223,6 +223,9 @@ def test_the_stale_workstation_baseline_is_no_longer_a_gate() -> None:
     # it cannot be compared against CI hardware, so it could only ever fail.
     yaml = pytest.importorskip("yaml")
     spec = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    # Without this the loop is vacuous: a workflow that lost its jobs would
+    # pass having checked nothing.
+    assert set(spec["jobs"]) == {"bench_gate", "drift_watch"}, sorted(spec["jobs"])
     for job_name, job in spec["jobs"].items():
         blob = "\n".join(s.get("run") or "" for s in job["steps"])
         assert "bench_baselines/native_chunk.json" not in blob, (
@@ -242,15 +245,21 @@ def test_no_gate_compares_against_a_committed_number() -> None:
     """
     yaml = pytest.importorskip("yaml")
     spec = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    assert set(spec["jobs"]) == {"bench_gate", "drift_watch"}, sorted(spec["jobs"])
+    checked = 0
     for job_name, job in spec["jobs"].items():
         blob = "\n".join(s.get("run") or "" for s in job["steps"])
         for line in blob.splitlines():
             if "--baseline" in line:
                 target = line.split("--baseline")[1].split()[0].strip("\\ ")
+                checked += 1
                 assert not target.startswith("bench_baselines/"), (
                     f"{job_name} compares against the committed file {target}; "
                     "it must benchmark both sides on this runner instead"
                 )
+    # Both jobs must actually HAVE a --baseline to check. Without this, a
+    # workflow that stopped comparing anything would pass this test.
+    assert checked == 2, f"expected one --baseline per job, found {checked}"
 
 
 def test_drift_is_measured_against_an_anchor_commit_built_here() -> None:

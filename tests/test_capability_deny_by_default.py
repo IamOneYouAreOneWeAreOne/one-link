@@ -326,8 +326,33 @@ def test_emit_capability_request_no_ui_server_is_safe():
     me = _new_identity()
     daemon = Daemon(me)
     daemon.ui_server = None
-    # Should not raise.
+    before = dict(getattr(daemon, "_capability_request_seen", {}))
+
     daemon._emit_capability_request("aa" * 32, "abc", FILES)
+
+    # "Does not raise" cannot catch the failure that matters here. The early
+    # return sits ABOVE the dedup bookkeeping on purpose: if it ever moved
+    # below, a peer could burn its 5-prompts-per-60s budget while no UI is
+    # attached, and the first genuine prompt after the user opens the UI would
+    # be dropped as a duplicate. So assert the rate-limit state is untouched.
+    assert dict(getattr(daemon, "_capability_request_seen", {})) == before, (
+        "a prompt with no UI attached consumed dedup state; a later real "
+        "request for the same capability would now be suppressed"
+    )
+    assert not getattr(daemon, "_capability_request_per_peer", {}), (
+        "a per-peer prompt window was opened for a prompt that was never shown"
+    )
+
+    # CONTROL: with a UI attached the same call DOES record state. Without
+    # this, the two assertions above would pass just as well against a method
+    # that never records anything at all, and would be measuring nothing.
+    attached = Daemon(_new_identity())
+    attached.ui_server = SimpleNamespace(broadcast=lambda evt: None)
+    attached._emit_capability_request("aa" * 32, "abc", FILES)
+    assert getattr(attached, "_capability_request_seen", {}), (
+        "the control did not record dedup state, so the no-UI assertions "
+        "above cannot distinguish a no-op from a broken method"
+    )
 
 
 def test_emit_capability_request_dedup_window_is_sane():
@@ -593,5 +618,13 @@ def test_apply_default_policy_with_no_state_is_noop():
     me = _new_identity()
     daemon = Daemon(me)
     daemon.state = None
-    # Should not raise.
+
     daemon._apply_default_capability_policy("aa" * 32)
+
+    # The name claims a no-op, so check it is one. Asserting only "did not
+    # raise" would pass just as happily if this lazily opened a store and
+    # wrote a policy into it -- which for a deny-by-default control would
+    # mean installing a grant nobody asked for.
+    assert daemon.state is None, (
+        "a headless daemon opened a state store while applying default policy"
+    )
