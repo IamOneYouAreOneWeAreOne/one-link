@@ -15,7 +15,14 @@ dependencies = [
   # supply-chain audit. One Link only uses the long-stable primitives
   # (Ed25519 / X25519 / AES-GCM / HKDF / PBKDF2HMAC), so the major
   # bump is API-safe; 48.x still ships the same wheel matrix.
-  "cryptography>=48.0.1",
+  # 2026-08-04: floor raised to >=50.0.0 to clear CVE-2026-69247
+  # (fixed in 50.0.0), which OSV published against 49.0.0 and which
+  # turned the security gate red. Raising the FLOOR and not only the
+  # lock on purpose: the lock protects our own builds, but anyone
+  # running `pip install one-link` resolves this constraint freely and
+  # would still be handed the vulnerable release. Same wheel matrix,
+  # same primitives, so the bump stays API-safe.
+  "cryptography>=50.0.0",
   # zeroconf >=0.149.12 clears CVE-2026-47180/47183/47184/48045
   # (mDNS parsing/DoS issues) — One Link's LAN discovery is exactly
   # the affected surface, so this one matters most.
