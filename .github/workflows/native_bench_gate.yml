@@ -4,21 +4,46 @@
 # "PR rejected if cycles/byte regresses or throughput drops by >5% on any
 # standardized corpus."
 #
-# This workflow:
-#  1. Builds the native module (maturin develop --release).
-#  2. Runs the perf_lab_native suite, emits JSON.
-#  3. Compares against a baseline JSON committed at
-#     `bench_baselines/native_chunk.json` (only the metrics tracked there;
-#     extra metrics are ignored).
-#  4. Fails if any tracked metric regresses by > 5 % vs. the baseline.
+# A throughput number only means something next to a number from the SAME
+# machine. This gate did not honour that and was measuring hardware:
 #
-# The baseline is updated by the maintainer after a PR that intentionally
-# changes the kernel; this is the single accepted way to relax a gate.
+#   bench_baselines/native_chunk.json records
+#     host: Windows-11-10.0.26200-SP0, python 3.14.3, cpu_count 24
+#
+# a 24-core Windows workstation, committed 2026-05-10 -- while the gate runs on
+# ubuntu-latest, a 2-4 core Linux VM. So every PR touching native/** was judged
+# against a desktop. On the lz4_flex bump that produced, in one run, ChaCha
+# "regressing" 12% and chunk_store_locate 41% while AES "improved" 293% and
+# quic_round_trip 184%. That bimodal split is AES-NI and core count, not code,
+# and it made the gate fail PRs for reasons unrelated to their changes.
+#
+# So the comparison is now PAIRED. Both jobs below compare like against like:
+#
+#   bench_gate   (pull_request): builds and benchmarks the PR head AND its
+#                merge base on the same runner, in the same job, and fails if
+#                the head regresses > 5%. Hardware is held constant by
+#                construction, so a difference is attributable to the change.
+#
+#   drift_watch  (push to master): the coverage the paired check cannot give.
+#                Twenty merged PRs each taking 4% all pass against their own
+#                base while throughput halves. This compares master against a
+#                baseline recorded on THIS runner class.
+#
+# bench_gate.py is passed --require-comparable-host in both, so it REFUSES to
+# compare across machines rather than reporting a meaningless delta.
 
 name: file-engine v2 bench gate
 
 on:
   pull_request:
+    paths:
+      - "native/**"
+      - "src/one_link/chunk_native.py"
+      - "src/one_link/perf_lab_native.py"
+      - "bench_baselines/**"
+      - ".github/workflows/native_bench_gate.yml"
+  push:
+    branches: [master]
     paths:
       - "native/**"
       - "src/one_link/chunk_native.py"
@@ -36,6 +61,111 @@ concurrency:
 jobs:
   bench_gate:
     name: native file-engine benchmark gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge base has to be checked out and built in this same job,
+          # so its history must be present.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup default 1.96.0
+
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: true
+
+      - name: Cache cargo target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: native
+
+      - name: Install deps
+        run: uv sync --frozen --python python --extra release
+
+      - name: Build native (release) -- PR head
+        working-directory: native
+        run: uv run --project .. --frozen --extra release maturin develop --release --locked
+
+      - name: Benchmark PR head
+        run: |
+          uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > head.json
+          cat head.json
+
+      # Everything from here to the gate exists to measure the MERGE BASE on
+      # this same runner. bench_gate.py keeps the JSON files (untracked), so
+      # they survive the checkout.
+      - name: Check out the merge base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git checkout --force "$BASE_SHA"
+
+      - name: Sync deps for the merge base
+        run: uv sync --frozen --python python --extra release
+
+      - name: Build native (release) -- merge base
+        working-directory: native
+        run: uv run --project .. --frozen --extra release maturin develop --release --locked
+
+      - name: Benchmark the merge base
+        run: |
+          uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > base.json
+          cat base.json
+
+      - name: Restore the PR head
+        env:
+          HEAD_SHA: ${{ github.sha }}
+        run: git checkout --force "$HEAD_SHA"
+
+      - name: Sync deps for the PR head
+        run: uv sync --frozen --python python --extra release
+
+      - name: Gate the PR against its own merge base, measured on this runner
+        run: |
+          uv run --frozen --extra release python scripts/bench_gate.py \
+            --results head.json \
+            --baseline base.json \
+            --require-comparable-host \
+            --max-regression-percent 5
+
+      - name: Keep both measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bench-paired-${{ github.run_id }}
+          path: |
+            head.json
+            base.json
+          if-no-files-found: warn
+
+  drift_watch:
+    # The paired gate above answers "did THIS pr regress throughput". It cannot
+    # answer "have twenty merged PRs each taken 4% and nobody noticed", because
+    # every one of them compared green against its own base.
+    #
+    # That drift check is what the committed baseline was supposed to be, and
+    # it never worked: the baseline was recorded on a 24-core Windows
+    # workstation while the gate ran on ubuntu-latest, so it was measuring the
+    # machine. This job keeps the drift coverage and fixes the provenance --
+    # it compares master against a baseline recorded on THIS runner class, and
+    # refuses to compare at all if the hosts do not match.
+    #
+    # bench_gate.py exits NEUTRAL when the baseline file is absent, so this
+    # bootstraps green and prints the JSON to seed the first baseline.
+    name: native throughput drift on master
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -70,14 +200,23 @@ jobs:
         working-directory: native
         run: uv run --project .. --frozen --extra release maturin develop --release --locked
 
-      - name: Run perf_lab_native and emit JSON
+      - name: Benchmark master
         run: |
-          uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > bench_results.json
-          cat bench_results.json
+          uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > master.json
+          cat master.json
 
-      - name: Gate against bench_baselines/native_chunk.json
+      - name: Compare against the CI-recorded baseline
         run: |
           uv run --frozen --extra release python scripts/bench_gate.py \
-            --results bench_results.json \
-            --baseline bench_baselines/native_chunk.json \
+            --results master.json \
+            --baseline bench_baselines/native_chunk_ci_ubuntu.json \
+            --require-comparable-host \
             --max-regression-percent 5
+
+      - name: Publish the measurement
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bench-master-${{ github.run_id }}
+          path: master.json
+          if-no-files-found: warn

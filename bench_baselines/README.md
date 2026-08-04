@@ -1,15 +1,42 @@
 # Benchmark baselines
 
-This directory holds benchmark artifacts for the file-engine v2. The
-`native_chunk.json` baseline is checked by the pinned GitHub benchmark job
-(`.github/workflows/native_bench_gate.yml` + `scripts/bench_gate.py`). A PR
-fails that gate if any tracked native throughput regresses by more than 5%.
+This directory holds benchmark artifacts for the file-engine v2.
 
-`coherence_field.json` is different: it is a historical Python-FFI
-microbenchmark captured on one local workstation. It is retained for
-controlled laboratory comparisons, but it is not a portable release gate.
-It predates the schema-v2 provenance fields and therefore cannot establish
-its own CPU, Python, native-artifact, or build identity.
+**`native_chunk.json` is NOT a CI gate and must not become one again.** It
+records `host: Windows-11-10.0.26200-SP0, cpu_count 24` -- a 24-core Windows
+workstation -- while the gate runs on `ubuntu-latest`, a 2-4 core Linux VM.
+Gating on it meant judging every PR that touched `native/**` against a
+desktop, and it failed every PR it ever ran on. One run reported ChaCha
+regressing 12% and `chunk_store_locate` 41% while AES improved 293% and
+`quic_round_trip` 184%: that is AES-NI and core count, not code. The file is
+retained for local laboratory comparison on that same workstation.
+
+The observation the old note below made about `coherence_field.json` -- that a
+baseline which cannot establish its own CPU identity is not a portable gate --
+was exactly right, and applied to `native_chunk.json` too. It just was not
+carried across.
+
+Throughput is now compared like for like, and `scripts/bench_gate.py` takes
+`--require-comparable-host` so it REFUSES a mismatched comparison instead of
+reporting a meaningless delta:
+
+- **Per PR** (`bench_gate`): the PR head and its merge base are built and
+  benchmarked in the same job on the same runner. Hardware is constant by
+  construction, so a difference is attributable to the change.
+- **Per master push** (`drift_watch`): compares master against
+  `native_chunk_ci_ubuntu.json`, a baseline recorded on that same runner
+  class. This is the coverage the paired check cannot give -- twenty merged
+  PRs each taking 4% all pass against their own base while throughput halves.
+
+`native_chunk_ci_ubuntu.json` is seeded from a `drift_watch` run: the gate
+exits NEUTRAL when the baseline is absent and prints the fresh JSON, which is
+committed as the new baseline. Regenerate it deliberately, never automatically.
+
+`coherence_field.json` is a historical Python-FFI microbenchmark captured on
+one local workstation. It is retained for controlled laboratory comparisons,
+but it is not a portable release gate. It predates the schema-v2 provenance
+fields and therefore cannot establish its own CPU, Python, native-artifact, or
+build identity.
 
 ## How baselines are produced
 

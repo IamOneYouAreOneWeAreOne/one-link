@@ -26,6 +26,43 @@ def _index_results(payload: dict) -> dict[str, float]:
     return out
 
 
+def _host(payload: dict) -> dict:
+    """The machine a result set was measured on, if it recorded one."""
+    host = payload.get("host")
+    return host if isinstance(host, dict) else {}
+
+
+def _describe_host(host: dict) -> str:
+    if not host:
+        return "UNRECORDED"
+    return (
+        f"{host.get('platform', '?')} / python {host.get('python', '?')} "
+        f"/ {host.get('cpu_count', '?')} cpus"
+    )
+
+
+def _hosts_are_comparable(a: dict, b: dict) -> tuple[bool, str]:
+    """Throughput numbers only mean something between like machines.
+
+    A raw MB/s comparison across different hardware measures the hardware, not
+    the change. This gate ran for months comparing CI against a baseline
+    recorded on a 24-core Windows workstation, which is why a dependency bump
+    could show ChaCha "regressing" 12% while AES "improved" 293% in the same
+    run: AES-NI and core count, not code.
+    """
+    if not a or not b:
+        return False, (
+            "one or both result sets record no host provenance, so they cannot "
+            "be shown to be comparable"
+        )
+    for field in ("platform", "cpu_count"):
+        if a.get(field) != b.get(field):
+            return False, (
+                f"host {field} differs: {a.get(field)!r} vs {b.get(field)!r}"
+            )
+    return True, ""
+
+
 def _read_json(path: Path) -> dict:
     # PowerShell redirection can write UTF-16LE with a BOM on Windows, while CI
     # shell redirection normally writes UTF-8. Accept both so the gate measures
@@ -46,6 +83,15 @@ def main(argv: list[str] | None = None) -> int:
         default=5.0,
         help="Maximum allowed regression vs baseline, in percent (default 5).",
     )
+    p.add_argument(
+        "--require-comparable-host",
+        action="store_true",
+        help=(
+            "Refuse to compare result sets measured on different machines. The "
+            "CI gate passes this: it benchmarks the PR head and its merge base "
+            "on the SAME runner, so a difference is attributable to the change."
+        ),
+    )
     args = p.parse_args(argv)
 
     results_path = Path(args.results)
@@ -62,8 +108,26 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    fresh = _index_results(_read_json(results_path))
-    baseline = _index_results(_read_json(baseline_path))
+    fresh_payload = _read_json(results_path)
+    baseline_payload = _read_json(baseline_path)
+    fresh = _index_results(fresh_payload)
+    baseline = _index_results(baseline_payload)
+
+    fresh_host = _host(fresh_payload)
+    baseline_host = _host(baseline_payload)
+    print(f"  measured on: {_describe_host(fresh_host)}")
+    print(f"  compared to: {_describe_host(baseline_host)}")
+
+    if args.require_comparable_host:
+        comparable, why = _hosts_are_comparable(fresh_host, baseline_host)
+        if not comparable:
+            print(
+                f"FAIL: refusing to compare throughput across machines -- {why}.\n"
+                "      A raw MB/s comparison between different hardware measures "
+                "the hardware, not the change.",
+                file=sys.stderr,
+            )
+            return 2
 
     if not baseline:
         print(f"FAIL: baseline empty: {baseline_path}", file=sys.stderr)
