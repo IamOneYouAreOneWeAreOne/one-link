@@ -321,29 +321,30 @@ jobs:
                 > "one-link/${EXE_NAME}.sha256"
             fi
           fi
-          # Store the complete content manifest *inside* the archive. Give it
-          # a stable name and exclude itself to avoid a recursive digest.
-          # Python provides identical path ordering and hashing on GNU/Linux,
-          # macOS/BSD, and Windows Git Bash (`sort -z` is not portable to BSD).
-          rm -f one-link/BUNDLE_SHA256SUMS
-          python - <<'PY'
-          from hashlib import sha256
-          from pathlib import Path
-
-          root = Path("one-link")
-          rows = []
-          for path in sorted((p for p in root.rglob("*") if p.is_file()), key=lambda p: p.as_posix()):
-              digest = sha256()
-              with path.open("rb") as stream:
-                  for block in iter(lambda: stream.read(1024 * 1024), b""):
-                      digest.update(block)
-              rows.append(f"{digest.hexdigest()}  {path.as_posix()}")
-          (root / "BUNDLE_SHA256SUMS").write_text(
-              "\n".join(rows) + "\n",
-              encoding="utf-8",
-              newline="\n",
-          )
-          PY
+          # Store the complete content manifest *inside* the archive, in the
+          # ONE format the product parses.
+          #
+          # This step used to write its own: `"<digest>  <path>"`, classic
+          # sha256sum output, two columns, no header. The consumer
+          # (one_link.update_transaction) requires a five-column TSV with a
+          # header, so every bundle built here failed validate_installed_bundle
+          # and inspect_external_update_capability returned
+          # `managed_bundle_validation_failed`. Measured on the real frozen
+          # Windows bundle: update_install_available was False, and flipped to
+          # True with no change but the manifest format. Since the website's
+          # download button points at the rolling channel, that was the bundle
+          # users installed -- their in-app updater could never activate.
+          #
+          # scripts/write_bundle_manifest.py imports the header and row shape
+          # from the parser instead of restating them, so this cannot drift
+          # apart again, and --verify re-reads the result through the product's
+          # own validator before this step succeeds.
+          cd ..
+          ONE_LINK_BUNDLE_EXECUTABLE="${EXE_NAME}" python scripts/write_bundle_manifest.py \
+            --bundle dist/one-link \
+            --root-name one-link \
+            --verify
+          cd dist
 
       - name: package bundle as a zip
         shell: bash

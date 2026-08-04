@@ -102,6 +102,8 @@ _PHASES = frozenset(
         "failed_closed",
     }
 )
+log = logging.getLogger("one_link.update_helper")
+
 _PHASE_TRANSITIONS = {
     "staged": frozenset({"accepted", "failed_closed"}),
     "accepted": frozenset({"release_authenticated", "failed_closed"}),
@@ -344,7 +346,23 @@ def inspect_external_update_capability(
             helper_path=helper,
             helper_sha256=helper_digest,
         )
-    except Exception:
+    except Exception as exc:
+        # Say WHY, at least once, somewhere a person can read it.
+        #
+        # The public reason stays a fixed token on purpose: it reaches an
+        # unauthenticated-ish UI surface and must not narrate the filesystem.
+        # But collapsing every failure to that token and logging nothing meant
+        # a real defect sat undetected. Every bundle from the continuous build
+        # failed here because its BUNDLE_SHA256SUMS was written in classic
+        # sha256sum format instead of the five-column TSV the parser requires,
+        # and the actual message -- "bundle member manifest has an invalid
+        # header" -- was discarded at this line. The in-app updater was dead on
+        # the bundle the website hands out, and nothing anywhere said so.
+        log.warning(
+            "managed bundle validation failed; in-app update is unavailable: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
         return ExternalUpdateCapability(
             False,
             "managed_bundle_validation_failed",
