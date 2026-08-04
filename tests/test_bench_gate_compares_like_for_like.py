@@ -324,6 +324,83 @@ def test_a_real_regression_survives_repetition(tmp_path: Path) -> None:
     assert proc.returncode == 1, f"{proc.stdout}{proc.stderr}"
 
 
+def _run(results: list[Path], bases: list[Path], *extra: str):
+    return subprocess.run(
+        [
+            sys.executable, str(GATE),
+            "--results", *[str(p) for p in results],
+            "--baseline", *[str(p) for p in bases],
+            "--require-comparable-host",
+            "--max-regression-percent", "5",
+            *extra,
+        ],
+        capture_output=True, text=True, check=False,
+    )
+
+
+NOISY = {"native_quic_round_trip_1024KiB_x20": 800_000_000.0}
+QUIET = {"native_aead_aes_encrypt_16KiB": 3_000_000_000.0}
+
+
+def test_a_noisy_metric_class_can_carry_its_own_limit(tmp_path: Path) -> None:
+    """Sized from measurement, not chosen to make red go away.
+
+    On byte-identical code, best-of-3 settled the crypto kernels to ~1% but
+    left quic_round_trip_1MiB at -7.75% and quic_parallel_8x4 at +6.84%. Those
+    cross a loopback socket and an async scheduler instead of running through
+    memory, so they do not converge the way an in-memory kernel does.
+    """
+    slower = {k: v * 0.92 for k, v in NOISY.items()}  # 8%: noise for this class
+    fresh = write(tmp_path, "f.json", payload(CI_RUNNER, slower))
+    base = write(tmp_path, "b.json", payload(CI_RUNNER, NOISY))
+    assert _run([fresh], [base]).returncode == 1, "8% must fail at the default 5%"
+    proc = _run([fresh], [base], "--tolerance", "native_quic_=15")
+    assert proc.returncode == 0, f"{proc.stdout}{proc.stderr}"
+
+
+def test_the_wider_limit_does_not_leak_to_other_metrics(tmp_path: Path) -> None:
+    """The control. A class override must not become a global one."""
+    slower = {k: v * 0.92 for k, v in QUIET.items()}
+    fresh = write(tmp_path, "f.json", payload(CI_RUNNER, slower))
+    base = write(tmp_path, "b.json", payload(CI_RUNNER, QUIET))
+    proc = _run([fresh], [base], "--tolerance", "native_quic_=15")
+    assert proc.returncode == 1, (
+        "a crypto metric must still be held to 5% while QUIC gets 15%:\n"
+        f"{proc.stdout}{proc.stderr}"
+    )
+
+
+def test_the_wider_limit_still_catches_a_gross_regression(tmp_path: Path) -> None:
+    slower = {k: v * 0.60 for k, v in NOISY.items()}  # 40%, far past 15%
+    fresh = write(tmp_path, "f.json", payload(CI_RUNNER, slower))
+    base = write(tmp_path, "b.json", payload(CI_RUNNER, NOISY))
+    proc = _run([fresh], [base], "--tolerance", "native_quic_=15")
+    assert proc.returncode == 1, f"{proc.stdout}{proc.stderr}"
+    assert "limit 15.0%" in proc.stderr, proc.stderr
+
+
+def test_a_malformed_tolerance_is_refused(tmp_path: Path) -> None:
+    fresh = write(tmp_path, "f.json", payload(CI_RUNNER, QUIET))
+    base = write(tmp_path, "b.json", payload(CI_RUNNER, QUIET))
+    assert _run([fresh], [base], "--tolerance", "nonsense").returncode == 2
+    assert _run([fresh], [base], "--tolerance", "native_=abc").returncode == 2
+
+
+def test_no_metric_class_is_exempted_entirely() -> None:
+    """Sizing a noisy gate is legitimate; switching it off is not."""
+    yaml = pytest.importorskip("yaml")
+    spec = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    for job_name, job in spec["jobs"].items():
+        blob = "\n".join(s.get("run") or "" for s in job["steps"])
+        for line in blob.splitlines():
+            if "--tolerance" in line:
+                value = float(line.split("=")[1].split()[0].strip("\\ "))
+                assert value <= 25.0, (
+                    f"{job_name} tolerance {value}% is wide enough to be no "
+                    "gate at all; narrow the metric or fix the noise instead"
+                )
+
+
 def test_both_jobs_repeat_each_side() -> None:
     yaml = pytest.importorskip("yaml")
     spec = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))

@@ -40,6 +40,22 @@
 # can only ever slow a run down -- so the maximum is the honest estimate and
 # repetition is what makes a 5% threshold survivable.
 #
+# native_quic_* carries a 15% limit, and that number is measured, not chosen
+# to make red go away. Every figure below comes from comparing BYTE-IDENTICAL
+# native code, so all of it is noise:
+#
+#   single run, paired     AES-256KiB          -9.03%
+#   best of 3, paired      AES                  within ~1%
+#   best of 3, paired      quic_round_trip_1MiB -7.75%
+#   best of 3, paired      quic_parallel_8x4    +6.84%
+#
+# The crypto kernels settle down once repeated; the QUIC round trips do not,
+# because they cross a loopback socket and an async scheduler rather than
+# running straight through memory. One global threshold cannot fit both. The
+# alternative -- dropping the QUIC metrics -- would delete the coverage
+# instead of sizing it, and 15% still catches any regression that matters at
+# this layer.
+#
 # bench_gate.py is passed --require-comparable-host in both, so it REFUSES to
 # compare across machines rather than reporting a meaningless delta.
 
@@ -151,6 +167,7 @@ jobs:
             --results head-1.json head-2.json head-3.json \
             --baseline base-1.json base-2.json base-3.json \
             --require-comparable-host \
+            --tolerance native_quic_=15 \
             --max-regression-percent 5
 
       - name: Keep both measurements
@@ -272,6 +289,7 @@ jobs:
             --results master-1.json master-2.json master-3.json \
             --baseline anchor-1.json anchor-2.json anchor-3.json \
             --require-comparable-host \
+            --tolerance native_quic_=15 \
             --max-regression-percent 5
 
       - name: Publish both measurements

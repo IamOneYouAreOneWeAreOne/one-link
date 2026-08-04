@@ -169,6 +169,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Maximum allowed regression vs baseline, in percent (default 5).",
     )
     p.add_argument(
+        "--tolerance",
+        action="append",
+        default=[],
+        metavar="PREFIX=PERCENT",
+        help=(
+            "Per-metric-class override, e.g. native_quic_=15. Metrics differ in "
+            "how noisy they are and one global threshold cannot fit both a "
+            "deterministic in-memory kernel and a loopback network round trip."
+        ),
+    )
+    p.add_argument(
         "--require-comparable-host",
         action="store_true",
         help=(
@@ -226,7 +237,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAIL: baseline empty: {baseline_paths[0]}", file=sys.stderr)
         return 2
 
-    threshold = args.max_regression_percent / 100.0
+    overrides: list[tuple[str, float]] = []
+    for raw in args.tolerance:
+        prefix, _, percent = raw.partition("=")
+        if not prefix or not percent:
+            print(f"FAIL: malformed --tolerance {raw!r}", file=sys.stderr)
+            return 2
+        try:
+            overrides.append((prefix, float(percent)))
+        except ValueError:
+            print(f"FAIL: --tolerance {raw!r} is not a percentage", file=sys.stderr)
+            return 2
+    # Longest prefix wins, so a specific class beats a general one.
+    overrides.sort(key=lambda item: len(item[0]), reverse=True)
+
+    def tolerance_for(metric: str) -> float:
+        for prefix, percent in overrides:
+            if metric.startswith(prefix):
+                return percent
+        return args.max_regression_percent
+
+    if overrides:
+        print("  per-class tolerances: " + ", ".join(f"{p}*={v}%" for p, v in overrides))
     failures: list[str] = []
 
     for name, base_bps in baseline.items():
@@ -238,11 +270,13 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if base_bps <= 0:
             continue
+        allowed = tolerance_for(name)
+        threshold = allowed / 100.0
         ratio = fresh_bps / base_bps
         if ratio < (1.0 - threshold):
             regress_pct = (1.0 - ratio) * 100.0
             failures.append(
-                f"  - {name}: regressed {regress_pct:.2f}% "
+                f"  - {name}: regressed {regress_pct:.2f}% (limit {allowed}%) "
                 f"({base_bps / 1e6:.2f} MB/s -> {fresh_bps / 1e6:.2f} MB/s)"
             )
         else:
@@ -255,8 +289,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if failures:
         print(
-            f"\nFAIL: {len(failures)} benchmark(s) regressed > "
-            f"{args.max_regression_percent}% vs baseline:",
+            f"\nFAIL: {len(failures)} benchmark(s) regressed past their limit:",
             file=sys.stderr,
         )
         for f in failures:
