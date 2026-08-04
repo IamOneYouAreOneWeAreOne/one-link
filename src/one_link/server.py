@@ -28530,15 +28530,20 @@ class UIServer:
                 "on_battery": False, "metered": False,
                 "sync_paused": False, "reason": "",
             })
-        # Off-loop: the refresh path shells out to PowerShell for metered
-        # detection, which blocked every other request for the duration.
-        state = await self.daemon._power_state_async()
-        skip, reason = await self.daemon._sync_paused_or_quiet_async()
+        # Never pay for a cache refresh inside the request. Moving the probe
+        # off the event loop stopped it blocking OTHER requests, but this one
+        # still waited on a PowerShell spawn and could exceed a 5s client
+        # budget on a loaded machine -- which is how it kept timing out. The
+        # cached reading is served immediately and the refresh runs behind the
+        # response; `fresh` says which one the caller got.
+        state, fresh = await self.daemon._power_state_nonblocking()
+        skip, reason = await self.daemon._sync_paused_or_quiet_async(allow_probe=False)
         return web.json_response({
             "on_battery": state.get("on_battery", False),
             "metered": state.get("metered", False),
             "sync_paused": bool(skip),
             "reason": reason,
+            "fresh": bool(fresh),
         })
 
     async def api_folder_file_history(self, request: web.Request) -> web.Response:

@@ -100,6 +100,16 @@ def test_both_builds_use_the_same_maturin_flags(flag: str) -> None:
         assert flag in command, f"{flag} missing from a compared build: {command}"
 
 
+def test_an_empty_comparison_is_a_failure_not_a_pass() -> None:
+    # The comparison reports success when nothing diverged. With no wheels on
+    # either side nothing CAN diverge, so a build step that stopped emitting a
+    # wheel would turn this gate green while certifying nothing.
+    text = REPRODUCIBLE.read_text(encoding="utf-8")
+    assert "REPRODUCIBILITY VACUOUS" in text, (
+        "the comparison must refuse an empty wheel set explicitly"
+    )
+
+
 def test_no_rustflags_are_injected_into_either_build() -> None:
     # Released wheels are built with no RUSTFLAGS. A rebuild that sets them is
     # measuring a different artifact. `-C target-feature=+crt-static` was set

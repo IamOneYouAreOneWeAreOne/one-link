@@ -49,6 +49,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -27364,11 +27365,17 @@ class Daemon:
             raise
 
     # v0.21.x Ship 6: sync bandwidth + scheduling helpers.
-    def _sync_paused_or_quiet(self) -> tuple[bool, str]:
+    def _sync_paused_or_quiet(self, *, allow_probe: bool = True) -> tuple[bool, str]:
         """Return (skip, reason) for the current moment based on the
         user's global sync rules. push_folder_to_peer calls this
         before any wire I/O to honour the user-set quiet hours +
         manual pause + (Windows-only) metered-network status.
+
+        ``allow_probe=False`` answers from the last known power reading and
+        never spawns anything. The sync path leaves it True -- it is deciding
+        whether to put bytes on the wire and should pay for a current answer.
+        A status endpoint painting a badge should not: see
+        :meth:`_power_state_nonblocking`.
 
         Quiet hours wrap midnight correctly (e.g. 22:00 → 07:00 is
         treated as ON between 22:00–23:59 OR 00:00–07:00). All
@@ -27378,6 +27385,25 @@ class Daemon:
         throttling, not a security guarantee)."""
         if self.state is None:
             return (False, "")
+        # Bound as callables, not values: reading power here unconditionally
+        # would spawn a probe for users who have neither rule enabled.
+        #
+        # The probing branch goes through `_network_is_metered` rather than
+        # reading the cache dict directly. That name is the seam callers and
+        # tests substitute to simulate a metered link, and short-circuiting past
+        # it would silently ignore every such override.
+        if allow_probe:
+            is_metered = self._network_is_metered
+
+            def on_battery() -> bool:
+                return bool(self._power_state()["on_battery"])
+        else:
+            def is_metered() -> bool:
+                return bool(self._power_state_last_known()["metered"])
+
+            def on_battery() -> bool:
+                return bool(self._power_state_last_known()["on_battery"])
+
         try:
             if self.state.get_setting("sync_paused") in ("1", "true", "yes"):
                 return (True, "user paused sync globally in Settings")
@@ -27387,10 +27413,10 @@ class Daemon:
                 if self._time_in_window(start, end):
                     return (True, f"quiet hours active ({start}–{end})")
             if self.state.get_setting("sync_pause_on_metered") in ("1", "true", "yes"):
-                if self._network_is_metered():
+                if is_metered():
                     return (True, "network is metered (Variable or OverDataLimit)")
             if self.state.get_setting("sync_pause_on_battery") in ("1", "true", "yes"):
-                if self._power_state()["on_battery"]:
+                if on_battery():
                     return (True, "running on battery (sync_pause_on_battery is on)")
         except Exception as exc:
             # A state/power probe failure must not invert a user pause into
@@ -27464,11 +27490,86 @@ class Daemon:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, cls._power_state)
 
-    async def _sync_paused_or_quiet_async(self) -> tuple[bool, str]:
+    async def _sync_paused_or_quiet_async(
+        self, *, allow_probe: bool = True,
+    ) -> tuple[bool, str]:
         """``_sync_paused_or_quiet`` off the event loop, for the same reason."""
 
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._sync_paused_or_quiet)
+        return await loop.run_in_executor(
+            None, functools.partial(self._sync_paused_or_quiet, allow_probe=allow_probe),
+        )
+
+    # Set while a background refresh is in flight so a burst of polls schedules
+    # one probe rather than one per request.
+    _power_refresh_inflight: bool = False
+
+    @classmethod
+    def _power_state_last_known(cls) -> dict:
+        """The cached reading, however old, with no OS probe of any kind.
+
+        Before the first successful refresh this is the class default
+        (not on battery, not metered). Both defaults err toward "do not pause",
+        which is the same direction every probe failure already takes: a
+        detection problem must never silently stop the user's sync.
+        """
+        return dict(cls._power_cache)
+
+    @classmethod
+    def _power_state_is_fresh(cls) -> bool:
+        return (time.monotonic() - float(cls._power_cache["ts"])) < cls._POWER_CACHE_TTL_S
+
+    @classmethod
+    def _schedule_power_refresh(cls) -> None:
+        """Refresh the power cache in the background, at most one at a time."""
+        if cls._power_refresh_inflight:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop (sync context): nothing to schedule onto. The next
+            # blocking caller refreshes as it always did.
+            return
+        cls._power_refresh_inflight = True
+
+        def _refresh() -> dict:
+            try:
+                return cls._power_state()
+            finally:
+                cls._power_refresh_inflight = False
+
+        future = loop.run_in_executor(None, _refresh)
+        # Retrieve the result so a failed probe cannot surface as a bare
+        # "exception was never retrieved" warning on loop teardown.
+        future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+
+    @classmethod
+    async def _power_state_nonblocking(cls) -> tuple[dict, bool]:
+        """Return ``(state, fresh)`` without ever waiting on an OS probe.
+
+        ``_power_state_async`` moved the probe off the event loop, which fixed
+        the loop stall but not the latency: the REQUEST that triggers a refresh
+        still waits for a PowerShell spawn (see :meth:`_detect_metered`, whose
+        own subprocess timeout is 2.0s before the kill and reap on top). Add
+        executor queueing and a second executor round trip for the sync-policy
+        read and one poll can exceed a 5s client budget on a loaded machine.
+        That is exactly how it failed: an e2e read timeout on
+        /api/power/status, still failing after the off-loop fix.
+
+        The endpoint documents itself as "cached server-side for 30s so polling
+        is cheap". Paying for the refresh inside the request contradicts that.
+        So a stale cache is served immediately and the refresh happens behind
+        the response; the caller is told which it got via ``fresh`` rather than
+        being left to guess.
+
+        Staleness is bounded by the poll interval: the next request after a
+        refresh completes sees the new value. Nothing here decides whether to
+        send bytes -- the sync path still calls the probing variant.
+        """
+        if cls._power_state_is_fresh():
+            return cls._power_state_last_known(), True
+        cls._schedule_power_refresh()
+        return cls._power_state_last_known(), False
 
     @staticmethod
     def _detect_on_battery() -> bool:

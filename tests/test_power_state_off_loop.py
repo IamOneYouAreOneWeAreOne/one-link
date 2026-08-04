@@ -61,7 +61,7 @@ def test_power_state_async_lets_the_loop_keep_running(monkeypatch) -> None:
 def test_sync_paused_helper_is_also_off_loop(monkeypatch) -> None:
     calls: list[str] = []
 
-    def _slow_gate(self) -> tuple[bool, str]:
+    def _slow_gate(self, *, allow_probe: bool = True) -> tuple[bool, str]:
         calls.append("probed")
         time.sleep(0.20)
         return (True, "on battery")
@@ -101,9 +101,16 @@ def test_no_coroutine_calls_the_blocking_power_helpers_directly() -> None:
     from one_link import server as server_module
 
     handler = inspect.getsource(server_module.UIServer.api_power_status)
-    assert "await self.daemon._power_state_async()" in handler
-    assert "await self.daemon._sync_paused_or_quiet_async()" in handler
+    # Off-loop was necessary but not sufficient: the request that triggers the
+    # refresh still waited for the PowerShell spawn, and the e2e read timeout
+    # survived this fix. The handler now takes the strictly stronger route --
+    # it never waits on a probe at all -- so pin THAT rather than the awaited
+    # blocking call it replaced. See
+    # tests/test_power_status_never_waits_on_a_probe.py.
+    assert "await self.daemon._power_state_nonblocking()" in handler
+    assert "await self.daemon._sync_paused_or_quiet_async(allow_probe=False)" in handler
     assert "self.daemon._power_state()" not in handler
+    assert "self.daemon._power_state_async()" not in handler
     assert "self.daemon._sync_paused_or_quiet()" not in handler
 
     push = inspect.getsource(Daemon.push_folder_to_peer)
