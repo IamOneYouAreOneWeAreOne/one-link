@@ -70,6 +70,26 @@ def _native_loadable_in_subprocess() -> bool:
 _NATIVE_SUBPROC_OK = _native_loadable_in_subprocess()
 
 
+def _require_native_subprocess_or_fail() -> None:
+    """Turn the Smart App Control skip into a FAILURE on CI.
+
+    The skip reason names a MOMENT ("Smart App Control is blocking the DLL
+    right now"), not a missing capability, and that is the shape that hides
+    real defects: an estate audit found seven such skips masking five genuine
+    cross-repo failures. Here the environment named is a Windows desktop
+    feature that no CI runner has, so on CI the only way this probe fails is
+    that the native module genuinely cannot load in a spawned daemon -- which
+    is exactly what these tests exist to catch.
+    """
+    if os.environ.get("CI", "").lower() in ("1", "true"):
+        raise AssertionError(
+            "one_link_native failed to import in a fresh subprocess on CI. "
+            "Smart App Control does not exist on a runner, so this is a real "
+            "packaging or build defect, not an environment quirk. Refusing to "
+            "skip: a skip here reads as a pass and would hide it."
+        )
+
+
 # Per-run private mDNS scope so the swarm only ever discovers its own
 # 4 cohort daemons — never the developer's live daemons (or a CI host's
 # other One Link instances) broadcasting on the same LAN. Without this,
@@ -277,6 +297,15 @@ def test_four_peer_swarm_all_advertise_phase_e_caps(four_peer_swarm):
     """Every daemon in the swarm must report Phase D/E + Bloom-init +
     QUIC capabilities as advertised via /api/status.native_status."""
     if not _NATIVE_SUBPROC_OK:
+        # On CI this is never a legitimate skip. Smart App Control is a
+        # Windows desktop feature no runner has, so if the native module
+        # will not import in a fresh subprocess there, the packaging IS
+        # broken -- and this is the test that would notice. A skip reads
+        # exactly like a pass, so it would go quiet at the moment it
+        # mattered. That is not hypothetical: the browser-call gate failed
+        # every run it ever had because its daemon came up without the
+        # native engine, and nothing said so.
+        _require_native_subprocess_or_fail()
         pytest.skip(
             "one_link_native not importable in a fresh subprocess "
             "(Smart App Control); daemons would report "

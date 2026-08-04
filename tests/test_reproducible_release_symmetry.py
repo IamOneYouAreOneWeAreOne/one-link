@@ -65,7 +65,11 @@ def test_the_reproducibility_candidate_installs_no_extra_components() -> None:
     # own home directory. Any component that changes what lands in the wheel
     # has the same effect, so the candidate build takes the minimal profile and
     # nothing else.
-    for install in toolchain_installs(REPRODUCIBLE):
+    installs = toolchain_installs(REPRODUCIBLE)
+    # Without this, a workflow that stopped installing a toolchain at all
+    # would pass this test having checked nothing.
+    assert len(installs) == 2, f"expected two toolchain installs, got {installs}"
+    for install in installs:
         assert "--component" not in install, (
             "a reproducibility build must not add toolchain components: they "
             "can change the emitted artifact, and no released wheel is built "
@@ -116,7 +120,10 @@ def test_no_rustflags_are_injected_into_either_build() -> None:
     # here once and broke every run: it reaches proc-macro crates, which must
     # be dylibs.
     text = REPRODUCIBLE.read_text(encoding="utf-8")
-    for line in text.splitlines():
+    lines = text.splitlines()
+    # An unreadable or emptied workflow would otherwise pass this vacuously.
+    assert len(lines) > 50, f"workflow looks truncated: {len(lines)} lines"
+    for line in lines:
         stripped = line.strip()
         if stripped.startswith("#"):
             continue

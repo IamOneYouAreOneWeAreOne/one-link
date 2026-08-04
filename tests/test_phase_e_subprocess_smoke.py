@@ -13,6 +13,8 @@ daemon, not just inside the test harness.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from tests.harness import daemon_pair, request
@@ -58,6 +60,17 @@ def test_daemon_reports_coherence_field_available():
     is built into the daemon's Python environment and reachable through
     the live control plane — not just inside the test harness."""
     if not _NATIVE_SUBPROC_OK:
+        # Never a legitimate skip on CI: Smart App Control is a Windows
+        # desktop feature no runner has, so a failed subprocess import there
+        # means the native module genuinely is not reachable from a spawned
+        # daemon -- which is the one thing this test checks. A skip reads as
+        # a pass and would hide it.
+        if os.environ.get("CI", "").lower() in ("1", "true"):
+            raise AssertionError(
+                "one_link_native failed to import in a fresh subprocess on "
+                "CI. Smart App Control does not exist on a runner, so this is "
+                "a real packaging or build defect. Refusing to skip."
+            )
         pytest.skip(
             "one_link_native not importable in a fresh subprocess — "
             "Smart App Control likely blocking the DLL; the daemon "
