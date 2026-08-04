@@ -89,7 +89,7 @@ def test_rendezvous_requirements_are_exact_hashed_lock_subset():
     uv_versions = _uv_versions()
 
     assert "aiohttp==3.14.3" in direct
-    assert "cryptography==49.0.0" in direct
+    assert "cryptography==50.0.0" in direct
     assert "!deploy/rendezvous/requirements.lock" in _read(".gitignore")
     assert len(versions) == 13
     assert versions.keys() <= uv_versions.keys()
