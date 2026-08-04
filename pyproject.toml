@@ -125,10 +125,10 @@ dev = [
   # 'I forgot to test the empty input / unicode edge / a value
   # that happens to be 256 bytes long' that example-based tests
   # systematically miss because the author didn't think of it.
-  "hypothesis>=6.100",
+  "hypothesis>=6.161.8",
   # Static quality gates are part of the committed universal lock so CI
   # never downloads an unreviewed "latest" linter at execution time.
-  "ruff>=0.15.22,<0.16",
+  "ruff>=0.16.0,<0.17",
   "mypy>=2.3,<2.4",
 ]
 # v0.21.x browser-driven E2E harness. Catches UI bugs that no
@@ -157,7 +157,7 @@ e2e = [
 # capture -> negotiated wire -> receiver playout path consumes it yet.
 preview-ml = [
   "numpy>=2.2,<3",
-  "onnxruntime>=1.27,<1.28",
+  "onnxruntime>=1.28.0,<1.29",
   "scipy>=1.15,<2",
 ]
 # Reproducible build/release tooling. Keeping this separate avoids pulling
