@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -270,6 +271,11 @@ def test_identity_acl_failure_never_returns_or_publishes_authority(
     assert not identity_path.exists()
 
 
+def _ace_count(dacl_output: str) -> int:
+    """How many access-control entries icacls printed."""
+    return len([line for line in dacl_output.splitlines() if ":(" in line])
+
+
 def _dacl_of(path: Path) -> str:
     """Read a file's DACL WITHOUT going through the code under test.
 
@@ -280,8 +286,6 @@ def _dacl_of(path: Path) -> str:
     inherited ACL, and that test would still pass. This reads the ACL
     independently so the check cannot be satisfied by the producer.
     """
-    import subprocess
-
     return subprocess.run(
         ["icacls", str(path)], capture_output=True, text=True, check=False
     ).stdout
@@ -293,13 +297,27 @@ def test_windows_acl_round_trip_is_verified(tmp_path: Path) -> None:
     path = tmp_path / "secret.bin"
     path.write_bytes(b"secret")
 
-    # CONTROL: a fresh file INHERITS its parent's ACL. Measured: three ACEs
-    # (SYSTEM, Administrators, OWNER RIGHTS), every one flagged (I). Without
-    # this, the assertions below could pass against a file that happened to be
-    # restrictive already, and would be measuring nothing.
+    # CONTROL: give the file a deliberately BROAD ACE first, so "it ended up
+    # restrictive" cannot be true by accident.
+    #
+    # The first version of this asserted a fresh file arrives with inherited
+    # `(I)` ACEs, measured on one workstation (SYSTEM, Administrators, OWNER
+    # RIGHTS). That is machine-specific and it failed on windows-latest, where
+    # a file under pytest-of-runneradmin has no inherited entries -- the same
+    # mistake as recording a benchmark baseline on one machine and asserting it
+    # on another. So CREATE the pre-state instead of assuming it.
+    #
+    # `*S-1-1-0` is the well-known SID for Everyone, used instead of the name
+    # because principal names are localized and SIDs are not.
+    granted = subprocess.run(
+        ["icacls", str(path), "/grant", "*S-1-1-0:(R)"],
+        capture_output=True, text=True, check=False,
+    )
+    assert granted.returncode == 0, f"could not set up the control: {granted.stderr}"
     before = _dacl_of(path)
-    assert "(I)" in before, (
-        f"expected a freshly created file to inherit its parent ACL: {before}"
+    assert _ace_count(before) > 1, (
+        f"control did not widen the ACL, so the assertions below prove "
+        f"nothing:\n{before}"
     )
 
     identity._restrict_windows_acl(path)
@@ -320,7 +338,7 @@ def test_windows_acl_round_trip_is_verified(tmp_path: Path) -> None:
     identity._restrict_windows_acl(path)
     again = _dacl_of(path)
     assert "(I)" not in again, f"re-applying the ACL restored inheritance:\n{again}"
-    assert len([line for line in again.splitlines() if ":(" in line]) == 1, again
+    assert _ace_count(again) == 1, again
 
 
 def test_empty_existing_local_sqlcipher_key_is_not_overwritten(
