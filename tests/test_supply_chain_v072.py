@@ -431,7 +431,12 @@ def test_workflows_use_frozen_uv_and_explicit_root_for_native_builds():
     # pqkem ABI) and build_windows_binary (build_binary.py treats
     # one_link_native as mandatory for a stable artifact). Both were invisible
     # while the tests gate could not conclude.
-    assert nested_maturin_count == 12
+    # 13 as of e2e_call_ui_browser.yml. That gate had failed on every run it
+    # ever had because it never built the engine: the daemon came up reporting
+    # "PQ-hybrid KEM UNAVAILABLE" and the call never reached media
+    # (caller_frames=0, stopped during incoming_call). It was measuring an
+    # incomplete install rather than the product.
+    assert nested_maturin_count == 13
 
 
 def test_windows_native_binding_uses_shell_matching_its_commands():
