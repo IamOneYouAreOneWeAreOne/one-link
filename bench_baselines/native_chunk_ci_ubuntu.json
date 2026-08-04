@@ -1,0 +1,360 @@
+{
+  "diagnostics": {
+    "native_available": true,
+    "version": "0.22.0-alpha.0",
+    "kernel": "FastCDC v2020 + Gear-256",
+    "cdc_min_avg_max": [
+      8192,
+      65536,
+      262144
+    ],
+    "aead_frame_plaintext_len": 16384,
+    "aead_tag_len": 16
+  },
+  "host": {
+    "platform": "Linux-6.17.0-1020-azure-x86_64-with-glibc2.39",
+    "python": "3.12.13",
+    "cpu_count": 4
+  },
+  "results": [
+    {
+      "name": "native_cdc_scan_128MiB",
+      "bytes_processed": 134217728,
+      "iterations": 5,
+      "seconds_total": 0.423338423,
+      "seconds_per_iter_median": 0.084608339,
+      "bytes_per_second_median": 1586341601.623925,
+      "metadata": {
+        "input_bytes": 134217728,
+        "kernel": "FastCDC v2020 + Gear-256"
+      }
+    },
+    {
+      "name": "native_blake3_addr_raw_64KiB",
+      "bytes_processed": 65536,
+      "iterations": 1000,
+      "seconds_total": 0.019189715,
+      "seconds_per_iter_median": 1.8969e-05,
+      "bytes_per_second_median": 3454900100.1634245,
+      "metadata": {
+        "input_bytes": 65536
+      }
+    },
+    {
+      "name": "native_blake3_addr_convergent_64KiB",
+      "bytes_processed": 65536,
+      "iterations": 1000,
+      "seconds_total": 0.019316704,
+      "seconds_per_iter_median": 1.9079e-05,
+      "bytes_per_second_median": 3434980869.018292,
+      "metadata": {
+        "input_bytes": 65536
+      }
+    },
+    {
+      "name": "native_derive_aead_key",
+      "bytes_processed": 64,
+      "iterations": 100000,
+      "seconds_total": 0.044367362,
+      "seconds_per_iter_median": 4.31e-07,
+      "bytes_per_second_median": 148491879.35034803,
+      "metadata": {
+        "per_iter_bytes": 64
+      }
+    },
+    {
+      "name": "native_derive_stripe_seed",
+      "bytes_processed": 33,
+      "iterations": 100000,
+      "seconds_total": 0.048745827,
+      "seconds_per_iter_median": 4.8e-07,
+      "bytes_per_second_median": 68750000.0,
+      "metadata": {
+        "per_iter_bytes": 33,
+        "stripe_k": 10
+      }
+    },
+    {
+      "name": "native_aead_aes_encrypt_16KiB",
+      "bytes_processed": 16384,
+      "iterations": 100,
+      "seconds_total": 0.0005003,
+      "seconds_per_iter_median": 4.887e-06,
+      "bytes_per_second_median": 3352568037.6509104,
+      "metadata": {
+        "input_bytes": 16384,
+        "kind": "aes"
+      }
+    },
+    {
+      "name": "native_aead_aes_decrypt_16KiB",
+      "bytes_processed": 16384,
+      "iterations": 100,
+      "seconds_total": 0.000477853,
+      "seconds_per_iter_median": 4.768e-06,
+      "bytes_per_second_median": 3436241610.738255,
+      "metadata": {
+        "input_bytes": 16384,
+        "kind": "aes"
+      }
+    },
+    {
+      "name": "native_aead_aes_encrypt_64KiB",
+      "bytes_processed": 65536,
+      "iterations": 100,
+      "seconds_total": 0.001847635,
+      "seconds_per_iter_median": 1.8257e-05,
+      "bytes_per_second_median": 3589636851.618557,
+      "metadata": {
+        "input_bytes": 65536,
+        "kind": "aes"
+      }
+    },
+    {
+      "name": "native_aead_aes_decrypt_64KiB",
+      "bytes_processed": 65536,
+      "iterations": 100,
+      "seconds_total": 0.001820576,
+      "seconds_per_iter_median": 1.7997e-05,
+      "bytes_per_second_median": 3641495804.8563647,
+      "metadata": {
+        "input_bytes": 65536,
+        "kind": "aes"
+      }
+    },
+    {
+      "name": "native_aead_aes_encrypt_256KiB",
+      "bytes_processed": 262144,
+      "iterations": 100,
+      "seconds_total": 0.007415249,
+      "seconds_per_iter_median": 7.333550000000001e-05,
+      "bytes_per_second_median": 3574585296.343517,
+      "metadata": {
+        "input_bytes": 262144,
+        "kind": "aes"
+      }
+    },
+    {
+      "name": "native_aead_aes_decrypt_256KiB",
+      "bytes_processed": 262144,
+      "iterations": 100,
+      "seconds_total": 0.007408634,
+      "seconds_per_iter_median": 7.22435e-05,
+      "bytes_per_second_median": 3628617107.4214287,
+      "metadata": {
+        "input_bytes": 262144,
+        "kind": "aes"
+      }
+    },
+    {
+      "name": "native_aead_chacha_encrypt_16KiB",
+      "bytes_processed": 16384,
+      "iterations": 100,
+      "seconds_total": 0.001051123,
+      "seconds_per_iter_median": 1.0395e-05,
+      "bytes_per_second_median": 1576142376.1423762,
+      "metadata": {
+        "input_bytes": 16384,
+        "kind": "chacha"
+      }
+    },
+    {
+      "name": "native_aead_chacha_decrypt_16KiB",
+      "bytes_processed": 16384,
+      "iterations": 100,
+      "seconds_total": 0.001057284,
+      "seconds_per_iter_median": 1.0470999999999999e-05,
+      "bytes_per_second_median": 1564702511.6989784,
+      "metadata": {
+        "input_bytes": 16384,
+        "kind": "chacha"
+      }
+    },
+    {
+      "name": "native_aead_chacha_encrypt_64KiB",
+      "bytes_processed": 65536,
+      "iterations": 100,
+      "seconds_total": 0.004055509,
+      "seconds_per_iter_median": 4.018e-05,
+      "bytes_per_second_median": 1631060228.9696367,
+      "metadata": {
+        "input_bytes": 65536,
+        "kind": "chacha"
+      }
+    },
+    {
+      "name": "native_aead_chacha_decrypt_64KiB",
+      "bytes_processed": 65536,
+      "iterations": 100,
+      "seconds_total": 0.004124184,
+      "seconds_per_iter_median": 4.0782e-05,
+      "bytes_per_second_median": 1606983473.100878,
+      "metadata": {
+        "input_bytes": 65536,
+        "kind": "chacha"
+      }
+    },
+    {
+      "name": "native_aead_chacha_encrypt_256KiB",
+      "bytes_processed": 262144,
+      "iterations": 100,
+      "seconds_total": 0.016335991,
+      "seconds_per_iter_median": 0.000161203,
+      "bytes_per_second_median": 1626173210.1759892,
+      "metadata": {
+        "input_bytes": 262144,
+        "kind": "chacha"
+      }
+    },
+    {
+      "name": "native_aead_chacha_decrypt_256KiB",
+      "bytes_processed": 262144,
+      "iterations": 100,
+      "seconds_total": 0.016526458,
+      "seconds_per_iter_median": 0.000163411,
+      "bytes_per_second_median": 1604200451.6219838,
+      "metadata": {
+        "input_bytes": 262144,
+        "kind": "chacha"
+      }
+    },
+    {
+      "name": "native_wal_group_commit_batch=128_payload=4KiB",
+      "bytes_processed": 524288,
+      "iterations": 5,
+      "seconds_total": 0.007663827,
+      "seconds_per_iter_median": 0.001348302,
+      "bytes_per_second_median": 388850569.0861543,
+      "metadata": {
+        "batch_size": 128,
+        "payload_kib": 4
+      }
+    },
+    {
+      "name": "native_wal_group_commit_batch=128_payload=64KiB",
+      "bytes_processed": 8388608,
+      "iterations": 5,
+      "seconds_total": 0.042804188,
+      "seconds_per_iter_median": 0.007370735,
+      "bytes_per_second_median": 1138096539.8973103,
+      "metadata": {
+        "batch_size": 128,
+        "payload_kib": 64
+      }
+    },
+    {
+      "name": "native_chunk_store_write_batch=32_plaintext=64KiB",
+      "bytes_processed": 2097152,
+      "iterations": 5,
+      "seconds_total": 0.014962782,
+      "seconds_per_iter_median": 0.002911266,
+      "bytes_per_second_median": 720357397.7781488,
+      "metadata": {
+        "batch_size": 32,
+        "plaintext_kib": 64
+      }
+    },
+    {
+      "name": "native_chunk_store_write_batch=128_plaintext=64KiB",
+      "bytes_processed": 8388608,
+      "iterations": 5,
+      "seconds_total": 0.03870352,
+      "seconds_per_iter_median": 0.007711648,
+      "bytes_per_second_median": 1087784089.7302368,
+      "metadata": {
+        "batch_size": 128,
+        "plaintext_kib": 64
+      }
+    },
+    {
+      "name": "native_chunk_store_locate",
+      "bytes_processed": 16000000,
+      "iterations": 1,
+      "seconds_total": 0.204803884,
+      "seconds_per_iter_median": 0.204803884,
+      "bytes_per_second_median": 78123518.39968035,
+      "metadata": {
+        "chunks_indexed": 1024,
+        "lookups": 500000
+      }
+    },
+    {
+      "name": "native_quic_round_trip_16KiB_x200",
+      "bytes_processed": 3276800,
+      "iterations": 3,
+      "seconds_total": 0.021052488,
+      "seconds_per_iter_median": 0.006848728,
+      "bytes_per_second_median": 478453809.232897,
+      "metadata": {
+        "payload_kib": 16,
+        "round_trips": 200
+      }
+    },
+    {
+      "name": "native_quic_round_trip_64KiB_x200",
+      "bytes_processed": 13107200,
+      "iterations": 3,
+      "seconds_total": 0.07852752,
+      "seconds_per_iter_median": 0.026831264,
+      "bytes_per_second_median": 488504753.26097196,
+      "metadata": {
+        "payload_kib": 64,
+        "round_trips": 200
+      }
+    },
+    {
+      "name": "native_quic_round_trip_256KiB_x50",
+      "bytes_processed": 13107200,
+      "iterations": 3,
+      "seconds_total": 0.075379561,
+      "seconds_per_iter_median": 0.024919863,
+      "bytes_per_second_median": 525973999.13474643,
+      "metadata": {
+        "payload_kib": 256,
+        "round_trips": 50
+      }
+    },
+    {
+      "name": "native_quic_round_trip_1024KiB_x20",
+      "bytes_processed": 20971520,
+      "iterations": 3,
+      "seconds_total": 0.12356462100000001,
+      "seconds_per_iter_median": 0.041828122,
+      "bytes_per_second_median": 501373693.0383821,
+      "metadata": {
+        "payload_kib": 1024,
+        "round_trips": 20
+      }
+    },
+    {
+      "name": "native_quic_parallel_16x4_64KiB",
+      "bytes_processed": 4194304,
+      "iterations": 3,
+      "seconds_total": 0.025081829,
+      "seconds_per_iter_median": 0.008392299,
+      "bytes_per_second_median": 499780096.0142149,
+      "metadata": {
+        "payload_kib": 64,
+        "parallelism": 16,
+        "iterations_per_stream": 4,
+        "stream_lanes": 1,
+        "requests_per_stream": 64
+      }
+    },
+    {
+      "name": "native_quic_parallel_8x4_256KiB",
+      "bytes_processed": 8388608,
+      "iterations": 3,
+      "seconds_total": 0.050193361,
+      "seconds_per_iter_median": 0.016772183,
+      "bytes_per_second_median": 500150040.0991332,
+      "metadata": {
+        "payload_kib": 256,
+        "parallelism": 8,
+        "iterations_per_stream": 4,
+        "stream_lanes": 2,
+        "requests_per_stream": 16
+      }
+    }
+  ]
+}

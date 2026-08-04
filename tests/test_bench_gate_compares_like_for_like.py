@@ -119,6 +119,64 @@ def test_it_still_catches_a_real_regression_on_a_matched_host(tmp_path: Path) ->
     )
 
 
+def test_a_runner_image_bump_does_not_break_the_gate(tmp_path: Path) -> None:
+    """The other failure mode, and the one that would have bitten quietly.
+
+    GitHub rotates runner images on its own schedule, so the recorded platform
+    string moves from `Linux-6.17.0-1020-azure-...` to a newer kernel without
+    anyone touching this repository. A host check that compared the whole
+    string would turn drift_watch permanently red at that moment, and a gate
+    that cries wolf gets ignored -- which is how the previous one survived so
+    long. Same machine class must still compare.
+    """
+    older = {
+        "platform": "Linux-6.17.0-1020-azure-x86_64-with-glibc2.39",
+        "python": "3.12.13",
+        "cpu_count": 4,
+    }
+    newer = {
+        "platform": "Linux-6.19.2-1004-azure-x86_64-with-glibc2.41",
+        "python": "3.12.14",
+        "cpu_count": 4,
+    }
+    fresh = write(tmp_path, "fresh.json", payload(newer, BASE_METRICS))
+    base = write(tmp_path, "base.json", payload(older, BASE_METRICS))
+    proc = run_gate(fresh, base)
+    assert proc.returncode == 0, (
+        "a kernel/patch bump on the same runner class must still compare:\n"
+        f"{proc.stdout}{proc.stderr}"
+    )
+
+
+def test_a_different_core_count_is_still_refused(tmp_path: Path) -> None:
+    """...but the thing that actually moves throughput must still refuse."""
+    small = {"platform": "Linux-6.17.0-azure-x86_64", "python": "3.12.13", "cpu_count": 4}
+    large = {"platform": "Linux-6.17.0-azure-x86_64", "python": "3.12.13", "cpu_count": 24}
+    fresh = write(tmp_path, "fresh.json", payload(small, BASE_METRICS))
+    base = write(tmp_path, "base.json", payload(large, BASE_METRICS))
+    proc = run_gate(fresh, base)
+    assert proc.returncode == 2, f"{proc.stdout}{proc.stderr}"
+    assert "cpu count" in proc.stderr
+
+
+def test_a_different_architecture_is_refused(tmp_path: Path) -> None:
+    x86 = {"platform": "Linux-6.17.0-azure-x86_64", "python": "3.12.13", "cpu_count": 4}
+    arm = {"platform": "Linux-6.17.0-azure-aarch64", "python": "3.12.13", "cpu_count": 4}
+    fresh = write(tmp_path, "fresh.json", payload(x86, BASE_METRICS))
+    base = write(tmp_path, "base.json", payload(arm, BASE_METRICS))
+    assert run_gate(fresh, base).returncode == 2
+
+
+def test_the_original_defect_is_still_refused(tmp_path: Path) -> None:
+    """The exact pair that shipped: CI runner vs the committed workstation."""
+    fresh = write(tmp_path, "fresh.json", payload(CI_RUNNER, BASE_METRICS))
+    base = write(tmp_path, "base.json", payload(WORKSTATION, BASE_METRICS))
+    proc = run_gate(fresh, base)
+    assert proc.returncode == 2
+    for expected in ("os family", "cpu count"):
+        assert expected in proc.stderr, f"{expected} not reported: {proc.stderr}"
+
+
 def test_a_regression_under_the_threshold_is_allowed(tmp_path: Path) -> None:
     nearly = copy.deepcopy(BASE_METRICS)
     nearly["native_cdc_scan_128MiB"] *= 0.97  # 3%, under 5%

@@ -41,6 +41,36 @@ def _describe_host(host: dict) -> str:
     )
 
 
+_ARCHITECTURES = ("x86_64", "amd64", "aarch64", "arm64")
+
+
+def _host_identity(host: dict) -> tuple[str, str, int | None, str]:
+    """The parts of a host that actually move throughput.
+
+    Deliberately NOT the whole platform string. GitHub rotates runner images,
+    so `Linux-6.17.0-1020-azure-...` becomes `Linux-6.19.0-...` on its own
+    schedule. Gating on that would turn this red on the next image bump and
+    teach everyone to ignore it -- a gate that cries wolf is worse than the
+    broken one it replaced, because this one is meant to be believed.
+
+    OS family, CPU architecture, core count and the Python minor version are
+    what separate a 24-core Windows desktop from a 4-core Linux VM. Kernel and
+    patch revisions are noise for a throughput comparison.
+    """
+    platform = str(host.get("platform", ""))
+    family = platform.split("-", 1)[0] or "?"
+    lowered = platform.lower()
+    architecture = next((a for a in _ARCHITECTURES if a in lowered), "?")
+    # x86_64 and amd64 are the same machine under two spellings.
+    if architecture == "amd64":
+        architecture = "x86_64"
+    if architecture == "aarch64":
+        architecture = "arm64"
+    cpu_count = host.get("cpu_count")
+    python = ".".join(str(host.get("python", "")).split(".")[:2])
+    return family, architecture, cpu_count if isinstance(cpu_count, int) else None, python
+
+
 def _hosts_are_comparable(a: dict, b: dict) -> tuple[bool, str]:
     """Throughput numbers only mean something between like machines.
 
@@ -55,11 +85,16 @@ def _hosts_are_comparable(a: dict, b: dict) -> tuple[bool, str]:
             "one or both result sets record no host provenance, so they cannot "
             "be shown to be comparable"
         )
-    for field in ("platform", "cpu_count"):
-        if a.get(field) != b.get(field):
-            return False, (
-                f"host {field} differs: {a.get(field)!r} vs {b.get(field)!r}"
-            )
+    left = _host_identity(a)
+    right = _host_identity(b)
+    if left != right:
+        labels = ("os family", "architecture", "cpu count", "python")
+        differences = [
+            f"{label} {x!r} vs {y!r}"
+            for label, x, y in zip(labels, left, right)
+            if x != y
+        ]
+        return False, "; ".join(differences)
     return True, ""
 
 
