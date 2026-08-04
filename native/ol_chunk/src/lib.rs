@@ -1,3 +1,4 @@
+// Semantically-null edit: exercises the paired PR benchmark gate.
 //! `ol_chunk` — content-defined chunking and content-addressed identifiers
 //! for One Link's file engine v2.
 //!
