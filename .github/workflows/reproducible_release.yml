@@ -102,8 +102,30 @@ jobs:
 
       - name: Install pinned Rust toolchain
         # Pin to a specific version, not `stable`, for reproducibility.
+        #
+        # This install must stay byte-identical to the one in
+        # `verify_reproducibility` below, and to the ones in release.yml. It
+        # did not, and that single asymmetry is why this gate had never passed
+        # once in 39 runs.
+        #
+        # This job alone installed `--component rust-src`. With the std sources
+        # present in the sysroot, rustc translates std panic locations from the
+        # virtual `/rustc/<hash>/library/...` back to the REAL local path, so
+        # this wheel carried 27 strings reading
+        # `/home/runner/.rustup/toolchains/1.96.0-.../library/...` that the
+        # rebuilt wheel (and every released wheel) does not have. Those strings
+        # are longer, so `.rodata` grew by a page, `.data.rel.ro` and
+        # `.rela.dyn` shifted with it, and the wheel hash could never match.
+        # `.text` was byte-identical the whole time: codegen was never the
+        # problem.
+        #
+        # Removing it is the correct direction rather than adding it to the
+        # verifier: a build that embeds the builder's home directory is not
+        # reproducible by anyone whose username is not `runner`, and no
+        # released wheel is built this way, so a candidate built with it could
+        # not speak for released bytes even if the comparison had passed.
         run: |
-          rustup toolchain install 1.96.0 --profile minimal --component rust-src --no-self-update
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
           rustup default 1.96.0
 
       - name: Install Python 3.11
