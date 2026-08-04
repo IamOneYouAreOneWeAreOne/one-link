@@ -102,11 +102,29 @@ async def _open_to(
     return me, channel
 
 
+# Bounded so a protocol-state regression names THIS boundary rather than
+# consuming the two-minute process timeout above -- that intent is why the wait
+# exists and it is kept.
+#
+# Raised from 10s after test_malicious_filename_stays_in_inbox[.] timed out
+# here on windows-latest inside a 19-minute live-daemon job, having passed on
+# the four preceding master commits. Nothing in that change touched the
+# protocol. 10s for a live handshake plus transfer on the slowest runner under
+# load measures the machine, not the wire format -- the same shape as the 5s
+# budget on /api/power-status and the 2s hypothesis deadline fixed earlier.
+#
+# 45s is still comfortably inside the 120s process timeout, so a genuine hang
+# is still reported at this line with its precise cause. If it fails HERE
+# again at 45s, that is no longer plausibly load and should be read as a real
+# protocol stall.
+_RECV_BOUND_SECONDS = 45.0
+
+
 async def _recv_non_caps(channel):
     while True:
-        # A protocol-state regression should identify this exact boundary
-        # instead of consuming the test's two-minute process-level timeout.
-        msg = decode_msg(await asyncio.wait_for(channel.recv(), timeout=10.0))
+        msg = decode_msg(
+            await asyncio.wait_for(channel.recv(), timeout=_RECV_BOUND_SECONDS)
+        )
         if msg.get("t") != "CAPS":
             return msg
 
