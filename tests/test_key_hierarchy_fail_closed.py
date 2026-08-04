@@ -270,15 +270,57 @@ def test_identity_acl_failure_never_returns_or_publishes_authority(
     assert not identity_path.exists()
 
 
+def _dacl_of(path: Path) -> str:
+    """Read a file's DACL WITHOUT going through the code under test.
+
+    `_restrict_windows_acl` verifies its own work and raises on failure, so a
+    test that only calls it is asserting "the helper agrees with itself". If an
+    early return were ever added -- the function already has one for
+    `os.name != "nt"` -- it would become a no-op, the key file would keep its
+    inherited ACL, and that test would still pass. This reads the ACL
+    independently so the check cannot be satisfied by the producer.
+    """
+    import subprocess
+
+    return subprocess.run(
+        ["icacls", str(path)], capture_output=True, text=True, check=False
+    ).stdout
+
+
 def test_windows_acl_round_trip_is_verified(tmp_path: Path) -> None:
     if os.name != "nt":
         pytest.skip("Windows DACL verification is platform-specific")
     path = tmp_path / "secret.bin"
     path.write_bytes(b"secret")
+
+    # CONTROL: a fresh file INHERITS its parent's ACL. Measured: three ACEs
+    # (SYSTEM, Administrators, OWNER RIGHTS), every one flagged (I). Without
+    # this, the assertions below could pass against a file that happened to be
+    # restrictive already, and would be measuring nothing.
+    before = _dacl_of(path)
+    assert "(I)" in before, (
+        f"expected a freshly created file to inherit its parent ACL: {before}"
+    )
+
     identity._restrict_windows_acl(path)
-    # The helper's success contract includes a Win32 read-back of protected
-    # state, exact ACE count/mask, and current-user SID equality.
+
+    after = _dacl_of(path)
+    # Protection means inheritance is DISABLED -- no ACE may still be
+    # inherited. `(I)` is a flag, not a localized principal name, so this
+    # holds on a non-English Windows too.
+    assert "(I)" not in after, (
+        f"DACL is not protected; inherited ACEs survived:\n{after}"
+    )
+    aces = [line for line in after.splitlines() if ":(" in line]
+    assert len(aces) == 1, (
+        f"expected exactly one allow ACE for the current user, got {len(aces)}:\n{after}"
+    )
+
+    # Idempotent: applying it twice must not widen the ACL back out.
     identity._restrict_windows_acl(path)
+    again = _dacl_of(path)
+    assert "(I)" not in again, f"re-applying the ACL restored inheritance:\n{again}"
+    assert len([line for line in again.splitlines() if ":(" in line]) == 1, again
 
 
 def test_empty_existing_local_sqlcipher_key_is_not_overwritten(

@@ -3959,8 +3959,29 @@ async def test_revoke_peer_unknown_fp_is_noop(tmp_path: Path):
     state = State(db_path=tmp_path / "state.db")
     daemon = Daemon(me)
     daemon.state = state
-    # Unknown peer — should not raise.
-    await daemon.revoke_peer("zz" * 32, actor="test")
+    unknown = "zz" * 32
+
+    await daemon.revoke_peer(unknown, actor="test")
+
+    # The name claims a no-op, so check it is one. "Did not raise" would pass
+    # just as happily if revoking an unknown fingerprint UPSERTED a peer row --
+    # revocation is a tear-down path, and a tear-down that creates the thing it
+    # is tearing down would let any caller populate the peer table with
+    # arbitrary fingerprints.
+    assert state.get_peer(unknown) is None, (
+        "revoking an unknown fingerprint created a peer record"
+    )
+
+    # CONTROL: the same call against a KNOWN peer does change trust, so the
+    # assertion above distinguishes a no-op from a method that does nothing at
+    # all.
+    them = _new_identity()
+    state.upsert_peer(
+        fingerprint=them.fingerprint, short_id=them.short_id,
+        pubkey=them.public_bytes,
+    )
+    await daemon.revoke_peer(them.fingerprint, actor="test")
+    assert state.get_peer(them.fingerprint).trust == "rejected"
     state.close()
 
 
