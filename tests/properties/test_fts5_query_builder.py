@@ -58,7 +58,15 @@ def test_normalizer_output_is_safe_for_fts5_match(raw):
 
 
 @given(st.text(max_size=256))
-@settings(max_examples=250, deadline=2000)
+# deadline is a WALL-CLOCK assertion inside a correctness property, and
+# these run on shared CI. One example of an in-memory FTS5 query took
+# 2817ms against a 2000ms deadline on a loaded windows-latest runner and
+# hypothesis reported it as FlakyFailure -- the runner stalled, the parser
+# did not regress. Raised well past any realistic stall rather than removed:
+# a genuinely pathological normalizer (accidentally quadratic on a 256-char
+# input) would blow through 30s, so the blowup check survives while the
+# false alarm does not.
+@settings(max_examples=250, deadline=30000)
 def test_every_normalized_query_is_accepted_by_real_fts5(raw):
     """Parser safety is a runtime property, not just a character whitelist."""
 
@@ -142,7 +150,7 @@ def state(tmp_path):
     prefix_len=st.integers(min_value=1, max_value=8),
 )
 @settings(
-    max_examples=100, deadline=2000,
+    max_examples=100, deadline=30000,
     # State is a function-scoped fixture but hypothesis warns when
     # function-scoped state mutates between examples (we wipe + re-
     # insert each iteration so it's safe).
@@ -187,7 +195,7 @@ def test_every_prefix_of_every_word_finds_the_message(state, body, prefix_len):
     ),
 )
 @settings(
-    max_examples=50, deadline=4000,
+    max_examples=50, deadline=30000,
     suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
 def test_disjoint_queries_return_disjoint_results(state, bodies):

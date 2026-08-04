@@ -34,7 +34,16 @@
 # twice -- against a workstation recording, then against a same-runner-class
 # recording, which still reported AES-256KiB down 37% on an unchanged tree.
 #
-# Each side is benchmarked THREE times and every observation is kept.
+# Each side is benchmarked FIVE times and every observation is kept.
+#
+# Five, not three, and the reason is arithmetic rather than taste. With n=3 a
+# side, complete separation between two samples of pure noise happens with
+# probability 2/C(6,3) = 10% PER METRIC. Across 28 tracked metrics that is
+# roughly three spurious separations every run, and one duly appeared:
+# native_quic_parallel_8x4_256KiB "regressed" 9.94% with all three head runs
+# below all three base runs, on byte-identical code. At n=5 the same
+# probability is 2/C(10,5) = 0.79%, and it has to coincide with a >5% effect
+# before anything fails.
 #
 # Pairing alone was not enough. On BYTE-IDENTICAL native code, three runs in a
 # row each put a different metric over whatever line was drawn:
@@ -136,7 +145,7 @@ jobs:
 
       - name: Benchmark PR head
         run: |
-          for i in 1 2 3; do
+          for i in 1 2 3 4 5; do
             uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > head-$i.json
           done
 
@@ -157,7 +166,7 @@ jobs:
 
       - name: Benchmark the merge base
         run: |
-          for i in 1 2 3; do
+          for i in 1 2 3 4 5; do
             uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > base-$i.json
           done
 
@@ -172,8 +181,8 @@ jobs:
       - name: Gate the PR against its own merge base, measured on this runner
         run: |
           uv run --frozen --extra release python scripts/bench_gate.py \
-            --results head-1.json head-2.json head-3.json \
-            --baseline base-1.json base-2.json base-3.json \
+            --results head-1.json head-2.json head-3.json head-4.json head-5.json \
+            --baseline base-1.json base-2.json base-3.json base-4.json base-5.json \
             --require-comparable-host \
             --max-regression-percent 5
 
@@ -260,7 +269,7 @@ jobs:
 
       - name: Benchmark master
         run: |
-          for i in 1 2 3; do
+          for i in 1 2 3 4 5; do
             uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > master-$i.json
           done
 
@@ -278,7 +287,7 @@ jobs:
 
       - name: Benchmark the anchor
         run: |
-          for i in 1 2 3; do
+          for i in 1 2 3 4 5; do
             uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > anchor-$i.json
           done
 
@@ -293,8 +302,8 @@ jobs:
       - name: Gate master against the anchor, measured on this runner
         run: |
           uv run --frozen --extra release python scripts/bench_gate.py \
-            --results master-1.json master-2.json master-3.json \
-            --baseline anchor-1.json anchor-2.json anchor-3.json \
+            --results master-1.json master-2.json master-3.json master-4.json master-5.json \
+            --baseline anchor-1.json anchor-2.json anchor-3.json anchor-4.json anchor-5.json \
             --require-comparable-host \
             --max-regression-percent 5
 

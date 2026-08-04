@@ -215,7 +215,7 @@ def test_the_pr_job_measures_the_merge_base_on_the_same_runner() -> None:
         "the PR job must benchmark BOTH the head and the merge base"
     )
     assert "git checkout --force" in runs
-    assert "--results head-1.json" in runs and "--baseline base-1.json" in runs
+    assert "head-5.json" in runs and "--baseline base-1.json" in runs
 
 
 def test_the_stale_workstation_baseline_is_no_longer_a_gate() -> None:
@@ -261,7 +261,7 @@ def test_drift_is_measured_against_an_anchor_commit_built_here() -> None:
         "drift_watch must benchmark BOTH the anchor and master on this runner"
     )
     assert "DRIFT_ANCHOR" in runs
-    assert "--results master-1.json" in runs and "--baseline anchor-1.json" in runs
+    assert "master-5.json" in runs and "--baseline anchor-1.json" in runs
 
 
 def test_repeated_runs_take_the_fastest_observation(tmp_path: Path) -> None:
@@ -413,7 +413,7 @@ def test_both_jobs_repeat_each_side() -> None:
     spec = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     for job_name, job in spec["jobs"].items():
         blob = "\n".join(s.get("run") or "" for s in job["steps"])
-        assert blob.count("for i in 1 2 3") == 2, (
+        assert blob.count("for i in 1 2 3 4 5") == 2, (
             f"{job_name} must benchmark BOTH sides more than once; a single "
             "sample per side cannot support a 5% threshold"
         )
