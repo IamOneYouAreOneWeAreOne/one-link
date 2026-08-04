@@ -34,27 +34,35 @@
 # twice -- against a workstation recording, then against a same-runner-class
 # recording, which still reported AES-256KiB down 37% on an unchanged tree.
 #
-# Each side is benchmarked THREE times and the fastest observation per metric
-# is used. Even paired on one machine, a single run of a byte-identical tree
-# showed AES-256KiB down 9.03%. Throughput noise is one-sided -- a neighbour
-# can only ever slow a run down -- so the maximum is the honest estimate and
-# repetition is what makes a 5% threshold survivable.
+# Each side is benchmarked THREE times and every observation is kept.
 #
-# native_quic_* carries a 15% limit, and that number is measured, not chosen
-# to make red go away. Every figure below comes from comparing BYTE-IDENTICAL
-# native code, so all of it is noise:
+# Pairing alone was not enough. On BYTE-IDENTICAL native code, three runs in a
+# row each put a different metric over whatever line was drawn:
 #
-#   single run, paired     AES-256KiB          -9.03%
-#   best of 3, paired      AES                  within ~1%
-#   best of 3, paired      quic_round_trip_1MiB -7.75%
-#   best of 3, paired      quic_parallel_8x4    +6.84%
+#   single run       AES-256KiB  -9.03%   AES-16KiB  -5.62%
+#   best of 3        QUIC-1MiB   -7.75%
+#   best of 3        AES-16KiB   -6.20%   QUIC-16KiB -25.37%
 #
-# The crypto kernels settle down once repeated; the QUIC round trips do not,
-# because they cross a loopback socket and an async scheduler rather than
-# running straight through memory. One global threshold cannot fit both. The
-# alternative -- dropping the QUIC metrics -- would delete the coverage
-# instead of sizing it, and 15% still catches any regression that matters at
-# this layer.
+# All of that is noise. Tuning the threshold a fourth time would have been
+# fitting noise, so the criterion changed instead of the constant. A metric
+# fails only when BOTH hold:
+#
+#   effect size  the head's best run is more than 5% below the base's best
+#   separation   the head's best run is slower than the base's WORST run
+#
+# Separation asks the data rather than a constant. A real regression is
+# present in every repetition, so the two sample sets stop overlapping. Noise
+# does not separate: on the run above, the head's best AES-16KiB (3559 MB/s)
+# still sat above the base's worst (3525 MB/s), and the same for QUIC-16KiB
+# (420 vs 393). Both are now correctly reported as noisy and not separable,
+# with the numbers printed -- silently passing a measured drop is how a real
+# one would hide.
+#
+# Verified against the real artifacts of the run that failed: with this
+# criterion it passes, and an injected 30% regression on the same data still
+# fails on all 28 metrics. That also removed the need for the per-class QUIC
+# tolerance this file carried briefly -- with separation doing the work, every
+# metric is back under one strict 5%.
 #
 # bench_gate.py is passed --require-comparable-host in both, so it REFUSES to
 # compare across machines rather than reporting a meaningless delta.
@@ -167,7 +175,6 @@ jobs:
             --results head-1.json head-2.json head-3.json \
             --baseline base-1.json base-2.json base-3.json \
             --require-comparable-host \
-            --tolerance native_quic_=15 \
             --max-regression-percent 5
 
       - name: Keep both measurements
@@ -289,7 +296,6 @@ jobs:
             --results master-1.json master-2.json master-3.json \
             --baseline anchor-1.json anchor-2.json anchor-3.json \
             --require-comparable-host \
-            --tolerance native_quic_=15 \
             --max-regression-percent 5
 
       - name: Publish both measurements

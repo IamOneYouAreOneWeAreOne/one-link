@@ -338,67 +338,74 @@ def _run(results: list[Path], bases: list[Path], *extra: str):
     )
 
 
-NOISY = {"native_quic_round_trip_1024KiB_x20": 800_000_000.0}
-QUIET = {"native_aead_aes_encrypt_16KiB": 3_000_000_000.0}
+M = "native_quic_round_trip_16KiB_x200"
 
 
-def test_a_noisy_metric_class_can_carry_its_own_limit(tmp_path: Path) -> None:
-    """Sized from measurement, not chosen to make red go away.
+def test_a_drop_inside_the_base_spread_is_not_a_regression(tmp_path: Path) -> None:
+    """Separation, and the reason the threshold stopped being tuned.
 
-    On byte-identical code, best-of-3 settled the crypto kernels to ~1% but
-    left quic_round_trip_1MiB at -7.75% and quic_parallel_8x4 at +6.84%. Those
-    cross a loopback socket and an async scheduler instead of running through
-    memory, so they do not converge the way an in-memory kernel does.
+    On byte-identical code, three successive runs each pushed a DIFFERENT
+    metric past whatever line was drawn: -9.03% AES, then -7.75% QUIC, then
+    -6.20% AES and -25.37% QUIC. A point estimate cannot tell a regression
+    from a noisy neighbour, so a fourth constant would have been fitting noise.
+
+    A metric now fails only if the head's best run is also slower than the
+    base's WORST run. These numbers are the real ones from that third run: the
+    head's best QUIC-16KiB was 419.83 MB/s while the base ranged down to
+    393.12, so the sample sets overlap and the drop is not attributable.
     """
-    slower = {k: v * 0.92 for k, v in NOISY.items()}  # 8%: noise for this class
-    fresh = write(tmp_path, "f.json", payload(CI_RUNNER, slower))
-    base = write(tmp_path, "b.json", payload(CI_RUNNER, NOISY))
-    assert _run([fresh], [base]).returncode == 1, "8% must fail at the default 5%"
-    proc = _run([fresh], [base], "--tolerance", "native_quic_=15")
-    assert proc.returncode == 0, f"{proc.stdout}{proc.stderr}"
-
-
-def test_the_wider_limit_does_not_leak_to_other_metrics(tmp_path: Path) -> None:
-    """The control. A class override must not become a global one."""
-    slower = {k: v * 0.92 for k, v in QUIET.items()}
-    fresh = write(tmp_path, "f.json", payload(CI_RUNNER, slower))
-    base = write(tmp_path, "b.json", payload(CI_RUNNER, QUIET))
-    proc = _run([fresh], [base], "--tolerance", "native_quic_=15")
-    assert proc.returncode == 1, (
-        "a crypto metric must still be held to 5% while QUIC gets 15%:\n"
+    bases = [
+        write(tmp_path, f"b{i}.json", payload(CI_RUNNER, {M: v}))
+        for i, v in enumerate([562.58e6, 460.0e6, 393.12e6])
+    ]
+    heads = [
+        write(tmp_path, f"h{i}.json", payload(CI_RUNNER, {M: v}))
+        for i, v in enumerate([419.83e6, 410.0e6, 400.0e6])
+    ]
+    proc = _run(heads, bases)
+    assert proc.returncode == 0, (
+        "a 25% drop that sits inside the base's own spread must not fail:\n"
         f"{proc.stdout}{proc.stderr}"
+    )
+    assert "not separable" in proc.stdout, (
+        f"the measured drop must still be REPORTED, not swallowed: {proc.stdout}"
     )
 
 
-def test_the_wider_limit_still_catches_a_gross_regression(tmp_path: Path) -> None:
-    slower = {k: v * 0.60 for k, v in NOISY.items()}  # 40%, far past 15%
-    fresh = write(tmp_path, "f.json", payload(CI_RUNNER, slower))
-    base = write(tmp_path, "b.json", payload(CI_RUNNER, NOISY))
-    proc = _run([fresh], [base], "--tolerance", "native_quic_=15")
+def test_a_drop_below_every_base_run_is_a_regression(tmp_path: Path) -> None:
+    """The control. Separation must not become a way to pass everything.
+
+    Same base spread; the head is now slower than even the worst base run, so
+    the effect survived the machine's own variance.
+    """
+    bases = [
+        write(tmp_path, f"b{i}.json", payload(CI_RUNNER, {M: v}))
+        for i, v in enumerate([562.58e6, 460.0e6, 393.12e6])
+    ]
+    heads = [
+        write(tmp_path, f"h{i}.json", payload(CI_RUNNER, {M: v}))
+        for i, v in enumerate([350.0e6, 340.0e6, 330.0e6])
+    ]
+    proc = _run(heads, bases)
     assert proc.returncode == 1, f"{proc.stdout}{proc.stderr}"
-    assert "limit 15.0%" in proc.stderr, proc.stderr
+    assert "every base run was faster" in proc.stderr, proc.stderr
 
 
-def test_a_malformed_tolerance_is_refused(tmp_path: Path) -> None:
-    fresh = write(tmp_path, "f.json", payload(CI_RUNNER, QUIET))
-    base = write(tmp_path, "b.json", payload(CI_RUNNER, QUIET))
-    assert _run([fresh], [base], "--tolerance", "nonsense").returncode == 2
-    assert _run([fresh], [base], "--tolerance", "native_=abc").returncode == 2
+def test_separation_alone_does_not_fail_a_tiny_difference(tmp_path: Path) -> None:
+    """Both conditions are required, not either.
 
-
-def test_no_metric_class_is_exempted_entirely() -> None:
-    """Sizing a noisy gate is legitimate; switching it off is not."""
-    yaml = pytest.importorskip("yaml")
-    spec = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    for job_name, job in spec["jobs"].items():
-        blob = "\n".join(s.get("run") or "" for s in job["steps"])
-        for line in blob.splitlines():
-            if "--tolerance" in line:
-                value = float(line.split("=")[1].split()[0].strip("\\ "))
-                assert value <= 25.0, (
-                    f"{job_name} tolerance {value}% is wide enough to be no "
-                    "gate at all; narrow the metric or fix the noise instead"
-                )
+    A 1% drop that happens to separate is not worth failing a build over; the
+    effect-size threshold still has to be crossed.
+    """
+    bases = [
+        write(tmp_path, f"b{i}.json", payload(CI_RUNNER, {M: v}))
+        for i, v in enumerate([1000.0e6, 999.0e6, 998.0e6])
+    ]
+    heads = [
+        write(tmp_path, f"h{i}.json", payload(CI_RUNNER, {M: v}))
+        for i, v in enumerate([997.0e6, 996.0e6, 995.0e6])
+    ]
+    assert _run(heads, bases).returncode == 0
 
 
 def test_both_jobs_repeat_each_side() -> None:

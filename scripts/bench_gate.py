@@ -42,25 +42,20 @@ def _index_results(payload: dict) -> dict[str, float]:
     return out
 
 
-def _reduce_best(payloads: list[dict]) -> dict[str, float]:
-    """Per metric, the FASTEST observation across repeated runs.
+def _samples(payloads: list[dict]) -> dict[str, list[float]]:
+    """Every observation of every metric, kept rather than collapsed.
 
     Throughput noise on shared CI is one-sided: a neighbour can steal cycles
-    and make a run slower, but nothing makes it spuriously faster. So the
-    maximum across repetitions is the closest estimate of what the machine can
-    actually do, and taking it suppresses interference without inventing
-    headroom.
-
-    Measured need: with `native/` byte-identical between the two sides, a
-    single paired run still reported native_aead_aes_encrypt_256KiB down 9.03%
-    -- entirely noise. A 5% gate on single runs cannot hold.
+    and slow a run down, but nothing makes it spuriously faster. The spread
+    between repetitions is therefore a direct measurement of the interference
+    on this machine right now, and it is what tells a real regression from a
+    bad neighbour.
     """
-    best: dict[str, float] = {}
+    out: dict[str, list[float]] = {}
     for payload in payloads:
         for name, value in _index_results(payload).items():
-            if value > best.get(name, 0.0):
-                best[name] = value
-    return best
+            out.setdefault(name, []).append(value)
+    return out
 
 
 def _host(payload: dict) -> dict:
@@ -169,17 +164,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Maximum allowed regression vs baseline, in percent (default 5).",
     )
     p.add_argument(
-        "--tolerance",
-        action="append",
-        default=[],
-        metavar="PREFIX=PERCENT",
-        help=(
-            "Per-metric-class override, e.g. native_quic_=15. Metrics differ in "
-            "how noisy they are and one global threshold cannot fit both a "
-            "deterministic in-memory kernel and a loopback network round trip."
-        ),
-    )
-    p.add_argument(
         "--require-comparable-host",
         action="store_true",
         help=(
@@ -208,8 +192,10 @@ def main(argv: list[str] | None = None) -> int:
 
     results_payloads = [_read_json(p) for p in results_paths]
     baseline_payloads = [_read_json(p) for p in baseline_paths]
-    fresh = _reduce_best(results_payloads)
-    baseline = _reduce_best(baseline_payloads)
+    fresh_samples = _samples(results_payloads)
+    baseline_samples = _samples(baseline_payloads)
+    fresh = {name: max(values) for name, values in fresh_samples.items()}
+    baseline = {name: max(values) for name, values in baseline_samples.items()}
 
     fresh_host = _host(results_payloads[0])
     baseline_host = _host(baseline_payloads[0])
@@ -237,28 +223,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAIL: baseline empty: {baseline_paths[0]}", file=sys.stderr)
         return 2
 
-    overrides: list[tuple[str, float]] = []
-    for raw in args.tolerance:
-        prefix, _, percent = raw.partition("=")
-        if not prefix or not percent:
-            print(f"FAIL: malformed --tolerance {raw!r}", file=sys.stderr)
-            return 2
-        try:
-            overrides.append((prefix, float(percent)))
-        except ValueError:
-            print(f"FAIL: --tolerance {raw!r} is not a percentage", file=sys.stderr)
-            return 2
-    # Longest prefix wins, so a specific class beats a general one.
-    overrides.sort(key=lambda item: len(item[0]), reverse=True)
-
-    def tolerance_for(metric: str) -> float:
-        for prefix, percent in overrides:
-            if metric.startswith(prefix):
-                return percent
-        return args.max_regression_percent
-
-    if overrides:
-        print("  per-class tolerances: " + ", ".join(f"{p}*={v}%" for p, v in overrides))
+    threshold = args.max_regression_percent / 100.0
     failures: list[str] = []
 
     for name, base_bps in baseline.items():
@@ -270,14 +235,41 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if base_bps <= 0:
             continue
-        allowed = tolerance_for(name)
-        threshold = allowed / 100.0
         ratio = fresh_bps / base_bps
-        if ratio < (1.0 - threshold):
+        # Two conditions, both required.
+        #
+        # (1) EFFECT SIZE: the best head observation is worse than the best
+        #     base observation by more than the tolerance.
+        # (2) SEPARATION: the best head observation is worse than the WORST
+        #     base observation -- the two sample sets do not overlap at all.
+        #
+        # (1) alone is what failed three times running on byte-identical code:
+        # -9.03% AES, then -7.75% QUIC, then -6.20% AES and -25.37% QUIC. Every
+        # run put a different metric over whatever line was drawn, because a
+        # point estimate cannot tell a regression from a noisy neighbour.
+        #
+        # (2) asks the data instead of a constant. If the head's best run is
+        # still slower than every base run, the effect survived the machine's
+        # own measured variance. If the sets overlap, the spread explains the
+        # difference and there is nothing to report. A real regression is
+        # present in every repetition, so it separates; noise does not.
+        worst_base = min(baseline_samples.get(name, [base_bps]))
+        separated = fresh_bps < worst_base
+        if ratio < (1.0 - threshold) and separated:
             regress_pct = (1.0 - ratio) * 100.0
             failures.append(
-                f"  - {name}: regressed {regress_pct:.2f}% (limit {allowed}%) "
-                f"({base_bps / 1e6:.2f} MB/s -> {fresh_bps / 1e6:.2f} MB/s)"
+                f"  - {name}: regressed {regress_pct:.2f}% (limit {args.max_regression_percent}%) "
+                f"({base_bps / 1e6:.2f} MB/s -> {fresh_bps / 1e6:.2f} MB/s); "
+                f"every base run was faster (worst base "
+                f"{worst_base / 1e6:.2f} MB/s)"
+            )
+        elif ratio < (1.0 - threshold):
+            # Over the line but inside the machine's own spread. Say so --
+            # silently passing a measured drop is how a real one hides.
+            print(
+                f"  noisy {name}: {(1.0 - ratio) * 100.0:.2f}% below best base, "
+                f"but base itself ranged down to {worst_base / 1e6:.2f} MB/s "
+                f"({len(baseline_samples.get(name, []))} runs); not separable"
             )
         else:
             delta_pct = (ratio - 1.0) * 100.0
