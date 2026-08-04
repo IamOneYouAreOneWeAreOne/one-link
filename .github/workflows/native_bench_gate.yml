@@ -156,20 +156,30 @@ jobs:
     # every one of them compared green against its own base.
     #
     # That drift check is what the committed baseline was supposed to be, and
-    # it never worked: the baseline was recorded on a 24-core Windows
-    # workstation while the gate ran on ubuntu-latest, so it was measuring the
-    # machine. This job keeps the drift coverage and fixes the provenance --
-    # it compares master against a baseline recorded on THIS runner class, and
-    # refuses to compare at all if the hosts do not match.
+    # it never worked: it was recorded on a 24-core Windows workstation while
+    # the gate ran on ubuntu-latest, so it measured the machine.
     #
-    # bench_gate.py exits NEUTRAL when the baseline file is absent, so this
-    # bootstraps green and prints the JSON to seed the first baseline.
+    # Recording a baseline on the RIGHT runner class does not fix it either,
+    # and this job proved that on its first real run: comparing an unchanged
+    # tree against a baseline captured on the same class one commit earlier
+    # reported native_aead_aes_encrypt_256KiB down 37% (3574 -> 2251 MB/s).
+    # Same class is not the same machine -- shared CI has noisy neighbours, and
+    # that variance swamps any 5% threshold. A committed number can therefore
+    # only ever be flaky or meaningless.
+    #
+    # So drift is measured the way the PR gate measures a change: build and
+    # benchmark BOTH the anchor commit and master here, in one job, on one
+    # machine. The hardware and its neighbours are common to both sides and
+    # cancel. bench_baselines/DRIFT_ANCHOR names the commit and is moved
+    # deliberately, never to silence a red gate.
     name: native throughput drift on master
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The anchor commit is built here too, so its history must be present.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install Rust
@@ -196,27 +206,63 @@ jobs:
       - name: Install deps
         run: uv sync --frozen --python python --extra release
 
-      - name: Build native (release)
+      - name: Read the drift anchor
+        id: anchor
+        run: |
+          anchor="$(grep -vE '^\s*(#|$)' bench_baselines/DRIFT_ANCHOR | head -n 1 | tr -d '[:space:]')"
+          if [ -z "$anchor" ]; then
+            echo "::error::bench_baselines/DRIFT_ANCHOR names no commit"
+            exit 1
+          fi
+          echo "sha=$anchor" >> "$GITHUB_OUTPUT"
+          echo "drift anchor: $anchor"
+
+      - name: Build native (release) -- master
         working-directory: native
         run: uv run --project .. --frozen --extra release maturin develop --release --locked
 
       - name: Benchmark master
         run: |
           uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > master.json
-          cat master.json
 
-      - name: Compare against the CI-recorded baseline
+      - name: Check out the drift anchor
+        env:
+          ANCHOR: ${{ steps.anchor.outputs.sha }}
+        run: git checkout --force "$ANCHOR"
+
+      - name: Sync deps for the anchor
+        run: uv sync --frozen --python python --extra release
+
+      - name: Build native (release) -- anchor
+        working-directory: native
+        run: uv run --project .. --frozen --extra release maturin develop --release --locked
+
+      - name: Benchmark the anchor
+        run: |
+          uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > anchor.json
+
+      - name: Restore master
+        env:
+          HEAD_SHA: ${{ github.sha }}
+        run: git checkout --force "$HEAD_SHA"
+
+      - name: Sync deps for master
+        run: uv sync --frozen --python python --extra release
+
+      - name: Gate master against the anchor, measured on this runner
         run: |
           uv run --frozen --extra release python scripts/bench_gate.py \
             --results master.json \
-            --baseline bench_baselines/native_chunk_ci_ubuntu.json \
+            --baseline anchor.json \
             --require-comparable-host \
             --max-regression-percent 5
 
-      - name: Publish the measurement
+      - name: Publish both measurements
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: bench-master-${{ github.run_id }}
-          path: master.json
+          name: bench-drift-${{ github.run_id }}
+          path: |
+            master.json
+            anchor.json
           if-no-files-found: warn

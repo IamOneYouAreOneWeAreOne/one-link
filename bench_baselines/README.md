@@ -23,14 +23,23 @@ reporting a meaningless delta:
 - **Per PR** (`bench_gate`): the PR head and its merge base are built and
   benchmarked in the same job on the same runner. Hardware is constant by
   construction, so a difference is attributable to the change.
-- **Per master push** (`drift_watch`): compares master against
-  `native_chunk_ci_ubuntu.json`, a baseline recorded on that same runner
-  class. This is the coverage the paired check cannot give -- twenty merged
+- **Per master push** (`drift_watch`): builds and benchmarks both the commit
+  named in `DRIFT_ANCHOR` and master, in one job on one machine, and compares
+  those. This is the coverage the paired PR check cannot give -- twenty merged
   PRs each taking 4% all pass against their own base while throughput halves.
 
-`native_chunk_ci_ubuntu.json` is seeded from a `drift_watch` run: the gate
-exits NEUTRAL when the baseline is absent and prints the fresh JSON, which is
-committed as the new baseline. Regenerate it deliberately, never automatically.
+**Recording a baseline on the right runner class does not work either**, and
+that was tried and measured. A `drift_watch` run comparing an unchanged tree
+against a baseline captured on the same class one commit earlier reported
+`native_aead_aes_encrypt_256KiB` down 37% (3574 -> 2251 MB/s). Same runner
+class is not the same machine: shared CI has noisy neighbours, and that
+variance swamps any 5% threshold. So a committed file of MB/s numbers can only
+ever be flaky or meaningless, and there is no longer one. Both gates measure
+both sides themselves.
+
+`DRIFT_ANCHOR` names a commit, not a number. Move it deliberately, after
+reviewing an intended throughput change, with the justification in the commit
+message -- never to silence a red gate.
 
 `coherence_field.json` is a historical Python-FFI microbenchmark captured on
 one local workstation. It is retained for controlled laboratory comparisons,

@@ -436,7 +436,13 @@ def test_workflows_use_frozen_uv_and_explicit_root_for_native_builds():
     # "PQ-hybrid KEM UNAVAILABLE" and the call never reached media
     # (caller_frames=0, stopped during incoming_call). It was measuring an
     # incomplete install rather than the product.
-    assert nested_maturin_count == 13
+    # 16 as of the paired benchmark gates. Three were added in
+    # native_bench_gate.yml: the PR gate builds the head AND its merge base,
+    # and drift_watch builds master AND the anchor commit. Both compare two
+    # builds made on ONE runner because the old gate compared a 4-core cloud
+    # VM against a baseline recorded on a 24-core Windows desktop, and failed
+    # every PR it ever ran on.
+    assert nested_maturin_count == 16
 
 
 def test_windows_native_binding_uses_shell_matching_its_commands():
@@ -598,7 +604,16 @@ def test_continuous_builds_are_ephemeral_and_have_no_release_authority():
 
 def test_rolling_archives_have_noncolliding_archive_sidecars():
     text = (_WORKFLOWS / "auto_build.yml").read_text(encoding="utf-8")
-    assert "one-link/BUNDLE_SHA256SUMS" in text
+    # The in-archive member manifest and the archive-level sidecar must stay
+    # distinct files. The manifest is no longer written inline here -- it goes
+    # through scripts/write_bundle_manifest.py, the single writer that emits
+    # the format the product actually parses. The inline version wrote classic
+    # sha256sum output with no header, so every bundle built here failed
+    # validate_installed_bundle and the in-app updater was dead. What this
+    # test cares about is unchanged: the manifest lands INSIDE dist/one-link,
+    # the .zip.sha256 sidecar is separate, and neither name collides.
+    assert "scripts/write_bundle_manifest.py" in text
+    assert "--bundle dist/one-link" in text
     assert '"${ARTIFACT_NAME}.zip.sha256"' in text
     assert "dist/${{ matrix.artifact-name }}.zip.sha256" in text
     assert "dist/one-link.sha256" not in text

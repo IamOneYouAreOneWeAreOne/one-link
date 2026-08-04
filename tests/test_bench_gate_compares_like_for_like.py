@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -227,3 +228,51 @@ def test_the_stale_workstation_baseline_is_no_longer_a_gate() -> None:
         assert "bench_baselines/native_chunk.json" not in blob, (
             f"{job_name} still gates on the workstation-recorded baseline"
         )
+
+
+def test_no_gate_compares_against_a_committed_number() -> None:
+    """Same runner CLASS is still not the same machine.
+
+    Recording a baseline on ubuntu-latest and comparing later ubuntu-latest
+    runs to it was tried, and its first real run reported
+    native_aead_aes_encrypt_256KiB down 37% (3574 -> 2251 MB/s) on an
+    UNCHANGED tree. Shared CI has noisy neighbours and that variance swamps a
+    5% threshold, so any committed MB/s file can only be flaky or meaningless.
+    Both gates must measure both sides themselves.
+    """
+    yaml = pytest.importorskip("yaml")
+    spec = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    for job_name, job in spec["jobs"].items():
+        blob = "\n".join(s.get("run") or "" for s in job["steps"])
+        for line in blob.splitlines():
+            if "--baseline" in line:
+                target = line.split("--baseline")[1].split()[0].strip("\\ ")
+                assert not target.startswith("bench_baselines/"), (
+                    f"{job_name} compares against the committed file {target}; "
+                    "it must benchmark both sides on this runner instead"
+                )
+
+
+def test_drift_is_measured_against_an_anchor_commit_built_here() -> None:
+    yaml = pytest.importorskip("yaml")
+    spec = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    runs = "\n".join(s.get("run") or "" for s in spec["jobs"]["drift_watch"]["steps"])
+    assert runs.count("perf_lab_native") == 2, (
+        "drift_watch must benchmark BOTH the anchor and master on this runner"
+    )
+    assert "DRIFT_ANCHOR" in runs
+    assert "--results master.json" in runs and "--baseline anchor.json" in runs
+
+
+def test_the_anchor_names_a_commit_not_a_measurement() -> None:
+    anchor_file = REPO / "bench_baselines" / "DRIFT_ANCHOR"
+    assert anchor_file.is_file(), "DRIFT_ANCHOR is missing"
+    lines = [
+        line.strip()
+        for line in anchor_file.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert len(lines) == 1, f"expected exactly one commit, got {lines}"
+    assert re.fullmatch(r"[0-9a-f]{40}", lines[0]), (
+        f"the anchor must be a full commit sha: {lines[0]!r}"
+    )

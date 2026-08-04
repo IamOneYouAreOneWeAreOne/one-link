@@ -339,11 +339,15 @@ jobs:
           # from the parser instead of restating them, so this cannot drift
           # apart again, and --verify re-reads the result through the product's
           # own validator before this step succeeds.
+          # Through uv, not a bare `python`: the writer imports the parser to
+          # get the format, and one_link.update_transaction pulls `packaging`
+          # transitively. A bare interpreter fails with ModuleNotFoundError.
           cd ..
-          ONE_LINK_BUNDLE_EXECUTABLE="${EXE_NAME}" python scripts/write_bundle_manifest.py \
-            --bundle dist/one-link \
-            --root-name one-link \
-            --verify
+          ONE_LINK_BUNDLE_EXECUTABLE="${EXE_NAME}" \
+            uv run --frozen --extra release python scripts/write_bundle_manifest.py \
+              --bundle dist/one-link \
+              --root-name one-link \
+              --verify
           cd dist
 
       - name: package bundle as a zip

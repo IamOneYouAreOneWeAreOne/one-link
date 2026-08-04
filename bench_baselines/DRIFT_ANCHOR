@@ -1,0 +1,16 @@
+# The commit master's native throughput is measured against.
+#
+# NOT a stored number. A committed MB/s figure cannot be compared to a fresh
+# one on shared CI: two runs of the identical tree on the same runner class
+# disagreed by 37% on native_aead_aes_encrypt_256KiB (3574 -> 2251 MB/s).
+# Noisy neighbours on shared hardware swamp any 5% threshold, so a baseline
+# file of numbers can only ever be flaky or useless.
+#
+# So drift is measured the same way the PR gate measures a change: build and
+# benchmark BOTH this anchor and master, in one job, on one machine. Hardware
+# and neighbours are then common to both sides and cancel out.
+#
+# Move this deliberately, after reviewing an intended throughput change, with
+# the justification in the commit message. Moving it to silence a red gate is
+# the one thing it must never be used for.
+c85089b11bae9464e217eb57329cc77551be6647
