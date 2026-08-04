@@ -150,6 +150,47 @@ def test_the_continuous_build_uses_the_single_writer() -> None:
     )
 
 
+def test_macos_self_install_cannot_validate_in_either_channel() -> None:
+    """A registered gap, asserted rather than assumed.
+
+    validate_installed_bundle requires every manifest row to start with
+    "one-link". The macOS contract puts the launcher at
+    Contents/MacOS/one-link, so the install root is the .app directory, and the
+    RELEASED macOS manifest is rooted at "one-link.app" (verified against
+    v0.21.0's one-link-macos-arm64.zip, which carries 126 SYMLINK rows under
+    that root). Those two rules cannot both hold, so macOS self-install
+    validates in neither the released nor the rolling channel.
+
+    Reconciling them changes either the manifest root convention or the
+    validator, and both reach signed release artifacts -- a product decision,
+    not a cleanup. This test exists so the gap cannot be forgotten: when it is
+    fixed, this fails and tells you to re-enable --verify on macOS in
+    auto_build.yml.
+    """
+    from one_link.update_metadata import PLATFORM_CONTRACTS
+
+    macos = PLATFORM_CONTRACTS["macos-arm64"]
+    assert macos.executable == "Contents/MacOS/one-link", (
+        "the macOS launcher path changed; re-derive whether the install root "
+        f"is still the .app: {macos.executable!r}"
+    )
+
+    source = (REPO / "src" / "one_link" / "update_transaction.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'parts[:1] != ("one-link",)' in source, (
+        "validate_installed_bundle no longer hardcodes the 'one-link' manifest "
+        "root. If it now accepts the .app root, macOS self-install may work -- "
+        "re-enable --verify for macOS in auto_build.yml and delete this test."
+    )
+
+    workflow = AUTO_BUILD.read_text(encoding="utf-8")
+    assert 'if [ "${RUNNER_OS}" = "macOS" ]' in workflow, (
+        "the macOS --verify exception must stay explicit and commented, not "
+        "quietly dropped"
+    )
+
+
 def test_the_capability_failure_is_no_longer_silent() -> None:
     source = (REPO / "src" / "one_link" / "update_helper.py").read_text(encoding="utf-8")
     marker = "managed bundle validation failed; in-app update is unavailable"

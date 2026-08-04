@@ -1,13 +1,29 @@
 #!/usr/bin/env python3
 """File engine v2 benchmark regression gate.
 
-Compares a fresh ``perf_lab_native --json`` output against a baseline JSON
-committed at ``bench_baselines/native_chunk.json``. Fails if any baseline
-metric regresses by more than the threshold, default 5%.
+Compares two ``perf_lab_native --json`` result sets and fails if any tracked
+metric regresses by more than the threshold. The gate is one-way: regressions
+fail, improvements are silent.
 
-The gate is intentionally one-way: regressions fail the PR; improvements are
-silent. To accept a regression, a maintainer updates the baseline in the same
-PR with a justification commit message. There is no auto-update path.
+Both sides must be MEASURED, not remembered. Comparing a fresh run against a
+committed file of MB/s does not work, and the two ways it fails were both
+observed here:
+
+  * A baseline recorded on a 24-core Windows workstation, compared against
+    ubuntu-latest, reported ChaCha down 12% and AES up 293% in one run. That
+    is AES-NI and core count, not code.
+  * A baseline recorded on the SAME runner class one commit earlier reported
+    AES-256KiB down 37% on an unchanged tree. Same class is not the same
+    machine; shared CI has noisy neighbours.
+
+So callers benchmark both sides on one runner in one job, and pass repeated
+runs of each. ``--require-comparable-host`` refuses a mismatched comparison
+outright rather than reporting a meaningless delta.
+
+Repetition matters: even paired on one machine, a single run of a byte-
+identical tree showed AES-256KiB down 9.03%. Throughput noise is one-sided --
+interference only ever slows a run down -- so the fastest observation per
+metric is taken across repetitions.
 """
 
 from __future__ import annotations
@@ -24,6 +40,27 @@ def _index_results(payload: dict) -> dict[str, float]:
     for r in payload.get("results", []):
         out[r["name"]] = float(r["bytes_per_second_median"])
     return out
+
+
+def _reduce_best(payloads: list[dict]) -> dict[str, float]:
+    """Per metric, the FASTEST observation across repeated runs.
+
+    Throughput noise on shared CI is one-sided: a neighbour can steal cycles
+    and make a run slower, but nothing makes it spuriously faster. So the
+    maximum across repetitions is the closest estimate of what the machine can
+    actually do, and taking it suppresses interference without inventing
+    headroom.
+
+    Measured need: with `native/` byte-identical between the two sides, a
+    single paired run still reported native_aead_aes_encrypt_256KiB down 9.03%
+    -- entirely noise. A 5% gate on single runs cannot hold.
+    """
+    best: dict[str, float] = {}
+    for payload in payloads:
+        for name, value in _index_results(payload).items():
+            if value > best.get(name, 0.0):
+                best[name] = value
+    return best
 
 
 def _host(payload: dict) -> dict:
@@ -110,8 +147,21 @@ def _read_json(path: Path) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--results", required=True, help="Fresh perf_lab_native JSON")
-    p.add_argument("--baseline", required=True, help="Committed baseline JSON")
+    p.add_argument(
+        "--results",
+        required=True,
+        nargs="+",
+        help=(
+            "Fresh perf_lab_native JSON. Pass repeated runs of the SAME build "
+            "and the fastest observation per metric is used."
+        ),
+    )
+    p.add_argument(
+        "--baseline",
+        required=True,
+        nargs="+",
+        help="The other side's JSON, same repetition rule.",
+    )
     p.add_argument(
         "--max-regression-percent",
         type=float,
@@ -129,29 +179,37 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = p.parse_args(argv)
 
-    results_path = Path(args.results)
-    baseline_path = Path(args.baseline)
+    results_paths = [Path(p) for p in args.results]
+    baseline_paths = [Path(p) for p in args.baseline]
 
-    if not results_path.is_file():
-        print(f"FAIL: results file missing: {results_path}", file=sys.stderr)
+    missing = [p for p in results_paths if not p.is_file()]
+    if missing:
+        print(f"FAIL: results file missing: {missing[0]}", file=sys.stderr)
         return 2
-    if not baseline_path.is_file():
+    absent = [p for p in baseline_paths if not p.is_file()]
+    if absent:
         print(
-            f"NEUTRAL: baseline file missing ({baseline_path}); commit current "
+            f"NEUTRAL: baseline file missing ({absent[0]}); commit current "
             f"results as the initial baseline.",
             file=sys.stderr,
         )
         return 0
 
-    fresh_payload = _read_json(results_path)
-    baseline_payload = _read_json(baseline_path)
-    fresh = _index_results(fresh_payload)
-    baseline = _index_results(baseline_payload)
+    results_payloads = [_read_json(p) for p in results_paths]
+    baseline_payloads = [_read_json(p) for p in baseline_paths]
+    fresh = _reduce_best(results_payloads)
+    baseline = _reduce_best(baseline_payloads)
 
-    fresh_host = _host(fresh_payload)
-    baseline_host = _host(baseline_payload)
-    print(f"  measured on: {_describe_host(fresh_host)}")
-    print(f"  compared to: {_describe_host(baseline_host)}")
+    fresh_host = _host(results_payloads[0])
+    baseline_host = _host(baseline_payloads[0])
+    print(
+        f"  measured on: {_describe_host(fresh_host)} "
+        f"(best of {len(results_payloads)})"
+    )
+    print(
+        f"  compared to: {_describe_host(baseline_host)} "
+        f"(best of {len(baseline_payloads)})"
+    )
 
     if args.require_comparable_host:
         comparable, why = _hosts_are_comparable(fresh_host, baseline_host)
@@ -165,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     if not baseline:
-        print(f"FAIL: baseline empty: {baseline_path}", file=sys.stderr)
+        print(f"FAIL: baseline empty: {baseline_paths[0]}", file=sys.stderr)
         return 2
 
     threshold = args.max_regression_percent / 100.0

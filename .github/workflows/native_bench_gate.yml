@@ -26,8 +26,19 @@
 #
 #   drift_watch  (push to master): the coverage the paired check cannot give.
 #                Twenty merged PRs each taking 4% all pass against their own
-#                base while throughput halves. This compares master against a
-#                baseline recorded on THIS runner class.
+#                base while throughput halves. It builds and benchmarks the
+#                commit named in bench_baselines/DRIFT_ANCHOR alongside master,
+#                here, for the same reason.
+#
+# Neither compares against a stored number. That was tried twice and failed
+# twice -- against a workstation recording, then against a same-runner-class
+# recording, which still reported AES-256KiB down 37% on an unchanged tree.
+#
+# Each side is benchmarked THREE times and the fastest observation per metric
+# is used. Even paired on one machine, a single run of a byte-identical tree
+# showed AES-256KiB down 9.03%. Throughput noise is one-sided -- a neighbour
+# can only ever slow a run down -- so the maximum is the honest estimate and
+# repetition is what makes a 5% threshold survivable.
 #
 # bench_gate.py is passed --require-comparable-host in both, so it REFUSES to
 # compare across machines rather than reporting a meaningless delta.
@@ -101,8 +112,9 @@ jobs:
 
       - name: Benchmark PR head
         run: |
-          uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > head.json
-          cat head.json
+          for i in 1 2 3; do
+            uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > head-$i.json
+          done
 
       # Everything from here to the gate exists to measure the MERGE BASE on
       # this same runner. bench_gate.py keeps the JSON files (untracked), so
@@ -121,8 +133,9 @@ jobs:
 
       - name: Benchmark the merge base
         run: |
-          uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > base.json
-          cat base.json
+          for i in 1 2 3; do
+            uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > base-$i.json
+          done
 
       - name: Restore the PR head
         env:
@@ -135,8 +148,8 @@ jobs:
       - name: Gate the PR against its own merge base, measured on this runner
         run: |
           uv run --frozen --extra release python scripts/bench_gate.py \
-            --results head.json \
-            --baseline base.json \
+            --results head-1.json head-2.json head-3.json \
+            --baseline base-1.json base-2.json base-3.json \
             --require-comparable-host \
             --max-regression-percent 5
 
@@ -146,8 +159,8 @@ jobs:
         with:
           name: bench-paired-${{ github.run_id }}
           path: |
-            head.json
-            base.json
+            head-*.json
+            base-*.json
           if-no-files-found: warn
 
   drift_watch:
@@ -223,7 +236,9 @@ jobs:
 
       - name: Benchmark master
         run: |
-          uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > master.json
+          for i in 1 2 3; do
+            uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > master-$i.json
+          done
 
       - name: Check out the drift anchor
         env:
@@ -239,7 +254,9 @@ jobs:
 
       - name: Benchmark the anchor
         run: |
-          uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > anchor.json
+          for i in 1 2 3; do
+            uv run --frozen --extra release python -m one_link.perf_lab_native --json --no-legacy --size-mib 128 > anchor-$i.json
+          done
 
       - name: Restore master
         env:
@@ -252,8 +269,8 @@ jobs:
       - name: Gate master against the anchor, measured on this runner
         run: |
           uv run --frozen --extra release python scripts/bench_gate.py \
-            --results master.json \
-            --baseline anchor.json \
+            --results master-1.json master-2.json master-3.json \
+            --baseline anchor-1.json anchor-2.json anchor-3.json \
             --require-comparable-host \
             --max-regression-percent 5
 
@@ -263,6 +280,6 @@ jobs:
         with:
           name: bench-drift-${{ github.run_id }}
           path: |
-            master.json
-            anchor.json
+            master-*.json
+            anchor-*.json
           if-no-files-found: warn

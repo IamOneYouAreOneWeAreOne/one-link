@@ -215,7 +215,7 @@ def test_the_pr_job_measures_the_merge_base_on_the_same_runner() -> None:
         "the PR job must benchmark BOTH the head and the merge base"
     )
     assert "git checkout --force" in runs
-    assert "--results head.json" in runs and "--baseline base.json" in runs
+    assert "--results head-1.json" in runs and "--baseline base-1.json" in runs
 
 
 def test_the_stale_workstation_baseline_is_no_longer_a_gate() -> None:
@@ -261,7 +261,78 @@ def test_drift_is_measured_against_an_anchor_commit_built_here() -> None:
         "drift_watch must benchmark BOTH the anchor and master on this runner"
     )
     assert "DRIFT_ANCHOR" in runs
-    assert "--results master.json" in runs and "--baseline anchor.json" in runs
+    assert "--results master-1.json" in runs and "--baseline anchor-1.json" in runs
+
+
+def test_repeated_runs_take_the_fastest_observation(tmp_path: Path) -> None:
+    """Throughput noise is one-sided, so the max is the honest estimate.
+
+    Even paired on one machine, a single run of a byte-identical tree reported
+    native_aead_aes_encrypt_256KiB down 9.03%. A neighbour stealing cycles can
+    only ever make a run slower; nothing makes it spuriously faster. So one
+    slow sample on either side must not decide the gate.
+    """
+    fast = dict(BASE_METRICS)
+    slow = {k: v * 0.80 for k, v in BASE_METRICS.items()}  # a 20% noise event
+    results = [
+        write(tmp_path, "r1.json", payload(CI_RUNNER, slow)),
+        write(tmp_path, "r2.json", payload(CI_RUNNER, fast)),
+        write(tmp_path, "r3.json", payload(CI_RUNNER, slow)),
+    ]
+    base = write(tmp_path, "base.json", payload(CI_RUNNER, fast))
+    proc = subprocess.run(
+        [
+            sys.executable, str(GATE),
+            "--results", *[str(p) for p in results],
+            "--baseline", str(base),
+            "--require-comparable-host",
+            "--max-regression-percent", "5",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, (
+        "two slow samples out of three must not fail the gate when a clean "
+        f"observation exists:\n{proc.stdout}{proc.stderr}"
+    )
+    assert "best of 3" in proc.stdout
+
+
+def test_a_real_regression_survives_repetition(tmp_path: Path) -> None:
+    """The control: taking the max must not erase a genuine slowdown.
+
+    If every repetition is slow, that is the machine's actual capability and
+    the gate must still fail. Otherwise best-of-N would be a way to launder
+    regressions away.
+    """
+    slower = {k: v * 0.85 for k, v in BASE_METRICS.items()}
+    results = [
+        write(tmp_path, f"r{i}.json", payload(CI_RUNNER, slower)) for i in (1, 2, 3)
+    ]
+    bases = [
+        write(tmp_path, f"b{i}.json", payload(CI_RUNNER, BASE_METRICS)) for i in (1, 2, 3)
+    ]
+    proc = subprocess.run(
+        [
+            sys.executable, str(GATE),
+            "--results", *[str(p) for p in results],
+            "--baseline", *[str(p) for p in bases],
+            "--require-comparable-host",
+            "--max-regression-percent", "5",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 1, f"{proc.stdout}{proc.stderr}"
+
+
+def test_both_jobs_repeat_each_side() -> None:
+    yaml = pytest.importorskip("yaml")
+    spec = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    for job_name, job in spec["jobs"].items():
+        blob = "\n".join(s.get("run") or "" for s in job["steps"])
+        assert blob.count("for i in 1 2 3") == 2, (
+            f"{job_name} must benchmark BOTH sides more than once; a single "
+            "sample per side cannot support a 5% threshold"
+        )
 
 
 def test_the_anchor_names_a_commit_not_a_measurement() -> None:

@@ -342,12 +342,33 @@ jobs:
           # Through uv, not a bare `python`: the writer imports the parser to
           # get the format, and one_link.update_transaction pulls `packaging`
           # transitively. A bare interpreter fails with ModuleNotFoundError.
+          #
+          # --verify (which re-reads the result through the product's own
+          # validate_installed_bundle) runs everywhere EXCEPT macOS, and that
+          # exception is a finding, not a convenience. validate_installed_bundle
+          # requires every manifest row to start with "one-link", while the
+          # macOS contract puts the launcher at Contents/MacOS/one-link so the
+          # install root is the .app -- and the released macOS manifest is
+          # rooted at "one-link.app". Those cannot both be satisfied, so macOS
+          # self-install cannot validate in EITHER channel today. Reconciling
+          # them changes either the manifest root convention or the validator,
+          # and both reach signed release artifacts.
+          #
+          # tests/test_bundle_manifest_has_one_format.py asserts that
+          # limitation still exists, so if it is ever fixed the test fails and
+          # says to turn --verify on here. The manifest itself is written
+          # identically on macOS; only the re-read is withheld.
           cd ..
+          VERIFY_FLAG="--verify"
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            VERIFY_FLAG=""
+            echo "::warning::macOS manifest written but NOT re-read: validate_installed_bundle cannot accept an .app-rooted manifest (see tests/test_bundle_manifest_has_one_format.py)"
+          fi
           ONE_LINK_BUNDLE_EXECUTABLE="${EXE_NAME}" \
             uv run --frozen --extra release python scripts/write_bundle_manifest.py \
               --bundle dist/one-link \
               --root-name one-link \
-              --verify
+              ${VERIFY_FLAG}
           cd dist
 
       - name: package bundle as a zip
