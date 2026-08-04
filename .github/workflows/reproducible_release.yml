@@ -237,6 +237,13 @@ jobs:
 
           a, b = wheels("dist1"), wheels("dist2")
           names = sorted(set(a) | set(b))
+          # An empty comparison finds no divergence and would report success.
+          # If a build step ever stops producing a wheel, this gate must say so
+          # rather than quietly certify nothing.
+          if not names:
+              print("REPRODUCIBILITY VACUOUS: no wheels in either build directory")
+              raise SystemExit(1)
+          print(f"comparing {len(names)} wheel(s): {', '.join(names)}")
           diverged = []
           for name in names:
               pa, pb = a.get(name), b.get(name)
