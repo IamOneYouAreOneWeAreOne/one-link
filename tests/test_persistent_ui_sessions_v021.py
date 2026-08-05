@@ -779,6 +779,15 @@ def test_create_ui_session_never_logs_uuid(tmp_path: Path, caplog):
         sess = s.create_ui_session(user_agent="Mozilla/5.0")
         s.touch_ui_session(sess["session_uuid"])
         s.revoke_ui_session(sess["session_uuid"])
+
+    # If NOTHING was logged, the loop below inspects zero lines and this
+    # security claim -- "a bearer secret never reaches a log" -- would be
+    # asserted against no evidence at all. Three session operations at DEBUG
+    # must produce some output for the absence check to mean anything.
+    assert caplog.records, (
+        "no log records captured, so 'the uuid never appears in logs' was "
+        "checked against nothing"
+    )
     for rec in caplog.records:
         assert sess["session_uuid"] not in rec.getMessage(), (
             f"session uuid leaked into log at {rec.levelname}: "

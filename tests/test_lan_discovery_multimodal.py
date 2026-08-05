@@ -165,6 +165,13 @@ class TestSovereigntyFloor:
         import inspect, ast
         src = inspect.getsource(lan_discovery)
         tree = ast.parse(src)
+        imports = [
+            n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+        ]
+        # A parse that yielded no imports would make the scan below pass having
+        # examined nothing -- the module definitely has imports, so zero means
+        # the source was not read, not that it is clean.
+        assert imports, "no imports found in lan_discovery; the scan read nothing"
         # Imports must not pull in HTTP clients.
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

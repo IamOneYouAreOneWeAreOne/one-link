@@ -189,6 +189,9 @@ def test_neighbor_graph_no_self_loops() -> None:
         SimpleNamespace(fingerprint="peerB", trust="pinned"),
     ]
     graph = d._build_field_neighbor_graph()
+    # An empty graph has no self-loops either. Pin that both peers are present
+    # so "no self-loops" is a statement about a real graph.
+    assert set(graph) == {"peerA", "peerB"}, f"unexpected graph: {graph}"
     for peer, neighbors in graph.items():
         assert peer not in neighbors, (
             f"self-loop at {peer}: neighbors={neighbors}"

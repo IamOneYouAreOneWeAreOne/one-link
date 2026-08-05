@@ -192,8 +192,12 @@ async def test_folder_name_propagated_to_requests() -> None:
     await d.request_blob_with_dedupe_fallback(
         "h" * 64, primary="peerA", folder_name="myfolder",
     )
-    # Both calls passed folder_name.
-    for call in d.request_blob_from_peer.call_args_list:
+    # Both calls passed folder_name. Pin the count: a fallback that stopped
+    # retrying would make this loop pass over a single call -- or none -- while
+    # the dedupe path silently stopped working.
+    calls = d.request_blob_from_peer.call_args_list
+    assert len(calls) == 2, f"expected primary + fallback, got {len(calls)}"
+    for call in calls:
         assert call.kwargs["folder_name"] == "myfolder"
 
 

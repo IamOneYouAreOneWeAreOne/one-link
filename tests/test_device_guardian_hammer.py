@@ -38,6 +38,15 @@ def _proof_sets() -> list[tuple[str, ...]]:
 
 
 def test_guardian_transition_matrix_is_total_and_safety_invariants_hold():
+    # "Total" is a claim about COVERAGE, so the count is part of the property.
+    # An empty SAFETY_STATES or _proof_sets() would make every invariant below
+    # hold over zero transitions and still report the matrix total.
+    expected = len(SAFETY_STATES) ** 2 * len(_proof_sets()) * 2 * 2
+    assert len(SAFETY_STATES) >= 3 and _proof_sets(), (
+        f"degenerate inputs: {len(SAFETY_STATES)} states, "
+        f"{len(_proof_sets())} proof sets"
+    )
+    seen = 0
     for current in sorted(SAFETY_STATES):
         for requested in sorted(SAFETY_STATES):
             for proofs in _proof_sets():
@@ -51,6 +60,7 @@ def test_guardian_transition_matrix_is_total_and_safety_invariants_hold():
                             active_suspicion=active_suspicion,
                             now=1_777_000_000_000,
                         )
+                        seen += 1
                         assert decision.target_state in SAFETY_STATES
                         assert decision.event
                         assert decision.detail
@@ -66,7 +76,9 @@ def test_guardian_transition_matrix_is_total_and_safety_invariants_hold():
                             and PROOF_RECENT_UNLOCK not in proofs
                         ):
                             assert decision.allowed is False
-
+    assert seen == expected, (
+        f"the matrix is not total: {seen} of {expected} transitions evaluated"
+    )
 
 def test_guardian_route_and_remote_blocks_match_policy_states():
     for state in SAFETY_STATES:
