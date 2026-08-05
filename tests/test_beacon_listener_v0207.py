@@ -129,7 +129,10 @@ def test_callback_exception_does_not_kill_listener():
     running."""
     received = []
 
+    calls = []
+
     def boom(_b):
+        calls.append(_b)
         raise RuntimeError("synthetic")
 
     cfg = bl.BeaconConfig(
@@ -142,6 +145,12 @@ def test_callback_exception_does_not_kill_listener():
     # Send a second; if the listener died, this would error. It
     # doesn't because the protocol catches.
     proto.datagram_received(blob, ("::1", 5354))
+
+    # Both datagrams must have REACHED the callback. Without this the test
+    # passes against a protocol that silently drops every beacon -- which also
+    # never raises, and would look exactly like resilience while discovering
+    # no peers at all.
+    assert len(calls) == 2, f"callback saw {len(calls)} of 2 beacons"
 
 
 def test_beacon_config_defaults_sane():

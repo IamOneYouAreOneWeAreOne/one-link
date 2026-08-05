@@ -99,8 +99,13 @@ def test_write_field_obs_rejects_nan() -> None:
 def test_write_field_obs_no_op_when_native_missing() -> None:
     d = _bare_daemon()
     d._field_obs = None
-    # Must not raise.
+
     d._write_field_observation("peer1", 0.5)
+
+    # "Did not raise" cannot catch the failure that matters: lazily building an
+    # observer when the native side is absent would start writing observations
+    # the daemon was explicitly configured not to collect.
+    assert d._field_obs is None, "a field observer was constructed on the no-op path"
 
 
 def test_write_field_obs_no_op_on_empty_peer() -> None:
@@ -112,8 +117,14 @@ def test_write_field_obs_no_op_on_empty_peer() -> None:
 def test_write_field_obs_survives_native_exception() -> None:
     d = _bare_daemon()
     d._field_obs.update.side_effect = ValueError("simulated")
-    # Must not raise.
+
     d._write_field_observation("peer1", 0.5)
+
+    # The exception must have been RAISED to be survived. Without this the test
+    # passes just as happily against code that short-circuits before ever
+    # touching the native observer -- "survives" would then be measuring a path
+    # that was never taken.
+    d._field_obs.update.assert_called_once()
 
 
 def test_write_field_obs_uses_real_trust_when_peer_known() -> None:

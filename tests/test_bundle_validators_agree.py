@@ -178,6 +178,12 @@ def test_a_chained_symlink_now_resolves_through_the_manifest() -> None:
     )
     _safe_symlink_target(chained, names, "one-link", rows)
 
+    # CONTROL: the acceptance above must come from FOLLOWING the chain, not
+    # from the resolver having gone permissive. Drop the intermediate link and
+    # the same target no longer resolves to anything, so it must be refused.
+    with pytest.raises(UpdateArchiveError, match="escapes or targets missing"):
+        _safe_symlink_target(chained, names, "one-link", {})
+
 
 def test_a_cyclic_symlink_chain_is_refused_not_followed_forever() -> None:
     from one_link.update_transaction import _ManifestRow, _safe_symlink_target

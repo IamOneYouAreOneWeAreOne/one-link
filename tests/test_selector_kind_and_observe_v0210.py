@@ -255,8 +255,12 @@ def test_observe_survives_observe_exception() -> None:
     sel.observe = MagicMock(side_effect=RuntimeError("simulated"))
     d._smart_selector = sel
     d._record_pending_selector_observation("t1", {"a": 1}, {"size": 1})
-    # Must not raise.
+
     d._maybe_feed_selector_observation("t1", "completed")
+
+    # observe() must have been attempted; otherwise "survives the observe
+    # exception" is describing a call that never happened.
+    sel.observe.assert_called_once()
 
 
 def test_observe_retries_with_minimum_surface_on_typeerror() -> None:

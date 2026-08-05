@@ -128,8 +128,13 @@ def test_drain_survives_drain_exception() -> None:
 def test_selector_log_no_op_when_missing() -> None:
     d = _bare_daemon()
     d._smart_selector = None
-    # Must not raise.
+
     d._log_selector_decision_for_file(peer=MagicMock(), peer_fp="abc", size=100)
+
+    # Constructing a selector on the no-op path would start making transport
+    # decisions for a daemon configured without one, which "did not raise"
+    # cannot see.
+    assert d._smart_selector is None, "a selector was constructed on the no-op path"
 
 
 def test_selector_log_calls_decide(caplog) -> None:
@@ -164,10 +169,15 @@ def test_selector_log_survives_decide_exception() -> None:
     d._smart_selector = MagicMock()
     d._smart_selector.decide.side_effect = ValueError("simulated")
     d.predict_next_files_for_peer = MagicMock(return_value=[])
-    # Must not raise.
+
     d._log_selector_decision_for_file(
         peer=MagicMock(), peer_fp="abc", size=100
     )
+
+    # decide() must have been REACHED for its exception to be the thing
+    # survived. Without this the test also passes against code that returns
+    # before ever consulting the selector.
+    d._smart_selector.decide.assert_called_once()
 
 
 def test_selector_log_pattern_strength_from_predictor() -> None:

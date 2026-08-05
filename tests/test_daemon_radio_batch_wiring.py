@@ -181,5 +181,10 @@ async def test_send_batched_swallows_send_error() -> None:
     peer_obj = MagicMock()
     d.resolve_for_send = AsyncMock(return_value=peer_obj)
     d.send_to = AsyncMock(side_effect=RuntimeError("network gone"))
-    # Must not raise.
+
     await d._send_batched_endpoint("fp1", {"type": "ENDPOINT_UPDATE"})
+
+    # The send must actually have been ATTEMPTED. Otherwise this passes against
+    # code that silently drops the message before reaching the wire, which is
+    # the very failure "swallows the send error" is meant to distinguish from.
+    d.send_to.assert_awaited_once()
