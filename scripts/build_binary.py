@@ -1101,6 +1101,14 @@ def main(
     # deps even when --exclude-module names the parent. We post-filter
     # the Analysis result via a generated .spec file.
     forbidden_paths = [
+        # Developer diagnostics must not ship in a release bundle. /dr_test is
+        # a Double Ratchet self-test harness served UNGUARDED by the daemon's
+        # loopback UI; it exposes no secrets and is CSP-locked, but it is
+        # surface a user never asked for and cannot benefit from. Excluding it
+        # here means the route's own 404 ("dr_test.html not bundled") becomes
+        # the shipped behaviour, which is what that branch was written for.
+        "one_link/web/dr_test.html",
+        "one_link\web\dr_test.html",
         "torch/lib/",
         "torch\\lib\\",
         "torchvision/",
