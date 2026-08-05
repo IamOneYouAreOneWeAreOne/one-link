@@ -149,8 +149,22 @@ def test_batch_throughput_characterisation() -> None:
             (cid, len(pt), cipher.encrypt_chunk(cid, pt))
             for cid, pt in inputs
         ]
-        # Warm-up.
-        cipher.decrypt_chunks(decrypt_inputs[:min(4, n_chunks)])
+        # Warm-up -- and the correctness claim this test can legitimately
+        # make. Throughput is deliberately NOT gated (see the docstring), but
+        # "serial and batch decrypt agree" is a real property and was going
+        # unasserted, so the whole test could pass while batch decrypt returned
+        # garbage.
+        batch_out = cipher.decrypt_chunks(decrypt_inputs)
+        serial_out = [
+            cipher.decrypt_chunk(cid, pt_len, ct)
+            for cid, pt_len, ct in decrypt_inputs
+        ]
+        assert list(batch_out) == serial_out, (
+            f"batch and serial decrypt disagree at {n_chunks}x{chunk_size}"
+        )
+        assert serial_out == [pt for _cid, pt in inputs], (
+            "decrypt did not round-trip the original plaintext"
+        )
         # Serial best-of-3.
         serial_runs = []
         for _ in range(3):

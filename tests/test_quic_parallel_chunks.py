@@ -138,11 +138,18 @@ def test_parallel_stream_empty_payload_list_is_noop() -> None:
             server_addr, server_id.fingerprint, timeout_ms=5_000,
         )
 
-        # An empty payload list. The native side may or may not
-        # accept this — our wrapper short-circuits before calling
-        # it, so the helper itself is what we exercise. Here we
-        # just confirm the client connection survives an
-        # immediate close.
+        # Actually exercise the thing this test is named for. The wrapper
+        # short-circuits on an empty list, so it must return zero bytes WITHOUT
+        # opening a stream -- previously this test never passed an empty list
+        # at all and only confirmed the connection survived a close, which is
+        # a different property entirely.
+        sent = client_conn.send_frame_stream_round_trips_count_parallel(
+            native_quic.FRAME_CHUNK_REQUEST,
+            [],
+            native_quic.FRAME_CHUNK_RESPONSE,
+        )
+        assert sent == 0, f"empty payload list returned {sent} bytes"
+
         client_conn.close(0, b"done")
         t.join(timeout=5.0)
     finally:

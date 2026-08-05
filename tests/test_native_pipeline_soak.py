@@ -51,6 +51,10 @@ def test_foldersync_native_pipeline_soak(tmp_path: Path):
     reconcile cross-check reports zero disagreements over every
     iteration."""
     iters = int(os.environ.get("ONE_LINK_SOAK_ITERS", "2000"))
+    # ONE_LINK_SOAK_ITERS=0 would make every bound below hold over zero
+    # observations and report the EWMA numerically stable having recorded
+    # nothing.
+    assert iters >= 100, f"soak configured with {iters} iterations"
     seed = int(os.environ.get("ONE_LINK_SOAK_SEED", "0xC0DEC0DE"), 0)
     rng = random.Random(seed)
 
