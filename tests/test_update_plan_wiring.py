@@ -18,6 +18,7 @@ are what a user would actually see.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import textwrap
@@ -28,8 +29,21 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 INDEX = REPO / "src" / "one_link" / "web" / "index.html"
 
+_NODE = shutil.which("node")
+
+# Skipping locally is fine; skipping on CI is how a gate goes dark. Every
+# GitHub-hosted runner ships Node, so an absence there is a broken environment,
+# not an unsupported one -- and a silent skip would let this whole file stop
+# running while the summary line still said "passed".
+if _NODE is None and os.environ.get("CI"):
+    raise RuntimeError(
+        "node is missing on CI, so the update-plan rendering tests would "
+        "silently not run. Install node in the workflow rather than letting "
+        "this file skip."
+    )
+
 pytestmark = pytest.mark.skipif(
-    shutil.which("node") is None,
+    _NODE is None,
     reason="node is required to execute the extracted browser functions",
 )
 
