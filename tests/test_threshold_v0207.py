@@ -32,11 +32,16 @@ def test_round_trip_2_of_3():
 def test_round_trip_3_of_5():
     secret = os.urandom(32)
     shares = split(secret, threshold=3, num_shares=5)
-    # Every 3-subset reconstructs.
+    assert len(shares) == 5, f"split returned {len(shares)} shares, not 5"
+    # Every 3-subset reconstructs. C(5,3) = 10; pin the count so a split that
+    # returned fewer shares cannot quietly shrink the enumeration.
     from itertools import combinations
+    checked = 0
     for indices in combinations(range(5), 3):
         subset = [shares[i] for i in indices]
         assert combine(subset) == secret
+        checked += 1
+    assert checked == 10, f"only {checked} of 10 3-subsets were tested"
 
 
 def test_round_trip_arbitrary_length():

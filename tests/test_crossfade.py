@@ -52,7 +52,12 @@ def test_gain_curve_equal_power_at_every_point() -> None:
     """The equal-power invariant must hold across the whole fade,
     not just at the midpoint."""
     plan = make_route_handoff(started_at_ms=0, duration_ms=200)
-    for s in plan.samples():
+    samples = list(plan.samples())
+    # A plan that produced NO samples would satisfy the loop while performing
+    # no fade at all, which is the one outcome "equal power at every point"
+    # must not be able to mean.
+    assert len(samples) > 1, f"handoff produced {len(samples)} samples"
+    for s in samples:
         total_power = s.gain_old ** 2 + s.gain_new ** 2
         assert total_power == pytest.approx(1.0, abs=1e-9), (
             f"power broken at t={s.timestamp_ms}: "

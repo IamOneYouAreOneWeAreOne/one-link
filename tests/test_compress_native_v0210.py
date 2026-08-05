@@ -109,12 +109,16 @@ def test_round_trip_zstd_aggressive() -> None:
 
 
 def test_round_trip_empty() -> None:
+    # An empty ALGORITHMS -- which is what a missing native backend looks like
+    # -- would make every round-trip test below pass having compressed nothing.
+    assert set(cn.ALGORITHMS) >= {"none", "lz4", "zstd_balanced"}, cn.ALGORITHMS
     for algo in cn.ALGORITHMS:
         assert _round_trip(algo, b"") == b""
 
 
 def test_round_trip_random_payload() -> None:
     payload = bytes(range(256)) * 4  # non-trivial
+    assert set(cn.ALGORITHMS) >= {"none", "lz4", "zstd_balanced"}, cn.ALGORITHMS
     for algo in cn.ALGORITHMS:
         assert _round_trip(algo, payload) == payload, f"algo={algo}"
 

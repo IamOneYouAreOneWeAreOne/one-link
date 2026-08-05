@@ -55,7 +55,13 @@ def test_every_word_in_phrase_is_in_bip39_wordlist(seed):
     phrase = mnemonic.encode(seed)
     wordlist, _ = mnemonic._load_wordlist()
     wordset = set(wordlist)
-    for word in phrase.split():
+    words = phrase.split()
+    # `"".split()` is [], so an encoder that returned an empty phrase would
+    # satisfy the loop below having emitted no words at all -- and an empty
+    # recovery phrase is unrecoverable, not merely non-canonical.
+    assert len(words) == 24, f"expected a 24-word phrase, got {len(words)}: {phrase!r}"
+    assert len(wordset) == 2048, f"BIP-39 wordlist has {len(wordset)} entries, not 2048"
+    for word in words:
         assert word in wordset, (
             f"encoder emitted non-BIP-39 word {word!r}; phrase {phrase!r}"
         )

@@ -120,7 +120,12 @@ def test_derive_sas_words_deterministic() -> None:
 
 def test_derive_sas_words_uses_vocab_only() -> None:
     h = bytes(range(32))
-    for w in derive_sas_words(h):
+    words = derive_sas_words(h)
+    # A derivation that returned NOTHING would satisfy the loop below while
+    # leaving the pairing phrase empty -- and an empty SAS is not a weak
+    # comparison, it is no comparison at all.
+    assert len(words) == 5, f"expected a 5-word SAS phrase, got {words!r}"
+    for w in words:
         assert w in SAS_VOCAB
 
 

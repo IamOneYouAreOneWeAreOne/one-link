@@ -118,7 +118,9 @@ def test_alternate_3_of_5_subsets():
     wrapped = sr.split_and_wrap(
         seed=master, contact_ed_pubs=pubs, threshold_k=3, total_n=5,
     )
+    checked = 0
     for combo in itertools.combinations(range(5), 3):
+        checked += 1
         decrypted = []
         for i in combo:
             idx, share = sr.unwrap_share(
@@ -127,6 +129,9 @@ def test_alternate_3_of_5_subsets():
             )
             decrypted.append((idx, share))
         assert sr.combine_shares(decrypted) == master, combo
+    # C(5,3) = 10. Pinned so a split that returned fewer wrapped shares cannot
+    # quietly shrink the enumeration and still look exhaustive.
+    assert checked == 10, f"only {checked} of 10 3-subsets were tested"
 
 
 def test_2_of_5_does_not_reconstruct():
