@@ -13,7 +13,7 @@ import sqlite3
 import string
 
 import pytest
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, example, given, settings, strategies as st
 
 from one_link.state import State, _normalize_user_query_to_fts5_prefix
 
@@ -67,8 +67,18 @@ def test_normalizer_output_is_safe_for_fts5_match(raw):
 # input) would blow through 30s, so the blowup check survives while the
 # false alarm does not.
 @settings(max_examples=250, deadline=30000)
+@example(raw="hello world")
+@example(raw="prefix")
 def test_every_normalized_query_is_accepted_by_real_fts5(raw):
-    """Parser safety is a runtime property, not just a character whitelist."""
+    """Parser safety is a runtime property, not just a character whitelist.
+
+    The `@example` cases are load-bearing, not decoration. The body returns
+    early when the normalizer yields an empty query, so a normalizer that
+    regressed to ALWAYS empty would make all 250 generated cases return
+    without touching FTS5 -- 250 green examples proving nothing. Pinning two
+    inputs that must normalize to something guarantees the MATCH below is
+    executed at least twice per run.
+    """
 
     query = _normalize_user_query_to_fts5_prefix(raw)
     if not query:

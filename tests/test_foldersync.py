@@ -279,7 +279,18 @@ def test_unchanged_periodic_scan_reuses_stable_materialization_proof(
             ),
         )
 
+        before = state.get_manifest_entry("docs", "large.bin")
         engine._reconcile_file("docs", path)
+        after = state.get_manifest_entry("docs", "large.bin")
+
+        # The throwing `put_path` above proves the file was not REHASHED, but
+        # only if reconcile ran at all -- a no-op reconcile would also never
+        # call it. Pin the positive outcome too: the entry still exists and is
+        # byte-identical, i.e. the stable proof was reused rather than dropped.
+        assert before is not None, "the first reconcile recorded nothing to reuse"
+        assert after == before, (
+            f"the unchanged file's manifest entry moved: {before} -> {after}"
+        )
     finally:
         state.close()
         loop.close()
