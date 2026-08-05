@@ -10,14 +10,22 @@ Two had neither a consumer NOR a test:
     GET /api/capability-audit   the capability audit trail
     GET /api/update/plan        the standalone release contract
 
-/api/update/plan is the sharper one. It calls
+/api/update/plan was the sharper one. It calls
 `_external_update_capability(fresh=True)`, which is the code path changed on
 2026-08-04 to fix macOS self-install -- so that change could have broken this
 endpoint and nothing would have reported it. An untested endpoint on the update
 path is exactly where a silent break is most expensive.
 
-These tests give both a consumer of last resort: the suite itself. They assert
-the contract each endpoint promises, not merely that it returns 200.
+It is no longer consumer-less: the update modal now uses it to tell the user
+what an install would download and which release it is pinned to. See
+test_update_plan_wiring.py, which executes that rendering under Node rather
+than asserting the code is present. This file remains the CONTRACT test for
+both endpoints -- the UI consumes the plan, but only these tests pin what the
+endpoints must return.
+
+/api/capability-audit still has no shipped consumer. That is recorded rather
+than fixed: it is a machine-readable audit trail, and inventing a UI for it to
+satisfy a coverage rule would be worse than leaving it as an API with tests.
 """
 
 from __future__ import annotations
@@ -75,9 +83,15 @@ def test_both_endpoints_are_authenticated(method: str, path: str) -> None:
 
     /api/capability-audit returns a security audit trail; /api/update/plan
     describes the exact release artifacts this daemon would install. Both are
-    behind `_guarded` today, and an audit of the whole table found 120 of 138
-    registrations guarded with every exception explained -- so a NEW unguarded
-    one would be an anomaly, not a pattern.
+    behind `_guarded` today.
+
+    An earlier version of this docstring said the whole table was "120 of 138
+    registrations guarded". That was measured with a regex that only matched
+    single-line registrations and silently missed 118 of them. Re-measured with
+    the AST: 232 of 256 guarded, with the 24 exceptions all deliberately
+    pre-authentication. The conclusion is unchanged -- a NEW unguarded route
+    would be an anomaly, not a pattern -- but the number it rested on was not
+    the number it claimed to be.
     """
     handler = _routes()[(method, path)]
     assert handler.startswith("UIServer._guarded."), (

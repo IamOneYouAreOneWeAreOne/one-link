@@ -5176,6 +5176,18 @@
     font-size: 12px;
   }
   .update-modal-body .um-loading,
+  .update-modal-body .um-plan {
+    margin: 10px 0 0; padding: 10px 12px;
+    border: 1px solid var(--line, #2a2f3a); border-radius: 6px;
+    background: var(--panel-2, rgba(255,255,255,.03));
+    font-size: 12.5px; line-height: 1.5;
+  }
+  .update-modal-body .um-plan[hidden] { display: none; }
+  .update-modal-body .um-plan-line { font-weight: 600; }
+  .update-modal-body .um-plan-line code { font-weight: 500; }
+  .update-modal-body .um-plan-note {
+    margin-top: 4px; color: var(--muted, #98a2b3); font-weight: 400;
+  }
   .update-modal-body .um-notes-error {
     font-style: italic;
     color: var(--text-dim);
@@ -9505,6 +9517,16 @@
         <div class="um-notes" id="um-notes">
           <div class="um-loading">Loading release notes…</div>
         </div>
+        <!-- What an install would actually fetch. Populated from
+             /api/update/plan, and ONLY when this build can self-install —
+             a user who has to download manually is told the size by the
+             browser, and asking the daemon to resolve a plan it cannot act
+             on would be a network call with nothing behind it.
+             This is presentation data. The external helper independently
+             re-discovers the pinned tag and authenticates every artifact
+             before activation, so nothing here is load-bearing for
+             security and the copy must not imply that it is. -->
+        <div class="um-plan" id="um-plan" hidden></div>
         <div class="um-howto" id="um-howto"></div>
       </div>
       <div class="update-modal-footer">
@@ -14060,10 +14082,73 @@
       );
     }
   }
+  // Human-readable artifact size. The plan reports bytes; "121 MB" is what a
+  // person deciding whether to start a download on a phone tether needs.
+  function _formatBytes(n) {
+    if (typeof n !== "number" || !isFinite(n) || n < 0) return "";
+    if (n < 1024) return n + " B";
+    const units = ["KB", "MB", "GB"];
+    let v = n / 1024, i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return (v < 10 ? v.toFixed(1) : Math.round(v)) + " " + units[i];
+  }
+
+  // Resolve /api/update/plan and describe the download in the modal.
+  //
+  // This endpoint was registered, guarded and correct, and NOTHING called it —
+  // found by auditing which registered routes have no consumer. It sits on the
+  // update path, so a regression in it would have been invisible.
+  //
+  // Every failure mode here leaves the modal exactly as it was. The plan is a
+  // convenience; the install does not depend on it, and a user must never be
+  // blocked from updating because a description could not be fetched.
+  async function _fillUpdatePlan() {
+    const host = $("#um-plan");
+    if (!host) return;
+    let plan;
+    try {
+      plan = await api.get("/api/update/plan");
+    } catch (_e) {
+      return;  // offline, policy-disabled, or unavailable — say nothing
+    }
+    if (!plan || !plan.artifact || plan.status === "error") return;
+    const size = _formatBytes(plan.artifact.size);
+    host.innerHTML = "";
+
+    const line = document.createElement("div");
+    line.className = "um-plan-line";
+    const name = document.createElement("code");
+    name.textContent = plan.artifact.filename || "release artifact";
+    line.append("Downloads ", name);
+    if (size) line.append(" · " + size);
+    host.appendChild(line);
+
+    if (plan.tag) {
+      const pin = document.createElement("div");
+      pin.className = "um-plan-note";
+      // Deliberately describes the mechanism rather than promising safety.
+      // The verification that matters happens in the external helper, and
+      // this text is not evidence of it.
+      pin.append("Pinned to release ");
+      const tag = document.createElement("code");
+      tag.textContent = plan.tag;
+      pin.appendChild(tag);
+      pin.append(". Signatures are checked by the updater before anything "
+                 + "is activated, and the update rolls back if the new "
+                 + "version does not come up healthy.");
+      host.appendChild(pin);
+    }
+    host.hidden = false;
+  }
+
   function openUpdateModal() {
     const info = state._updateInfo;
     const backdrop = $("#update-modal-backdrop");
     if (!backdrop || !info) return;
+    // Clear any plan from a previous open before re-resolving, so a stale
+    // artifact size can never be shown against a newer release.
+    const planHost = $("#um-plan");
+    if (planHost) { planHost.hidden = true; planHost.innerHTML = ""; }
     // Versions. Rolling builds all call themselves the same version, so
     // the honest identity to diff is the build commit.
     const cur = $("#um-current-version");
@@ -14134,6 +14219,10 @@
             ? "Download latest build"
             : "Inspect exact release";
       }
+      // Tell the user what "Install verified update" will actually fetch,
+      // before they click it. Fire-and-forget: the modal is already usable,
+      // and a plan that cannot be resolved must never block the install.
+      if (canInstall) _fillUpdatePlan();
     }
     if (howto) {
       const canInstall = state.me?.update_install_available === true
