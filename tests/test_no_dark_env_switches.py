@@ -30,39 +30,36 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src" / "one_link"
 
-_READ = re.compile(r'environ(?:\.get)?[\(\[]\s*["\'](ONE_LINK_[A-Z0-9_]+)')
+# Matches every way the source READS a switch. env_int/env_float are the
+# validated numeric readers added 2026-08-05; when nine constants moved onto
+# them, this regex -- which only knew about os.environ -- stopped seeing those
+# nine entirely. The gate would have gone on reporting "no dark switches" while
+# no longer looking at them. A scan that silently narrows is worse than no scan,
+# because it still produces a green result.
+_READ = re.compile(
+    r'(?:environ(?:\.get)?[\(\[]|env_int\(|env_float\()\s*["\'](ONE_LINK_[A-Z0-9_]+)'
+)
 
 # Switches the source reads that nothing else mentions. Each needs a reason.
 # Triaged 2026-08-05; the security-relevant ones are called out because an
 # undocumented switch that WEAKENS something is the dangerous member of this
 # family, not a tuning knob.
 KNOWN_UNREACHABLE: dict[str, str] = {
-    # -- security posture: these WEAKEN a default. Highest priority to cover.
-    "ONE_LINK_ALLOW_FIXED_COURIER_TARGETS":
-        "lets courier files land on FIXED drives; the code comment says "
-        "production must not spray them onto C:. Test-only opt-in, untested.",
-    "ONE_LINK_ALLOW_LEGACY_RELAY_IDENTITY_ROUTE":
-        "re-enables a legacy relay identity route, and accepts a LOOSE value "
-        "set {1,true,yes,on} plus a stored setting -- unlike the handshake "
-        "switch, which requires exactly '1'. Inconsistent posture, untested.",
-    "ONE_LINK_SMART_SELECTOR_ENFORCE": "changes transport-selection enforcement.",
-    "ONE_LINK_COVER_TRAFFIC": "privacy feature toggle.",
-    # -- credentials
-    "ONE_LINK_TURN_CREDENTIAL": "TURN credential injection point.",
-    "ONE_LINK_TURN_USERNAME": "TURN username injection point.",
-    # -- resource / DoS bounds
-    "ONE_LINK_MAX_PEERS": "peer table bound.",
-    "ONE_LINK_MAX_PEERS_PER_FP": "per-fingerprint peer bound.",
-    # -- timing and tuning knobs
-    "ONE_LINK_CASCADE_THRESHOLD": "tuning knob.",
-    "ONE_LINK_FOREGROUND_ACK_DEADLINE_S": "tuning knob.",
-    "ONE_LINK_QUIC_FRAME_DEADLINE_S": "tuning knob.",
-    "ONE_LINK_QUIC_TRANSPORT": "transport selection override.",
-    "ONE_LINK_RECONCILE_DISAGREEMENTS_ACKED": "reconciliation behaviour.",
-    "ONE_LINK_RELAY_PROBE_TIMEOUT_SECONDS": "tuning knob.",
-    "ONE_LINK_UI_UPLOAD_IDLE_TIMEOUT_SECONDS": "tuning knob.",
-    "ONE_LINK_WAVE_FORECAST": "research feature, shipped DISABLED by default.",
-    "ONE_LINK_WAVE_FORECAST_DT": "research feature parameter.",
+    # EMPTY, 2026-08-05. Every switch the source reads is now reachable from
+    # outside src/ -- by a test, a workflow, or docs/ENVIRONMENT.md.
+    #
+    # It started at 17 entries. Each removal was forced by the staleness
+    # assertion below rather than chosen: covering a switch made its entry a
+    # false claim that a gap still existed, and the only way to make the suite
+    # green again was to delete the entry. The list can only shrink.
+    #
+    # An empty registry does NOT mean this file has nothing left to do. Its job
+    # is test_no_new_dark_switch: the next switch someone adds without a test
+    # or a doc line fails immediately, instead of living unnoticed the way
+    # ONE_LINK_ALLOW_CLASSICAL_HANDSHAKE did.
+    #
+    # If you are adding an entry here, you are re-opening a closed class. Write
+    # a real reason, and prefer a test.
 }
 
 
@@ -109,9 +106,17 @@ def everything_that_could_reach_them() -> str:
 def test_the_scanner_finds_the_switches_it_is_supposed_to() -> None:
     """Control. A regex that matched nothing would make this gate vacuous."""
     found = switches_read_by_source()
-    assert len(found) >= 40, f"only {len(found)} switches found; the scan broke"
+    assert len(found) >= 55, f"only {len(found)} switches found; the scan broke"
     # A switch known to exist and known to be covered.
     assert "ONE_LINK_ALLOW_V1_HELLO" in found
+    # Read via env_int(), not os.environ. Pinned by name because the regex once
+    # matched only os.environ and silently stopped seeing nine switches when
+    # they moved to the validated readers -- the gate stayed green while its
+    # coverage shrank. Losing these names again must fail loudly.
+    assert "ONE_LINK_MAX_PEERS" in found, (
+        "the scan no longer sees switches read through env_int/env_float"
+    )
+    assert "ONE_LINK_QUIC_FRAME_DEADLINE_S" in found
 
 
 def test_no_new_dark_switch() -> None:
@@ -143,18 +148,52 @@ def test_the_registry_shrinks_and_does_not_go_stale() -> None:
     )
 
 
-def test_the_security_weakening_switches_are_called_out() -> None:
+def test_no_security_weakening_switch_is_still_dark() -> None:
     """The dangerous member of this family is a switch that WEAKENS a default.
 
     A tuning knob nobody documents is untidy. An undocumented switch that
-    disables a protection is the actual hazard, and the reason strings must say
-    so rather than blending in with the knobs.
+    disables a protection is the actual hazard.
+
+    This test used to NAME the two `ALLOW_*` switches and assert they were in
+    the registry with good reasons. Once they were covered they had to leave the
+    registry, and this assertion failed -- correctly, but for a reason that says
+    the test was written at the wrong level. A gate should assert the rule, not
+    enumerate today's violations of it, or closing a violation breaks the gate.
+
+    The rule: no `ONE_LINK_ALLOW_*` switch may sit in the dark registry at all.
+    Something that turns a protection OFF must be reachable from a test.
     """
+    still_dark = sorted(n for n in KNOWN_UNREACHABLE if "_ALLOW_" in n)
+    assert not still_dark, (
+        "these switches WEAKEN a default and nothing outside src/ exercises "
+        "them; cover them rather than registering them: "
+        + "; ".join(f"{n}: {KNOWN_UNREACHABLE[n]}" for n in still_dark)
+    )
+
+
+def test_every_registered_reason_is_substantive() -> None:
+    """A registry entry earns its place with a reason, not a placeholder.
+
+    Without this, the gate above is trivially satisfiable by writing "todo"
+    next to a switch.
+    """
+    thin = {n: r for n, r in KNOWN_UNREACHABLE.items() if len(r.strip()) < 15}
+    assert not thin, f"these registry entries lack a real reason: {thin}"
+
+
+def test_the_weakening_switches_are_covered_not_registered() -> None:
+    """The two that motivated the rule above, pinned individually.
+
+    Same shape as the handshake assertion below: reachable from outside src/,
+    and absent from the registry. Naming them here is right where naming them
+    in a registry-membership test was wrong -- this asserts the END state, so
+    closing the gap satisfies it instead of breaking it.
+    """
+    reachable = everything_that_could_reach_them()
     for name in ("ONE_LINK_ALLOW_FIXED_COURIER_TARGETS",
                  "ONE_LINK_ALLOW_LEGACY_RELAY_IDENTITY_ROUTE"):
-        assert name in KNOWN_UNREACHABLE, f"{name} dropped out of the registry"
-        reason = KNOWN_UNREACHABLE[name]
-        assert len(reason) > 40, f"{name} needs a real reason, got {reason!r}"
+        assert name in reachable, f"{name} went dark again"
+        assert name not in KNOWN_UNREACHABLE, f"{name} was re-registered as dark"
 
 
 def test_the_handshake_downgrade_is_no_longer_dark() -> None:
