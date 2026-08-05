@@ -1108,7 +1108,7 @@ def main(
         # here means the route's own 404 ("dr_test.html not bundled") becomes
         # the shipped behaviour, which is what that branch was written for.
         "one_link/web/dr_test.html",
-        "one_link\web\dr_test.html",
+        "one_link\\web\\dr_test.html",
         "torch/lib/",
         "torch\\lib\\",
         "torchvision/",

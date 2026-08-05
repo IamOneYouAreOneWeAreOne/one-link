@@ -36,8 +36,21 @@ def test_the_builder_excludes_the_self_test_page() -> None:
         "dr_test.html is no longer excluded from release bundles"
     )
     # Both separators, because the filter matches raw PyInstaller source paths.
-    assert "one_link\\web\\dr_test.html" in text.replace("\\\\", "\\"), (
-        "the Windows-separator form of the exclusion is missing"
+    #
+    # Asserted against the SOURCE TEXT, not a normalised copy. The first version
+    # of this line did `text.replace("\\\\", "\\")` first, which accepted both
+    # the correct `"one_link\\web\\..."` and the single-backslash form I had
+    # actually written. `\w` and `\d` are invalid escape sequences: Python keeps
+    # the backslash, so the value was right by accident, while emitting a
+    # SyntaxWarning that will become an error in a future release. The build
+    # printed that warning on every run and this test stayed green -- a
+    # deliberately lenient assertion is a gate that cannot fail.
+    assert '"one_link\\\\web\\\\dr_test.html"' in text, (
+        "the Windows-separator exclusion must be written with escaped "
+        "backslashes, matching the neighbouring entries"
+    )
+    assert '"one_link\\web\\dr_test.html"' not in text.replace('\\\\', '\x00'), (
+        "the exclusion uses raw backslashes, which are invalid escape sequences"
     )
 
 
