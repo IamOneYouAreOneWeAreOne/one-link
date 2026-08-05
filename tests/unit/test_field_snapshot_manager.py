@@ -172,12 +172,28 @@ def test_start_stop_lifecycle():
     cfg = FieldConfig(update_interval_s=0.05)
     mgr = FieldSnapshotManager(cfg)
     mgr.start()
-    # Idempotent.
-    mgr.start()
+    first_thread = mgr._thread
+    assert first_thread is not None and first_thread.is_alive(), (
+        "start() did not run a background loop, so the rest measures nothing"
+    )
+
+    mgr.start()  # idempotent
+    # Idempotence is the property named, and "did not raise" cannot see it: a
+    # second start that spawned ANOTHER thread would leave two loops solving
+    # the same field forever, and nothing would report it.
+    assert mgr._thread is first_thread, "start() spawned a second loop"
+
     time.sleep(0.15)
     mgr.stop()
-    # No assertion on solve count — if native is missing this is 0,
-    # which is the expected safe-default behavior.
+
+    # stop() must actually stop. A stop that only flips a flag leaves the
+    # thread running past shutdown, which also never raises.
+    first_thread.join(timeout=2.0)
+    assert not first_thread.is_alive(), "the field loop outlived stop()"
+
+    # Deliberately no assertion on solve COUNT: with the native engine absent
+    # that is legitimately 0, and asserting on it would make this a native
+    # availability test rather than a lifecycle one.
 
 
 # ── Phase E #4: env-var kill switches ──────────────────────────────

@@ -54,9 +54,32 @@ def test_tray_status_tint_handles_all_states():
     (defaults to online color) without crashing."""
     from one_link.tray import TrayIcon
     t = TrayIcon(on_quit=lambda: None, url="x")
-    # set_status doesn't raise even when icon hasn't started.
-    for s in ("online", "away", "dnd", "offline", "wat", ""):
+    states = ("online", "away", "dnd", "offline", "wat", "")
+
+    # Before start, _icon is None and set_status returns early -- so looping
+    # here proves only that the early return exists.
+    for s in states:
         t.set_status(s)
+    assert t._icon is None, "set_status built an icon before start()"
+
+    # With an icon attached, every state must actually produce a tint --
+    # including the unknown ones, which must fall back rather than leave the
+    # previous status showing. Without this the test passes against a
+    # set_status that does nothing at all.
+    tinted = []
+
+    class _FakeIcon:
+        icon = None
+
+    t._icon = _FakeIcon()
+    original = t._tinted_icon
+    t._tinted_icon = lambda status: tinted.append(status) or f"img:{status}"
+    try:
+        for s in states:
+            t.set_status(s)
+    finally:
+        t._tinted_icon = original
+    assert tinted == list(states), f"not every status was tinted: {tinted}"
 
 
 def test_tray_start_skips_when_icon_image_is_missing(monkeypatch):
