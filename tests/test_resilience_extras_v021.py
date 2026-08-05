@@ -96,8 +96,16 @@ def test_rotate_daemon_launch_log_shifts_existing_rotations(tmp_path, monkeypatc
 def test_rotate_daemon_launch_log_handles_missing_file(tmp_path):
     """Rotating a non-existent file is a no-op (the first launch ever)."""
     from one_link import app as app_mod
-    # Must not raise.
-    app_mod._rotate_daemon_launch_log(tmp_path / "never-existed.log")
+    missing = tmp_path / "never-existed.log"
+
+    app_mod._rotate_daemon_launch_log(missing)
+
+    # Rotating a file that is not there must not CREATE one, nor leave a
+    # rotated sibling behind. Neither of those would raise.
+    assert not missing.exists(), "rotation created the log it was meant to rotate"
+    assert list(tmp_path.iterdir()) == [], (
+        f"rotation left artefacts behind: {list(tmp_path.iterdir())}"
+    )
 
 
 # ─── supervised vs. bare banner ────────────────────────────────────────

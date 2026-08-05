@@ -327,12 +327,21 @@ def test_print_lan_warning_ignores_invalid_gui_stdout(monkeypatch):
     Startup status printing must never crash the desktop app."""
     from one_link import app as app_mod
 
+    attempts = []
+
     def bad_echo(*_args, **_kwargs):
+        attempts.append(_args)
         raise OSError(22, "Invalid argument")
 
     monkeypatch.setattr(app_mod.click, "echo", bad_echo)
     monkeypatch.setattr(app_mod.click, "secho", bad_echo)
+
     app_mod._print_lan_warning("192.168.1.42", 7117)
+
+    # Printing must have been ATTEMPTED. A warning that silently prints nothing
+    # also never crashes, and would pass this while the user stopped being told
+    # which address reaches the daemon.
+    assert attempts, "nothing was printed, so no invalid-handle error was ignored"
 
 
 def test_page_version_matches_package():

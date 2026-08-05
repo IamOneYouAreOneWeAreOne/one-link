@@ -485,10 +485,19 @@ def test_handler_silent_drops_missing_cert_field():
     daemon.me = SimpleNamespace(short_id="me")
 
     class _Chan:
-        async def send(self, frame): pass
+        def __init__(self):
+            self.sent = []
 
+        async def send(self, frame):
+            self.sent.append(frame)
+
+    chan = _Chan()
     # No 'cert' key in the frame; handler should silently return.
     asyncio.run(daemon._handle_rotation_cert(
-        _Chan(), {"id": "x"}, peer_fp="aa" * 32,
+        chan, {"id": "x"}, peer_fp="aa" * 32,
     ))
-    # No exception means we pass.
+
+    # A malformed frame must be DROPPED, not answered. "No exception" cannot
+    # tell a silent drop from a handler that replies to an unauthenticated peer
+    # using a frame it could not validate.
+    assert chan.sent == [], f"handler replied to a frame with no cert: {chan.sent}"

@@ -203,13 +203,23 @@ def test_execute_plan_feeds_manager_event_into_callmanager() -> None:
 
 
 def test_execute_plan_handles_broadcast_failure_gracefully() -> None:
-    def boom(_ev): raise RuntimeError("ws closed")
+    seen = []
+
+    def boom(_ev):
+        seen.append(_ev)
+        raise RuntimeError("ws closed")
+
     plan = plan_for_decision(
         decision=_decision(ImmuneAction.REQUEST_VOICE_ONLY),
         call_id="c1", now_ms=0,
     )
-    # Must not raise.
+
     execute_plan(plan=plan, manager=None, broadcast_tail=boom)
+
+    # The broadcast must have been ATTEMPTED for its failure to be what is
+    # handled. An executor that never broadcasts also never raises, and would
+    # pass this while the UI silently stopped being told anything.
+    assert seen, "no broadcast was attempted, so no failure was handled"
 
 
 def test_execute_plan_returns_manager_outputs() -> None:
