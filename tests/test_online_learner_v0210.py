@@ -136,6 +136,13 @@ def test_weights_bounded_under_saturated_regret() -> None:
         learner.observe(100.0, d, **ctx)
     w = learner.weights()
     defaults = learner.defaults()
+    # A learner returning no weights would satisfy every bound below while
+    # having learned nothing -- "weights stay bounded" must be a statement
+    # about actual weights.
+    assert w, "the learner exposed no weights after 2000 observations"
+    assert set(w) == set(defaults), (
+        f"weights and defaults disagree on keys: {sorted(set(w) ^ set(defaults))}"
+    )
     for k, v in w.items():
         d_v = defaults[k]
         assert 0.0 <= v, f"{k} went negative: {v}"

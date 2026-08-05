@@ -102,7 +102,15 @@ def test_cdc_boundary_addresses_match_blake3():
     import blake3
 
     buf = _xorshift_buf(0xCAFE_BABE_F00D_BAAD, 256 * 1024)
-    for b in chunk_native.cdc_iter(buf):
+    chunks = list(chunk_native.cdc_iter(buf))
+    # A scanner that emitted NO chunks would satisfy the address check below
+    # having addressed nothing, and 256 KiB of content silently producing zero
+    # chunks is the failure this test is closest to.
+    assert chunks, "cdc_iter produced no chunks for a 256 KiB buffer"
+    assert sum(b.end - b.start for b in chunks) == len(buf), (
+        "the chunk boundaries do not cover the whole buffer"
+    )
+    for b in chunks:
         expected = blake3.blake3(buf[b.start : b.end]).digest()
         assert b.raw_address == expected
 

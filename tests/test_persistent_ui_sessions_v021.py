@@ -803,6 +803,10 @@ def test_preset_definitions_have_session_flags():
     """All three presets must declare both ui_session_* flags so the
     resolver always has a defined preset_value to fall back on."""
     from one_link.sovereignty import ALL_PRESETS
+    # The docstring says ALL THREE presets. An empty or shrunken registry would
+    # satisfy the loop while leaving the resolver with no preset_value to fall
+    # back on for whichever preset went missing.
+    assert len(ALL_PRESETS) == 3, f"expected 3 presets, got {sorted(ALL_PRESETS)}"
     for name, p in ALL_PRESETS.items():
         assert isinstance(p.ui_session_persistence_enabled, bool), (
             f"preset {name!r} missing ui_session_persistence_enabled"

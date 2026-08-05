@@ -212,7 +212,9 @@ async def test_timeout_propagated() -> None:
     await d.request_blob_with_dedupe_fallback(
         "h" * 64, primary="peerA", timeout_s=5.0,
     )
-    for call in d.request_blob_from_peer.call_args_list:
+    calls = d.request_blob_from_peer.call_args_list
+    assert len(calls) == 2, f"expected primary + fallback, got {len(calls)}"
+    for call in calls:
         assert call.kwargs["timeout_s"] == 5.0
 
 

@@ -159,6 +159,12 @@ def test_container_source_allowlist_matches_one_link_import_closure():
 def test_minimal_container_module_set_is_runtime_complete(tmp_path: Path):
     package = tmp_path / "one_link"
     package.mkdir()
+    # An empty module set would copy nothing and still "prove" the container
+    # surface is runtime-complete, because the probe below imports from a
+    # package that happens to be importable for other reasons.
+    assert len(RENDEZVOUS_MODULES) >= 6, (
+        f"rendezvous module set collapsed to {sorted(RENDEZVOUS_MODULES)}"
+    )
     for module in RENDEZVOUS_MODULES:
         filename = "__init__.py" if module == "__init__" else f"{module}.py"
         shutil.copy2(REPO / "src" / "one_link" / filename, package / filename)
