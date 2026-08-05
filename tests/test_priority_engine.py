@@ -90,6 +90,12 @@ def test_zero_bandwidth_pauses_everything() -> None:
         total_bandwidth_kbps=0.0,
         current_rung=Rung.RAW_AV,
     )
+    # An allocate() that returned nothing would satisfy "everything is
+    # paused" without pausing anything. The claim is about every stream, so
+    # every stream has to be present to make it.
+    assert len(allocs) == len(ALL_STREAMS), (
+        f"allocate() dropped streams: {len(allocs)} of {len(ALL_STREAMS)}"
+    )
     for a in allocs:
         assert a.paused
         assert a.allocated_kbps == 0.0
@@ -100,6 +106,9 @@ def test_negative_bandwidth_handled_as_zero() -> None:
         streams=ALL_STREAMS,
         total_bandwidth_kbps=-100.0,
         current_rung=Rung.RAW_AV,
+    )
+    assert len(allocs) == len(ALL_STREAMS), (
+        f"allocate() dropped streams: {len(allocs)} of {len(ALL_STREAMS)}"
     )
     for a in allocs:
         assert a.paused

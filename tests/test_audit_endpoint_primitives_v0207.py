@@ -33,6 +33,7 @@ def test_enumerator_returns_non_empty():
 
 def test_each_entry_has_required_fields():
     out = srv_mod._enumerate_sovereign_primitives()
+    assert out, "the catalog is empty, so the field check below proves nothing"
     required = {"module", "name", "status", "summary", "audit_ref"}
     for entry in out:
         assert required.issubset(entry.keys()), entry
@@ -40,6 +41,7 @@ def test_each_entry_has_required_fields():
 
 def test_status_values_are_sane():
     out = srv_mod._enumerate_sovereign_primitives()
+    assert out, "the catalog is empty, so the status check below proves nothing"
     valid = {"primitive", "live", "unavailable"}
     for entry in out:
         assert entry["status"] in valid, entry

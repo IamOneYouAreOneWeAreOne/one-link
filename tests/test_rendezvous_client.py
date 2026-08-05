@@ -308,6 +308,88 @@ async def test_updated_advertised_endpoints_picked_up_on_next_register(rendezvou
 
 # ─── discover_local_endpoints ──────────────────────────────────────
 
+def _fake_addresses(monkeypatch, addresses):
+    """Drive the filter with addresses we choose.
+
+    `own_ipv4_addresses()` is the only source the filter reads, which makes it
+    the injection seam this test needed. The socket trick further down the
+    function may still append the host's real outbound IP, so the assertions
+    below are about which CLASSES survive, never about an exact list.
+    """
+    import one_link.rendezvous_client as rc
+
+    monkeypatch.setattr(rc, "own_ipv4_addresses", lambda: list(addresses))
+
+
+_SYNTHETIC = [
+    "192.168.7.7",     # a normal LAN address: must survive
+    "169.254.10.10",   # link-local: excluded by default
+    "127.0.0.1",       # loopback: excluded by default
+    "0.0.0.0",         # unspecified: excluded ALWAYS
+]
+
+
+def test_the_exclusions_actually_exclude(monkeypatch) -> None:
+    """The deterministic version of the environment test below.
+
+    That test iterates whatever the host happens to have and asserts none of
+    it is link-local, loopback or 0.0.0.0. On a machine with no usable
+    interface -- a CI container, often -- the list is empty, every assertion is
+    skipped, and it passes without testing the filter at all. It also cannot be
+    made to require a LAN address, because a machine legitimately may not have
+    one.
+
+    Feeding the filter a list that CONTAINS one of each excluded class removes
+    the dependence on the host entirely.
+    """
+    _fake_addresses(monkeypatch, _SYNTHETIC)
+    hosts = {e.host for e in discover_local_endpoints(peer_port=51234)}
+    assert "192.168.7.7" in hosts, (
+        f"the filter dropped a normal LAN address: {hosts}"
+    )
+    assert "169.254.10.10" not in hosts, "link-local was advertised"
+    assert "127.0.0.1" not in hosts, "loopback was advertised"
+    assert "0.0.0.0" not in hosts, "the unspecified address was advertised"
+
+
+@pytest.mark.parametrize(
+    "flag,address,label",
+    [
+        ("include_link_local", "169.254.10.10", "link-local"),
+        ("include_loopback", "127.0.0.1", "loopback"),
+    ],
+)
+def test_each_opt_in_admits_exactly_its_own_class(
+    monkeypatch, flag: str, address: str, label: str
+) -> None:
+    """CONTROL for the exclusions above.
+
+    Without this, a filter that rejected everything would satisfy every
+    "not advertised" assertion. Each opt-in must change the outcome for its
+    own class and no other.
+    """
+    _fake_addresses(monkeypatch, _SYNTHETIC)
+    hosts = {
+        e.host
+        for e in discover_local_endpoints(peer_port=51234, **{flag: True})
+    }
+    assert address in hosts, f"{flag}=True did not admit the {label} address"
+    assert "0.0.0.0" not in hosts, (
+        "0.0.0.0 has no opt-in and must never be advertised"
+    )
+
+
+def test_zero_port_advertises_nothing(monkeypatch) -> None:
+    """A daemon with no bound listener must advertise no endpoint.
+
+    Port-0 entries are rejected by the rendezvous, so producing them turns a
+    pre-bind state into a stream of refused advertisements.
+    """
+    _fake_addresses(monkeypatch, _SYNTHETIC)
+    assert discover_local_endpoints(peer_port=0) == []
+    assert discover_local_endpoints(peer_port=-1) == []
+
+
 def test_discover_local_endpoints_skips_link_local_and_zero():
     eps = discover_local_endpoints(peer_port=51234)
     for e in eps:

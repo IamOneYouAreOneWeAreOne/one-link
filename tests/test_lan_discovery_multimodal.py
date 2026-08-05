@@ -9,6 +9,7 @@ touching any real network.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 
 from one_link import lan_discovery
@@ -139,6 +140,64 @@ class TestNetworkHealth:
 class TestMulticastFilter:
     """Multicast / broadcast IPs and MACs must be filtered out of
     discovery results — they're not real devices."""
+    def test_the_arp_parser_excludes_multicast_deterministically(self, monkeypatch):
+        """The real check. The full_scan test below is a smoke test.
+
+        The multicast/broadcast exclusion does not live in full_scan at all --
+        it is in scan_arp_table, applied while parsing the kernel's ARP table.
+        So the test below was calling the wrong unit: on a CI container the
+        scan returns nothing, its loop body never runs, and it passes without
+        exercising the filter. Its own comment admitted as much ("We can't
+        easily inject test data into full_scan").
+
+        The seam is subprocess.run. Feeding the parser a table that CONTAINS
+        one of each excluded class tests the filter itself, on every host.
+        """
+        import subprocess as _sp
+
+        from one_link import lan_discovery as ld
+
+        table = """Interface: 192.168.1.10 --- 0x5
+  Internet Address      Physical Address      Type
+  192.168.1.1           aa-bb-cc-dd-ee-01     dynamic
+  192.168.1.55          aa-bb-cc-dd-ee-02     dynamic
+  224.0.0.22            01-00-5e-00-00-16     static
+  239.255.255.250       01-00-5e-7f-ff-fa     static
+  255.255.255.255       ff-ff-ff-ff-ff-ff     static
+  0.0.0.0               00-00-00-00-00-00     invalid
+"""
+
+        monkeypatch.setattr(ld, "resolve_argv", lambda cmd, **kw: ["arp", "-a"])
+        monkeypatch.setattr(
+            ld.subprocess, "run",
+            lambda *a, **k: _sp.CompletedProcess(
+                args=["arp", "-a"], returncode=0, stdout=table, stderr=""
+            ),
+        )
+        monkeypatch.setattr(ld, "hidden_creationflags", lambda: 0)
+        monkeypatch.setattr(ld, "trusted_process_env", lambda: {})
+        monkeypatch.setattr(ld.Path, "parent", property(lambda self: Path(".")))
+
+        devices = ld.scan_arp_table()
+        ips = {d.ip for d in devices}
+
+        # CONTROL: without these, a parser that returned nothing would satisfy
+        # every exclusion below.
+        assert "192.168.1.1" in ips, f"a real device was dropped: {ips}"
+        assert "192.168.1.55" in ips, f"a real device was dropped: {ips}"
+
+        for excluded, why in (
+            ("224.0.0.22", "IPv4 multicast"),
+            ("239.255.255.250", "SSDP multicast"),
+            ("255.255.255.255", "broadcast"),
+            ("0.0.0.0", "unspecified"),
+        ):
+            assert excluded not in ips, f"{why} address {excluded} survived: {ips}"
+
+        for d in devices:
+            assert not d.mac.startswith("01:00:5e"), d.mac
+            assert not d.mac.startswith("ff:ff"), d.mac
+
     def test_full_scan_excludes_multicast(self):
         # We can't easily inject test data into full_scan, so we just
         # call it and check that no result has a multicast IP or MAC.
