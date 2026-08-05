@@ -1622,6 +1622,26 @@ def _process_token_windows(pid: int) -> ProcessIdentity | None:
             ctypes.byref(user),
         ):
             raise ctypes.WinError(ctypes.get_last_error())
+        # A terminated process still has a process OBJECT for as long as any
+        # handle to it is open, so OpenProcess above can succeed for a pid that
+        # has already exited. QueryFullProcessImageNameW then fails with
+        # ERROR_GEN_FAILURE (31), which is not in the "gone" set the OpenProcess
+        # branch knows about, so this raised PermissionError instead of
+        # reporting the exit.
+        #
+        # Found by running the update ceremony against a real frozen bundle on
+        # Windows: the daemon was stopped, it really had exited, and
+        # require_guarded_process_exit raised rather than confirming it. On that
+        # path the helper cannot proceed, so a Windows self-update stalls at the
+        # step that waits for the old process to go away.
+        #
+        # lpExitTime is the authoritative answer and we already asked for it:
+        # Windows leaves it zero for a process that has NOT exited, so reading
+        # it cannot mistake a live process for a dead one. Returning None here
+        # means "this instance is gone", which is exactly what has happened.
+        exited_at = (int(exit_time.dwHighDateTime) << 32) | int(exit_time.dwLowDateTime)
+        if exited_at:
+            return None
         capacity = wintypes.DWORD(32768)
         buffer = ctypes.create_unicode_buffer(capacity.value)
         if not kernel32.QueryFullProcessImageNameW(
