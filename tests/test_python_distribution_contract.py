@@ -64,12 +64,15 @@ def _stage_distribution_source(destination: Path) -> None:
 
 
 def test_stable_distribution_contract_exactly_matches_source_tree() -> None:
-    # 204: one_link.bounded_resolver added 2026-07-30 -- the one place a
-    # blocking name-resolution call is given a deadline. Being in this tuple
-    # is also what gets it bundled as a PyInstaller hidden import, and a
-    # frozen daemon missing it would fail at the first resolver call.
-    # (203 before it: build_info, 2026-07-27.)
-    assert len(build_identity.EXPECTED_STABLE_RUNTIME_MODULES) == 204
+    # 205: one_link.env_bounds added 2026-08-05 -- the single validated parser
+    # for numeric environment overrides. It exists because nine constants in
+    # daemon.py and server.py used bare int(os.environ.get(...)), so
+    # ONE_LINK_MAX_PEERS=abc raised at IMPORT and the daemon could not start,
+    # while ONE_LINK_MAX_PEERS=0 was accepted and silently set the peer ceiling
+    # to zero. It is imported at module scope by both, so a frozen build
+    # missing it would fail before logging exists.
+    # (204 before it: bounded_resolver, 2026-07-30.)
+    assert len(build_identity.EXPECTED_STABLE_RUNTIME_MODULES) == 205
     assert build_identity.EXPECTED_STABLE_RUNTIME_MODULES == tuple(
         sorted(set(build_identity.EXPECTED_STABLE_RUNTIME_MODULES))
     )
@@ -123,13 +126,13 @@ def test_distribution_source_contract_hashes_every_packaged_python_file() -> Non
         if "__pycache__" not in path.parts
     }
     packaged_python = {name for name in contract.payload_hashes if name.endswith(".py")}
-    # 220 / 239: one_link/bounded_resolver.py added 2026-07-30 -- the single
-    # place a blocking name-resolution call is given a deadline, after an
-    # unbounded one froze a macOS daemon's event loop for 64 seconds.
-    # (219 / 238 before it: build_info.py, 2026-07-27.)
-    assert len(source_python) == 220
+    # 221 / 240: one_link/env_bounds.py added 2026-08-05 -- validated numeric
+    # environment overrides, after a bare int(os.environ.get(...)) at module
+    # scope made a typo in a service unit an unstartable daemon.
+    # (220 / 239 before it: bounded_resolver.py, 2026-07-30.)
+    assert len(source_python) == 221
     assert packaged_python == source_python
-    assert len(contract.payload_hashes) == 239
+    assert len(contract.payload_hashes) == 240
 
 
 def test_developer_only_modules_are_not_stable_distribution_requirements() -> None:

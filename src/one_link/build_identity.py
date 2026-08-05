@@ -378,6 +378,7 @@ EXPECTED_STABLE_RUNTIME_MODULES: tuple[str, ...] = (
     "one_link.discovery_native",
     "one_link.double_ratchet",
     "one_link.durability",
+    "one_link.env_bounds",
     "one_link.erasure_native",
     "one_link.error_dialog",
     "one_link.fault_observability",

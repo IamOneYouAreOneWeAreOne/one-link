@@ -49,6 +49,7 @@ import unicodedata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, cast
 
+from one_link.env_bounds import env_float, env_int
 from one_link.platform_guard import install_windows_platform_fastpath
 
 install_windows_platform_fastpath()
@@ -1681,14 +1682,10 @@ UI_UPLOAD_METADATA_LIMITS = {
     "intent_metadata_complete": 8,
 }
 try:
-    UI_UPLOAD_IDLE_TIMEOUT_SECONDS = min(
-        300.0,
-        max(
-            1.0,
-            float(os.environ.get("ONE_LINK_UI_UPLOAD_IDLE_TIMEOUT_SECONDS", "30")),
-        ),
+    UI_UPLOAD_IDLE_TIMEOUT_SECONDS = env_float(
+        "ONE_LINK_UI_UPLOAD_IDLE_TIMEOUT_SECONDS", 30.0, minimum=1.0, maximum=300.0
     )
-except (TypeError, ValueError):
+except (TypeError, ValueError):  # pragma: no cover - env_float cannot raise
     UI_UPLOAD_IDLE_TIMEOUT_SECONDS = 30.0
 UPLOAD_MAX_ACTIVE_GLOBAL = 16
 UPLOAD_MAX_ACTIVE_BYTES_GLOBAL = 4 * UI_UPLOAD_MAX_BYTES
@@ -5873,11 +5870,9 @@ class UIServer:
         shared_secret = self._setting_value("turn_shared_secret")
         if shared_secret is None:
             shared_secret = os.environ.get("ONE_LINK_TURN_SHARED_SECRET")
-        ttl_s = 3600
-        try:
-            ttl_s = max(300, min(86_400, int(os.environ.get("ONE_LINK_TURN_TTL_SECONDS", "3600"))))
-        except ValueError:
-            ttl_s = 3600
+        ttl_s = env_int(
+            "ONE_LINK_TURN_TTL_SECONDS", 3600, minimum=300, maximum=86_400
+        )
 
         urls = list(
             _sov.parse_ice_server_list(
@@ -6996,11 +6991,9 @@ class UIServer:
                 "results": [],
                 "routePolicy": self._resolved_webrtc_route_policy(call_id=call_id),
             })
-        timeout_s = 1.5
-        try:
-            timeout_s = max(0.3, min(5.0, float(os.environ.get("ONE_LINK_RELAY_PROBE_TIMEOUT_SECONDS", "1.5"))))
-        except ValueError:
-            timeout_s = 1.5
+        timeout_s = env_float(
+            "ONE_LINK_RELAY_PROBE_TIMEOUT_SECONDS", 1.5, minimum=0.3, maximum=5.0
+        )
         results = await asyncio.gather(*[
             self._probe_turn_relay_once(url, timeout_s=timeout_s)
             for url in urls

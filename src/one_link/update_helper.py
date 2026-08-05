@@ -1208,10 +1208,19 @@ def _stop_candidate_for_recovery(
             if response.get("ok") is True:
                 try:
                     require_guarded_process_exit(guard, timeout=10.0)
-                except UpdateTransactionError:
-                    pass
-    except Exception:
-        pass
+                except UpdateTransactionError as exc:
+                    log.info(
+                        "guarded process did not confirm exit within 10s: %s", exc
+                    )
+    except Exception as exc:
+        # Best-effort shutdown of the running daemon before handoff. Staying
+        # best-effort is correct -- the helper must proceed either way -- but
+        # silence here meant an update that stalled because the old process
+        # never exited left no trace at all.
+        log.warning(
+            "pre-handoff daemon shutdown request failed: %s: %s",
+            type(exc).__name__, exc,
+        )
 
     if launched_process is None:
         return
@@ -1434,8 +1443,17 @@ def execute_external_update_handoff(
                 terminal_phase or "failed_closed",
                 result_code=result,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            # The journal is how an operator reconstructs a failed update after
+            # the fact. Losing the TERMINAL phase silently is the single worst
+            # moment to lose a record, because it is the one that says whether
+            # the install committed or rolled back. The original exception is
+            # still re-raised below; this only makes the loss visible.
+            log.error(
+                "could not record terminal update phase %r (result=%r): %s: %s",
+                terminal_phase or "failed_closed", result,
+                type(exc).__name__, exc,
+            )
         raise
 
 

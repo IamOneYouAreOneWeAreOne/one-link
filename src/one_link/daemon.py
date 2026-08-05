@@ -69,6 +69,7 @@ import uuid
 import zlib
 from collections import OrderedDict, deque
 
+from one_link.env_bounds import env_float, env_int
 from one_link._coerce import to_int
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -441,14 +442,14 @@ OUTBOUND_SESSION_PING_DEADLINE_S = 1.5
 # Foreground chat/control sends must not inherit OS/protocol dead-socket
 # timeouts. If a cached session stops answering, fail fast, drop it, and let
 # send_text() retry on a fresh session using the same message id.
-FOREGROUND_ACK_DEADLINE_S = float(
-    os.environ.get("ONE_LINK_FOREGROUND_ACK_DEADLINE_S", "2.0")
+FOREGROUND_ACK_DEADLINE_S = env_float(
+    "ONE_LINK_FOREGROUND_ACK_DEADLINE_S", 2.0, minimum=0.1, maximum=60.0
 )
 # Native QUIC can report a cached connection as structurally present even after
 # the path died. Bound diagnostics and one-off frame probes so a stale cached
 # path never blocks the user-facing fast path for tens of seconds.
-QUIC_FRAME_DEADLINE_S = float(
-    os.environ.get("ONE_LINK_QUIC_FRAME_DEADLINE_S", "2.0")
+QUIC_FRAME_DEADLINE_S = env_float(
+    "ONE_LINK_QUIC_FRAME_DEADLINE_S", 2.0, minimum=0.1, maximum=60.0
 )
 
 # D13 — Adaptive heartbeat bounds. Per integration map Phase E E3:
@@ -502,10 +503,16 @@ PEER_IDLE_S = 120.0
 # can pin N×32 inflight handshakes plus N×∞ post-handshake idle
 # channels (slowloris). 256 is a generous ceiling for friend-of-friend
 # households; tune via env if needed.
-MAX_TOTAL_PEER_CONNECTIONS = int(os.environ.get("ONE_LINK_MAX_PEERS", "256"))
+# minimum=1: a ceiling of 0 accepts nobody, which looks like a network fault
+# rather than a configuration one. Refuse to be configured into silence.
+MAX_TOTAL_PEER_CONNECTIONS = env_int(
+    "ONE_LINK_MAX_PEERS", 256, minimum=1, maximum=65_536
+)
 # Per-fingerprint cap so one peer key can't open many parallel
 # channels to wedge the global cap.
-MAX_PEER_CONNECTIONS_PER_FP = int(os.environ.get("ONE_LINK_MAX_PEERS_PER_FP", "4"))
+MAX_PEER_CONNECTIONS_PER_FP = env_int(
+    "ONE_LINK_MAX_PEERS_PER_FP", 4, minimum=1, maximum=4_096
+)
 # Loopback gets a free pass — the test suite & the local UI talk to the
 # daemon on 127.0.0.1 in tight bursts, and an attacker on loopback already
 # owns the box.
@@ -3896,8 +3903,10 @@ class Daemon:
         # at the tuned threshold), so the selector treats it as a
         # soft signal — but operator dashboards still want to see
         # cascade-warning rate as a leading indicator of mesh stress.
-        self._cascade_warning_threshold: float = float(
-            os.environ.get("ONE_LINK_CASCADE_THRESHOLD", "0.5") or "0.5",
+        # No maximum: a deliberately huge threshold is a legitimate way to
+        # mute the warning, and clamping it would defeat that intent.
+        self._cascade_warning_threshold: float = env_float(
+            "ONE_LINK_CASCADE_THRESHOLD", 0.5, minimum=0.0
         )
         self._cascade_warning_count: int = 0
 
@@ -3951,8 +3960,11 @@ class Daemon:
         # (in seconds). Independent of the prune loop's 20s tick so
         # operators can tune cascade response time without disturbing
         # other maintenance work.
-        self._wave_forecast_dt: float = float(
-            os.environ.get("ONE_LINK_WAVE_FORECAST_DT", "0.5") or "0.5",
+        # minimum=0.05: this is a loop cadence in seconds. Zero would spin the
+        # forecast tick as fast as the event loop allows and starve everything
+        # else on it.
+        self._wave_forecast_dt: float = env_float(
+            "ONE_LINK_WAVE_FORECAST_DT", 0.5, minimum=0.05, maximum=3_600.0
         )
 
         # Selector-decision telemetry. Every selector.decide() call from
@@ -23570,8 +23582,19 @@ class Daemon:
                             asyncio.shield(worker),
                             timeout=FOLDER_ARCHIVE_CANCEL_GRACE_S,
                         )
-                    except BaseException:
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        # Expected: the grace window elapsed, or we are already
+                        # being cancelled. Fall through to the force path below.
                         pass
+                    except Exception as exc:
+                        # Anything else is a real fault in the worker and must
+                        # not vanish. `except BaseException: pass` here also ate
+                        # KeyboardInterrupt and SystemExit, so a Ctrl-C during a
+                        # folder-archive cancel was silently discarded.
+                        log.warning(
+                            "folder archive cancel grace failed: %s: %s",
+                            type(exc).__name__, exc,
+                        )
                     if not worker.done():
                         worker.add_done_callback(_drain_worker)
                     raise FolderArchiveCommitError(
