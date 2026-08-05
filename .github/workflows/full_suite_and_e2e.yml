@@ -102,6 +102,30 @@ jobs:
             --maxfail=20
         env:
           PYTHONUNBUFFERED: "1"
+          # tests/test_perf_benchmarks.py provides this knob and says, in its
+          # own comment, "Set ONE_LINK_PERF_TOLERANCE=3.0 (or higher) for slow
+          # boxes". No workflow had ever set it, so the slowest box in the
+          # matrix ran at the default -- the mechanism existed and nothing
+          # reached it.
+          #
+          # windows-latest/py3.12 is that box, and this is the third distinct
+          # thing it lost on 2026-08-05 (a live-daemon test, two 50-pair spawn
+          # budgets, and now this). Measured:
+          #   local, idle:            10k enqueues well inside the 150 ms budget
+          #   CI windows py3.12:      703 ms  (4.7x the default 450 ms ceiling)
+          #
+          # 6.0 gives that leg a 900 ms ceiling: still enough to catch a real
+          # order-of-magnitude regression in a path whose strict budget is
+          # 150 ms, while not asking a contended shared runner to hit a
+          # wall-clock number it cannot reliably hit. Every other platform
+          # stays at the 3.0 default, and a developer can still run strict with
+          # ONE_LINK_PERF_TOLERANCE=1.0.
+          #
+          # A wall-clock micro-benchmark on a shared runner measures the runner
+          # as much as the code. Widening the tolerance where that is true is
+          # not weakening the gate; leaving it to fail randomly is, because a
+          # gate that reds for noise stops being read.
+          ONE_LINK_PERF_TOLERANCE: ${{ matrix.os == 'windows-latest' && '6.0' || '3.0' }}
 
   e2e_browser:
     name: e2e (playwright) / ${{ matrix.os }}
