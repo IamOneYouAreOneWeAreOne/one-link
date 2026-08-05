@@ -17,16 +17,23 @@ above it, so a typo in a service unit is indistinguishable from a broken build.
 The other two are the dangerous ones: the process comes up looking healthy with
 a protection configured to a value that disables it.
 
-These tests are written against the CONSTANTS as re-imported under a modified
-environment, not against env_int/env_float alone. Testing the helper only would
-prove the helper works while leaving open the thing that actually broke -- a
-call site that never adopted it.
+These tests are written against the CONSTANTS, imported by a fresh interpreter
+under a modified environment, not against env_int/env_float alone. Testing the
+helper only would prove the helper works while leaving open the thing that
+actually broke -- a call site that never adopted it.
+
+The subprocess is not incidental. The first version used importlib.reload() and
+that was a genuine mistake, described at the call-site section below: it broke
+31 tests in five unrelated files, every one of which passed in isolation.
 """
 
 from __future__ import annotations
 
-import importlib
 import logging
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -115,85 +122,102 @@ def test_a_rejected_value_names_itself_in_the_log(
 
 
 # ── the call sites, which is what actually broke ──────────────────────
+#
+# These read the CONSTANTS under a modified environment, because testing
+# env_int/env_float alone would prove the helper works while leaving open the
+# thing that actually broke: a call site that never adopted it.
+#
+# In a SUBPROCESS, deliberately. The first version used importlib.reload() on
+# one_link.daemon and it was a bad mistake: reloading a module rebinds its
+# classes and constants, while every other module that did `from one_link.daemon
+# import X` keeps pointing at the old objects. Isinstance checks and patch
+# targets silently stop matching. It cost 31 failures across five unrelated
+# files -- all of which passed in isolation, which is what made it look like
+# flakiness rather than contamination.
+#
+# A subprocess is also the more honest test. The defect was that IMPORTING the
+# module raised, and only a fresh interpreter actually imports it.
 
 
-def _daemon_with(monkeypatch: pytest.MonkeyPatch, **env: str):
-    import one_link.daemon as daemon
-
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    return importlib.reload(daemon)
-
-
-@pytest.fixture(autouse=True)
-def _restore_daemon_module():
-    """Reloading daemon under a modified env must not leak into other tests."""
-    yield
-    import one_link.daemon as daemon
-
-    importlib.reload(daemon)
-
-
-def test_the_daemon_module_imports_with_a_garbage_peer_bound(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The regression that motivated all of this: import used to raise."""
-    daemon = _daemon_with(monkeypatch, ONE_LINK_MAX_PEERS="abc")
-    assert daemon.MAX_TOTAL_PEER_CONNECTIONS == 256
-
-
-def test_the_daemon_module_imports_with_a_garbage_deadline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    daemon = _daemon_with(monkeypatch, ONE_LINK_FOREGROUND_ACK_DEADLINE_S="soon")
-    assert daemon.FOREGROUND_ACK_DEADLINE_S == 2.0
-
-
-def test_a_zero_peer_ceiling_cannot_be_configured(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A ceiling of zero means the node accepts nobody, silently."""
-    daemon = _daemon_with(monkeypatch, ONE_LINK_MAX_PEERS="0")
-    assert daemon.MAX_TOTAL_PEER_CONNECTIONS >= 1
-
-
-def test_a_negative_per_fingerprint_bound_cannot_be_configured(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    daemon = _daemon_with(monkeypatch, ONE_LINK_MAX_PEERS_PER_FP="-1")
-    assert daemon.MAX_PEER_CONNECTIONS_PER_FP >= 1
-
-
-def test_a_legal_override_still_takes_effect(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """CONTROL.
-
-    Every assertion above is satisfied by a helper that ignores the environment
-    entirely. This is the one that says the overrides still work at all.
-    """
-    daemon = _daemon_with(monkeypatch, ONE_LINK_MAX_PEERS="512")
-    assert daemon.MAX_TOTAL_PEER_CONNECTIONS == 512
-
-
-def test_the_shipped_defaults_are_unchanged(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """CONTROL: routing through the helper must not have moved any default."""
-    for name in (
+def _daemon_constant(name: str, **env: str):
+    """Import one_link.daemon in a fresh interpreter and read one constant."""
+    child = dict(os.environ)
+    for key in (
         "ONE_LINK_MAX_PEERS",
         "ONE_LINK_MAX_PEERS_PER_FP",
         "ONE_LINK_FOREGROUND_ACK_DEADLINE_S",
         "ONE_LINK_QUIC_FRAME_DEADLINE_S",
     ):
-        monkeypatch.delenv(name, raising=False)
-    import one_link.daemon as daemon
+        child.pop(key, None)
+    child.update(env)
+    result = subprocess.run(
+        [sys.executable, "-c",
+         f"import one_link.daemon as d; print(repr(d.{name}))"],
+        capture_output=True, text=True, timeout=180, env=child,
+        cwd=str(Path(__file__).resolve().parents[1]),
+    )
+    assert result.returncode == 0, (
+        f"importing one_link.daemon failed with {env}: {result.stderr}"
+    )
+    printed = result.stdout.strip().splitlines()
+    assert printed, f"no value printed; stderr: {result.stderr}"
+    return eval(printed[-1])  # noqa: S307 - our own repr(), from our own child
 
-    daemon = importlib.reload(daemon)
-    assert daemon.MAX_TOTAL_PEER_CONNECTIONS == 256
-    assert daemon.MAX_PEER_CONNECTIONS_PER_FP == 4
-    assert daemon.FOREGROUND_ACK_DEADLINE_S == 2.0
-    assert daemon.QUIC_FRAME_DEADLINE_S == 2.0
+
+def test_the_daemon_module_imports_with_a_garbage_peer_bound() -> None:
+    """The regression that motivated all of this: import used to RAISE."""
+    assert _daemon_constant(
+        "MAX_TOTAL_PEER_CONNECTIONS", ONE_LINK_MAX_PEERS="abc"
+    ) == 256
+
+
+def test_the_daemon_module_imports_with_a_garbage_deadline() -> None:
+    assert _daemon_constant(
+        "FOREGROUND_ACK_DEADLINE_S", ONE_LINK_FOREGROUND_ACK_DEADLINE_S="soon"
+    ) == 2.0
+
+
+def test_a_zero_peer_ceiling_cannot_be_configured() -> None:
+    """A ceiling of zero means the node accepts nobody, silently."""
+    assert _daemon_constant("MAX_TOTAL_PEER_CONNECTIONS", ONE_LINK_MAX_PEERS="0") >= 1
+
+
+def test_a_negative_per_fingerprint_bound_cannot_be_configured() -> None:
+    assert _daemon_constant(
+        "MAX_PEER_CONNECTIONS_PER_FP", ONE_LINK_MAX_PEERS_PER_FP="-1"
+    ) >= 1
+
+
+def test_an_infinite_frame_deadline_cannot_be_configured() -> None:
+    """float() accepts "inf" by name, and an infinite deadline is a hang."""
+    assert _daemon_constant(
+        "QUIC_FRAME_DEADLINE_S", ONE_LINK_QUIC_FRAME_DEADLINE_S="inf"
+    ) == 2.0
+
+
+def test_a_legal_override_still_takes_effect() -> None:
+    """CONTROL.
+
+    Every assertion above is satisfied by a helper that ignores the environment
+    entirely. This is the one that says the overrides still work at all.
+    """
+    assert _daemon_constant(
+        "MAX_TOTAL_PEER_CONNECTIONS", ONE_LINK_MAX_PEERS="512"
+    ) == 512
+
+
+@pytest.mark.parametrize(
+    "constant,expected",
+    [
+        ("MAX_TOTAL_PEER_CONNECTIONS", 256),
+        ("MAX_PEER_CONNECTIONS_PER_FP", 4),
+        ("FOREGROUND_ACK_DEADLINE_S", 2.0),
+        ("QUIC_FRAME_DEADLINE_S", 2.0),
+    ],
+)
+def test_the_shipped_defaults_are_unchanged(constant: str, expected) -> None:
+    """CONTROL: routing through the helper must not have moved any default."""
+    assert _daemon_constant(constant) == expected
 
 
 # ── the gate that keeps this closed ───────────────────────────────────
