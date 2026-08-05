@@ -41,6 +41,9 @@ def test_pre_release_audit_runs_on_legacy_windows_console_encodings():
     """The operator gate must not crash before executing on CP-1252 consoles."""
     audit = REPO / "scripts" / "pre_release_audit.py"
     source = audit.read_text(encoding="utf-8")
+    # `"".encode("ascii")` succeeds, so a missing or emptied gate would pass
+    # this "runs on CP-1252" check having verified nothing.
+    assert len(source) > 1000, f"pre_release_audit.py is {len(source)} bytes"
     source.encode("ascii")
 
 

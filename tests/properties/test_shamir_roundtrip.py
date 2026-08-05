@@ -107,13 +107,23 @@ def test_every_k_combination_round_trips(seed, kn):
             my_ed_priv_seed=guardians[i].private_bytes_raw(),
         )
         unwrapped_all.append((idx, share_bytes))
-    # Test every K-combination.
+    # "EVERY K-of-N combination" is a claim about COVERAGE, so the count is
+    # part of it. An unwrap that yielded fewer shares would silently shrink the
+    # enumeration and still look exhaustive.
+    assert len(unwrapped_all) == n, (
+        f"unwrapped {len(unwrapped_all)} of {n} shares"
+    )
+    checked = 0
     for combo in itertools.combinations(unwrapped_all, k):
         reconstructed = social_recovery.combine_shares(list(combo))
+        checked += 1
         assert reconstructed == seed, (
             f"k={k}-of-{n} combo failed: indices "
             f"{[c[0] for c in combo]} did not reconstruct seed"
         )
+    assert checked == math.comb(n, k), (
+        f"only {checked} of C({n},{k})={math.comb(n, k)} combinations tested"
+    )
 
 
 @given(
