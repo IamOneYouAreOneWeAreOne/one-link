@@ -433,14 +433,72 @@ def _validate_component(component: str, *, context: str) -> None:
         raise UpdateArchiveError(f"Windows-reserved path component in {context}: {component!r}")
 
 
-def _validate_archive_name(value: str) -> PurePosixPath:
+DEFAULT_ARCHIVE_ROOT = "one-link"
+
+
+def _manifest_name_for(root: str) -> str:
+    return f"{root}/BUNDLE_SHA256SUMS"
+
+
+def _discover_manifest_root(raw: bytes) -> str:
+    """The single top-level directory every manifest row sits under.
+
+    Taken from the MANIFEST, not from the directory name on disk. Those are
+    not the same thing: the update transaction stages an extracted bundle into
+    directories of its own choosing while the rows inside still say
+    `one-link/...`, so keying off the folder name rejected every row during a
+    staged update. The packager's archive validator has always discovered the
+    root this way (`archive_root = roots.pop()`).
+
+    Discovery is not trust. `_parse_bundle_manifest` then requires EVERY row to
+    share this root, and `validate_installed_bundle` maps each row to
+    `bundle / <relative>` -- so a manifest naming an unexpected root still
+    cannot reach outside the bundle, and the file-set equality check still has
+    to match what is actually on disk.
+    """
+    try:
+        text = raw.decode("utf-8", "strict")
+    except UnicodeDecodeError as exc:
+        raise UpdateArchiveError("bundle member manifest is not strict UTF-8") from exc
+    lines = text.splitlines()
+    # Header first, so a wrong FORMAT still reports "invalid header" rather
+    # than the vaguer "names no members" it would otherwise get here. The
+    # classic sha256sum layout auto_build used to emit has no header at all,
+    # and that diagnostic is how it was identified.
+    if not lines or lines[0] != ARCHIVE_MANIFEST_HEADER:
+        raise UpdateArchiveError("bundle member manifest has an invalid header")
+    for line in lines[1:]:
+        fields = line.split("\t")
+        if len(fields) != 5:
+            continue
+        head = PurePosixPath(fields[3]).parts[:1]
+        if head:
+            return head[0]
+    raise UpdateArchiveError("bundle member manifest names no members")
+
+
+def _validate_archive_name(value: str, root: str = DEFAULT_ARCHIVE_ROOT) -> PurePosixPath:
+    """Every member must live under ROOT, with no traversal.
+
+    The root is a PARAMETER because bundles are not all called `one-link`.
+    macOS ships `one-link.app`, and the packager has always derived the root
+    from the bundle directory (`_archive_root_for`, and its archive validator
+    discovers it from the archive). This side hardcoded it, so the packager
+    signed and shipped a macOS bundle this validator refused every row of --
+    701 of 701, measured on v0.21.0's one-link-macos-arm64.zip.
+
+    Containment does NOT come from the root name. It comes from the checks
+    around it: no `..`, not absolute, no backslash, no leading slash, and
+    `as_posix()` round-tripping the input. Those are unchanged; the root only
+    decides WHICH directory everything must sit under.
+    """
     if not value or "\\" in value or value.startswith("/"):
         raise UpdateArchiveError(f"unsafe archive member path: {value!r}")
     path = PurePosixPath(value)
     if (
         path.is_absolute()
         or ".." in path.parts
-        or path.parts[:1] != ("one-link",)
+        or path.parts[:1] != (root,)
         or path.as_posix() != value
     ):
         raise UpdateArchiveError(f"unsafe archive member path: {value!r}")
@@ -528,7 +586,9 @@ class _ManifestRow:
     target: str
 
 
-def _parse_bundle_manifest(raw: bytes) -> Mapping[str, _ManifestRow]:
+def _parse_bundle_manifest(
+    raw: bytes, root: str = DEFAULT_ARCHIVE_ROOT,
+) -> Mapping[str, _ManifestRow]:
     if not raw or len(raw) > MAX_ARCHIVE_MANIFEST_BYTES:
         raise UpdateArchiveError("bundle member manifest is empty or oversized")
     try:
@@ -544,8 +604,8 @@ def _parse_bundle_manifest(raw: bytes) -> Mapping[str, _ManifestRow]:
         if len(fields) != 5:
             raise UpdateArchiveError("bundle member manifest has a malformed row")
         digest, kind, size_text, name, target = fields
-        _validate_archive_name(name)
-        if name == ARCHIVE_MANIFEST or name in rows:
+        _validate_archive_name(name, root)
+        if name == _manifest_name_for(root) or name in rows:
             raise UpdateArchiveError(f"bundle member manifest duplicates {name!r}")
         if not _HEX_64.fullmatch(digest) or kind not in {"FILE", "SYMLINK"}:
             raise UpdateArchiveError(f"bundle member manifest row is invalid: {name!r}")
@@ -563,7 +623,79 @@ def _parse_bundle_manifest(raw: bytes) -> Mapping[str, _ManifestRow]:
     return rows
 
 
-def _safe_symlink_target(row: _ManifestRow, all_names: set[str]) -> None:
+MAX_SYMLINK_HOPS = 40
+
+
+def _resolve_through_manifest(
+    start: str,
+    rows: Mapping[str, "_ManifestRow"],
+    root: str,
+    *,
+    label: str,
+) -> str:
+    """Walk `start` component by component, following SYMLINK rows on the way.
+
+    A symlink target is not always a member of the manifest, because real
+    bundles chain links THROUGH linked directories. PyInstaller's macOS layout
+    does exactly that:
+
+        Contents/Frameworks/Python.framework/Python  -> Versions/Current/Python
+        Contents/Frameworks/Python.framework/Versions/Current -> 3.12
+        Contents/Frameworks/PIL/.dylibs -> __dot__dylibs
+
+    `Versions/Current/Python` is a member of NOTHING: `Current` is itself a
+    link, so the literal path never appears in the manifest. Requiring the
+    target to be a literal entry rejected 79 of the 126 symlinks in the real
+    v0.21.0 macOS bundle. Resolving the chain first is what makes the check
+    answerable.
+
+    Containment is enforced at EVERY hop, not just at the end -- a link may not
+    step outside `root` even transiently. Hops are bounded, so a cycle
+    (a -> b -> a) terminates as a refusal rather than a hang.
+    """
+    current = start
+    for _ in range(MAX_SYMLINK_HOPS):
+        parts = [p for p in current.split("/") if p]
+        jumped = False
+        # Longest-prefix first is wrong here: a link must be applied at the
+        # SHALLOWEST component that is one, because everything after it is
+        # relative to wherever that link lands.
+        for i in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:i])
+            row = rows.get(prefix)
+            if row is None or row.kind != "SYMLINK":
+                continue
+            rest = parts[i:]
+            landed = posixpath.normpath(
+                posixpath.join(posixpath.dirname(prefix), row.target)
+            )
+            candidate = posixpath.normpath(
+                posixpath.join(landed, *rest) if rest else landed
+            )
+            candidate_parts = [p for p in candidate.split("/") if p]
+            # Containment is checked at EVERY hop, not just at the end: a chain
+            # may not step outside the root even transiently.
+            if ".." in candidate_parts or candidate_parts[:1] != [root]:
+                raise UpdateArchiveError(
+                    f"bundle symlink escapes the bundle root: {label!r}"
+                )
+            current = candidate
+            jumped = True
+            break
+        if not jumped:
+            return current
+        # Re-scan from the start: the path we landed on may itself traverse
+        # further links. Bounded by MAX_SYMLINK_HOPS, so a -> b -> a
+        # terminates as a refusal instead of spinning.
+    raise UpdateArchiveError(
+        f"bundle symlink chain is too deep or cyclic: {label!r}"
+    )
+
+
+def _safe_symlink_target(
+    row: _ManifestRow, all_names: set[str], root: str = DEFAULT_ARCHIVE_ROOT,
+    rows: Mapping[str, "_ManifestRow"] | None = None,
+) -> None:
     target = row.target
     posix_target = PurePosixPath(target.replace("\\", "/"))
     windows_target = PureWindowsPath(target)
@@ -580,15 +712,22 @@ def _safe_symlink_target(row: _ManifestRow, all_names: set[str]) -> None:
         posixpath.normpath(str(PurePosixPath(row.path).parent / posix_target))
     )
     relocated_name = relocated.as_posix()
-    if (
-        relocated.parts[:1] != ("one-link",)
-        or ".." in relocated.parts
-        or not (
-            relocated_name in all_names
-            or any(name.startswith(relocated_name + "/") for name in all_names)
-        )
-    ):
+    if relocated.parts[:1] != (root,) or ".." in relocated.parts:
         raise UpdateArchiveError(f"bundle symlink escapes or targets missing content: {row.path!r}")
+
+    def _present(name: str) -> bool:
+        return name in all_names or any(n.startswith(name + "/") for n in all_names)
+
+    if _present(relocated_name):
+        return
+    # Not a literal member: follow the chain before declaring it missing.
+    if rows is not None:
+        resolved = _resolve_through_manifest(
+            relocated_name, rows, root, label=row.path,
+        )
+        if _present(resolved):
+            return
+    raise UpdateArchiveError(f"bundle symlink escapes or targets missing content: {row.path!r}")
 
 
 def _archive_budgets() -> tuple[int, int, int]:
@@ -883,11 +1022,19 @@ def validate_installed_bundle(root: Path, *, expected_executable: str) -> Bundle
     if raw is None:
         raise UpdateArchiveError("bundle member manifest is absent")
     manifest_digest = hashlib.sha256(raw).hexdigest()
-    rows = _parse_bundle_manifest(raw)
+    # The root comes from the MANIFEST, not from the folder name on disk.
+    # macOS installs as `one-link.app` (its launcher is Contents/MacOS/one-link,
+    # so the install root IS the .app), and hardcoding "one-link" rejected every
+    # row of every macOS bundle ever shipped. Using the DIRECTORY name instead
+    # was my first attempt and it broke staged updates, where the transaction
+    # extracts into a directory of its own choosing while the rows inside still
+    # say `one-link/...`.
+    archive_root = _discover_manifest_root(raw)
+    rows = _parse_bundle_manifest(raw, archive_root)
     expected_relative: dict[str, _ManifestRow] = {}
     for name, row in rows.items():
         parts = PurePosixPath(name).parts
-        if parts[:1] != ("one-link",):
+        if parts[:1] != (archive_root,):
             raise UpdateArchiveError("bundle manifest row leaves bundle root")
         relative = PurePosixPath(*parts[1:]).as_posix()
         expected_relative[relative] = row
@@ -923,7 +1070,7 @@ def validate_installed_bundle(root: Path, *, expected_executable: str) -> Bundle
         raise UpdateArchiveError(
             "managed bundle file set differs from its authenticated member manifest"
         )
-    all_archive_names = set(rows) | {ARCHIVE_MANIFEST}
+    all_archive_names = set(rows) | {_manifest_name_for(archive_root)}
     for relative, row in expected_relative.items():
         path = bundle.joinpath(*PurePosixPath(relative).parts)
         try:
@@ -933,7 +1080,7 @@ def validate_installed_bundle(root: Path, *, expected_executable: str) -> Bundle
         if row.kind == "SYMLINK":
             if not stat.S_ISLNK(item.st_mode) or _is_link_or_reparse(item) is False:
                 raise UpdateArchiveError(f"managed bundle link type differs: {relative}")
-            _safe_symlink_target(row, all_archive_names)
+            _safe_symlink_target(row, all_archive_names, archive_root, rows)
             try:
                 target = os.readlink(path)
             except OSError as exc:

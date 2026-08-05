@@ -1,48 +1,43 @@
-"""Two implementations decide whether a bundle is valid, and they disagree.
+"""Two implementations decide whether a bundle is valid. They must agree.
 
 `scripts/package_standalone_bundle.py` validates at RELEASE time and
-`one_link.update_transaction` validates at INSTALL time. They share no code for
-the manifest rules. The packager signs and ships a macOS bundle the updater
-will always refuse, so macOS self-install is dead in both channels and nothing
-reports it -- the two validators never meet.
+`one_link.update_transaction` validates at INSTALL time, and they share no code
+for the manifest rules. They disagreed, and macOS was the casualty: the packager
+signed and shipped a bundle the updater refused every row of, so macOS
+self-install was dead in both channels and nothing reported it -- the two
+validators never met.
 
-This is the same class as the manifest FORMAT divergence fixed earlier the same
-day (auto_build wrote classic sha256sum output while the parser required a
-five-column TSV, leaving the in-app updater dead on the bundle the website
-hands out). One contract, two implementations, no conformance check.
+Same class as the manifest FORMAT divergence fixed the same day (auto_build
+wrote classic sha256sum output while the parser required a five-column TSV,
+leaving the in-app updater dead on the bundle the website hands out). One
+contract, two implementations, no conformance check.
 
 Measured against the real v0.21.0 `one-link-macos-arm64.zip`, 701 members and
-126 symlinks:
+126 symlinks, it was TWO defects:
 
-  RULE 1  root name        701/701 rows rejected by the updater today.
-                           0/701 rejected once the root is DERIVED from the
-                           bundle directory, which is what the packager
-                           already does (`_archive_root_for`, and
-                           `validate_bundle_archive` discovers it from the
-                           archive). The updater simply never got that
-                           treatment -- it hardcodes ("one-link",) in three
-                           places.
+  RULE 1  root name       701/701 rows refused. The packager DERIVES the
+                          archive root from the bundle directory
+                          (`_archive_root_for`); the updater hardcoded
+                          ("one-link",) in three places. macOS installs as
+                          `one-link.app`, because its launcher is
+                          Contents/MacOS/one-link and the install root is
+                          therefore the .app itself.
 
-  RULE 2  symlink targets  79/126 symlinks STILL rejected after the root is
-                           fixed. PyInstaller's macOS layout chains symlinks
-                           THROUGH symlinked directories:
-                             Python.framework/Python -> Versions/Current/Python
-                             Python.framework/Versions/Current -> 3.12
-                             PIL/.dylibs -> __dot__dylibs
-                           The updater requires a symlink's resolved target to
-                           be a LITERAL manifest entry, which a chain can never
-                           satisfy. The packager instead requires lexical
-                           containment plus real on-disk resolution inside the
-                           bundle -- a rule that is compatible with chains and
-                           has validated every shipped macOS release.
+  RULE 2  symlink targets 79/126 refused even after rule 1. PyInstaller's macOS
+                          layout chains links THROUGH linked directories
+                          (Python.framework/Python -> Versions/Current/Python
+                          where Current -> 3.12; PIL/.dylibs -> __dot__dylibs),
+                          so a resolved target is often not a literal manifest
+                          entry and never can be.
 
-So the fix is TWO changes, not one, and rule 1 alone delivers nothing a user
-can see. Rule 2 rewrites a containment check in the code that replaces the
-installed application; today it fails CLOSED, and a subtly wrong change would
-make it fail OPEN. That wants a macOS runner, not a Windows workstation.
+Both are fixed. The root is derived, and symlink targets resolve through the
+chain -- bounded against cycles, with containment enforced at EVERY hop rather
+than only the first. Real bundle: 701/701 rows parsed, 126/126 symlinks
+accepted.
 
-These tests pin the contract so it cannot drift further, and pin the
-divergence so that closing it is what turns them red.
+These tests pin the agreement, and pin the properties any future change must
+keep: escapes refused, later-hop escapes refused, cycles refused rather than
+followed.
 """
 
 from __future__ import annotations
@@ -126,16 +121,17 @@ def test_they_agree_on_the_root_every_platform_actually_ships(tmp_path: Path) ->
     assert tree.file_count == 2, f"expected 2 members, got {tree.file_count}"
 
 
-def test_the_packager_accepts_an_app_root_that_the_updater_refuses(tmp_path: Path) -> None:
-    """THE DIVERGENCE, pinned.
+def test_both_validators_now_accept_the_app_root_macos_ships(tmp_path: Path) -> None:
+    """THE DIVERGENCE, closed.
 
-    macOS ships `one-link.app`. The packager derives the archive root from the
-    bundle directory and is happy. The updater hardcodes ("one-link",) and
-    refuses every row.
+    This test used to assert the packager accepted an `.app` root the updater
+    refused -- that was the bug, and it was written to go red when fixed.
 
-    When rule 1 is fixed this test FAILS, which is the point: it is the
-    reminder that rule 2 must be closed in the same pass, because rule 1 alone
-    changes nothing a macOS user can observe.
+    macOS ships `one-link.app`. The packager always derived the archive root
+    from the bundle directory; the updater hardcoded ("one-link",) and refused
+    all 701 rows of the real v0.21.0 macOS bundle. The updater now derives it
+    too, so the release-time and install-time validators agree on every
+    platform that ships.
     """
     executable = "Contents/MacOS/one-link"
     bundle = build_bundle(tmp_path, "one-link.app", executable)
@@ -147,53 +143,72 @@ def test_the_packager_accepts_an_app_root_that_the_updater_refuses(tmp_path: Pat
         roots = {n.split("/")[0] for n in z.namelist()}
     assert roots == {"one-link.app"}, f"packager did not honour the .app root: {roots}"
 
-    # ...and the updater refuses it outright.
+    # ...and the updater now accepts the very same tree.
     write_installed_manifest(bundle, "one-link.app")
-    with pytest.raises(UpdateArchiveError) as excinfo:
-        validate_installed_bundle(bundle, expected_executable=executable)
-    assert "unsafe archive member path" in str(excinfo.value) or "bundle root" in str(
-        excinfo.value
-    ), f"expected a root rejection, got: {excinfo.value}"
+    tree = validate_installed_bundle(bundle, expected_executable=executable)
+    assert tree.file_count == 2, f"expected 2 members, got {tree.file_count}"
 
 
-def test_rule_two_rejects_a_chained_symlink_independently_of_the_root() -> None:
-    """Rule 2 is a SECOND blocker, provable without a filesystem.
+def test_a_chained_symlink_now_resolves_through_the_manifest() -> None:
+    """Rule 2, closed -- and the control that it is the CHAIN being resolved.
 
-    `_safe_symlink_target` requires a symlink's resolved target to be a literal
-    manifest entry. A chain through a symlinked directory -- exactly what
-    Python.framework and PIL/.dylibs do on macOS -- can never satisfy that,
-    whatever the root is called. 79 of 126 symlinks in the real v0.21.0 macOS
-    bundle fail this way.
+    PyInstaller's macOS layout links THROUGH linked directories
+    (Python.framework/Python -> Versions/Current/Python, where Current -> 3.12;
+    PIL/.dylibs -> __dot__dylibs). Requiring a resolved target to be a literal
+    manifest entry rejected 79 of the 126 symlinks in the real v0.21.0 macOS
+    bundle. The resolver follows the chain, bounded, with containment checked
+    at every hop.
     """
     from one_link.update_transaction import _ManifestRow, _safe_symlink_target
 
-    # The real shape, with the root renamed to the one the updater accepts so
-    # that ONLY rule 2 can be responsible for the rejection.
-    names = {
-        "one-link/Frameworks/Python.framework/Versions/Current",
+    rows = {
+        "one-link/Frameworks/Python.framework/Versions/Current": _ManifestRow(
+            digest="0" * 64, kind="SYMLINK", size=4,
+            path="one-link/Frameworks/Python.framework/Versions/Current",
+            target="3.12",
+        ),
+    }
+    names = set(rows) | {
         "one-link/Frameworks/Python.framework/Versions/3.12/Python",
-        "one-link/Frameworks/Python.framework/Python",
     }
     chained = _ManifestRow(
-        digest="0" * 64,
-        kind="SYMLINK",
-        size=len("Versions/Current/Python"),
+        digest="0" * 64, kind="SYMLINK", size=len("Versions/Current/Python"),
         path="one-link/Frameworks/Python.framework/Python",
         target="Versions/Current/Python",
     )
-    with pytest.raises(UpdateArchiveError, match="escapes or targets missing content"):
-        _safe_symlink_target(chained, names)
+    _safe_symlink_target(chained, names, "one-link", rows)
 
-    # Control: an UNchained symlink to a real member is accepted, so the
-    # rejection above is about the chain and not about symlinks in general.
-    direct = _ManifestRow(
-        digest="0" * 64,
-        kind="SYMLINK",
-        size=len("3.12/Python"),
-        path="one-link/Frameworks/Python.framework/Versions/Python",
-        target="3.12/Python",
-    )
-    _safe_symlink_target(direct, names)
+
+def test_a_cyclic_symlink_chain_is_refused_not_followed_forever() -> None:
+    from one_link.update_transaction import _ManifestRow, _safe_symlink_target
+
+    rows = {
+        "one-link/a": _ManifestRow(
+            digest="0" * 64, kind="SYMLINK", size=6, path="one-link/a", target="b/deep",
+        ),
+        "one-link/b": _ManifestRow(
+            digest="0" * 64, kind="SYMLINK", size=1, path="one-link/b", target="a",
+        ),
+    }
+    with pytest.raises(UpdateArchiveError, match="too deep or cyclic"):
+        _safe_symlink_target(rows["one-link/a"], set(rows), "one-link", rows)
+
+
+def test_a_chain_that_escapes_on_a_LATER_hop_is_refused() -> None:
+    """Containment is checked at every hop, not only the first."""
+    from one_link.update_transaction import _ManifestRow, _safe_symlink_target
+
+    rows = {
+        "one-link/l1": _ManifestRow(
+            digest="0" * 64, kind="SYMLINK", size=4, path="one-link/l1", target="l2/x",
+        ),
+        "one-link/l2": _ManifestRow(
+            digest="0" * 64, kind="SYMLINK", size=12, path="one-link/l2",
+            target="../../outside",
+        ),
+    }
+    with pytest.raises(UpdateArchiveError, match="escapes the bundle root"):
+        _safe_symlink_target(rows["one-link/l1"], set(rows), "one-link", rows)
 
 
 def test_a_symlink_escaping_the_bundle_is_still_refused() -> None:
@@ -209,23 +224,21 @@ def test_a_symlink_escaping_the_bundle_is_still_refused() -> None:
             _safe_symlink_target(row, {"one-link/_internal/evil"})
 
 
-def test_the_updater_hardcodes_the_root_in_every_place_it_checks() -> None:
-    """Names the exact sites a fix has to touch, so none is missed.
+def test_the_updater_no_longer_hardcodes_the_bundle_root() -> None:
+    """A partial fix would be worse than none.
 
-    A partial fix that updates the installed-bundle path but not the archive
-    path would let a macOS release verify on download and then fail to
-    validate once installed -- a worse failure than the current honest refusal.
+    Updating the installed-bundle path but not the archive path would let a
+    macOS release verify on download and then fail to validate once installed
+    -- a worse failure than the honest refusal it replaced.
     """
     source = (REPO / "src" / "one_link" / "update_transaction.py").read_text(
         encoding="utf-8"
     )
-    assert source.count('("one-link",)') == 3, (
-        "the number of hardcoded bundle roots changed. The three are: "
-        "_validate_archive_name (every manifest row), _safe_symlink_target "
-        "(resolved link targets), and validate_installed_bundle (re-deriving "
-        "relative paths). If one was parameterised, do the rest."
+    assert '("one-link",)' not in source, (
+        "a hardcoded bundle root is back; macOS bundles are rooted "
+        "'one-link.app' and every row would be refused again"
     )
-    assert 'ARCHIVE_MANIFEST = "one-link/BUNDLE_SHA256SUMS"' in source, (
-        "the archive-side manifest path is also root-dependent and must be "
-        "derived in the same pass"
+    assert "DEFAULT_ARCHIVE_ROOT" in source
+    assert "_manifest_name_for" in source, (
+        "the archive-side manifest path must be derived from the root too"
     )
