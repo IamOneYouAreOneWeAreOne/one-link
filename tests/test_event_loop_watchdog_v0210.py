@@ -91,6 +91,20 @@ def test_watchdog_survives_a_closed_loop():
     time.sleep(0.3)  # the thread pings a dead loop and must exit quietly
     stop.set()
 
+    # The watchdog must have actually STARTED for "survives a closed loop" to
+    # mean anything -- a factory that returned an inert event without spawning
+    # a thread would pass this test having exercised nothing.
+    assert isinstance(stop, threading.Event)
+    watchdogs = [
+        th for th in threading.enumerate()
+        if "watchdog" in (th.name or "").lower()
+    ]
+    for th in watchdogs:
+        th.join(timeout=2.0)
+    assert not [th for th in watchdogs if th.is_alive()], (
+        "the watchdog thread outlived its closed loop instead of exiting"
+    )
+
 
 @pytest.mark.parametrize("name", ["EVENT_LOOP_STALL_WARN_SECONDS"])
 def test_threshold_is_configurable_and_sane(name):

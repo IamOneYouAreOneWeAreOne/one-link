@@ -97,7 +97,14 @@ def test_remove():
 
 def test_remove_unknown_is_noop():
     r = Registry()
-    r.remove("nope")  # no error
+    r.upsert(_peer("aaaaaaaa", "alice"))
+
+    r.remove("nope")
+
+    # "No error" cannot catch the failure that matters: removing an unknown id
+    # must not disturb the peers that ARE known. A remove that cleared the
+    # registry would raise nothing and look identical.
+    assert [p.hostname for p in r.list()] == ["alice"]
 
 
 def test_list_sorted_by_hostname():

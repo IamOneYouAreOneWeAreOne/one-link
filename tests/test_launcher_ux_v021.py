@@ -117,10 +117,19 @@ def test_reveal_in_file_manager_swallows_errors(tmp_path, monkeypatch):
     """Best-effort — must NEVER raise; the user is already in the
     error-recovery path, we cannot pile a second crash on top."""
     from one_link import error_dialog
+    calls = []
+
     def _boom(*a, **k):
+        calls.append(a)
         raise OSError("simulated")
     monkeypatch.setattr(error_dialog, "launch_system_opener", _boom)
-    error_dialog._reveal_in_file_manager(tmp_path)  # must not raise
+
+    error_dialog._reveal_in_file_manager(tmp_path)
+
+    # The opener must have been ATTEMPTED. A reveal that quietly does nothing
+    # also never raises, and would pass this test while the button silently
+    # stopped working.
+    assert calls, "the system opener was never invoked, so nothing was swallowed"
 
 
 # ─── launcher splash spawn / close helpers ─────────────────────────────
@@ -163,9 +172,12 @@ def test_spawn_splash_command_targets_correct_entry(monkeypatch):
 
 def test_close_splash_handles_none():
     from one_link import app as app_mod
-    # None means "no splash was spawned". Must be a clean no-op,
-    # never raise.
-    app_mod._close_splash(None)
+    # None means "no splash was spawned". Must be a clean no-op, never raise,
+    # and -- the part "did not raise" cannot see -- must not report that it
+    # closed something.
+    assert app_mod._close_splash(None) in (None, False), (
+        "closing a nonexistent splash claimed to have closed one"
+    )
 
 
 def test_close_splash_closes_stdin_first(monkeypatch):

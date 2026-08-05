@@ -32,13 +32,29 @@ from one_link import state as state_mod
 def test_idempotent_reopen(tmp_path):
     db_path = tmp_path / "state.db"
     s1 = state_mod.State(db_path=db_path)
+    first_version = s1._conn.execute("PRAGMA user_version").fetchone()[0]
+    s1.set_setting("survives", "yes")
     s1._conn.close()
+
     # Second open against the already-migrated db must succeed.
     s2 = state_mod.State(db_path=db_path)
+    second_version = s2._conn.execute("PRAGMA user_version").fetchone()[0]
+    carried = s2.get_setting("survives")
     s2._conn.close()
+
     # And a third for good measure.
     s3 = state_mod.State(db_path=db_path)
+    third_version = s3._conn.execute("PRAGMA user_version").fetchone()[0]
     s3._conn.close()
+
+    # Reopening must not RE-MIGRATE. A migration that ran again would not
+    # raise -- it would quietly rewrite or drop tables -- so "opened without an
+    # exception" is exactly the wrong thing to assert here.
+    assert first_version == second_version == third_version, (
+        f"schema version moved on reopen: {first_version} -> {second_version} "
+        f"-> {third_version}"
+    )
+    assert carried == "yes", "reopening the migrated db lost existing rows"
 
 
 def test_schema_version_unique_after_migration(tmp_path):

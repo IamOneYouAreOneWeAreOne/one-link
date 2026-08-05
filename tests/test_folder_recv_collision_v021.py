@@ -167,5 +167,9 @@ def test_daemon_collision_callback_no_op_without_ui_server(tmp_path: Path):
     me = _identity()
     daemon = Daemon(me)
     daemon.ui_server = None
-    # Should not raise.
+
     daemon._on_folder_collision("x", "y", 1, 2, "ab" * 32)
+
+    # Lazily building a UI server on the headless path would start a listener
+    # a headless daemon never asked for, and that cannot raise.
+    assert daemon.ui_server is None, "a UI server was constructed on the no-op path"
