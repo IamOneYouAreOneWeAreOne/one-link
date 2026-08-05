@@ -3041,6 +3041,15 @@ class IncomingFile:
     # user-visible collision-safe destination is not published until the
     # staging descriptor has been whole-file hashed and fsynced.
     final_path: Path | None = None
+    # When this delivery claimed the blob. Self-stamping so no construction
+    # site has to remember it. It exists to make ONE failure diagnosable: an
+    # entry in ``_incoming_files`` is released through the stuck-transfer
+    # reaper, and an entry the reaper never sees would refuse that blob until
+    # the daemon restarts. Without an age, a refusal cannot distinguish "a
+    # delivery started two seconds ago" from "an orphan has held this since
+    # boot" -- and that is exactly the question a 2026-08-05 CI refusal left
+    # unanswerable.
+    started_ms: int = field(default_factory=lambda: int(time.time() * 1000))
     delivery_id: str = ""
     delivery_name: str = ""
     delivery_rel_path: str = ""
@@ -9211,6 +9220,56 @@ class Daemon:
                 delivery_rel_path=delivery_rel_path,
                 delivery_kind=delivery_kind,
             ):
+                # This refusal was, on 2026-08-05, the least diagnosable
+                # outcome the daemon can produce. A live-daemon CI run rejected
+                # a FIRST send with `admission_blob_in_use_by_another_delivery`
+                # and left nothing behind to explain WHICH delivery held the
+                # blob, how long it had held it, or whether the holder was
+                # still real. It could not be reproduced in 5 isolated runs or
+                # 25/25 whole-file runs, so there was nothing to work from.
+                #
+                # The guard itself is correct -- content already being
+                # delivered under one identity must not be silently adopted by
+                # another -- and it was deliberately NOT changed without a
+                # reproduction. What was missing is the evidence to resolve it
+                # the next time, which costs nothing and is written here rather
+                # than guessed at in the admission logic.
+                #
+                # `_incoming_files` is released through the stuck-transfer
+                # reaper, which only parks entries whose transfer row appears
+                # in its bounded scan. An entry whose row is missing or beyond
+                # that bound would be orphaned and would refuse this blob until
+                # restart. `held_ms` and `holder_has_transfer_row` are here to
+                # confirm or eliminate exactly that.
+                _held_ms = -1
+                _started = getattr(existing_owner, "started_ms", None)
+                if isinstance(_started, int) and _started > 0:
+                    _held_ms = int(time.time() * 1000) - _started
+                _holder_row = None
+                if self.state is not None:
+                    with contextlib.suppress(Exception):
+                        _holder_row = self.state.get_transfer(
+                            existing_owner.transfer_id or f"in:{blob}"
+                        )
+                log.warning(
+                    "file offer REFUSED (%s): blob=%s incoming_delivery=%s "
+                    "from peer=%s; holder_delivery=%s holder_peer=%s "
+                    "holder_name=%r holder_kind=%s held_ms=%s "
+                    "holder_finalizing=%s holder_has_transfer_row=%s "
+                    "holder_transfer_status=%s",
+                    "blob_in_use_by_another_delivery",
+                    blob,
+                    delivery_id or "(none)",
+                    peer_fp[:8],
+                    existing_owner.delivery_id or "(none)",
+                    (existing_owner.peer_fp or "")[:8],
+                    existing_owner.delivery_name or existing_owner.name,
+                    existing_owner.delivery_kind,
+                    _held_ms,
+                    getattr(existing_owner, "finalizing", None),
+                    _holder_row is not None,
+                    getattr(_holder_row, "status", None),
+                )
                 await self._reject_file_offer(
                     channel,
                     msg,
