@@ -6133,6 +6133,17 @@
   }
   .rdz-status-dot.active { background: var(--good); box-shadow: 0 0 6px rgba(70,211,154,.55); }
   .rdz-status-dot.error  { background: var(--bad); }
+  .cap-history { display: flex; flex-direction: column; gap: 4px; }
+  .cap-history-row {
+    display: flex; gap: 8px; align-items: baseline;
+    font-size: 12px; line-height: 1.45;
+  }
+  .cap-history-when {
+    flex: 0 0 auto; min-width: 5.5em;
+    color: var(--muted, #98a2b3); font-variant-numeric: tabular-nums;
+  }
+  .cap-history-what { flex: 1 1 auto; }
+  .cap-history-who { flex: 0 0 auto; color: var(--muted, #98a2b3); }
   .settings-help {
     color: var(--text-dim); font-size: 12px; line-height: 1.5;
     margin-bottom: 10px;
@@ -12049,6 +12060,19 @@
           <button class="cap-toggle" data-cap="folder_sync">Folders</button>
           <button class="cap-toggle" data-cap="voice_call">Voice</button>
           <button class="cap-toggle" data-cap="video_call">Video</button>
+        </div>
+        <!-- 2026-08-05: permission history, from /api/capability-audit.
+             The daemon has recorded every permission change since v1 and
+             nothing ever showed them to the user: the endpoint was
+             registered, authenticated and called by nothing.
+
+             This is the answer to "did I give this device access to my
+             files, and when?" -- a question a user of a privacy product
+             is entitled to ask about their own machine. Advanced tier,
+             next to the toggles that write the entries. -->
+        <div class="settings-section" data-tier="advanced" id="dev-cap-history-wrap" hidden>
+          <div class="settings-section-h"><span>Permission history</span></div>
+          <div class="cap-history" id="dev-cap-history"></div>
         </div>
       </div>
 
@@ -25976,6 +26000,12 @@
       peer.allowed_capabilities,
     ));
 
+    // Permission history for THIS peer. Fire-and-forget inside tryStep, the
+    // same as every other optional panel here: a drawer that fails to open
+    // because a history could not be fetched would be a worse product than
+    // one that shows no history.
+    tryStep("capability-history", () => renderCapabilityHistory(peer.fingerprint));
+
     const regEl = $("#dev-regime");
     if (regEl) regEl.textContent = reachLabel(peer);
     const lat = peer.health?.latency_ewma_ms;
@@ -26191,6 +26221,82 @@
       allowed.add("video_call");
     }
     return allowed;
+  }
+
+  // Describe a stored capability policy the way a person would say it.
+  // `null` and `["*"]` both mean "everything" in the wire format; a user
+  // reading their own permission history should not have to know that.
+  function _capPolicyLabel(policy) {
+    if (policy == null) return "everything";
+    const list = Array.isArray(policy) ? policy : [policy];
+    if (!list.length) return "nothing";
+    if (list.includes("*")) return "everything";
+    const names = {
+      chat: "Chat", files: "Files", folder_sync: "Folders",
+      voice_call: "Voice", video_call: "Video",
+    };
+    return list.map(c => names[c] || c).join(", ");
+  }
+
+  // Render this peer's permission history from /api/capability-audit.
+  //
+  // The daemon has recorded every capability change since the first schema
+  // version, and no shipped asset ever asked for them -- the endpoint was
+  // registered, authenticated, correct, and consumed by nothing. Found by
+  // auditing which registered routes have no consumer.
+  //
+  // Everything here degrades to "show nothing": an empty history and a failed
+  // request are the same to the user, because a peer whose permissions were
+  // never changed genuinely has no history, and inventing a distinction
+  // between "none" and "could not load" would be noise on a panel nobody
+  // opened to debug the UI.
+  async function renderCapabilityHistory(fingerprint) {
+    const wrap = $("#dev-cap-history-wrap");
+    const host = $("#dev-cap-history");
+    if (!wrap || !host || !fingerprint) return;
+    wrap.hidden = true;
+    host.innerHTML = "";
+
+    let payload;
+    try {
+      payload = await api.get(
+        `/api/capability-audit?fp=${encodeURIComponent(fingerprint)}&limit=20`
+      );
+    } catch (_e) {
+      return;
+    }
+    const events = (payload && payload.events) || [];
+    if (!events.length) return;
+
+    for (const ev of events) {
+      const row = document.createElement("div");
+      row.className = "cap-history-row";
+
+      const when = document.createElement("span");
+      when.className = "cap-history-when";
+      when.textContent = _humanRelMs(ev.ts_ms);
+      row.appendChild(when);
+
+      const what = document.createElement("span");
+      what.className = "cap-history-what";
+      const before = _capPolicyLabel(ev.before_json);
+      const after = _capPolicyLabel(ev.after_json);
+      what.textContent = before === after
+        ? `${ev.kind || "changed"}: ${after}`
+        : `${before} → ${after}`;
+      row.appendChild(what);
+
+      // The actor is the accountability half. "Who changed this" is the
+      // question that makes an audit trail an audit trail rather than a log.
+      if (ev.actor) {
+        const who = document.createElement("span");
+        who.className = "cap-history-who";
+        who.textContent = ev.actor;
+        row.appendChild(who);
+      }
+      host.appendChild(row);
+    }
+    wrap.hidden = false;
   }
 
   function syncDrawerCapabilityControls(policy) {

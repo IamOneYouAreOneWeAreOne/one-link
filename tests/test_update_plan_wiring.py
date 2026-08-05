@@ -62,6 +62,12 @@ def _run_node(script: str) -> object:
         text=True,
         timeout=60,
         cwd=REPO,
+        # encoding is explicit: text=True decodes with the Windows
+        # locale codepage (cp1252 here), which turned the arrow in the
+        # rendered history into mojibake and failed an assertion about
+        # text the product renders correctly. The harness was reading
+        # different bytes than node wrote.
+        encoding="utf-8",
     )
     assert result.returncode == 0, (
         f"node failed ({result.returncode}):\n{result.stderr}\n{result.stdout}"
