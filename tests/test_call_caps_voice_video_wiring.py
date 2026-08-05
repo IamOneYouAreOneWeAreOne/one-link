@@ -214,13 +214,36 @@ def test_icon_filter_branch_coverage(allowed, expect_voice, expect_video):
     assert _should_show_icon(allowed, "video_call") is expect_video
 
 
+def _function_body(source: str, signature: str) -> str:
+    """Return one function's text, bounded by the NEXT function at its level.
+
+    This replaced `source[idx:idx + 700]`. That window was really asking "are
+    these lines in the drawer capability logic", but it measured "are they
+    within 700 characters", and the two stopped agreeing the moment an
+    unrelated function was inserted between `drawerAllowedSet` and
+    `syncDrawerCapabilityControls` -- the assertion below lives in the SECOND
+    of those, so it silently fell off the end of the window.
+
+    A byte distance is not a structural property. Scoping to the function keeps
+    every assertion and drops only the accidental coupling to layout.
+    """
+    start = source.index(signature)
+    after = start + len(signature)
+    candidates = [
+        source.find("\n  function ", after),
+        source.find("\n  async function ", after),
+    ]
+    stops = [c for c in candidates if c != -1]
+    return source[start:min(stops)] if stops else source[start:]
+
+
 def test_drawer_allow_all_includes_voice_and_video(index_html):
     body = index_html
     assert 'const DRAWER_CAPS = ["chat", "files", "folder_sync", "voice_call", "video_call"];' in body
-    idx = body.find("function drawerAllowedSet(policy)")
-    snippet = body[idx:idx + 700]
-    assert "if (policy == null) return new Set(DRAWER_CAPS);" in snippet
-    assert "DRAWER_CAPS.every(cap => allowed.has(cap))" in snippet
+    allowed_set = _function_body(body, "function drawerAllowedSet(policy)")
+    assert "if (policy == null) return new Set(DRAWER_CAPS);" in allowed_set
+    sync = _function_body(body, "function syncDrawerCapabilityControls(policy)")
+    assert "DRAWER_CAPS.every(cap => allowed.has(cap))" in sync
     assert 'const LEGACY_DRAWER_ALLOW_ALL_CAPS = ["chat", "files", "folder_sync"];' in body
     assert 'policyLooksLikeLegacyDrawerAllowAll(policy)' in body
     assert 'return state.runtimeSettings?.pair_default_allow_all !== false;' in body
