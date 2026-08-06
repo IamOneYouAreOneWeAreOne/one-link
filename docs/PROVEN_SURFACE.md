@@ -2,7 +2,7 @@
 
 **An interface that cannot lie.**
 
-Status: **Phases 1, 1b, 2, 4 and 5 are BUILT, and the text killer has been probed** (`idem/surface.py`, 34 tests, committed `6890441`); Phases
+Status: **Phases 1, 1b, 2, 3, 4, 5 are BUILT; 0.2 dissolved structurally; 6 part-built** (`idem/surface.py`, 34 tests, committed `6890441`); Phases
 0 and 2–6 are design. Every capability this stands on is cited with its real maturity label, and
 every gap it must cross is named rather than glossed. Where measurement has contradicted this
 document, the document has been corrected in place and the correction recorded — never reverted.
@@ -25,6 +25,11 @@ contradicted the design, the design was corrected in place and the correction re
 | 2 — frame receipts | `idem/attest.py` | survives class growth; a stranger verifies with no proof store |
 | 4 — the membrane | `test_idem_surface_membrane.py` | no peer claim may ever be `admit`ted, attested or not |
 | 5 — certificates gossip | `test_idem_surface_gossip.py` | peer B re-proves; a forged id is refused |
+| 3 — per-machine selection | `test_idem_surface_selection.py` | two cost surfaces, two winners, ONE frame digest |
+| 3 — on real hardware | `scripts/crosshost_bundle.py` check 5 | emit here, verify there; NOT-EXERCISED when it isn't |
+| 0.2 — cross-vendor exactness | `surface.exact_pixels` | a float renderer is refused *structurally* |
+| 6 — a11y from the Scene | `idem/a11y.py` | the spoken node and the picked node are the same node |
+| 6 — text at scale | `test_idem_surface_text.py` | greedy line breaking proven for every paragraph |
 
 Commits: `6890441`, `492e0d1`, `aa4334d`. idem's full suite green throughout.
 
@@ -84,10 +89,59 @@ Two theorems compose into one guarantee: **a peer cannot make your screen say VE
 
 Two different mechanisms, so one defect cannot open both doors.
 
+### Four more corrections measurement forced — 2026-08-06
+
+7. **My two-machine test injected costs into a store nothing reads.** The facts were written at
+   `engine_epoch()`; extraction reads `idem_epoch()`. Both "machines" fell through to real
+   measurement, timed alike, and the anchor won both ties — so the receipts matched **for the wrong
+   reason**. Caught only by the negative control that asks whether the winner actually changed.
+   Second defect in the same test: a store returns the *first* fact matching (member, workload,
+   host), so re-injecting into one store cannot invert anything. A machine has to be its own store.
+8. **`Extraction.member` is a `Member`, not an id.** Recorded here because the fix is a one-liner
+   and the wrong reading survived three tests.
+9. **The greedy line-wrap everyone writes is `out_of_scope`.** Probed construct by construct:
+   arithmetic with `%` and `/` proves at `exact`, a `let` proves at `exact`, a law calling the
+   member twice proves at `exact` — **assignment to an existing binding** is the blocker, and one
+   `a = 1;` is enough. The renderer was rewritten in SSA rather than the law weakened, and the SSA
+   version is the one a reviewer would rather read.
+10. **A verdict is not a property.** The under-reporting bug test asserted the box law returned
+    `unknown`; across runs it returns `unknown` *or* `proven`, both meaning "does not catch it".
+    Asserting the verdict made the test flip for a reason unrelated to the claim. It now asserts
+    non-refutation.
+
+### Phase 0.2, dissolved rather than sampled
+
+The plan was to measure 0 ULP across GPU vendors. That plan cannot work: agreement sampled on the
+GPUs you own is a statement about those GPUs, and the next driver revision is outside the sample.
+A ULP is a property of **floating point** — a renderer whose pipeline is integer has none to differ
+in, so the requirement becomes structural and holds on hardware nobody has built yet.
+
+`surface.exact_pixels` runs both halves, and **neither is sufficient**, measured here:
+
+- a renderer returning `1.5` **ran and agreed on five backends** of this host, so the measured half
+  alone blesses exactly the renderer that would diverge on a second vendor;
+- the structural half alone cannot see a backend that miscompiles integer arithmetic — injected in
+  `test_the_structural_half_cannot_see_a_disagreeing_backend`, and caught only by the measured half.
+
+### The solver ladder, priced
+
+Three strengths of one true property about line breaking, with the engine's wall clock:
+
+| law | verdict | cost |
+|---|---|---|
+| `wrap(seed) >= 1` | PROVEN `exact` | 5.3 s |
+| `wrap(seed) >= w0` | PROVEN `exact` | 84.7 s |
+| `wrap(seed) >= max(w0,w1,w2,w3)` | `unknown` | >180 s |
+
+The renderer is the same SSA program in all three; the cost is in how many independently-derived
+digits the **law** must relate. Rung 3 is kept as a tripwire that fails if the engine ever closes
+it, because a gap nothing watches is a gap nobody closes.
+
 ### Still not built
 
-Phase 0.2 (cross-vendor 0-ULP — needs more than one GPU), Phase 3 (member selection per machine),
-Phase 6 (the surface at scale: text, a11y, the window). Sections 10 and 11 stand unchanged.
+The native window (§10.4), and text beyond line breaking — shaping, hinting, bidi. Phase 3 is
+proven deterministically and has a real-hardware path in `crosshost_bundle.py` check 5; running it
+on a second machine is a *measurement*, not a build. Sections 10 and 11 otherwise stand.
 
 ---
 
