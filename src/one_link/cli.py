@@ -168,6 +168,47 @@ def _ui_launch_info(*, timeout: float = 5.0) -> tuple[int, str]:
     return info.server_port, info.token
 
 
+def _ui_launch_url(*, path: str = "/", timeout: float = 5.0) -> str:
+    """A UI URL carrying a SINGLE-USE credential, safe to hand to a browser.
+
+    EVERY url built for a browser must come from here. `_ui_launch_info` returns the
+    long-lived bearer, which is correct for an `Authorization` header and WRONG for a
+    URL: opening a URL hands it to the browser as a command-line argument, and a command
+    line is readable by any process running as the same user with no elevation (measured;
+    see `UIServer.mint_launch_nonce` and threat T7b in docs/SECURITY.md).
+
+    This existed as three separate f-strings -- the auto-open, the tray, and the deep-link
+    handler -- and fixing only the one that was found would have left two live. A guard on
+    one of several paths is a coincidence, not a control.
+    """
+    from one_link.app import _resolve_running_daemon
+
+    info = _resolve_running_daemon(timeout=timeout)
+    if info is None:
+        raise click.ClickException("authenticated daemon UI is not available")
+    credential = info.launch_nonce or info.token
+    if not info.launch_nonce:
+        logging.getLogger("one_link.cli").warning(
+            "daemon minted no launch nonce; the UI URL carries the long-lived token and "
+            "is readable by any process running as you. This should be unreachable."
+        )
+    return f"http://127.0.0.1:{info.server_port}{path}?t={credential}"
+
+
+def _resolve_running_daemon_for_url(*, timeout: float = 5.0) -> tuple[int, str]:
+    """(port, single-use credential) for callers that must build their own URL shape."""
+    from one_link.app import _resolve_running_daemon
+
+    info = _resolve_running_daemon(timeout=timeout)
+    if info is None:
+        raise click.ClickException("authenticated daemon UI is not available")
+    if not info.launch_nonce:
+        logging.getLogger("one_link.cli").warning(
+            "daemon minted no launch nonce; this URL carries the long-lived token."
+        )
+    return info.server_port, (info.launch_nonce or info.token)
+
+
 @click.group()
 @click.version_option(__version__, prog_name="one-link")
 def cli() -> None:
@@ -237,6 +278,9 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
             tray_icon = TrayIcon(
                 on_quit=lambda: os.kill(os.getpid(), signal.SIGINT),
                 inbox_path=inbox_dir(),
+                # Minted per click, never stored: a single-use credential cached in the
+                # tray would open the app once and leave every later click dead.
+                url_provider=_ui_launch_url,
             )
             tray_icon_holder["icon"] = tray_icon
             if tray_icon.available:
@@ -281,8 +325,11 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
             _t.sleep(0.1)
         if launch is None:
             return
-        port, token = launch
-        url = f"http://127.0.0.1:{port}/?t={token}"
+        port, _token = launch
+        # The tray must NOT cache a credential: a single-use nonce would work once and
+        # leave every later click dead. It holds a bare URL for display and mints a fresh
+        # one at click time via `url_provider`.
+        url = f"http://127.0.0.1:{port}/"
         tray_icon = tray_icon_holder.get("icon")
         if tray_icon is not None:
             try:
@@ -312,8 +359,7 @@ def daemon(verbose: bool, tray: bool, open_browser: bool) -> None:
             _t.sleep(2.5)
             url = "http://127.0.0.1:7117/"
             try:
-                port, token = _ui_launch_info(timeout=5.0)
-                url = f"http://127.0.0.1:{port}/?t={token}"
+                url = _ui_launch_url(timeout=5.0)
             except (OSError, RuntimeError, ValueError, click.ClickException) as exc:
                 report_best_effort_failure(
                     logging.getLogger("one_link.cli"),
@@ -2796,11 +2842,14 @@ def open_url(url: str):
     if code != 0:
         raise SystemExit(code)
     try:
-        ui_port, ui_token = _ui_launch_info()
+        # A deep link is opened in a browser, so it carries the single-use nonce --
+        # never the long-lived bearer. `local_ui_url_for_deep_link` names its parameter
+        # `token`; what it wants is "the credential in the URL", and that is the nonce.
+        info = _resolve_running_daemon_for_url()
         local = local_ui_url_for_deep_link(
             url,
-            port=ui_port,
-            token=ui_token,
+            port=info[0],
+            token=info[1],
         )
     except Exception as exc:
         raise click.ClickException(str(exc))

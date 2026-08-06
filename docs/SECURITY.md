@@ -315,6 +315,79 @@ against DNS-rebinding) shipped; Trusted Types is still aspirational
 and many of the worker-isolation primitives are part of the
 Tier A browser PWA roadmap rather than the Tier B daemon today.
 
+### T7b — Unprivileged local process (an app running as you)
+
+**Capabilities:** ordinary user-level code execution on the desktop
+machine, with **no elevation**. Cannot read protected files owned by
+other users, cannot install drivers — but *can* enumerate processes
+and read the **full command line** of any process running as the same
+user.
+
+That last capability was measured, not assumed (Windows, 2026-08-06): a
+marker planted in a child process's `argv` came back complete to an
+unprivileged `Get-CimInstance Win32_Process` reader owned by the same
+user. No debug privilege, no elevation.
+
+**Why this row exists.** The model previously jumped from T7 (RCE inside
+the browser sandbox) to T8 (root). It skipped the attacker a downloaded
+desktop app most often actually meets: a second app the user installed
+themselves, running with exactly the user's own rights. The daemon
+already assumes this attacker elsewhere — `$BROWSER` is refused, `PATH`
+is replaced with trusted roots, and executables are validated as
+absolute registered images — so leaving the threat unnamed made the
+posture inconsistent rather than absent.
+
+**The defect this found.** The desktop launcher opened the UI as
+`msedge.exe --app=http://127.0.0.1:PORT/?t=TOKEN`, and `t` was the UI
+server's bearer — a credential granting a full owner session for the
+daemon's entire lifetime. Because `_load_or_create_token` mints a fresh
+per-process value and persists nothing at rest, that command line was
+the **only** place the token left process memory: the exposure was not
+"one of several", it was the whole of it.
+
+**And it was four sites, not one.** The app-mode launcher is simply
+where it was noticed. Auditing for the *class* rather than the instance
+found the same bearer in the CLI auto-open, in the tray's stored click
+URL, and in the `one-link://` deep-link handler — all of which reach a
+browser, and `os.startfile(url)` puts the URL on the **browser's**
+command line just as surely as `--app=` puts it on ours. Fixing only the
+reported one would have left three live. Every browser-bound URL is now
+built in one place (`cli._ui_launch_url`) so there is a single site to
+audit rather than four to remember.
+
+**Defenses (default tier):**
+- **Single-use launch nonce.** The URL handed to the browser now carries
+  a credential minted per launch, redeemable **once**, expiring in
+  ~2 minutes (`UIServer.mint_launch_nonce`). A secret on a command line
+  cannot be hidden, so the countermeasure is to put something there that
+  stops being a secret. An `argv` snapshot is useful only to an attacker
+  who wins a race against the browser *and* acts inside the window — and
+  winning it makes the legitimate window **fail visibly** rather than
+  silently share a session.
+- The long-lived bearer stays an `Authorization` header on the
+  authenticated control channel and never reaches `argv`.
+- Redemption compares constant-time against every live nonce; a dict
+  lookup would be an early-exit comparison on attacker-supplied text.
+- The tray mints **per click** rather than caching. A stored single-use
+  credential would open the app once and leave every later click dead,
+  and that pressure is exactly how a nonce quietly becomes reusable
+  again. With no provider wired it opens *unauthenticated* — a worse
+  click, never a replayed secret.
+
+**Residual risk, stated plainly:**
+- The loopback `lan_url` export still embeds the long-lived token in a
+  URL shown to the user (and encoded into the pairing QR). That is a
+  different exposure with a different threat model — user-visible rather
+  than machine-readable by a background process — and it is not closed
+  by this change.
+- A same-user process can also open a handle to the daemon and read its
+  memory directly. Nothing here prevents that; the nonce removes the
+  *easy, logged, and passively-collected* path (process listings, EDR
+  telemetry, crash dumps), not the determined one.
+
+**Status:** mitigated for the `argv` path, which was the measured leak.
+Not claimed as immunity to a local attacker — see the residual above.
+
 ### T8 — Compromised OS
 
 **Capabilities:** root access to the phone OS; can inspect any

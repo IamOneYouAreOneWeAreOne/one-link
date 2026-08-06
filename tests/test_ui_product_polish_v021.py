@@ -77,11 +77,22 @@ def test_launcher_and_tray_open_authenticated_owner_url() -> None:
     assert "_open_verified_ui_instance" in app
     assert '"ui.token"' not in cli
     assert '"server.port"' not in cli
-    assert 'f"http://127.0.0.1:{port}/?t={token}"' in cli
+    # 2026-08-06: this used to pin the literal `f"http://127.0.0.1:{port}/?t={token}"`,
+    # which was the leaking construction -- that URL is handed to a browser, and a browser
+    # command line is readable by any same-user process (threat T7b in docs/SECURITY.md).
+    # The INTENT of this assertion was "the launcher and tray open an AUTHENTICATED owner
+    # URL, not a bare one", and that intent survives: the credential is now a single-use
+    # launch nonce minted per open. Narrowed to the intent rather than deleted, and
+    # strengthened -- it now also refuses the construction it previously required.
+    assert "_ui_launch_url" in cli, "the CLI no longer builds an authenticated UI URL"
+    assert 'f"http://127.0.0.1:{info.server_port}{path}?t={credential}"' in cli
+    assert 'f"http://127.0.0.1:{port}/?t={token}"' not in cli, (
+        "the long-lived bearer is back in a browser-bound URL")
     assert "ui_port.txt" not in cli
     assert "def _display_url(url: str)" in tray
     assert "urlsplit(url)" in tray
     assert "_display_url(self._url)" in tray
+    assert "url_provider" in tray, "the tray no longer mints a fresh credential per click"
 
 
 def test_composer_toolbar_uses_icons_not_text_labels() -> None:

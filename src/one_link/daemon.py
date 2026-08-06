@@ -35740,6 +35740,15 @@ class Daemon:
                             "ui_server_port": ui_port,
                             "ui_https_port": getattr(ui_server, "https_port", None),
                             "token": ui_token,
+                            # The credential the caller may put in a browser URL, and
+                            # therefore on a command line. Single-use and TTL-bounded --
+                            # `token` above is a Bearer for this authenticated control
+                            # channel and must never reach argv (UIServer.mint_launch_nonce).
+                            "launch_nonce": (
+                                ui_server.mint_launch_nonce()
+                                if hasattr(ui_server, "mint_launch_nonce")
+                                else None
+                            ),
                             "daemon_instance_id": self._control_instance_id,
                             "pid": os.getpid(),
                             "source_fingerprint": runtime_build_identity()["source_fingerprint"],
