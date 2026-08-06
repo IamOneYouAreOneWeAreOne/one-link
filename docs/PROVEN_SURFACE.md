@@ -2,10 +2,92 @@
 
 **An interface that cannot lie.**
 
-Status: **Phase 1 and 1b are BUILT** (`idem/surface.py`, 34 tests, committed `6890441`); Phases
+Status: **Phases 1, 1b, 2, 4 and 5 are BUILT, and the text killer has been probed** (`idem/surface.py`, 34 tests, committed `6890441`); Phases
 0 and 2–6 are design. Every capability this stands on is cited with its real maturity label, and
 every gap it must cross is named rather than glossed. Where measurement has contradicted this
 document, the document has been corrected in place and the correction recorded — never reverted.
+
+---
+
+## BUILD LOG — 2026-08-06
+
+Six sessions of building against this document. Everything below was measured; where measurement
+contradicted the design, the design was corrected in place and the correction recorded.
+
+### What is built
+
+| Phase | Module | Evidence |
+|---|---|---|
+| 1 — UI laws as theorems | `idem/surface.py` | a renderer wrong on ONE un-exampled input is `refuted` |
+| 1b — layout invariants | `test_idem_surface_layout.py` | the clamped "fix" caught drawing the badge over the name |
+| **views** (unplanned) | `test_idem_surface_view.py` | `fn render(Peer) -> Region` proves at scope `exact` |
+| 0.1 — deterministic text | `test_idem_surface_raster.py` | AA coverage kernel proven in-range AND monotone |
+| 2 — frame receipts | `idem/attest.py` | survives class growth; a stranger verifies with no proof store |
+| 4 — the membrane | `test_idem_surface_membrane.py` | no peer claim may ever be `admit`ted, attested or not |
+| 5 — certificates gossip | `test_idem_surface_gossip.py` | peer B re-proves; a forged id is refused |
+
+Commits: `6890441`, `492e0d1`, `aa4334d`. idem's full suite green throughout.
+
+### Six corrections measurement forced
+
+1. **The law form was wrong.** `("property", …)` refuses every straight-line renderer —
+   `out_of_scope` — and every UI renderer is straight-line. The working form is `epsilon.py`'s
+   reduction (`holds ≡ const-1`), which discharges at scope **`exact`**, *stronger* than the
+   property lane's `math-int`.
+2. **My own law was wrong.** The non-overlap law hard-coded truncation into the *law*, so a
+   clamping layout that really does draw the badge over the name **proved it**. Fixed with
+   `LawSpec.observes`, so a law reads where the name *actually is*.
+3. **The receipt binding would have broken on success.** Bound to the union-find root, it would
+   expire the day a faster renderer joined the class — because the root is a function of
+   *membership*, and membership is what grows. Re-bound to a **behavioural fingerprint**.
+4. **`int`-only assumptions capped views at kernels** in three places (probe coercion, example
+   construction, the reality net's return check). All removed; struct-in/struct-out now proves.
+5. **A false negative of mine:** I recorded list parameters as unsupported. The spelling is
+   `[Int]`. A false "not supported" deletes real capability from the record.
+6. **A contamination bug of mine:** module-scoped fixtures outlived `conftest.py`'s autouse
+   per-test isolation and broke an unrelated file. Fixed by respecting the repo's model.
+
+### The boundary that is real, and was not widened
+
+Struct views **prove equal** and still **cannot join a class**:
+
+```
+prove_pair -> verdict='proven', admit -> True, fence='exact'
+try_merge  -> REFUSED: "reality re-check could not run EITHER member on any boundary
+              input -- fail closed: an unverifiable proof is not admitted on the
+              engine's word alone"
+```
+
+`try_merge` independently re-runs both members on boundary inputs before admitting any proof, and
+those probes are `Int`s. **This is idem being right**, and the gate was not touched. What would
+close it: struct-aware boundary-probe generation in the merge reality net. Frame receipts are
+unaffected — `attest.py` binds a fingerprint it computes itself.
+
+### The killer, probed
+
+Text was named as the most likely cause of death. The **antialiasing coverage kernel** — the heart
+of every vector rasterizer — is deterministic in 8.8 fixed point and its properties are theorems.
+The realistic bug is instructive: masking with `% 256` instead of clamping **passes** the range
+check and was refuted by **monotonicity** alone, because 255 wraps to 0 and puts a hard notch in any
+glyph crossing that region.
+
+Deterministic text is reachable in principle. What remains is scale — shaping, hinting, bidi — not
+feasibility.
+
+### The property the whole thing exists for
+
+Two theorems compose into one guarantee: **a peer cannot make your screen say VERIFIED.**
+
+- the renderer cannot emit the verified glyph for a non-verified trust value (proven, all inputs)
+- a peer's claim is a `WorldObservation` whose ceiling is `configure`/`order` and **never `admit`** —
+  enforced as a type, not a policy check somebody can forget
+
+Two different mechanisms, so one defect cannot open both doors.
+
+### Still not built
+
+Phase 0.2 (cross-vendor 0-ULP — needs more than one GPU), Phase 3 (member selection per machine),
+Phase 6 (the surface at scale: text, a11y, the window). Sections 10 and 11 stand unchanged.
 
 ---
 
