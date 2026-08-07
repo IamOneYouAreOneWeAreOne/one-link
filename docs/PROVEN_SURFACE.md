@@ -224,11 +224,66 @@ off-by-one reflection, the exclusive lower bound and the exclusive upper bound a
 
 What remains is shaping and hinting — genuinely large, and not the same kind of problem.
 
+### §10.4 — the window is ours
+
+One Link no longer opens in a browser. `native/ol_shell` (tao + wry → WebView2 / WKWebView /
+WebKitGTK, 515 KB) is our own window, built and shipped by the release, which **refuses to package a
+release that advertises a native window it lacks**.
+
+Four properties the app-mode path could not have:
+
+- **the credential never touches a command line** — it arrives on stdin;
+- **navigation is fenced to loopback, and the fence is a THEOREM.** Written first in Rust as
+  `uri.starts_with(origin)`, which admits `http://127.0.0.1:7117@evil.example/` — the loopback
+  address becomes *userinfo* and the real host is the attacker's. Found by happening to think of
+  `@`. The predicate now lives in `.cl` (`origin_fence`, 5 laws at `exact`, 257 points) and the Rust
+  is **replayed against every point of it**;
+- **the interface is pinned at build time** — `build.rs` compiles `sha256(index.html)` into the
+  binary, so editing the UI after install requires re-signing the shell. The expectation cannot be
+  tampered with alongside the thing it checks;
+- **the certified surfaces are verified by a second implementation**, in another language, written
+  against the spec. It refuses non-ASCII rather than diverging from Python's `ensure_ascii` — a
+  failure that would appear only on a device whose name is not English.
+
+The daemon outlives the window, verified end to end.
+
+### §10.7 — retracted: living-glyph is not load-bearing
+
+This document called it *"the 0-ULP twin — the linchpin of every frame receipt"* and required
+hardening before anything depended on it. **Nothing depends on it.** No file in idem or One Link
+imports it, and frame receipts use `attest.py`'s own `class_fingerprint`, computed in-process by
+running the member — that path never went through living-glyph. It is a website logo widget
+(`.cl` → WGSL → WebGPU animated favicon), and two of the four facts stated here were stale: it has a
+LICENSE and a remote. The risk did not materialise because the receipt design changed underneath it.
+
+### §11.1 — answered, and it dissolves §10.5
+
+Model **(a) — state is a parameter, `render(State) → Scene`, laws over all states** — is no longer
+"the buildable start". It is built four times and rendering in a product.
+
+That settles §10.5. Its worry was that *most product interactions are not meaning-preserving
+deformations*. Under (a) that is not a problem to solve: a gesture changes **state**, the renderer is
+a pure function of state, and `deform` was never needed for product interactions. The loop is
+`pick → action → new state → re-render`.
+
+Model **(b) — transitions as obligations** — the one this document said not to attempt first, now
+has a first instance: `on_message: Inbox → Inbox` with four laws at `exact`.
+
+> **And the prover caught the SPECIFICATION, not the code.** `an-arrival-adds-at-most-one-unread`
+> was written the obvious way, `n.unread <= s.unread + 1`, and was REFUTED — at i64 max the *law's
+> own* `+ 1` wraps to `INT_MIN`, so it asserts `n.unread <= INT_MIN`. The transition was fine; the
+> sentence about it was not. **A refuted law is not automatically a bug in the subject.**
+
 ### Still not built
 
-The native window (§10.4) — though One Link already launches in Chromium app mode, so what is
-missing is a true WebView2/Tauri shell rather than a browser dependency. Text shaping and hinting
-(bidi is now proven). The gesture loop (§10.5) and living-glyph hardening (§10.7). Phase 3 is proven deterministically and has a real-hardware path in
+The plumbing language. The shell's *decisions* are `.cl` and proven; its window/COM plumbing is
+Rust, and estate precedent argues it should be C: the bare-metal kernel puts policy in `.cl`
+(`field_governor.cl`) and hardware in C headers (`coh_sched.h`) beside it. Moving it would also drop
+the ~260 transitive crates the webview stack brings, which are today quarantined in their own
+workspace so the daemon never resolves against them.
+
+Wiring model (b) to the real unread badge — the laws are proven and gated, but no artifact ships,
+because a payload no code consumes is a capability wearing a product's clothes. Phase 3 is proven deterministically and has a real-hardware path in
 `crosshost_bundle.py` check 5; running it on a second machine is a *measurement*, not a build.
 Sections 10 and 11 otherwise stand.
 
