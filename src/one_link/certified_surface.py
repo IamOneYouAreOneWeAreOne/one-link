@@ -53,6 +53,28 @@ DEFAULT_ARTIFACT = Path(__file__).resolve().parent / "data" / "certified" / "pee
 #: the law protects without opening the prover repo.
 GLYPH_VERIFIED = 7
 
+#: WHO IS ALLOWED TO HAVE PRODUCED THIS TABLE.
+#:
+#: The digest binds the artifact to ITSELF: edit an answer and it stops matching. But an adversary
+#: who edits an answer AND recomputes the digest produces a perfectly self-consistent file, because
+#: a hash is not an identity. Only a signature makes FABRICATION fail rather than merely editing —
+#: and only a PINNED signer makes the signature mean anything, since verifying against whatever key
+#: the artifact names is verifying against its author.
+#:
+#: ⚠ THIS IS A DEVELOPMENT KEY. It is derived from a published phrase
+#: (`one-link/certified-view/DEVELOPMENT-KEY/not-for-release/v1`), so anyone can produce a table
+#: this build accepts. That is deliberate and temporary: it makes the whole path — sign, pin,
+#: verify, fail closed — real and testable now, instead of a TODO. `test_certified_surface.py`
+#: FAILS THE BUILD if a non-alpha version still pins it, so the key cannot quietly ride into a
+#: release. Replace with the release role pubkey and drop this entry.
+DEVELOPMENT_SIGNER = "6c73b5addfbc1dcd82adb15738c954b2fa0e0e49ae92a93451ae7c9f2ff9df51"
+
+TRUSTED_VIEW_SIGNERS: frozenset = frozenset({DEVELOPMENT_SIGNER})
+
+#: Domain separator for the signed bytes. Must match `idem/certified_view.py::_signable` exactly —
+#: a divergence here does not fail loudly, it simply rejects every honest artifact.
+_SIG_DOMAIN = b"idem-view-sig/v1\x00"
+
 
 def _canon(payload: Any) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"),
@@ -136,7 +158,39 @@ class CertifiedSurface:
         return (int(trust), int(name_len)) in self._index
 
 
-def verify(doc: dict) -> tuple:
+def _signable(doc: dict) -> bytes:
+    """The exact bytes the signature covers: everything EXCEPT the signature fields.
+
+    Built by EXCLUSION, mirroring the producer, so a field added to the artifact tomorrow is covered
+    by default. A signature whose scope is a hand-maintained list of keys is a signature that
+    silently stops covering the newest thing anyone added.
+    """
+    body = {k: v for k, v in doc.items() if k not in ("signature", "signer")}
+    return _SIG_DOMAIN + _canon(body)
+
+
+def signature_ok(doc: dict, *, trusted: frozenset = TRUSTED_VIEW_SIGNERS) -> tuple:
+    """(ok, reason) for the artifact's identity. Ed25519, stdlib + `cryptography` only."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    signer = str(doc.get("signer") or "")
+    sig = str(doc.get("signature") or "")
+    if not signer or not sig:
+        return False, ("the artifact is UNSIGNED — its digest proves only that nobody EDITED it, "
+                       "and a fabricated table with a freshly computed digest is self-consistent")
+    if signer not in trusted:
+        return False, (f"signed by {signer[:16]}, which is not a pinned signer — an artifact "
+                       "verified against whatever key it names is verified against its author")
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(signer)).verify(
+            bytes.fromhex(sig), _signable(doc))
+    except (InvalidSignature, ValueError):
+        return False, "SIGNATURE INVALID: this is not the artifact that was signed"
+    return True, f"signed by pinned {signer[:16]}"
+
+
+def verify(doc: dict, *, trusted: frozenset = TRUSTED_VIEW_SIGNERS) -> tuple:
     """(ok, reason). Everything checkable without the producer.
 
     Deliberately dependency-free: this is what the product, a reviewer, or a stranger runs, and it
@@ -168,8 +222,15 @@ def verify(doc: dict) -> tuple:
     if not doc.get("laws"):
         return False, ("no proven laws — this would be a lookup table with a hash, which is "
                        "precisely what the format exists not to be")
+
+    # IDENTITY LAST, and it is not optional. Everything above is self-referential: it proves the
+    # artifact is internally consistent, which a competent forger also achieves.
+    signed, why_sig = signature_ok(doc, trusted=trusted)
+    if not signed:
+        return False, why_sig
+
     return True, (f"{len(rows)} points, exhaustive, {len(doc['laws'])} law(s) proven, "
-                  f"digest {recomputed[:16]}")
+                  f"digest {recomputed[:16]}, {why_sig}")
 
 
 def load(path: Optional[Path] = None) -> Optional[CertifiedSurface]:

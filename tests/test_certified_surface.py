@@ -412,3 +412,148 @@ def test_the_verified_glyph_constant_matches_the_server():
     html = _ui()
     assert "const GLYPH_VERIFIED = 7;" in html
     assert GLYPH_VERIFIED == 7
+
+
+# ── identity: the digest proves nobody EDITED it; the signature proves nobody MADE it ──
+#
+# Everything above is self-referential. An adversary who edits an answer AND recomputes the digest
+# produces a perfectly self-consistent artifact, because a hash is not an identity. These are the
+# tests that distinguish the two properties.
+
+import hashlib as _hashlib  # noqa: E402
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: E402
+    Ed25519PrivateKey,
+)
+
+from one_link.certified_surface import (  # noqa: E402
+    DEVELOPMENT_SIGNER,
+    TRUSTED_VIEW_SIGNERS,
+    _signable,
+    signature_ok,
+)
+
+
+def _resign(doc: dict, sk: Ed25519PrivateKey) -> dict:
+    """Sign a (possibly forged) artifact with an arbitrary key, as an attacker would."""
+    body = {k: v for k, v in doc.items() if k not in ("signature", "signer")}
+    pub = sk.public_key().public_bytes_raw().hex()
+    signed = {**body, "signer": pub}
+    return {**signed, "signature": sk.sign(_signable(signed)).hex()}
+
+
+def test_the_shipped_artifact_is_SIGNED_by_a_pinned_key(doc):
+    ok, why = signature_ok(doc)
+    assert ok, why
+    assert doc["signer"] in TRUSTED_VIEW_SIGNERS
+
+
+def test_an_UNSIGNED_artifact_is_refused(doc):
+    """The property the digest cannot give: a table nobody stands behind."""
+    bare = {k: v for k, v in doc.items() if k not in ("signature", "signer")}
+    ok, why = verify(bare)
+    assert ok is False
+    assert "UNSIGNED" in why
+
+
+def test_a_FORGERY_with_a_recomputed_digest_is_refused(doc):
+    """THE case signing exists for, and the one the digest alone waves through.
+
+    The attacker flips an unverified peer to the verified glyph, then recomputes the table
+    digest so the artifact is internally perfect. Every structural check passes. Only the
+    signature refuses it.
+    """
+    forged = copy.deepcopy(doc)
+    for row in forged["rows"]:
+        if row["in"]["trust"] != VERIFIED:
+            row["out"]["glyph"] = GLYPH_VERIFIED
+            break
+    forged["table_digest"] = table_digest(forged["rows"])       # internally consistent now
+
+    assert table_digest(forged["rows"]) == forged["table_digest"], (
+        "the forgery is not self-consistent, so this test would pass for the wrong reason")
+
+    ok, why = verify(forged)
+    assert ok is False, "a forged table with a recomputed digest was accepted"
+    assert "SIGNATURE INVALID" in why, why
+
+
+def test_a_forgery_RESIGNED_with_the_attackers_own_key_is_refused(doc):
+    """The obvious escalation: if they can recompute a digest, they can sign it too.
+
+    This is why the signer is PINNED. An artifact verified against whatever key it names is
+    verified against its author, which is no verification at all.
+    """
+    forged = copy.deepcopy(doc)
+    forged["rows"][0]["out"]["glyph"] = GLYPH_VERIFIED
+    forged["table_digest"] = table_digest(forged["rows"])
+    attacker = _resign(forged, Ed25519PrivateKey.generate())
+
+    ok, why = signature_ok(attacker)
+    assert ok is False, "an artifact signed by an arbitrary key was accepted"
+    assert "not a pinned signer" in why
+
+    ok2, _ = verify(attacker)
+    assert ok2 is False
+
+
+def test_the_signature_covers_EVERY_field_including_ones_added_later(doc):
+    """Coverage by exclusion, not by a hand-maintained list.
+
+    A signature scoped to an enumerated set of keys silently stops covering the newest field
+    anyone adds. Mutating a field the signer never explicitly listed must still break it.
+    """
+    tampered = copy.deepcopy(doc)
+    tampered["laws"] = [["a-law-nobody-proved", "exact"]]
+    ok, _ = signature_ok(tampered)
+    assert ok is False, "the `laws` field is outside the signature's coverage"
+
+    tampered2 = copy.deepcopy(doc)
+    tampered2["class_fingerprint"] = "0" * 64
+    assert signature_ok(tampered2)[0] is False, "the fingerprint is outside the coverage"
+
+
+def test_the_signable_bytes_match_the_producers_rule(doc):
+    """A domain-separator divergence does not fail loudly -- it rejects every honest artifact.
+
+    Pinned explicitly so a change on either side is a test failure rather than a silent
+    outage where the surface simply stops loading everywhere.
+    """
+    body = {k: v for k, v in doc.items() if k not in ("signature", "signer")}
+    expected = b"idem-view-sig/v1\x00" + json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    assert _signable(doc) == expected
+    assert _hashlib.sha256(_signable(doc)).digest()          # it is bytes, and non-empty
+
+
+# ── the development key must not ride into a release ──────────────────
+
+
+def test_a_RELEASE_build_must_not_pin_the_development_key():
+    """THE gate that stops this being security theatre.
+
+    The pinned key is derived from a published phrase, so anyone can produce a table this
+    build accepts. That is fine for making the path real and testable now — and it must not
+    survive into a release. If this fails, generate a release key, pin its pubkey, and drop
+    `DEVELOPMENT_SIGNER`.
+    """
+    from one_link import __version__
+
+    prerelease = any(tag in __version__ for tag in ("alpha", "beta", "rc", "dev"))
+    if not prerelease:
+        assert DEVELOPMENT_SIGNER not in TRUSTED_VIEW_SIGNERS, (
+            f"version {__version__} looks like a RELEASE and still trusts the development "
+            "signing key. Anyone can forge a certified surface this build will accept. "
+            "Generate a release key, pin its pubkey in TRUSTED_VIEW_SIGNERS, and remove "
+            "DEVELOPMENT_SIGNER.")
+    assert TRUSTED_VIEW_SIGNERS, "no pinned signer at all: every artifact would be refused"
+
+
+def test_the_development_key_is_labelled_as_one_in_the_source():
+    """A published key that does not say so is the dangerous kind."""
+    src = (Path(__file__).resolve().parents[1] / "src" / "one_link" /
+           "certified_surface.py").read_text(encoding="utf-8")
+    i = src.index("DEVELOPMENT_SIGNER")
+    window = src[max(0, i - 1400):i]
+    assert "DEVELOPMENT KEY" in window and "not-for-release" in window, (
+        "the development key is no longer marked as one where a reader would see it")
