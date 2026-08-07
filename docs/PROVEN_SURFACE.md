@@ -2,7 +2,7 @@
 
 **An interface that cannot lie.**
 
-Status: **Phases 1, 1b, 2, 3, 4, 5 are BUILT; 0.2 dissolved structurally; 6 part-built** (`idem/surface.py`, 34 tests, committed `6890441`); Phases
+Status: **Phases 1–5 BUILT; 0.2 dissolved structurally; 6 part-built; and the surface now DRAWS A SHIPPING PRODUCT'S BADGE** (One Link PR #21) (`idem/surface.py`, 34 tests, committed `6890441`); Phases
 0 and 2–6 are design. Every capability this stands on is cited with its real maturity label, and
 every gap it must cross is named rather than glossed. Where measurement has contradicted this
 document, the document has been corrected in place and the correction recorded — never reverted.
@@ -52,21 +52,47 @@ Commits: `6890441`, `492e0d1`, `aa4334d`. idem's full suite green throughout.
 6. **A contamination bug of mine:** module-scoped fixtures outlived `conftest.py`'s autouse
    per-test isolation and broke an unrelated file. Fixed by respecting the repo's model.
 
-### The boundary that is real, and was not widened
+### The boundary that was not real — RETRACTED 2026-08-06
 
-Struct views **prove equal** and still **cannot join a class**:
+This section used to say struct views prove equal and *cannot join a class*, and called that
+**"idem being right"**. It was wrong, and the way it was wrong is worth more than the fix.
+
+`try_merge` re-runs both members on boundary inputs before admitting any proof. Those probes were
+built as `[base + i for i in range(arity)]` — **an integer per parameter, whatever the declared
+type**. A `fn render(p: Peer) -> Region` was handed an `Int`, both members trapped on every probe,
+and the re-check refused:
 
 ```
-prove_pair -> verdict='proven', admit -> True, fence='exact'
-try_merge  -> REFUSED: "reality re-check could not run EITHER member on any boundary
-              input -- fail closed: an unverifiable proof is not admitted on the
-              engine's word alone"
+"reality re-check could not run EITHER member on any boundary input -- fail closed:
+ an unverifiable proof is not admitted on the engine's word alone"
 ```
 
-`try_merge` independently re-runs both members on boundary inputs before admitting any proof, and
-those probes are `Int`s. **This is idem being right**, and the gate was not touched. What would
-close it: struct-aware boundary-probe generation in the merge reality net. Frame receipts are
-unaffected — `attest.py` binds a fingerprint it computes itself.
+Every word of that is true, and it **measured nothing**. The net was not failing to *verify* those
+members — it was failing to **call** them. The message pointed at the members; the cause was the
+probe generator. So a bug got written up here as a principled fail-closed verdict, complete with a
+test celebrating it.
+
+**The cost was total and invisible:** no struct member could ever join a class, so no real view ever
+earned the extraction dividend — the entire point of the graph. Laws over views worked; classes of
+views did not. And it was never one site: the same `Int`-only pattern sat in `artifacts.py` ×2
+(banked-binary verification), `epsilon.py` ×2 (bound proofs) and `attest.py` (the render battery,
+which is why struct views had no class fingerprint and no frame receipt either).
+
+Probes are now built from the declared type, and the generator is canonical across all of them.
+Struct views merge — `admitted=True`, fence `exact`, 26 probes actually executed — and get real
+fingerprints, so frame receipts cover views rather than kernels only.
+
+**The gate did not widen.** The change can only turn "could not run → refuse" into "ran → compare
+and decide"; an unprobeable type still refuses, and an all-`Int` signature produces byte-identical
+probes (asserted across 11 bases × arities 1–4), so no existing verdict moved. Two bugs fell out of
+doing it properly: `_battery_agrees` ended in `return True` — safe only *by accident*, because every
+member used to take `Int`s so the loop always ran at least once — and `isinstance(True, int)` is
+True in Python, so letting a Bool through structurally would have changed the digest of every
+Bool-returning frame and **silently invalidated its receipts**.
+
+> **The law worth keeping:** a refusal must be able to distinguish *"the subject failed"* from
+> *"my instrument could not reach it"*. When it cannot, the second gets recorded as the first — and
+> a fixable gap becomes a documented law of nature. The refusal now names which one it is.
 
 ### The killer, probed
 
@@ -137,11 +163,30 @@ The renderer is the same SSA program in all three; the cost is in how many indep
 digits the **law** must relate. Rung 3 is kept as a tripwire that fails if the engine ever closes
 it, because a gap nothing watches is a gap nobody closes.
 
+### It reaches a product now
+
+The gap that mattered more than any remaining phase: **nothing rendered from any of this.** One Link
+did not import `idem` at all, and §10.2 explains why it could not — `sigil.Scene` renders the IR of a
+*function*, not a product surface, and a PyInstaller bundle cannot carry a solver.
+
+The way across is not to ship the prover but its **answers**. `idem/certified_view.py` proves a
+renderer's laws once, runs the proven member over a *declared finite* state space, and emits a table
+with a digest. One Link ships 39 KB of JSON plus a stdlib-only verifier — no prover, no solver, no
+`coherence_lang`, no network — and its peer row's verified badge is now decided by
+`certified_row.glyph` rather than an ad-hoc conditional. Same pixels; different authority.
+
+The emitter **refuses to emit** if any law fails, and earned that immediately: the peer-row renderer
+clamped only the *high* side of the name width — the clamp anybody writes — and the containment law
+came back refuted, because a negative `name_len` (or one large enough that `name_len * 8` wraps in
+i64) yields a **negative width**.
+
 ### Still not built
 
-The native window (§10.4), and text beyond line breaking — shaping, hinting, bidi. Phase 3 is
-proven deterministically and has a real-hardware path in `crosshost_bundle.py` check 5; running it
-on a second machine is a *measurement*, not a build. Sections 10 and 11 otherwise stand.
+The native window (§10.4) — though One Link already launches in Chromium app mode, so what is
+missing is a true WebView2/Tauri shell rather than a browser dependency. Text beyond line breaking:
+shaping, hinting, bidi. Phase 3 is proven deterministically and has a real-hardware path in
+`crosshost_bundle.py` check 5; running it on a second machine is a *measurement*, not a build.
+Sections 10 and 11 otherwise stand.
 
 ---
 
