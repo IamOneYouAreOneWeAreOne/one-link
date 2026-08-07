@@ -180,11 +180,55 @@ clamped only the *high* side of the name width — the clamp anybody writes — 
 came back refuted, because a negative `name_len` (or one large enough that `name_len * 8` wraps in
 i64) yields a **negative width**.
 
+### Phase 6 — grown, twice over
+
+**Two surfaces are certified now, not one**, through a single pipeline that knows nothing about what
+either draws (`idem/scripts/emit_certified_views.py`). Adding a third is a `ViewSpec`.
+
+| surface | the question it answers | laws |
+|---|---|---|
+| `peer_row` | is this device who I think? | 5, all `exact` |
+| `link_badge` | is this direct, and authenticated? | 5, all `exact` |
+
+The second is the claim a product overstates quietly — "direct" and "secure" describe infrastructure
+the user cannot inspect. **And its law changed the code.** The natural way to write it is
+`if relayed { RELAYED } else { DIRECT }`; a law quantified over *every integer* refutes that at once,
+because `regime = 9` is not relayed and would render DIRECT. There is no "and otherwise it cannot
+happen" branch when the quantifier is over all of `Int`, so an unrecognised regime — including one a
+future protocol adds — falls to RELAYED.
+
+Closing the last mile found the same class already shipped: the UI's regime table ended `return r;`,
+printing an unrecognised regime **raw** as a protocol token.
+
+**Identity, not just integrity.** The tables are signed, and the signer is pinned. The digest proves
+nobody *edited* a table; only a signature proves nobody *fabricated* one, since an adversary who
+edits an answer and recomputes the digest produces a perfectly self-consistent file. The dev key is
+labelled as such and a gate fails the build if a release still pins it.
+
+**§10.3 is a theorem, not a binding.** The design asked for an a11y tree generated from the Scene.
+What shipped is stronger: the spoken label is an *output of the same renderer as the pixel*, and
+`the-spoken-label-cannot-contradict-the-pixel` is discharged over every integer input. The DOM's
+oldest silent failure — a badge restyled, the `aria-label` left behind — cannot occur.
+
+### Text (§10.1) — all three problems now have a proven core
+
+| problem | status |
+|---|---|
+| rasterization | AA coverage kernel proven in-range **and** monotone |
+| line breaking | proven for every paragraph one `Int` can describe; priced solver ladder |
+| **reordering** | **proven a PERMUTATION** — no glyph lost or duplicated, at scope `exact` |
+
+Reordering carried the worst failure of the three, and it is invisible to a length check: the
+off-by-one reflection, the exclusive lower bound and the exclusive upper bound all emit the right
+*number* of glyphs and eat one. All three are refuted.
+
+What remains is shaping and hinting — genuinely large, and not the same kind of problem.
+
 ### Still not built
 
 The native window (§10.4) — though One Link already launches in Chromium app mode, so what is
-missing is a true WebView2/Tauri shell rather than a browser dependency. Text beyond line breaking:
-shaping, hinting, bidi. Phase 3 is proven deterministically and has a real-hardware path in
+missing is a true WebView2/Tauri shell rather than a browser dependency. Text shaping and hinting
+(bidi is now proven). The gesture loop (§10.5) and living-glyph hardening (§10.7). Phase 3 is proven deterministically and has a real-hardware path in
 `crosshost_bundle.py` check 5; running it on a second machine is a *measurement*, not a build.
 Sections 10 and 11 otherwise stand.
 
