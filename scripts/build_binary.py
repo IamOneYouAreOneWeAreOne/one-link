@@ -874,19 +874,36 @@ def main(
     # browser path silently from the user's side. That is the exact silent-claim failure the
     # certified surfaces exist to end, so the build stops instead.
     shell_stage = build / "native-shell"
+    # REQUIRED ONLY WHERE THE WINDOW HAS BEEN VERIFIED, which today is Windows.
+    #
+    # `wry` needs WebKitGTK development packages on Linux and a working macOS SDK; a runner
+    # without them fails the cargo build. Hard-failing a Linux release for a window nobody has
+    # yet opened on Linux would trade a working product for an unverified feature -- the release
+    # simply ships the browser fallback there, which is the behaviour it had yesterday.
+    #
+    # This is deliberately NOT "best effort everywhere": on Windows the window is verified end to
+    # end, so a Windows release that quietly lost it would be exactly the silent-claim failure
+    # the certified surfaces exist to end.
+    shell_required = sys.platform == "win32"
     shell_cmd = [
         sys.executable,
         str(repo / "scripts" / "build_native_shell.py"),
         "--output-dir",
         str(shell_stage),
-        "--required",
-    ]
+    ] + (["--required"] if shell_required else [])
     shell_build = subprocess.run(shell_cmd, cwd=repo)
     if shell_build.returncode != 0:
         print(f"[build] native window build failed: exit {shell_build.returncode}")
-        print("[build] refusing to package a release that claims a native window it lacks")
-        return shell_build.returncode
-    add_data_shell = [f"{shell_stage}{sep}."]
+        if shell_required:
+            print("[build] refusing to package a release that claims a native window it lacks")
+            return shell_build.returncode
+        print(f"[build] {sys.platform}: packaging WITHOUT the native window; the launcher will "
+              "use the browser path and say so")
+
+    # An absent staging directory must not become an empty `--add-data` entry: PyInstaller would
+    # accept it and the spec validator would then see a destination with nothing behind it.
+    staged_shell = shell_stage / ("ol_shell.exe" if sys.platform == "win32" else "ol_shell")
+    add_data_shell = [f"{shell_stage}{sep}."] if staged_shell.is_file() else []
 
     certified_dir = repo / "src" / "one_link" / "data" / "certified"
     if not (certified_dir / "peer_row.json").is_file():
