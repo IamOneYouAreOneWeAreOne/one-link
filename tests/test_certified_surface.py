@@ -944,8 +944,19 @@ def test_the_shell_takes_the_URL_on_STDIN_and_never_on_a_command_line():
     app = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "app.py").read_text(
         encoding="utf-8")
     i = app.index("def _open_native_shell(")
-    body = app[i:i + 2600]
-    assert "proc.stdin.write" in body, "the launcher no longer passes the URL over stdin"
+    # To the END of the function, not a fixed character count. A byte window silently shrinks its
+    # own coverage as the function grows -- it would stop reaching the Popen call it exists to
+    # check and still pass, which is the quietest way for a test to stop testing anything.
+    rest = app[i + 1:]
+    j = rest.index("\ndef ")
+    body = app[i: i + 1 + j]
+    # Same comment-stripping rule as the Rust half above: the docstring here NAMES argv and stdin
+    # to explain the threat, and a grep that reads documentation as implementation passes on prose.
+    body_code = " ".join(
+        ln for ln in body.splitlines() if not ln.strip().startswith("#"))
+    py_code = body_code.split('"""')[-1] if '"""' in body_code else body_code
+    assert "stdin.write" in py_code, "the launcher no longer passes the URL over stdin"
+    assert "{url}" in py_code, "the launch URL is no longer what goes over stdin"
     # The spawn must carry the executable and NOTHING else: the moment a URL joins that list it
     # is readable by every process running as this user.
     assert "[str(exe)]" in body, "the launcher passes something beyond the executable path in argv"
@@ -1121,3 +1132,126 @@ def test_every_refusal_the_shell_can_emit_is_classified():
                    "DIGEST MISMATCH", "not a pinned signer"):
         assert phrase in rust, f"the shell no longer emits {phrase!r}; the marker list is stale"
         assert phrase in _SHELL_TAMPER_MARKERS
+
+
+# ── THE WINDOW'S OWN BEHAVIOUR ──────────────────────────────────────────────────────────────
+#
+# These are behavioural, not source greps. A grep proves a line exists; only running the launcher
+# against a shell that misbehaves proves what it DOES about it.
+
+
+class _Pipe:
+    """A stdio pipe that can be told to fail the way a real one does."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.written = ""
+
+    def write(self, s: str) -> None:
+        if self.fail:
+            raise OSError("the shell went away")
+        self.written += s
+
+    def flush(self) -> None:
+        if self.fail:
+            raise OSError("the shell went away")
+
+    def read(self) -> str:
+        return ""
+
+    def readline(self) -> str:
+        return ""
+
+
+class _FakeProc:
+    def __init__(self, *, stdin=None, stdout=None, stderr=None, alive: bool = True) -> None:
+        self.stdin, self.stdout, self.stderr = stdin, stdout, stderr
+        self.terminated = self.killed = False
+        self._alive = alive
+
+    def poll(self):
+        return None if self._alive else 0
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def _launch_against(monkeypatch, proc, timeout: float = 0.4) -> bool:
+    """Drive the real `_open_native_shell` against a shell that behaves like `proc`."""
+    from one_link import app as app_mod
+
+    monkeypatch.setattr(app_mod, "_shell_path", lambda: Path("ol_shell.exe"))
+    monkeypatch.setattr(app_mod, "_package_root", lambda: "root")
+    monkeypatch.setattr(app_mod.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(app_mod, "SHELL_READY_TIMEOUT_S", timeout)
+    return app_mod._open_native_shell("http://127.0.0.1:1/?t=nonce")
+
+
+def test_a_shell_that_never_gets_its_URL_is_SHUT_DOWN_not_left_running(monkeypatch):
+    """A shell that never received a URL is blocked reading stdin forever.
+
+    Returning False without ending it means every failed launch leaks a stuck process, and the user
+    sees only that the browser opened — the orphan is invisible and permanent.
+    """
+    proc = _FakeProc(stdin=_Pipe(fail=True), stdout=_Pipe(), stderr=_Pipe())
+    assert _launch_against(monkeypatch, proc) is False
+    assert proc.terminated, "the launcher abandoned a shell that could not be handed its URL"
+
+
+def test_a_shell_that_misses_its_DEADLINE_is_SHUT_DOWN_so_there_is_ONE_window(monkeypatch):
+    """We are about to open the browser path. A slow-but-working shell would then pop its own
+    window too, and the user would be looking at two One Links."""
+    proc = _FakeProc(stdin=_Pipe(), stdout=_Pipe(), stderr=_Pipe())
+    assert _launch_against(monkeypatch, proc) is False
+    assert proc.terminated, "a shell that missed its deadline was left to open a second window"
+
+
+def test_missing_pipes_DOWNGRADE_to_the_browser_instead_of_raising(monkeypatch):
+    """`Popen` types its pipes as optional. Reaching through a None would raise out of a function
+    whose entire contract is to return False so the browser path can take over — a crash instead
+    of a downgrade, which is the failure this function exists to prevent."""
+    proc = _FakeProc(stdin=None, stdout=None, stderr=None)
+    assert _launch_against(monkeypatch, proc) is False
+    assert proc.terminated
+
+
+def test_the_window_takes_its_GEOMETRY_from_the_launcher_not_its_own_guess(monkeypatch):
+    """ONE source of truth. `_default_window_geometry` already computes 80% of the primary screen,
+    clamped, centred, for the browser path. If the shell decided its own size, the window a user
+    gets would depend on which launch path ran."""
+    from one_link import app as app_mod
+
+    pipe = _Pipe()
+    proc = _FakeProc(stdin=pipe, stdout=_Pipe(), stderr=_Pipe())
+    monkeypatch.setattr(app_mod, "_default_window_geometry", lambda: (1234, 567, 89, 10))
+    _launch_against(monkeypatch, proc)
+
+    lines = pipe.written.splitlines()
+    assert len(lines) >= 3, f"the launcher sent {len(lines)} lines; geometry is the third"
+    assert lines[2] == "1234 567 89 10", f"geometry line was {lines[2]!r}"
+
+    # ...and the shell must actually READ a third line, or the launcher is talking to itself.
+    rust = _shell_src("main.rs")
+    code = " ".join(ln for ln in rust.splitlines() if not ln.strip().startswith("//"))
+    assert code.count("read_line") >= 3, "the shell reads fewer lines than the launcher sends"
+    assert "with_inner_size" in code and "with_position" in code
+
+
+def test_the_window_carries_ONE_LINKS_icon_not_a_generic_executable_one():
+    """Taskbar identity. Windows reads the PE resource table before any of our code runs, so the
+    icon has to be embedded at build time — it cannot be set late enough to matter otherwise."""
+    build_rs = (SHELL_DIR / "build.rs").read_text(encoding="utf-8")
+    code = " ".join(ln for ln in build_rs.splitlines() if not ln.strip().startswith("//"))
+    assert "winresource" in code and "set_icon" in code
+    assert "rerun-if-changed" in code and ".ico" in code, (
+        "cargo watches ONLY the paths named by rerun-if-changed once any is emitted, so without "
+        "the icon among them a new icon would never reach the binary")
+
+    icon = Path(__file__).resolve().parents[1] / "src/one_link/web/assets/one-glyph.ico"
+    assert icon.is_file(), f"the icon the build embeds is missing: {icon}"

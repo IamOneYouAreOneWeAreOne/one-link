@@ -13,6 +13,7 @@ background process is.
 from __future__ import annotations
 
 import json
+import contextlib
 import ctypes
 import http.client
 import logging
@@ -943,6 +944,22 @@ def _report_shell_refusal(reason: str) -> None:
     _safe_echo(f"  native window unavailable ({text}); using the browser path")
 
 
+def _shut_down_shell(proc: "subprocess.Popen[str]") -> None:
+    """End a shell that will not be used, so a failed launch leaves nothing behind.
+
+    Every caller is on a path that has already decided to fall back to the browser. A shell left
+    running is either blocked forever on a URL it never got, or about to open a second window the
+    user did not ask for. Best effort throughout: this runs while handling another failure, and
+    must never be the thing that raises.
+    """
+    with contextlib.suppress(Exception):
+        proc.terminate()
+        try:
+            proc.wait(timeout=3.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def _open_native_shell(url: str) -> bool:
     """Open One Link's own window. True if a window actually appeared.
 
@@ -969,11 +986,28 @@ def _open_native_shell(url: str) -> bool:
         _safe_echo(f"  (native window could not start: {exc})")
         return False
 
+    # Popen types these as optional because they are only pipes when asked for. We DID ask, so this
+    # should never fire — but reaching through a `None` here would raise `AttributeError` out of a
+    # function whose whole contract is to return False and let the browser path take over. A crash
+    # instead of a downgrade is exactly the failure this function exists to prevent.
+    stdin, stdout, stderr = proc.stdin, proc.stdout, proc.stderr
+    if stdin is None or stdout is None or stderr is None:
+        _shut_down_shell(proc)
+        _safe_echo("  (native window did not expose its pipes; using the browser path)")
+        return False
+
     try:
         # Line 1: the URL with its single-use credential. Line 2: what to verify before drawing.
-        proc.stdin.write(f"{url}\n{_package_root()}\n")
-        proc.stdin.flush()
+        # Line 3: the geometry the browser path already uses, so the window a user gets does not
+        # depend on which launch path ran. These are logical pixels at both ends — the same numbers
+        # Edge app-mode receives as `--window-size`, so the two paths open the same window.
+        win_w, win_h, win_x, win_y = _default_window_geometry()
+        stdin.write(f"{url}\n{_package_root()}\n{win_w} {win_h} {win_x} {win_y}\n")
+        stdin.flush()
     except (OSError, ValueError) as exc:
+        # The shell is blocked reading a URL it will now never receive. Left alone it waits forever,
+        # so the downgrade to the browser path would silently leak a stuck process on every launch.
+        _shut_down_shell(proc)
         _safe_echo(f"  (native window would not accept the launch URL: {exc})")
         return False
 
@@ -985,12 +1019,12 @@ def _open_native_shell(url: str) -> bool:
             # installed" want very different responses from a user.
             reason = ""
             try:
-                reason = (proc.stderr.read() or "").strip().splitlines()[-1]
+                reason = (stderr.read() or "").strip().splitlines()[-1]
             except (OSError, ValueError, IndexError):
                 pass
             _report_shell_refusal(reason)
             return False
-        line = proc.stdout.readline()
+        line = stdout.readline()
         if not line:
             continue
         if SHELL_READY in line:
@@ -998,6 +1032,10 @@ def _open_native_shell(url: str) -> bool:
             # daemon. Closing the window ends the shell and leaves peers reachable, which is the
             # behaviour One Link has always had and the reason this function does not wait on it.
             return True
+    # It never said ready, so we are about to open the browser path. If the shell is merely slow it
+    # would pop its own window afterwards and the user would be looking at TWO One Links. One window
+    # per launch is the promise; enforcing it means ending the one that missed its deadline.
+    _shut_down_shell(proc)
     _safe_echo("  native window did not report ready in time; using the browser path")
     return False
 

@@ -52,6 +52,12 @@ sha2 = "0.11.0"
 tao = "0.36"
 wry = "0.54"
 
+[target.'cfg(windows)'.build-dependencies]
+# Embeds One Link's icon into the executable's PE resources. Windows reads that for the taskbar,
+# alt-tab and the title bar, so the window is identifiably ours before a single line of our code
+# runs. Windows-only: the same job is done by a bundle on macOS and a .desktop file on Linux.
+winresource = "0.1"
+
 [profile.release]
 opt-level = "z"      # a window host should be small; nothing here is hot
 lto = true

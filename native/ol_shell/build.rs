@@ -17,6 +17,30 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // THE TASKBAR ICON. Embedded into the PE resource table so Windows shows it for the taskbar,
+    // alt-tab and the title bar. Best effort: a missing icon must not fail a build -- an unbranded
+    // window is a cosmetic loss, and refusing to build over it would be a worse trade than the
+    // pinning check below, which refuses because rendering the wrong interface is not cosmetic.
+    #[cfg(windows)]
+    {
+        let icon = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/one_link/web/assets/one-glyph.ico");
+        // Cargo watches ONLY the paths named by `rerun-if-changed` once any is emitted, and the UI
+        // pin below emits one. Without this line a new icon would never reach the binary.
+        println!("cargo:rerun-if-changed={}", icon.display());
+        if icon.is_file() {
+            let mut res = winresource::WindowsResource::new();
+            res.set_icon(icon.to_str().unwrap());
+            res.set("ProductName", "One Link");
+            res.set("FileDescription", "One Link");
+            if let Err(e) = res.compile() {
+                println!("cargo:warning=could not embed the window icon: {e}");
+            }
+        } else {
+            println!("cargo:warning=window icon not found at {}", icon.display());
+        }
+    }
+
     let ui = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src/one_link/web/index.html");
 
     // Rebuild whenever the UI changes: a stale pin would refuse the very interface that shipped
