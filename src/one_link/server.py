@@ -2809,6 +2809,9 @@ class UIServer:
         # grew without a hard ceiling when an authenticated tab minted them in
         # a loop. Keep the ephemeral store isolated and capacity-bounded.
         self._invite_store: dict[str, dict[str, Any]] = {}
+        # LAUNCH NONCES -- see `mint_launch_nonce`. Kept beside the invite store
+        # because they are the same species: short-lived, single-use, capacity-bounded.
+        self._launch_nonces: dict[str, float] = {}
         self._courier_seen_bundle_ids: set[str] = set()
         self._courier_events: list[dict] = []
         self._courier_ledger_error: str | None = None
@@ -3433,6 +3436,81 @@ class UIServer:
     #   - wrapped (new): "OLB1:" prefix + base64url(LockBox.wrap(token)).
     # The prefix disambiguates without needing a length check.
     _TOKEN_WRAPPED_PREFIX = "OLB1:"
+
+
+    # ---- launch nonces: the credential that is ALLOWED to reach a command line ----
+    #
+    # WHY THIS EXISTS, measured 2026-08-06. The desktop launcher opens the UI with
+    # `msedge.exe --app=http://127.0.0.1:PORT/?t=TOKEN`, and that URL used to carry
+    # `self.token` -- the long-lived bearer that grants a full owner session for the
+    # daemon's whole lifetime. **A command line is readable by any process running as
+    # the same user, with no elevation.** Measured directly on Windows via
+    # `Get-CimInstance Win32_Process`: a marker planted in a child's argv came back in
+    # full to an unprivileged same-user reader.
+    #
+    # That made argv the ONLY place the token left process memory -- `_load_or_create_token`
+    # mints a fresh `secrets.token_urlsafe(32)` per process and deliberately persists
+    # nothing ("no at-rest value is an authority for the next process"), so there was no
+    # token file to read. The command line was the whole exposure, and it contradicted
+    # this module's own posture: `$BROWSER` is refused, PATH is isolated, and executables
+    # are validated precisely because a local process is not trusted.
+    #
+    # The fix is not to hide the token better -- a secret on a command line cannot be
+    # hidden -- but to put something there that is worthless a second later. A launch
+    # nonce is single-use and TTL-bounded, so an argv snapshot is useful only to an
+    # attacker who both wins a race against the browser AND acts within the window; and
+    # if they win it, the legitimate window fails visibly rather than silently sharing.
+    #
+    # `self.token` remains valid as an `Authorization: Bearer` credential, which travels
+    # over the authenticated control channel and never touches a command line.
+
+    #: How long a minted nonce may be redeemed. Long enough for a cold browser start on a
+    #: slow machine, short enough that a stale argv snapshot is worthless.
+    LAUNCH_NONCE_TTL_S: float = 120.0
+
+    #: Hard ceiling on unredeemed nonces. A launcher that mints in a loop must not grow
+    #: the process; the oldest are dropped first.
+    LAUNCH_NONCE_MAX = 32
+
+    def mint_launch_nonce(self) -> str:
+        """Return a fresh single-use credential that may be placed in a URL/argv."""
+
+        now = time.time()
+        self._expire_launch_nonces(now)
+        if len(self._launch_nonces) >= self.LAUNCH_NONCE_MAX:
+            for oldest in sorted(self._launch_nonces, key=self._launch_nonces.__getitem__)[
+                : len(self._launch_nonces) - self.LAUNCH_NONCE_MAX + 1
+            ]:
+                self._launch_nonces.pop(oldest, None)
+        nonce = secrets.token_urlsafe(32)
+        self._launch_nonces[nonce] = now + self.LAUNCH_NONCE_TTL_S
+        return nonce
+
+    def _expire_launch_nonces(self, now: float | None = None) -> None:
+        cutoff = time.time() if now is None else now
+        for nonce, expiry in tuple(self._launch_nonces.items()):
+            if expiry <= cutoff:
+                self._launch_nonces.pop(nonce, None)
+
+    def consume_launch_nonce(self, supplied: Any) -> bool:
+        """Redeem a launch nonce exactly once. False for unknown, expired or REUSED.
+
+        Constant-time against every live nonce rather than a dict lookup: a dict hit is
+        an early-exit comparison on attacker-supplied text, which is the timing oracle
+        `_constant_time_token_equal` exists to avoid on the token path.
+        """
+
+        if not isinstance(supplied, str) or not supplied:
+            return False
+        self._expire_launch_nonces()
+        matched: str | None = None
+        for nonce in tuple(self._launch_nonces):
+            if _constant_time_token_equal(supplied, nonce):
+                matched = nonce
+        if matched is None:
+            return False
+        self._launch_nonces.pop(matched, None)      # single use: redeemed is gone
+        return True
 
     @staticmethod
     def _load_or_create_token(daemon: "Daemon | None" = None) -> str:
@@ -5089,8 +5167,16 @@ class UIServer:
         # ``str`` inputs.
         _q_tok = request.query.get("t") or ""
         owner_transport_ok = self._owner_auth_transport_ok(request)
-        bootstrap_ok = (
-            owner_transport_ok and bool(_q_tok) and _constant_time_token_equal(_q_tok, self.token)
+        # A LAUNCH NONCE IS TRIED FIRST, AND IT IS CONSUMED BY THE ATTEMPT. `?t=` now
+        # carries a single-use credential on the desktop-launcher path (see
+        # `mint_launch_nonce` for why a command line may not carry the real token).
+        # `self.token` is still accepted here because the LAN/loopback `lan_url` export
+        # hands it to the user directly -- a different exposure with a different threat
+        # model, and widening this change to cover it would have touched the QR/pairing
+        # flow in the same commit.
+        bootstrap_ok = owner_transport_ok and bool(_q_tok) and (
+            self.consume_launch_nonce(_q_tok)
+            or _constant_time_token_equal(_q_tok, self.token)
         )
         if request.query.get("t") and not bootstrap_ok:
             # Loopback plus browser-controlled navigation headers do not prove
