@@ -61,13 +61,17 @@ REQUIRED_DATA_FRAGMENTS = (
     # installed artifact cannot tell it is older than the published build,
     # so a stampless spec is a distribution-contract failure, not a warning.
     "one_link",
-    # One Link's NATIVE WINDOW (native/ol_shell), staged at the bundle root beside the
-    # launcher. A bundle without it still opens -- the launcher degrades to the browser
-    # app-mode path and says so -- but it degrades SILENTLY from the user's side, which is
-    # the shape of failure the certified surfaces exist to end. So it is part of the
-    # contract, not an optional extra somebody notices is missing.
-    ".",
 )
+
+#: One Link's NATIVE WINDOW (native/ol_shell), staged at the bundle root beside the launcher.
+#:
+#: REQUIRED ONLY WHERE IT IS VERIFIED, which today is Windows -- mirroring `build_binary.py`.
+#: `wry` needs WebKitGTK development packages on Linux and a working macOS SDK, so a runner
+#: without them cannot produce the window at all; demanding it there would fail a release for a
+#: feature nobody has yet opened on that platform. On Windows it IS verified, so a bundle that
+#: quietly lost it must fail this gate: that is the silent-claim failure the certified surfaces
+#: exist to end.
+REQUIRED_SHELL_FRAGMENTS = (".",) if sys.platform == "win32" else ()
 REQUIRED_STABLE_SUBMODULE_COLLECTORS = (
     "aiohttp",
     "cryptography",
@@ -640,7 +644,8 @@ def _stable_spec_structure_failures(text: str) -> list[str]:
             and all(isinstance(value, str) for value in item)
         ]
         native_destination = f"one_link/native/{native_platform_tag()}"
-        expected_destinations = {*REQUIRED_DATA_FRAGMENTS, native_destination}
+        expected_destinations = {*REQUIRED_DATA_FRAGMENTS, *REQUIRED_SHELL_FRAGMENTS,
+                                 native_destination}
         destinations = [destination for _source, destination in data_rows]
         from one_link.build_info import STAMP_FILENAME
 

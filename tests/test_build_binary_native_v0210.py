@@ -165,6 +165,23 @@ def _install_fake_runner(
                     encoding="ascii",
                 )
             return FakeCompleted(returncode=native_rc)
+        if any("build_native_shell.py" in str(a) for a in cmd):
+            # ONE LINK'S NATIVE WINDOW, staged the way the real step stages it. Without this the
+            # fake runner returned success and staged NOTHING, so the spec advertised a shell
+            # directory with no shell in it -- and the packaging gate passed. That hollow pass is
+            # exactly what `build_binary` now refuses to produce, so the fake has to model the
+            # real thing rather than merely not fail.
+            assert Path(kwargs["cwd"]).resolve() == repo.resolve()
+            output_dir = Path(cmd[cmd.index("--output-dir") + 1]).resolve()
+            assert output_dir.is_relative_to(output_root / "build" / "native-shell")
+            if stage_outputs:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                exe = output_dir / ("ol_shell.exe" if sys.platform == "win32" else "ol_shell")
+                exe.write_bytes(b"fake native window")
+                digest = hashlib.sha256(exe.read_bytes()).hexdigest()
+                (output_dir / f"{exe.name}.sha256").write_text(
+                    f"{digest}  {exe.name}\n", encoding="ascii")
+            return FakeCompleted(returncode=0)
         if any("build_update_helper.py" in str(a) for a in cmd):
             assert Path(kwargs["cwd"]).resolve() == repo.resolve()
             output = Path(cmd[cmd.index("--output") + 1]).resolve()
