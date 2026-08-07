@@ -240,6 +240,7 @@ STABLE_FROZEN_MAX_ZIP_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
 EXPECTED_STABLE_PACKAGE_DATA: tuple[str, ...] = (
     "data/bip39-english.txt",
     "data/certified/link_badge.json",
+    "data/certified/origin_fence.json",
     "data/certified/peer_row.json",
     "data/oui_prefixes.txt.gz",
     "web/assets/argon2id-v1.wasm",

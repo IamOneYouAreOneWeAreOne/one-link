@@ -839,3 +839,129 @@ def test_an_unauthenticated_link_shows_a_WARNING_in_the_UI():
     i = html.index("const regimeLabel = (() => {")
     body = html[i:i + 1400]
     assert "certified.warn" in body, "the proven warn flag never reaches the screen"
+
+
+# ═══ THE NATIVE SHELL — One Link's own window ════════════════════════════════════════════
+#
+# §10.4 of the design. The app-mode path was a real chromeless window, but it was Edge's: it needed
+# Edge installed, showed Edge in the process list, and put the launch URL on a command line. These
+# assert the properties that make the native shell worth having, not merely that it exists.
+
+SHELL_DIR = Path(__file__).resolve().parents[1] / "native" / "ol_shell"
+
+
+def _shell_src(name: str) -> str:
+    return (SHELL_DIR / "src" / name).read_text(encoding="utf-8")
+
+
+def test_the_third_certified_view_is_the_shells_navigation_FENCE():
+    """The decision the shell enforces is a theorem, not seven hand-written cases.
+
+    I wrote this fence in Rust as `uri.starts_with(origin)` and shipped a bypass within
+    minutes: `http://127.0.0.1:7117@evil.example/` starts with the origin because the
+    loopback address becomes userinfo. Sampling found it by luck; a proof cannot miss it.
+    """
+    from one_link.certified_surface import origin_fence
+
+    s = origin_fence()
+    assert s is not None, "the origin_fence view did not load or did not verify"
+    names = {n for n, _ in s.laws}
+    assert "only-a-real-boundary-may-extend-the-origin" in names
+    assert "userinfo-can-never-extend-the-origin" in names
+    assert all(scope == "exact" for _n, scope in s.laws)
+
+
+def test_the_fence_refuses_every_bypass_character_and_admits_only_four():
+    from one_link.certified_surface import fence_admits
+
+    for bad, why in ((64, "@ — userinfo"), (46, ". — hostname"), (58, ": — port"),
+                     (48, "digit"), (57, "digit"), (65, "letter")):
+        assert fence_admits(bad) is False, f"the fence admits {why}"
+    for good in (-1, 47, 63, 35):          # end, '/', '?', '#'
+        assert fence_admits(good) is True, f"the fence refuses a real boundary: {good}"
+
+
+def test_the_shell_and_python_pin_the_SAME_signers():
+    """A divergence here does not fail loudly — it refuses every honest artifact.
+
+    The shell would open, verify nothing it recognises, and refuse to draw; the Python side
+    would happily load the same files. Two verifiers disagreeing about WHO is trusted is the
+    worst shape of failure: silent on one side, total on the other.
+    """
+    from one_link.certified_surface import TRUSTED_VIEW_SIGNERS
+
+    rust = _shell_src("main.rs")
+    for signer in TRUSTED_VIEW_SIGNERS:
+        assert signer in rust, (
+            f"signer {signer[:16]} is pinned in Python but not in native/ol_shell — the shell "
+            "will refuse every artifact the daemon accepts")
+
+
+def test_the_shell_takes_the_URL_on_STDIN_and_never_on_a_command_line():
+    """The launch credential must not reach argv. This is the same finding that produced the
+    single-use nonce: a command line is readable by any same-user process, no elevation."""
+    rust = _shell_src("main.rs")
+    assert "read_line" in rust and "stdin" in rust
+    # Assert about CODE. The doc comment explains argv precisely BY NAMING IT, and the first
+    # version of this test matched that explanation -- a test reading documentation and calling
+    # it implementation. Second time today; the lesson is that a source-grep test must always
+    # strip comments first.
+    rust_code = " ".join(
+        ln for ln in rust.splitlines() if not ln.strip().startswith("//"))
+    assert "std::env::args" not in rust_code, (
+        "the shell reads its arguments from argv, which is where the launch credential must "
+        "never appear")
+
+    app = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "app.py").read_text(
+        encoding="utf-8")
+    i = app.index("def _open_native_shell(")
+    body = app[i:i + 2600]
+    assert "proc.stdin.write" in body, "the launcher no longer passes the URL over stdin"
+    # The spawn must carry the executable and NOTHING else: the moment a URL joins that list it
+    # is readable by every process running as this user.
+    assert "[str(exe)]" in body, "the launcher passes something beyond the executable path in argv"
+    argv_list = body.split("Popen(", 1)[1].split("]", 1)[0]
+    assert "url" not in argv_list, "the launch URL appears inside the Popen argument list"
+
+
+def test_the_shell_PINS_the_interface_it_will_render():
+    """The trust chain's root. An attacker who can edit index.html can edit whatever told the
+    shell what to expect — unless the expectation is compiled into the binary."""
+    build_rs = (SHELL_DIR / "build.rs").read_text(encoding="utf-8")
+    assert "OL_UI_SHA256" in build_rs and "index.html" in build_rs
+    assert "panic!" in build_rs, (
+        "a build with no interface to pin no longer fails; a shell with no pin renders anything")
+
+    rust = _shell_src("main.rs")
+    assert 'env!("OL_UI_SHA256")' in rust
+    assert "INTERFACE MODIFIED" in rust, "the shell no longer refuses a modified interface"
+
+
+def test_the_shell_verifies_certified_surfaces_INDEPENDENTLY():
+    """A second implementation, in another language, written against the spec.
+
+    Re-checking the same bytes with the same code proves nothing. Two implementations that
+    agree byte-for-byte is evidence.
+    """
+    cert = _shell_src("certified.rs")
+    assert "idem-view-table/v1" in cert and "idem-view-sig/v1" in cert, (
+        "the shell's domain separators no longer match the producer's")
+    assert "non-ASCII" in cert, (
+        "the shell no longer refuses non-ASCII artifacts — Python escapes them and serde_json "
+        "does not, so the digests would diverge on the first device with a non-English name")
+
+
+def test_the_launcher_prefers_our_own_window_and_falls_back_VISIBLY():
+    app = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "app.py").read_text(
+        encoding="utf-8")
+    assert "if standalone and _open_native_shell(url):" in app, (
+        "the launcher no longer tries One Link's own window first")
+    i = app.index("def _open_native_shell(")
+    body = app[i:i + 3200]
+    assert "_safe_echo" in body, (
+        "a failed native launch is silent; the user would see the browser path with no idea why")
+    assert "SHELL_READY" in body, (
+        "the launcher no longer waits for a WINDOW -- 'the process started' and 'a window "
+        "opened' are different facts, and only the second is worth falling back on")
+    assert 'SHELL_READY = "OL_SHELL_READY"' in app, (
+        "the ready marker no longer matches what the shell prints")

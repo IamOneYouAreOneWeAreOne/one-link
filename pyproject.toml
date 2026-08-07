@@ -273,6 +273,7 @@ one_link = [
   # artifact exists to end.
   "data/certified/peer_row.json",
   "data/certified/link_badge.json",
+  "data/certified/origin_fence.json",
 ]
 
 [tool.pytest.ini_options]

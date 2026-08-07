@@ -54,7 +54,7 @@ DEFAULT_ARTIFACT = CERTIFIED_DIR / "peer_row.json"
 #: Every certified surface this build ships. Named here rather than globbed: a directory listing
 #: would silently accept an artifact somebody dropped in, and "which surfaces are proven" is a
 #: claim the source should make, not the filesystem.
-VIEW_NAMES = ("peer_row", "link_badge")
+VIEW_NAMES = ("peer_row", "link_badge", "origin_fence")
 
 #: The glyph the whole security argument is about. Named here so a reader of THIS file can see what
 #: the law protects without opening the prover repo.
@@ -376,6 +376,28 @@ def surface() -> Optional[CertifiedSurface]:
 
 def link_surface() -> Optional[CertifiedSurface]:
     return view("link_badge")
+
+
+def origin_fence() -> Optional[CertifiedSurface]:
+    """The native shell's navigation decision, as a verified table.
+
+    The shell (`native/ol_shell`) checks its own Rust implementation against this at every point.
+    Loading it here means the Python side refuses to launch the shell when the decision the shell
+    is about to enforce does not itself verify.
+    """
+    return view("origin_fence")
+
+
+def fence_admits(next_char_code: int) -> Optional[bool]:
+    """Is a URI still inside its origin when the next character is this? None if unverified.
+
+    -1 encodes end-of-string, exactly as the certified table does.
+    """
+    s = origin_fence()
+    if s is None:
+        return None
+    out = s.at(c=int(next_char_code))
+    return None if out is None else bool(out == 1)
 
 
 def available() -> bool:
