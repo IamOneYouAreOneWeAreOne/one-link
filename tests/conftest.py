@@ -26,6 +26,13 @@ _PYTEST_SESSION_ROOT = Path(_PYTEST_SESSION_HOME_OWNER.name).resolve()
 _PYTEST_SESSION_HOME = _PYTEST_SESSION_ROOT / "home"
 os.environ[_ONE_LINK_HOME_ENV] = str(_PYTEST_SESSION_HOME)
 
+# NO REAL WINDOWS DURING A TEST RUN. `_open_browser_url` now prefers One Link's own window, which
+# spawns a process and waits up to 20s for it to report ready. Several tests call that function
+# directly to exercise the browser fallback; without this they would open GUI windows on the
+# machine running the suite and pay the wait for each one. Tests that mean to exercise the shell
+# unset this explicitly.
+os.environ["ONE_LINK_NO_NATIVE_SHELL"] = "1"
+
 from one_link.platform_guard import install_windows_platform_fastpath
 
 

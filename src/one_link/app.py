@@ -862,12 +862,20 @@ SHELL_READY = "OL_SHELL_READY"
 SHELL_READY_TIMEOUT_S = 20.0
 
 
+#: Set by the test suite so a run cannot open real windows on a developer's machine. NOT a
+#: production switch: nothing in One Link sets it, and a user who set it would simply get the
+#: browser path with the usual message. Tests that want the real shell unset it explicitly.
+NO_SHELL_ENV = "ONE_LINK_NO_NATIVE_SHELL"
+
+
 def _shell_path() -> Optional[Path]:
     """Where the native shell lives, or None.
 
     Beside the executable in a frozen bundle; under `native/ol_shell/target/release` in a source
     checkout, so a developer who has built it gets the real window too.
     """
+    if os.environ.get(NO_SHELL_ENV):
+        return None
     here = Path(getattr(sys, "_MEIPASS", "") or Path(sys.executable).parent)
     for candidate in (
         here / SHELL_EXE,
@@ -885,6 +893,45 @@ def _shell_path() -> Optional[Path]:
 def _package_root() -> Path:
     """The directory the shell verifies: where `web/index.html` and `data/certified/` live."""
     return Path(__file__).resolve().parent
+
+
+#: Refusals that mean SOMETHING CHANGED YOUR INSTALL, as opposed to "this machine lacks a
+#: webview runtime". The difference matters more to a user than to us: one is an inconvenience,
+#: the other is the only warning they will ever get.
+_SHELL_TAMPER_MARKERS = ("INTERFACE MODIFIED", "CERTIFIED SURFACE REFUSED", "SIGNATURE INVALID",
+                         "DIGEST MISMATCH", "not a pinned signer")
+
+
+def _report_shell_refusal(reason: str) -> None:
+    """Tell the user WHY their own window would not open, and shout when it matters.
+
+    THE GAP THIS CLOSES. The shell verifies the interface against a hash compiled into it and
+    refuses to render one that was modified after install. That is the most serious thing this
+    program can detect about itself -- and until now the user experience of it was *a browser
+    opening instead*. Someone whose install had been tampered with would have seen a slightly
+    different window and nothing else.
+
+    A missing WebView2 runtime is an inconvenience and reads like one. Tampering is not, and must
+    not be delivered in the same voice as a missing dependency.
+    """
+    text = reason or "no reason given"
+    if any(marker in text for marker in _SHELL_TAMPER_MARKERS):
+        _safe_echo("")
+        _safe_echo("  " + "!" * 68)
+        _safe_echo("  ONE LINK REFUSED TO OPEN ITS OWN WINDOW.")
+        _safe_echo("")
+        _safe_echo(f"  {text}")
+        _safe_echo("")
+        _safe_echo("  This means the interface or its proofs are NOT the ones that shipped.")
+        _safe_echo("  Something changed them after installation. That is worth taking")
+        _safe_echo("  seriously: reinstall One Link from a source you trust before using it.")
+        _safe_echo("")
+        _safe_echo("  Opening in a browser instead so you are not locked out -- but the same")
+        _safe_echo("  modified interface will be served there.")
+        _safe_echo("  " + "!" * 68)
+        _safe_echo("")
+        return
+    _safe_echo(f"  native window unavailable ({text}); using the browser path")
 
 
 def _open_native_shell(url: str) -> bool:
@@ -932,7 +979,7 @@ def _open_native_shell(url: str) -> bool:
                 reason = (proc.stderr.read() or "").strip().splitlines()[-1]
             except (OSError, ValueError, IndexError):
                 pass
-            _safe_echo(f"  native window refused to open: {reason or 'no reason given'}")
+            _report_shell_refusal(reason)
             return False
         line = proc.stdout.readline()
         if not line:

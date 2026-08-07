@@ -547,12 +547,17 @@ def test_no_PUBLISHED_key_is_trusted():
 
     # Any signer that is the release-role pubkey of a seed derived from a phrase in our own
     # source is, by construction, forgeable by anyone who can read the repository.
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "idem"))
-    try:
-        from idem.keys import role_pubkey
-    except Exception:                                   # idem is a sibling checkout, not a dep
-        pytest.skip("idem not available to re-derive published keys")
+    #
+    # THE DERIVATION IS INLINE, NOT IMPORTED FROM idem. The first version did
+    # `sys.path.insert(0, .../idem)` -- and idem has its own top-level `scripts/` package, which
+    # then SHADOWED One Link's, so an unrelated test's `import scripts.build_binary` failed with
+    # ModuleNotFoundError several files later. A test that mutates sys.path to reach a sibling
+    # checkout is a test that can break any other test in the run.
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    def role_pubkey(seed: bytes, role: str) -> str:
+        derived = hashlib.sha256(f"idem/role/{role}/v1".encode("ascii") + seed).digest()
+        return Ed25519PrivateKey.from_private_bytes(derived).public_key().public_bytes_raw().hex()
 
     for phrase in (
         b"one-link/certified-view/DEVELOPMENT-KEY/not-for-release/v1",
@@ -1066,3 +1071,53 @@ def test_the_peers_API_and_the_UI_both_use_the_proven_badge():
         "the sidebar badge decides its own text again; the old `ucount > 99 ? \"99+\"` was "
         "correct and re-decided in JS on every render")
     assert 'data-proven' in body, "the unproven fallback no longer marks itself"
+
+
+def test_a_TAMPER_refusal_is_shouted_and_a_missing_runtime_is_not():
+    """The most serious thing this program can detect about itself must not be delivered
+    in the same voice as a missing dependency.
+
+    The shell refuses to render an interface whose hash does not match the one compiled
+    into it. Until this existed, the user experience of that refusal was *a browser opening
+    instead* — someone whose install had been tampered with would see a slightly different
+    window and nothing else.
+    """
+    from one_link import app as app_mod
+
+    said = []
+    orig = app_mod._safe_echo
+    app_mod._safe_echo = lambda s="": said.append(s)
+    try:
+        app_mod._report_shell_refusal(
+            "OL_SHELL_FAILED INTERFACE MODIFIED: web/index.html hashes to abc but this shell "
+            "was built to render def")
+        tamper = "\n".join(said)
+
+        said.clear()
+        app_mod._report_shell_refusal(
+            "OL_SHELL_FAILED could not create the webview (...) — on Windows this usually means "
+            "the WebView2 runtime is not installed")
+        benign = "\n".join(said)
+    finally:
+        app_mod._safe_echo = orig
+
+    assert "REFUSED TO OPEN ITS OWN WINDOW" in tamper, "a tamper signal is not surfaced"
+    assert "reinstall" in tamper.lower(), "the user is not told what to do about it"
+    assert "NOT the ones that shipped" in tamper
+
+    assert "REFUSED TO OPEN ITS OWN WINDOW" not in benign, (
+        "a missing WebView2 runtime shouts like a tamper event -- cry wolf often enough and "
+        "the real warning is ignored")
+    assert "browser path" in benign
+
+
+def test_every_refusal_the_shell_can_emit_is_classified():
+    """A tamper marker the launcher does not recognise is a tamper event delivered as an
+    inconvenience. Every security refusal in the shell must appear in the marker list."""
+    rust = _shell_src("main.rs") + _shell_src("certified.rs")
+    from one_link.app import _SHELL_TAMPER_MARKERS
+
+    for phrase in ("INTERFACE MODIFIED", "CERTIFIED SURFACE REFUSED", "SIGNATURE INVALID",
+                   "DIGEST MISMATCH", "not a pinned signer"):
+        assert phrase in rust, f"the shell no longer emits {phrase!r}; the marker list is stale"
+        assert phrase in _SHELL_TAMPER_MARKERS
