@@ -15,6 +15,7 @@ Pins:
 from __future__ import annotations
 
 import os
+import random
 from pathlib import Path
 
 import pytest
@@ -33,20 +34,61 @@ def test_mnemonic_round_trip_random():
         assert mnemonic.decode(phrase) == seed
 
 
-def test_mnemonic_typo_caught_by_checksum():
-    seed = os.urandom(32)
-    phrase = mnemonic.encode(seed)
-    words = phrase.split()
-    # Swap one word for another from the wordlist.
-    swapped = words[:]
-    # Pick a different valid word at position 5.
+def _swap_one_word(seed: bytes, position: int = 5) -> str:
+    """A phrase with exactly one word replaced by a different valid word."""
+    words = mnemonic.encode(seed).split()
     for w in ("zebra", "yellow", "voyage", "able"):
-        if w != swapped[5]:
-            swapped[5] = w
+        if w != words[position]:
+            words[position] = w
             break
-    typo_phrase = " ".join(swapped)
+    return " ".join(words)
+
+
+def test_mnemonic_typo_caught_by_checksum():
+    """A one-word typo is rejected -- DETERMINISTICALLY.
+
+    This used to draw `os.urandom(32)` every run. BIP-39 at 256 bits carries an EIGHT-BIT
+    checksum, so a single-word substitution passes by chance about 1 time in 256: the test
+    failed roughly 0.4% of runs, and every one of those failures would be read as flakiness
+    and re-run away. Measured on this machine: 19 misses in 4000 trials, 1 in 211.
+
+    A security test whose verdict is a coin flip is worse than no test -- it trains everyone
+    to ignore it. Fixed seed, so this either always passes or always fails.
+    """
+    seed = bytes.fromhex(
+        "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")
     with pytest.raises(ValueError, match="checksum"):
-        mnemonic.decode(typo_phrase)
+        mnemonic.decode(_swap_one_word(seed))
+
+
+def test_a_one_word_typo_is_caught_only_255_TIMES_IN_256():
+    """The property the deterministic test above deliberately hides, stated out loud.
+
+    An 8-bit checksum cannot catch every single-word typo, and a user restoring a wallet
+    deserves to know that recovery can succeed onto the WRONG seed. This measures the real
+    rate rather than implying the check is total.
+
+    Seeded RNG so the measurement is reproducible -- a flaky test about flakiness would be
+    an unusually poor joke.
+    """
+    rng = random.Random(0xC0FFEE)
+    trials, missed = 2000, 0
+    for _ in range(trials):
+        seed = bytes(rng.getrandbits(8) for _ in range(32))
+        try:
+            mnemonic.decode(_swap_one_word(seed))
+            missed += 1
+        except ValueError:
+            pass
+
+    rate = missed / trials
+    # An 8-bit checksum gives 1/256 = 0.39%. Bounds are wide enough that ordinary sampling
+    # noise cannot fail this, and tight enough that a checksum silently shrinking to 4 bits
+    # (1/16) or vanishing entirely would.
+    assert 0.0005 < rate < 0.02, (
+        f"single-word typos slip through {missed}/{trials} = {rate:.4%}. Expected ~0.39% for "
+        "an 8-bit checksum; far above means the checksum weakened, far below means this "
+        "measurement stopped measuring anything")
 
 
 def test_mnemonic_unknown_word_rejected():

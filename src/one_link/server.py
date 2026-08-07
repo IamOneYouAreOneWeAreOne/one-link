@@ -19765,6 +19765,11 @@ class UIServer:
             "glyph": row.glyph,
             "name_w": row.name_w,
             "badge_x": row.badge_x,
+            # The accessible label travels WITH the pixel, from the same proven renderer.
+            # `the-spoken-label-cannot-contradict-the-pixel` is discharged over every integer
+            # input, so these two fields cannot disagree -- which is the drift every DOM has.
+            "label": row.label,
+            "spoken": row.spoken(),
             # The digest travels with the row so the UI can show WHICH table drew it, and a
             # reviewer can match a screenshot to an artifact.
             "digest": surface.digest[:16],

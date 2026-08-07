@@ -65,12 +65,15 @@ def test_the_shipped_artifact_verifies(doc):
     assert "exhaustive" in why
 
 
-def test_it_carries_the_three_laws_at_scope_exact(surface):
+def test_it_carries_the_five_laws_at_scope_exact(surface):
     names = {n for n, _s in surface.laws}
     assert names == {
         "the-verified-glyph-requires-verified-trust",
         "the-name-never-runs-under-the-badge",
         "nothing-is-drawn-outside-the-row",
+        # §10.3 of the design, made a theorem: the a11y tree is not a parallel structure.
+        "every-row-says-something",
+        "the-spoken-label-cannot-contradict-the-pixel",
     }, f"the shipped laws changed: {sorted(names)}"
     assert all(scope == "exact" for _n, scope in surface.laws), (
         f"a law discharged at a weaker scope than `exact`: {surface.laws}")
@@ -557,3 +560,64 @@ def test_the_development_key_is_labelled_as_one_in_the_source():
     window = src[max(0, i - 1400):i]
     assert "DEVELOPMENT KEY" in window and "not-for-release" in window, (
         "the development key is no longer marked as one where a reader would see it")
+
+
+# ── the screen reader and the pixel cannot disagree ───────────────────
+#
+# Every mainstream stack maintains the semantic tree ALONGSIDE the visual one and the mapping rots
+# silently: a badge is restyled, the aria-label stays, and a blind user is told something the screen
+# stopped saying two quarters ago. Nothing detects it, because no component holds both at once.
+#
+# Here the label is an output of the SAME renderer as the pixel, and the agreement is DISCHARGED
+# over every integer input rather than left to construction.
+
+
+def test_the_spoken_label_and_the_pixel_agree_on_EVERY_shipped_row(surface, doc):
+    """The product-side sweep of `the-spoken-label-cannot-contradict-the-pixel`."""
+    from one_link.certified_surface import LABEL_VERIFIED
+
+    checked = 0
+    for row in doc["rows"]:
+        got = surface.row(row["in"]["trust"], row["in"]["name_len"])
+        assert got.shows_verified() == got.says_verified(), (
+            f"{row['in']}: the badge shows verified={got.shows_verified()} while the screen "
+            f"reader says verified={got.says_verified()} -- a blind user and a sighted user are "
+            "being told different things about the same peer")
+        if row["in"]["trust"] == VERIFIED:
+            assert got.label == LABEL_VERIFIED
+        checked += 1
+    assert checked == len(doc["rows"])
+
+
+def test_every_shipped_row_says_SOMETHING(surface, doc):
+    """A row that announces nothing is invisible to a screen reader while visible on screen."""
+    for row in doc["rows"]:
+        got = surface.row(row["in"]["trust"], row["in"]["name_len"])
+        assert got.spoken().strip(), f"{row['in']} announces nothing"
+
+
+def test_an_UNKNOWN_label_id_falls_back_to_the_most_conservative_text():
+    """Fail safe, not silent. An id the product does not recognise must under-claim rather
+    than announce nothing -- and must never announce verification it cannot support."""
+    from one_link.certified_surface import LABEL_TEXT, LABEL_NONE, CertifiedRow
+
+    weird = CertifiedRow(glyph=0, name_w=10, badge_x=296, label=99)
+    assert weird.spoken() == LABEL_TEXT[LABEL_NONE]
+    assert "erified in person" not in weird.spoken()
+
+
+def test_the_peers_API_carries_the_spoken_label():
+    src = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "server.py").read_text(
+        encoding="utf-8")
+    assert '"spoken": row.spoken(),' in src and '"label": row.label,' in src, (
+        "the API no longer sends the proven accessible label, so the UI has nothing to speak")
+
+
+def test_the_UI_sets_aria_label_from_the_PROOF():
+    html = _ui()
+    assert "function spokenByProof(peer)" in html
+    i = html.index("function renderConvHeaderTrust(peer)")
+    body = html[i:i + 2000]
+    assert "spokenByProof(peer)" in body and 'setAttribute("aria-label"' in body, (
+        "the verified pill's aria-label is no longer taken from the proven renderer -- it is "
+        "back to being a string maintained beside the badge, which is the drift this replaces")

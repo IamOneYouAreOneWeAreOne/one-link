@@ -1,5 +1,5 @@
 {
-  "class_fingerprint": "5b39af8e9e043c910a5a0ff9f32bc1fc3c845a4734fbe79ea4be3a2fb41cd3fa",
+  "class_fingerprint": "7db11b062f32b18ab5c0683bdea1bed80d249031cfa9ad3c8ddc42cc9107622e",
   "entry": "row",
   "frame_digest": null,
   "laws": [
@@ -14,9 +14,17 @@
     [
       "nothing-is-drawn-outside-the-row",
       "exact"
+    ],
+    [
+      "every-row-says-something",
+      "exact"
+    ],
+    [
+      "the-spoken-label-cannot-contradict-the-pixel",
+      "exact"
     ]
   ],
-  "member_mid": "9f4ec053ef10c9b73f370a22dbe3dfc30591d94a6fa9bef2ad56252f56ef54ba",
+  "member_mid": "3e19639b7d475d84513e608422d6d1331759d097144c415bfc03b083b89d4f94",
   "notes": {
     "points": 192
   },
@@ -30,6 +38,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 0
       }
     },
@@ -42,6 +51,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 8
       }
     },
@@ -54,6 +64,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 16
       }
     },
@@ -66,6 +77,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 24
       }
     },
@@ -78,6 +90,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 32
       }
     },
@@ -90,6 +103,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 40
       }
     },
@@ -102,6 +116,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 48
       }
     },
@@ -114,6 +129,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 56
       }
     },
@@ -126,6 +142,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 64
       }
     },
@@ -138,6 +155,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 72
       }
     },
@@ -150,6 +168,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 80
       }
     },
@@ -162,6 +181,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 88
       }
     },
@@ -174,6 +194,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 96
       }
     },
@@ -186,6 +207,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 104
       }
     },
@@ -198,6 +220,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 112
       }
     },
@@ -210,6 +233,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 120
       }
     },
@@ -222,6 +246,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 128
       }
     },
@@ -234,6 +259,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 136
       }
     },
@@ -246,6 +272,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 144
       }
     },
@@ -258,6 +285,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 152
       }
     },
@@ -270,6 +298,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 160
       }
     },
@@ -282,6 +311,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 168
       }
     },
@@ -294,6 +324,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 176
       }
     },
@@ -306,6 +337,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 184
       }
     },
@@ -318,6 +350,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 192
       }
     },
@@ -330,6 +363,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 200
       }
     },
@@ -342,6 +376,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 208
       }
     },
@@ -354,6 +389,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 216
       }
     },
@@ -366,6 +402,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 224
       }
     },
@@ -378,6 +415,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 232
       }
     },
@@ -390,6 +428,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 240
       }
     },
@@ -402,6 +441,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 248
       }
     },
@@ -414,6 +454,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 256
       }
     },
@@ -426,6 +467,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 264
       }
     },
@@ -438,6 +480,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 272
       }
     },
@@ -450,6 +493,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 280
       }
     },
@@ -462,6 +506,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -474,6 +519,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -486,6 +532,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -498,6 +545,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -510,6 +558,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -522,6 +571,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -534,6 +584,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -546,6 +597,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -558,6 +610,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -570,6 +623,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -582,6 +636,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -594,6 +649,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -606,6 +662,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -618,6 +675,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -630,6 +688,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -642,6 +701,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -654,6 +714,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -666,6 +727,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -678,6 +740,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -690,6 +753,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -702,6 +766,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -714,6 +779,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -726,6 +792,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -738,6 +805,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -750,6 +818,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -762,6 +831,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -774,6 +844,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -786,6 +857,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 0,
+        "label": 0,
         "name_w": 288
       }
     },
@@ -798,6 +870,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 0
       }
     },
@@ -810,6 +883,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 8
       }
     },
@@ -822,6 +896,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 16
       }
     },
@@ -834,6 +909,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 24
       }
     },
@@ -846,6 +922,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 32
       }
     },
@@ -858,6 +935,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 40
       }
     },
@@ -870,6 +948,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 48
       }
     },
@@ -882,6 +961,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 56
       }
     },
@@ -894,6 +974,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 64
       }
     },
@@ -906,6 +987,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 72
       }
     },
@@ -918,6 +1000,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 80
       }
     },
@@ -930,6 +1013,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 88
       }
     },
@@ -942,6 +1026,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 96
       }
     },
@@ -954,6 +1039,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 104
       }
     },
@@ -966,6 +1052,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 112
       }
     },
@@ -978,6 +1065,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 120
       }
     },
@@ -990,6 +1078,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 128
       }
     },
@@ -1002,6 +1091,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 136
       }
     },
@@ -1014,6 +1104,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 144
       }
     },
@@ -1026,6 +1117,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 152
       }
     },
@@ -1038,6 +1130,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 160
       }
     },
@@ -1050,6 +1143,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 168
       }
     },
@@ -1062,6 +1156,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 176
       }
     },
@@ -1074,6 +1169,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 184
       }
     },
@@ -1086,6 +1182,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 192
       }
     },
@@ -1098,6 +1195,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 200
       }
     },
@@ -1110,6 +1208,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 208
       }
     },
@@ -1122,6 +1221,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 216
       }
     },
@@ -1134,6 +1234,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 224
       }
     },
@@ -1146,6 +1247,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 232
       }
     },
@@ -1158,6 +1260,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 240
       }
     },
@@ -1170,6 +1273,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 248
       }
     },
@@ -1182,6 +1286,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 256
       }
     },
@@ -1194,6 +1299,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 264
       }
     },
@@ -1206,6 +1312,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 272
       }
     },
@@ -1218,6 +1325,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 280
       }
     },
@@ -1230,6 +1338,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1242,6 +1351,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1254,6 +1364,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1266,6 +1377,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1278,6 +1390,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1290,6 +1403,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1302,6 +1416,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1314,6 +1429,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1326,6 +1442,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1338,6 +1455,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1350,6 +1468,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1362,6 +1481,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1374,6 +1494,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1386,6 +1507,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1398,6 +1520,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1410,6 +1533,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1422,6 +1546,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1434,6 +1559,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1446,6 +1572,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1458,6 +1585,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1470,6 +1598,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1482,6 +1611,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1494,6 +1624,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1506,6 +1637,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1518,6 +1650,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1530,6 +1663,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1542,6 +1676,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1554,6 +1689,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 3,
+        "label": 1,
         "name_w": 288
       }
     },
@@ -1566,6 +1702,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 0
       }
     },
@@ -1578,6 +1715,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 8
       }
     },
@@ -1590,6 +1728,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 16
       }
     },
@@ -1602,6 +1741,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 24
       }
     },
@@ -1614,6 +1754,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 32
       }
     },
@@ -1626,6 +1767,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 40
       }
     },
@@ -1638,6 +1780,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 48
       }
     },
@@ -1650,6 +1793,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 56
       }
     },
@@ -1662,6 +1806,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 64
       }
     },
@@ -1674,6 +1819,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 72
       }
     },
@@ -1686,6 +1832,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 80
       }
     },
@@ -1698,6 +1845,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 88
       }
     },
@@ -1710,6 +1858,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 96
       }
     },
@@ -1722,6 +1871,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 104
       }
     },
@@ -1734,6 +1884,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 112
       }
     },
@@ -1746,6 +1897,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 120
       }
     },
@@ -1758,6 +1910,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 128
       }
     },
@@ -1770,6 +1923,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 136
       }
     },
@@ -1782,6 +1936,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 144
       }
     },
@@ -1794,6 +1949,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 152
       }
     },
@@ -1806,6 +1962,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 160
       }
     },
@@ -1818,6 +1975,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 168
       }
     },
@@ -1830,6 +1988,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 176
       }
     },
@@ -1842,6 +2001,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 184
       }
     },
@@ -1854,6 +2014,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 192
       }
     },
@@ -1866,6 +2027,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 200
       }
     },
@@ -1878,6 +2040,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 208
       }
     },
@@ -1890,6 +2053,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 216
       }
     },
@@ -1902,6 +2066,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 224
       }
     },
@@ -1914,6 +2079,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 232
       }
     },
@@ -1926,6 +2092,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 240
       }
     },
@@ -1938,6 +2105,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 248
       }
     },
@@ -1950,6 +2118,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 256
       }
     },
@@ -1962,6 +2131,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 264
       }
     },
@@ -1974,6 +2144,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 272
       }
     },
@@ -1986,6 +2157,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 280
       }
     },
@@ -1998,6 +2170,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2010,6 +2183,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2022,6 +2196,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2034,6 +2209,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2046,6 +2222,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2058,6 +2235,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2070,6 +2248,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2082,6 +2261,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2094,6 +2274,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2106,6 +2287,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2118,6 +2300,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2130,6 +2313,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2142,6 +2326,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2154,6 +2339,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2166,6 +2352,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2178,6 +2365,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2190,6 +2378,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2202,6 +2391,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2214,6 +2404,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2226,6 +2417,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2238,6 +2430,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2250,6 +2443,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2262,6 +2456,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2274,6 +2469,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2286,6 +2482,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2298,6 +2495,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2310,6 +2508,7 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     },
@@ -2322,12 +2521,13 @@
         "__type__": "Row",
         "badge_x": 296,
         "glyph": 7,
+        "label": 2,
         "name_w": 288
       }
     }
   ],
   "schema": "idem-certified-view/v1",
-  "signature": "6c3e918c661a4f59610c1c37a9f30b8c01ee2e80e4bddf84c41640bda7ab693feb03e1502217eb39fb749fa8bf8ac1f301dee42f08119449fc1ffa3079ba7f00",
+  "signature": "9839a5018ab86a7efb8200c2f880dc799e2f0be421b458261497fb692842e6b2a7e155a97a060b38d62d8be9faec6d0c1dd3023febba0ba90c1caf93c1ab0c0c",
   "signer": "6c73b5addfbc1dcd82adb15738c954b2fa0e0e49ae92a93451ae7c9f2ff9df51",
   "space": {
     "axes": [
@@ -2410,5 +2610,5 @@
       ]
     ]
   },
-  "table_digest": "966bfa9cfa95b854c8382d0cf0e6f491107daf7b0609b61fa87e0fdc53bd4094"
+  "table_digest": "ba1c5c4718db67f207a5b8261c83afa4a8d2c8a16af21a903865994d117d9785"
 }

@@ -94,15 +94,37 @@ def table_digest(rows: Any) -> str:
     return d.hexdigest()
 
 
+#: What a screen reader says, as ids the PROOF chose. The words are the product's; the CHOICE is
+#: a theorem. `the-spoken-label-cannot-contradict-the-pixel` is discharged over every integer input,
+#: so a row showing the verified glyph and a row announcing "verified" are the same rows -- not by
+#: construction, and not by review, but because the renderer emitting one emits the other.
+LABEL_NONE, LABEL_KNOWN, LABEL_VERIFIED = 0, 1, 2
+
+LABEL_TEXT = {
+    LABEL_NONE: "Unverified device",
+    LABEL_KNOWN: "Paired, not verified in person",
+    LABEL_VERIFIED: "Verified in person",
+}
+
+
 @dataclass(frozen=True)
 class CertifiedRow:
-    """What the renderer proved it draws for one peer."""
+    """What the renderer proved it draws for one peer -- seen AND spoken."""
     glyph: int
     name_w: int
     badge_x: int
+    label: int
 
     def shows_verified(self) -> bool:
         return self.glyph == GLYPH_VERIFIED
+
+    def says_verified(self) -> bool:
+        return self.label == LABEL_VERIFIED
+
+    def spoken(self) -> str:
+        """The accessible text. Unknown ids fall back to the most CONSERVATIVE label rather
+        than to a blank: a row that announces nothing is worse than one that under-claims."""
+        return LABEL_TEXT.get(self.label, LABEL_TEXT[LABEL_NONE])
 
 
 class CertifiedSurface:
@@ -152,7 +174,7 @@ class CertifiedSurface:
         if out is None:
             return None
         return CertifiedRow(glyph=int(out["glyph"]), name_w=int(out["name_w"]),
-                            badge_x=int(out["badge_x"]))
+                            badge_x=int(out["badge_x"]), label=int(out.get("label", LABEL_NONE)))
 
     def covers(self, trust: int, name_len: int) -> bool:
         return (int(trust), int(name_len)) in self._index
