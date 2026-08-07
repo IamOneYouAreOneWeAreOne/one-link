@@ -56,7 +56,7 @@ install_windows_platform_fastpath()
 
 from aiohttp import WSMsgType, web
 
-from one_link import control_ipc
+from one_link import certified_surface, control_ipc
 from one_link.build_identity import runtime_build_identity
 from one_link.device_relogin import (
     DeviceReloginChallengeCapacityError,
@@ -19742,6 +19742,34 @@ class UIServer:
         return web.json_response({"ok": True})
 
     # ─── /api/peers ───────────────────────────────────────────────────
+    @staticmethod
+    def _certified_row_for(surface: Any, p: dict) -> Optional[dict]:
+        """The proven layout for one peer row, or None outside the certified space.
+
+        None is honest emptiness: the UI renders its ordinary row rather than being handed an
+        extrapolation. A table that guessed past its proven domain would be the unproven code this
+        replaces, wearing a digest.
+        """
+        # VERIFIED requires in-person verification, not pairing. See the note at the call site.
+        if p.get("is_verified"):
+            level = 2
+        elif p.get("trust") == "pinned":
+            level = 1
+        else:
+            level = 0
+        name = str(p.get("local_alias") or p.get("hostname") or "")
+        row = surface.row(level, len(name))
+        if row is None:
+            return None
+        return {
+            "glyph": row.glyph,
+            "name_w": row.name_w,
+            "badge_x": row.badge_x,
+            # The digest travels with the row so the UI can show WHICH table drew it, and a
+            # reviewer can match a screenshot to an artifact.
+            "digest": surface.digest[:16],
+        }
+
     async def api_peers(self, request: web.Request) -> web.Response:
         """Merge live mDNS-discovered peers with persistent peer DB.
 
@@ -19964,6 +19992,19 @@ class UIServer:
             return bool(p.get("online"))
 
         kept = [p for p in live.values() if _keep(p)]
+
+        # THE PROVEN ROW. Stamped in ONE place, for every peer, from a table whose three
+        # layout/security laws were discharged over every integer input by the Coherence prover at
+        # build time (see one_link/certified_surface.py and idem/scripts/emit_peer_row_view.py).
+        #
+        # The trust mapping is deliberately STRICTER than the obvious one: the verified glyph
+        # requires `is_verified` -- an in-person SAS confirmation -- not merely `trust == "pinned"`.
+        # Being paired is not the same as having checked who is on the other end, and the law only
+        # constrains the renderer; choosing what counts as VERIFIED is this line's job.
+        _certified = certified_surface.surface()
+        if _certified is not None:
+            for p in kept:
+                p["certified_row"] = self._certified_row_for(_certified, p)
 
         # v0.5.6: stamp connection regime per peer. Outbound session
         # regime (most authoritative — that's the path our chat sends

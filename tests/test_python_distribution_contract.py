@@ -72,14 +72,14 @@ def test_stable_distribution_contract_exactly_matches_source_tree() -> None:
     # to zero. It is imported at module scope by both, so a frozen build
     # missing it would fail before logging exists.
     # (204 before it: bounded_resolver, 2026-07-30.)
-    assert len(build_identity.EXPECTED_STABLE_RUNTIME_MODULES) == 205
+    assert len(build_identity.EXPECTED_STABLE_RUNTIME_MODULES) == 206
     assert build_identity.EXPECTED_STABLE_RUNTIME_MODULES == tuple(
         sorted(set(build_identity.EXPECTED_STABLE_RUNTIME_MODULES))
     )
     assert build_identity.EXPECTED_STABLE_PACKAGE_DATA == tuple(
         sorted(set(build_identity.EXPECTED_STABLE_PACKAGE_DATA))
     )
-    assert len(build_identity.EXPECTED_STABLE_PACKAGE_DATA) == 19
+    assert len(build_identity.EXPECTED_STABLE_PACKAGE_DATA) == 20
 
     package_root = build_identity.package_root()
     discovered_data = {
@@ -126,13 +126,14 @@ def test_distribution_source_contract_hashes_every_packaged_python_file() -> Non
         if "__pycache__" not in path.parts
     }
     packaged_python = {name for name in contract.payload_hashes if name.endswith(".py")}
-    # 221 / 240: one_link/env_bounds.py added 2026-08-05 -- validated numeric
-    # environment overrides, after a bare int(os.environ.get(...)) at module
-    # scope made a typo in a service unit an unstartable daemon.
-    # (220 / 239 before it: bounded_resolver.py, 2026-07-30.)
-    assert len(source_python) == 221
+    # 222 / 242: one_link/certified_surface.py added 2026-08-06 -- loads and VERIFIES
+    # the peer row's proven layout table, whose laws are discharged over every integer
+    # input by the Coherence prover at build time. The payload count rises by TWO: the
+    # module plus data/certified/peer_row.json, the materialized answers it reads.
+    # (221 / 240 before it: env_bounds.py, 2026-08-05. 220 / 239: bounded_resolver.py.)
+    assert len(source_python) == 222
     assert packaged_python == source_python
-    assert len(contract.payload_hashes) == 240
+    assert len(contract.payload_hashes) == 242
 
 
 def test_developer_only_modules_are_not_stable_distribution_requirements() -> None:
@@ -480,7 +481,7 @@ def test_fresh_wheel_and_sdist_pass_two_clean_install_probes(tmp_path: Path) -> 
     assert result["stable_runtime_module_count"] == len(
         build_identity.EXPECTED_STABLE_RUNTIME_MODULES
     )
-    assert result["stable_package_data_count"] == 19
+    assert result["stable_package_data_count"] == 20
     assert result["source_payload_file_count"] == len(staged_contract.payload_hashes)
     assert result["source_python_file_count"] == sum(
         name.endswith(".py") for name in staged_contract.payload_hashes

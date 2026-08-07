@@ -239,6 +239,7 @@ STABLE_FROZEN_MAX_ZIP_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
 # and PyInstaller builds stage a freshly compiled CDC library separately.
 EXPECTED_STABLE_PACKAGE_DATA: tuple[str, ...] = (
     "data/bip39-english.txt",
+    "data/certified/peer_row.json",
     "data/oui_prefixes.txt.gz",
     "web/assets/argon2id-v1.wasm",
     "web/assets/argon2id-worker.js",
@@ -347,6 +348,7 @@ EXPECTED_STABLE_RUNTIME_MODULES: tuple[str, ...] = (
     "one_link.capsule_store",
     "one_link.capsule_transport",
     "one_link.cdc",
+    "one_link.certified_surface",
     "one_link.channel",
     "one_link.chat",
     "one_link.chunk_cache_gc",

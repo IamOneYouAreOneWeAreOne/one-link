@@ -25785,17 +25785,44 @@
   // The CTA's onclick opens the device drawer scrolled to the
   // verification section, so the user lands one click from the
   // confirm button.
+  // The glyph id the proven renderer emits for VERIFIED. Nothing else may ever be 7 --
+  // that is the theorem, discharged over every integer input at build time.
+  const GLYPH_VERIFIED = 7;
+
+  // 2026-08-06: WHO DECIDES the badge is now the proven table, not this function.
+  //
+  // `peer.certified_row` is stamped by /api/peers from a renderer whose laws were discharged
+  // over EVERY integer input by the Coherence prover (see one_link/certified_surface.py). The
+  // pixels are unchanged -- the server maps VERIFIED from `is_verified`, so glyph===7 exactly
+  // when the pill used to show. What changed is the AUTHORITY: the badge is now the output of
+  // a proven function rather than a conditional a reviewer has to notice is correct.
+  //
+  // Falls back to `is_verified` when the surface is unavailable (older daemon, artifact absent).
+  // The fallback is the ordinary unproven path, so it must never be silent about which one ran
+  // -- `data-proven` records it, and the test suite asserts on that attribute.
+  function verifiedByProof(peer) {
+    const row = peer && peer.certified_row;
+    if (!row || typeof row.glyph !== "number") return null;   // no proven answer available
+    return row.glyph === GLYPH_VERIFIED;
+  }
+
   function renderConvHeaderTrust(peer) {
     const host = $("#convo-trust");
     if (!host) return;
     host.innerHTML = "";
     if (!peer || peer.trust !== "pinned") return;
-    if (peer.is_verified) {
+    const proven = verifiedByProof(peer);
+    host.setAttribute("data-proven", proven === null ? "unavailable" : "yes");
+    if (proven === null ? !!peer.is_verified : proven) {
       const pill = el("span", "verified-pill", "Verified");
       const label = peer.verified_method
         ? `Verified in person · ${verifyMethodLabel(peer.verified_method)}`
         : "Verified in person";
-      pill.title = peer.verified_note ? `${label} - ${peer.verified_note}` : label;
+      const base = peer.verified_note ? `${label} - ${peer.verified_note}` : label;
+      // Show WHICH proven table drew this, so a screenshot can be matched to an artifact.
+      pill.title = proven === null
+        ? base
+        : `${base}\nDrawn by a proven renderer · table ${peer.certified_row.digest}`;
       host.appendChild(pill);
     } else {
       const cta = el("span", "verify-cta", "Verify in person");
