@@ -101,9 +101,16 @@ class TrayIcon:
         on_quit: Callable[[], None],
         url: str = "http://127.0.0.1:7117/",
         inbox_path: Optional[Path] = None,
+        url_provider: Optional[Callable[[], str]] = None,
     ):
         self._on_quit = on_quit
         self._url = url
+        # THE TRAY MUST NOT CACHE A CREDENTIAL. Its URL used to carry the UI bearer, which
+        # then reached the browser's command line on every click -- readable by any
+        # same-user process (threat T7b). The replacement credential is SINGLE-USE, so a
+        # stored one would open the app once and leave every later click dead. Instead the
+        # tray asks for a fresh URL at click time. `_url` is now display/fallback only.
+        self._url_provider = url_provider
         self._inbox_path = inbox_path
         # Lazy-imported pystray Icon — None until ``start()`` creates
         # the real one. Local stubs live under ``stubs/pystray.pyi``.
@@ -199,9 +206,26 @@ class TrayIcon:
         ])
         return Menu(*items)
 
+    def _authenticated_url(self) -> str:
+        """A URL with a FRESH single-use credential, minted at click time.
+
+        Falls back to the stored URL when no provider is wired (embedders, tests). The
+        fallback opens the UI unauthenticated rather than replaying a credential -- the
+        user sees the app's own auth prompt, which is a worse click and not a leak.
+        """
+        if self._url_provider is None:
+            return self._url
+        try:
+            return self._url_provider()
+        except Exception as e:  # noqa: BLE001 -- a dead provider must not kill the tray
+            log.warning("tray: could not mint a launch credential (%s); "
+                        "opening unauthenticated", e)
+            return self._url
+
     def _on_open(self, icon, item) -> None:
         try:
-            launch_loopback_url(_local_ui_url(self._url), platform_name=sys.platform)
+            launch_loopback_url(_local_ui_url(self._authenticated_url()),
+                                platform_name=sys.platform)
         except (OSError, ValueError) as e:
             log.warning("tray: failed to open browser: %s", e)
 
@@ -210,8 +234,12 @@ class TrayIcon:
         auto-opens the Add Device modal + mints a fresh invite QR.
         Same target as ``Open One Link`` plus ``?setup=add-device``."""
         try:
-            separator = "&" if "?" in self._url else "?"
-            target = f"{self._url}{separator}setup=add-device"
+            # Same rule as `_on_open`: a fresh single-use credential per click. This
+            # branch was the second of two tray paths, and fixing only the first would
+            # have left the leak live behind one menu item.
+            base = self._authenticated_url()
+            separator = "&" if "?" in base else "?"
+            target = f"{base}{separator}setup=add-device"
             launch_loopback_url(_local_ui_url(target), platform_name=sys.platform)
         except (OSError, ValueError) as e:
             log.warning("tray: failed to open connect-device flow: %s", e)

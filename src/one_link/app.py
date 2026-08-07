@@ -58,6 +58,10 @@ class RunningDaemon:
     server_port: int
     token: str
     status: dict
+    #: Single-use, TTL-bounded credential minted for THIS launch. `token` is a Bearer for
+    #: the authenticated control channel and must never reach a command line; this is the
+    #: only credential allowed in a browser URL. See `UIServer.mint_launch_nonce`.
+    launch_nonce: Optional[str] = None
 
     @property
     def compatible(self) -> bool:
@@ -318,7 +322,12 @@ def resolve_authenticated_daemon(
         verified_connection.close()
     if not _runtime_matches_control(status, ui_status):
         return None
-    return RunningDaemon(ctrl, int(srv), token, status)
+    nonce = launch.get("launch_nonce")
+    if nonce is not None and (
+        not isinstance(nonce, str) or not 32 <= len(nonce) <= 512 or nonce != nonce.strip()
+    ):
+        return None
+    return RunningDaemon(ctrl, int(srv), token, status, launch_nonce=nonce)
 
 
 def _resolve_running_daemon(*, timeout: float = 2.0) -> Optional[RunningDaemon]:
@@ -1384,7 +1393,24 @@ def run_app(
     # Reachable only via the loop's `break` (info is up) or the
     # already-running branch; every failure path above returns first.
     assert info is not None
-    url = f"http://127.0.0.1:{info.server_port}/?t={info.token}"
+    # THE CREDENTIAL THAT GOES IN THE URL IS THE NONCE, NOT THE TOKEN. This URL is handed
+    # to `msedge.exe --app=...`, and a command line is readable by any same-user process
+    # with no elevation (measured on Windows via Win32_Process). The nonce is single-use
+    # and expires, so an argv snapshot is worthless a moment later.
+    if info.launch_nonce:
+        url = f"http://127.0.0.1:{info.server_port}/?t={info.launch_nonce}"
+    else:
+        # Cannot happen in a matched build -- `resolve_authenticated_daemon` refuses any
+        # daemon whose `source_fingerprint` differs, so the daemon always speaks this
+        # protocol. Kept as a LOUD degraded path rather than a silent fallback: putting
+        # the long-lived token back on a command line is the exact defect this replaced,
+        # and a fallback nobody can see is how it would return.
+        _safe_echo(
+            "  WARNING: the daemon minted no launch nonce; falling back to the "
+            "long-lived token in the launch URL. It will be visible to any process "
+            "running as you. Please report this -- it should be unreachable."
+        )
+        url = f"http://127.0.0.1:{info.server_port}/?t={info.token}"
     _safe_echo(f"  open: http://127.0.0.1:{info.server_port}/ (authenticated)")
     if not no_browser:
         try:
