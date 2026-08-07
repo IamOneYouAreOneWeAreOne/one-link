@@ -23,6 +23,26 @@ publish = false
 # the parent workspace it physically sits inside.
 [workspace]
 
+# ── KNOWN ADVISORY, NAMED RATHER THAN SILENT ────────────────────────────────────────────────
+#
+# GHSA-wrw7-89jp-8q8g (medium) — unsoundness in the `Iterator`/`DoubleEndedIterator` impls for
+# `glib::VariantStrIter`, in glib 0.18.5.
+#
+# NOT FIXABLE HERE. 0.18.5 is the newest 0.18.x, and it is pinned by `gtk 0.18.2` <- `tao 0.36`.
+# The fix requires tao/gtk to move to glib 0.19+, which is upstream of this crate.
+#
+# SCOPE, measured rather than assumed:
+#   * glib is the LINUX GTK backend. `cargo tree -i glib` on Windows prints nothing — it is not
+#     in the Windows dependency graph at all, so Windows builds do not compile it.
+#   * this crate never references `glib` or `Variant`; the unsound iterators are not reachable
+#     from any code here.
+#   * ol_shell is a LEAF BINARY in its OWN workspace, so this does not enter the daemon's
+#     lockfile. The crates that touch keys, ciphertext and the wire are unaffected — which is
+#     the reason the workspace was split in the first place.
+#
+# This is the cost of choosing a webview stack, stated plainly. Re-check when tao releases a
+# version built on glib 0.19+, and delete this block when it lands.
+
 [dependencies]
 ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
 serde_json = "1.0.151"
