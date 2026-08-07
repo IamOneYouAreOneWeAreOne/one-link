@@ -265,6 +265,16 @@ one_link = [
   "web/assets/argon2id-v1.wasm",
   "web/assets/argon2id-worker.js",
   "web/assets/ed25519-v1.wasm",
+  # The CERTIFIED SURFACE: the peer row's proven layout table. Its three layout/security
+  # laws are discharged over every integer input by the Coherence prover at build time and
+  # this file is the materialized answer (see one_link/certified_surface.py). Omitting it
+  # produces a wheel whose daemon runs, renders every row through the UNPROVEN fallback,
+  # and still reports a proven surface in its own code -- the exact silent failure the
+  # artifact exists to end.
+  "data/certified/peer_row.json",
+  "data/certified/link_badge.json",
+  "data/certified/origin_fence.json",
+  "data/certified/unread_badge.json",
 ]
 
 [tool.pytest.ini_options]

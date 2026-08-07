@@ -857,6 +857,151 @@ def _is_existing_app_window_running(profile_dir: Path) -> bool:
         return False
 
 
+
+#: One Link's own window, built from `native/ol_shell`. Absent in a source checkout that has not
+#: built it; present in a release bundle.
+SHELL_EXE = "ol_shell.exe" if sys.platform == "win32" else "ol_shell"
+
+#: What the shell prints once the window AND the webview exist. "The process started" and "a window
+#: opened" are different facts, and only the second one is worth falling back on.
+SHELL_READY = "OL_SHELL_READY"
+
+#: How long to wait for that line. A cold WebView2 first-run can take a few seconds; beyond this,
+#: falling back beats a user staring at nothing.
+SHELL_READY_TIMEOUT_S = 20.0
+
+
+#: Set by the test suite so a run cannot open real windows on a developer's machine. NOT a
+#: production switch: nothing in One Link sets it, and a user who set it would simply get the
+#: browser path with the usual message. Tests that want the real shell unset it explicitly.
+NO_SHELL_ENV = "ONE_LINK_NO_NATIVE_SHELL"
+
+
+def _shell_path() -> Optional[Path]:
+    """Where the native shell lives, or None.
+
+    Beside the executable in a frozen bundle; under `native/ol_shell/target/release` in a source
+    checkout, so a developer who has built it gets the real window too.
+    """
+    if os.environ.get(NO_SHELL_ENV):
+        return None
+    here = Path(getattr(sys, "_MEIPASS", "") or Path(sys.executable).parent)
+    for candidate in (
+        here / SHELL_EXE,
+        here / "native" / SHELL_EXE,
+        Path(__file__).resolve().parents[2] / "native" / "ol_shell" / "target" / "release" / SHELL_EXE,
+    ):
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _package_root() -> Path:
+    """The directory the shell verifies: where `web/index.html` and `data/certified/` live."""
+    return Path(__file__).resolve().parent
+
+
+#: Refusals that mean SOMETHING CHANGED YOUR INSTALL, as opposed to "this machine lacks a
+#: webview runtime". The difference matters more to a user than to us: one is an inconvenience,
+#: the other is the only warning they will ever get.
+_SHELL_TAMPER_MARKERS = ("INTERFACE MODIFIED", "CERTIFIED SURFACE REFUSED", "SIGNATURE INVALID",
+                         "DIGEST MISMATCH", "not a pinned signer")
+
+
+def _report_shell_refusal(reason: str) -> None:
+    """Tell the user WHY their own window would not open, and shout when it matters.
+
+    THE GAP THIS CLOSES. The shell verifies the interface against a hash compiled into it and
+    refuses to render one that was modified after install. That is the most serious thing this
+    program can detect about itself -- and until now the user experience of it was *a browser
+    opening instead*. Someone whose install had been tampered with would have seen a slightly
+    different window and nothing else.
+
+    A missing WebView2 runtime is an inconvenience and reads like one. Tampering is not, and must
+    not be delivered in the same voice as a missing dependency.
+    """
+    text = reason or "no reason given"
+    if any(marker in text for marker in _SHELL_TAMPER_MARKERS):
+        _safe_echo("")
+        _safe_echo("  " + "!" * 68)
+        _safe_echo("  ONE LINK REFUSED TO OPEN ITS OWN WINDOW.")
+        _safe_echo("")
+        _safe_echo(f"  {text}")
+        _safe_echo("")
+        _safe_echo("  This means the interface or its proofs are NOT the ones that shipped.")
+        _safe_echo("  Something changed them after installation. That is worth taking")
+        _safe_echo("  seriously: reinstall One Link from a source you trust before using it.")
+        _safe_echo("")
+        _safe_echo("  Opening in a browser instead so you are not locked out -- but the same")
+        _safe_echo("  modified interface will be served there.")
+        _safe_echo("  " + "!" * 68)
+        _safe_echo("")
+        return
+    _safe_echo(f"  native window unavailable ({text}); using the browser path")
+
+
+def _open_native_shell(url: str) -> bool:
+    """Open One Link's own window. True if a window actually appeared.
+
+    WHY THE URL GOES ON STDIN. It carries the single-use launch credential, and a command line is
+    readable by any process running as the same user with no elevation — measured on Windows via
+    `Win32_Process`. This is the same finding that produced the launch-nonce fix; the native shell
+    is the first launch path that never puts the credential anywhere another process can read.
+
+    WHY THIS RETURNS A BOOL RATHER THAN RAISING. A shell that cannot start is not an error the user
+    should see as a crash — it is a downgrade to the browser path, and the caller announces it.
+    """
+    exe = _shell_path()
+    if exe is None:
+        return False
+    try:
+        proc = subprocess.Popen(
+            [str(exe)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (OSError, ValueError) as exc:
+        _safe_echo(f"  (native window could not start: {exc})")
+        return False
+
+    try:
+        # Line 1: the URL with its single-use credential. Line 2: what to verify before drawing.
+        proc.stdin.write(f"{url}\n{_package_root()}\n")
+        proc.stdin.flush()
+    except (OSError, ValueError) as exc:
+        _safe_echo(f"  (native window would not accept the launch URL: {exc})")
+        return False
+
+    deadline = time.time() + SHELL_READY_TIMEOUT_S
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            # It exited before opening a window. The shell writes its reason to stderr, and that
+            # reason is the whole point: "INTERFACE MODIFIED" and "WebView2 runtime is not
+            # installed" want very different responses from a user.
+            reason = ""
+            try:
+                reason = (proc.stderr.read() or "").strip().splitlines()[-1]
+            except (OSError, ValueError, IndexError):
+                pass
+            _report_shell_refusal(reason)
+            return False
+        line = proc.stdout.readline()
+        if not line:
+            continue
+        if SHELL_READY in line:
+            # The shell is now detached from this call: it owns its window, and it does NOT own the
+            # daemon. Closing the window ends the shell and leaves peers reachable, which is the
+            # behaviour One Link has always had and the reason this function does not wait on it.
+            return True
+    _safe_echo("  native window did not report ready in time; using the browser path")
+    return False
+
+
 def _open_browser_url(url: str, *, standalone: bool = True) -> None:
     """Open ``url`` in the user's default browser, OR — when
     ``standalone`` is True (the default) — in a Chromium-style
@@ -876,6 +1021,15 @@ def _open_browser_url(url: str, *, standalone: bool = True) -> None:
     found or the launch fails; ``$BROWSER`` is deliberately not honored.
     """
     url = validate_loopback_url(url)
+
+    # ONE LINK'S OWN WINDOW FIRST. The app-mode path below is a real chromeless window, but it is
+    # Edge's: it needs Edge installed, shows Edge in the process list, and puts the launch URL on a
+    # command line. The native shell needs no browser, takes the credential on stdin, refuses to
+    # render an interface whose hash does not match the one it was built against, and fences
+    # navigation to loopback using a decision proven over every integer input.
+    if standalone and _open_native_shell(url):
+        return
+
     if standalone:
         browser = _find_chromium_browser_exe()
         if browser is not None:

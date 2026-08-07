@@ -72,14 +72,14 @@ def test_stable_distribution_contract_exactly_matches_source_tree() -> None:
     # to zero. It is imported at module scope by both, so a frozen build
     # missing it would fail before logging exists.
     # (204 before it: bounded_resolver, 2026-07-30.)
-    assert len(build_identity.EXPECTED_STABLE_RUNTIME_MODULES) == 205
+    assert len(build_identity.EXPECTED_STABLE_RUNTIME_MODULES) == 206
     assert build_identity.EXPECTED_STABLE_RUNTIME_MODULES == tuple(
         sorted(set(build_identity.EXPECTED_STABLE_RUNTIME_MODULES))
     )
     assert build_identity.EXPECTED_STABLE_PACKAGE_DATA == tuple(
         sorted(set(build_identity.EXPECTED_STABLE_PACKAGE_DATA))
     )
-    assert len(build_identity.EXPECTED_STABLE_PACKAGE_DATA) == 19
+    assert len(build_identity.EXPECTED_STABLE_PACKAGE_DATA) == 23
 
     package_root = build_identity.package_root()
     discovered_data = {
@@ -126,13 +126,22 @@ def test_distribution_source_contract_hashes_every_packaged_python_file() -> Non
         if "__pycache__" not in path.parts
     }
     packaged_python = {name for name in contract.payload_hashes if name.endswith(".py")}
-    # 221 / 240: one_link/env_bounds.py added 2026-08-05 -- validated numeric
-    # environment overrides, after a bare int(os.environ.get(...)) at module
-    # scope made a typo in a service unit an unstartable daemon.
-    # (220 / 239 before it: bounded_resolver.py, 2026-07-30.)
-    assert len(source_python) == 221
+    # 222 / 245: data/certified/unread_badge.json added 2026-08-07 -- the FIFTH certified
+    # surface and where design §11.1 model (b) reaches a pixel: what an unread count is
+    # ALLOWED TO SAY, proven over every integer.
+    # (222 / 244: data/certified/origin_fence.json -- the THIRD certified
+    # surface, and the first that is not a pixel: it is the NATIVE SHELL's navigation decision
+    # (which characters may extend an origin), proven over every integer and checked by the
+    # shell against its own Rust implementation at all 257 points.
+    # (222 / 243: data/certified/link_badge.json -- the SECOND certified
+    # surface (is this connection direct, and authenticated?), emitted through the same
+    # pipeline as the first. No new module: `certified_surface.py` carries both.
+    # (222 / 242 before it: certified_surface.py + data/certified/peer_row.json, the
+    # peer row's proven layout table, laws discharged over every integer input.)
+    # (221 / 240 before it: env_bounds.py, 2026-08-05. 220 / 239: bounded_resolver.py.)
+    assert len(source_python) == 222
     assert packaged_python == source_python
-    assert len(contract.payload_hashes) == 240
+    assert len(contract.payload_hashes) == 245
 
 
 def test_developer_only_modules_are_not_stable_distribution_requirements() -> None:
@@ -480,7 +489,7 @@ def test_fresh_wheel_and_sdist_pass_two_clean_install_probes(tmp_path: Path) -> 
     assert result["stable_runtime_module_count"] == len(
         build_identity.EXPECTED_STABLE_RUNTIME_MODULES
     )
-    assert result["stable_package_data_count"] == 19
+    assert result["stable_package_data_count"] == 23
     assert result["source_payload_file_count"] == len(staged_contract.payload_hashes)
     assert result["source_python_file_count"] == sum(
         name.endswith(".py") for name in staged_contract.payload_hashes

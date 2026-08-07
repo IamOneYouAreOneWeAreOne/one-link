@@ -1,0 +1,422 @@
+"""The peer row is drawn from a PROVEN renderer — and this module is why that can ship.
+
+One Link tells a user what to trust over a channel whose other end is a stranger. The row that says
+so is ordinary UI code: a badge, a name, a width. In every app ever shipped, "the verified badge only
+appears for verified peers" is a convention enforced by code review, and the failure mode is silent.
+
+Here it is a theorem. Three laws are discharged over **every integer input** by the Coherence prover
+in the `idem` repo, at build time:
+
+    the-verified-glyph-requires-verified-trust    scope: exact
+    the-name-never-runs-under-the-badge           scope: exact
+    nothing-is-drawn-outside-the-row              scope: exact
+
+WHY A TABLE AND NOT A PROVER. One Link ships as a PyInstaller bundle. Importing the prover would drag
+in a research checkout, a solver, and `coherence_lang` to put a badge on a row — so the proof stays
+at build time and what ships is its ANSWERS: `data/certified/peer_row.json`, a table over the
+declared state space, with a digest. This module is the whole runtime cost: stdlib only, no
+network, no `idem`, no `coherence_lang`.
+
+WHAT THE LAWS BOUGHT, CONCRETELY. The first version of that renderer clamped only the high side of
+the name width — the clamp anybody writes, because the failure you picture is a long name
+overflowing. `nothing-is-drawn-outside-the-row` came back **refuted** and the emitter refused to
+produce a table at all. The witness: a negative `name_len`, or one large enough that `name_len * 8`
+wraps in i64, yields a **negative width**. No test written against plausible names would have found
+it, and no reviewer would have looked.
+
+FAIL CLOSED, AND SAY SO. A table whose digest does not match its rows, or that is missing a point of
+its declared space, is REFUSED at load — `available()` goes False and the UI falls back to its
+ordinary rendering path. A surface that silently drew from an unverified table would be worse than
+one that never claimed anything, because the claim is the product.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
+
+log = logging.getLogger("one_link.certified_surface")
+
+SCHEMA = "idem-certified-view/v1"
+
+#: Lives under `data/` because that subtree is ALREADY inside the packaging contract: the wheel's
+#: package-data list, PyInstaller's `--add-data`, and `validate_python_distributions.py`'s source
+#: scan (which walks exactly `data` and `web`). A new top-level directory would have been
+#: invisible to that scan and shipped in a wheel that looked valid.
+CERTIFIED_DIR = Path(__file__).resolve().parent / "data" / "certified"
+
+DEFAULT_ARTIFACT = CERTIFIED_DIR / "peer_row.json"
+
+#: Every certified surface this build ships. Named here rather than globbed: a directory listing
+#: would silently accept an artifact somebody dropped in, and "which surfaces are proven" is a
+#: claim the source should make, not the filesystem.
+VIEW_NAMES = ("peer_row", "link_badge", "origin_fence", "unread_badge")
+
+#: The glyph the whole security argument is about. Named here so a reader of THIS file can see what
+#: the law protects without opening the prover repo.
+GLYPH_VERIFIED = 7
+
+#: WHO IS ALLOWED TO HAVE PRODUCED THIS TABLE.
+#:
+#: The digest binds the artifact to ITSELF: edit an answer and it stops matching. But an adversary
+#: who edits an answer AND recomputes the digest produces a perfectly self-consistent file, because
+#: a hash is not an identity. Only a signature makes FABRICATION fail rather than merely editing --
+#: and only a PINNED signer makes the signature mean anything, since verifying against whatever key
+#: the artifact names is verifying against its author.
+#:
+#: THIS IS THE RELEASE KEY. Its private half is a random 32-byte seed held in the estate's DPAPI
+#: vault as `one_link_certified_view_seed` (CurrentUser, round-trip verified before the plaintext
+#: was shredded). It replaced a development key derived from a PUBLISHED phrase -- which anyone
+#: could have used to forge a table this build accepts. That key was deliberate and temporary: it
+#: made the whole path (sign, pin, verify, fail closed) real and testable before a real key existed.
+#:
+#: To rotate: mint a new seed, vault it, re-emit every view with
+#: `IDEM_VIEW_SIGNING_SEED=<hex> python idem/scripts/emit_certified_views.py`, and replace this
+#: constant. Nothing else changes -- the artifacts carry their own signer.
+RELEASE_SIGNER = "30f8f6f794ab0059926bb61fa8e63a19dfea84505b5ccee5c30f87df36fd39a1"
+
+TRUSTED_VIEW_SIGNERS: frozenset = frozenset({RELEASE_SIGNER})
+
+#: Domain separator for the signed bytes. Must match `idem/certified_view.py::_signable` exactly —
+#: a divergence here does not fail loudly, it simply rejects every honest artifact.
+_SIG_DOMAIN = b"idem-view-sig/v1\x00"
+
+
+def _canon(payload: Any) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True).encode("ascii")
+
+
+def table_digest(rows: Any) -> str:
+    """Re-derive the table's content address.
+
+    Byte-for-byte the producer's rule (`idem/certified_view.py::table_digest`). It hashes the ROWS
+    ALONE — not the provenance beside them — so the number stays a statement about what is drawn and
+    does not move when a comment does.
+    """
+    d = hashlib.sha256()
+    d.update(b"idem-view-table/v1")
+    d.update(_canon(list(rows)))
+    return d.hexdigest()
+
+
+#: What a screen reader says, as ids the PROOF chose. The words are the product's; the CHOICE is
+#: a theorem. `the-spoken-label-cannot-contradict-the-pixel` is discharged over every integer input,
+#: so a row showing the verified glyph and a row announcing "verified" are the same rows -- not by
+#: construction, and not by review, but because the renderer emitting one emits the other.
+LABEL_NONE, LABEL_KNOWN, LABEL_VERIFIED = 0, 1, 2
+
+LABEL_TEXT = {
+    LABEL_NONE: "Unverified device",
+    LABEL_KNOWN: "Paired, not verified in person",
+    LABEL_VERIFIED: "Verified in person",
+}
+
+
+@dataclass(frozen=True)
+class CertifiedRow:
+    """What the renderer proved it draws for one peer -- seen AND spoken."""
+    glyph: int
+    name_w: int
+    badge_x: int
+    label: int
+
+    def shows_verified(self) -> bool:
+        return self.glyph == GLYPH_VERIFIED
+
+    def says_verified(self) -> bool:
+        return self.label == LABEL_VERIFIED
+
+    def spoken(self) -> str:
+        """The accessible text. Unknown ids fall back to the most CONSERVATIVE label rather
+        than to a blank: a row that announces nothing is worse than one that under-claims."""
+        return LABEL_TEXT.get(self.label, LABEL_TEXT[LABEL_NONE])
+
+
+#: The connection badge's vocabulary. `icon` is what is drawn, `label` what is spoken/written,
+#: `warn` whether the surface must call attention to itself.
+ICON_OFFLINE, ICON_DIRECT, ICON_RELAYED = 0, 1, 2
+LBL_OFFLINE, LBL_DIRECT, LBL_RELAYED, LBL_UNAUTH = 0, 1, 2, 3
+
+LINK_LABEL_TEXT = {
+    LBL_OFFLINE: "Offline",
+    LBL_DIRECT: "Direct connection, authenticated",
+    LBL_RELAYED: "Relayed connection, authenticated",
+    LBL_UNAUTH: "Not authenticated",
+}
+
+
+@dataclass(frozen=True)
+class CertifiedBadge:
+    """What the renderer proved it draws for one connection state.
+
+    `claims_direct` is the load-bearing one: "direct" is a claim about infrastructure the user
+    cannot inspect, and `never-claims-DIRECT-for-a-link-that-is-not` is discharged over every
+    integer input -- including regimes this build has never heard of, which render as RELAYED.
+    """
+    icon: int
+    label: int
+    warn: int
+
+    def claims_direct(self) -> bool:
+        return self.icon == ICON_DIRECT
+
+    def claims_authenticated(self) -> bool:
+        return self.label in (LBL_DIRECT, LBL_RELAYED)
+
+    def spoken(self) -> str:
+        """Conservative fallback: an unrecognised id must never announce authentication."""
+        return LINK_LABEL_TEXT.get(self.label, LINK_LABEL_TEXT[LBL_UNAUTH])
+
+
+class CertifiedSurface:
+    """A loaded, verified render table. Construct via :func:`load`."""
+
+    def __init__(self, doc: dict, *, source: Optional[Path] = None) -> None:
+        self._doc = doc
+        self._source = source
+        # Keyed by the axis values IN DECLARED ORDER, so this class is generic over views. The
+        # first version hard-coded `(trust, name_len)`; a second surface would have needed a
+        # second loader, which is how one proven demo stays one proven demo.
+        self._axes = tuple(name for name, _values in (doc.get("space") or {}).get("axes", []))
+        self._index = {tuple(r["in"][a] for a in self._axes): r["out"] for r in doc["rows"]}
+
+    @property
+    def axes(self) -> tuple:
+        return self._axes
+
+    def at(self, **inputs: Any) -> Optional[dict]:
+        """The proven output for one point, or None outside the certified space.
+
+        None is honest emptiness -- the caller renders normally rather than being handed an
+        extrapolation. A table that guessed past its proven domain would be the unproven code
+        this replaces, wearing a digest.
+        """
+        try:
+            key = tuple(inputs[a] for a in self._axes)
+        except KeyError as missing:
+            raise KeyError(
+                f"{missing} is not an axis of this view; axes are {self._axes}") from missing
+        return self._index.get(key)
+
+    # -- provenance a UI can show, and a reviewer can check ------------------------------------
+
+    @property
+    def digest(self) -> str:
+        return str(self._doc["table_digest"])
+
+    @property
+    def laws(self) -> tuple:
+        """((law_name, scope), ...) — every one proven, or the artifact would not exist."""
+        return tuple((str(n), str(s)) for n, s in self._doc.get("laws", []))
+
+    @property
+    def member(self) -> str:
+        return str(self._doc.get("member_mid", ""))
+
+    def provenance(self) -> dict:
+        """The shape the UI surfaces to a user who asks 'why should I believe this row?'"""
+        return {
+            "schema": self._doc.get("schema"),
+            "digest": self.digest,
+            "member": self.member,
+            "laws": [{"name": n, "scope": s} for n, s in self.laws],
+            "points": len(self._index),
+            "source": str(self._source) if self._source else None,
+        }
+
+    # -- the read path ------------------------------------------------------------------------
+
+    def link_badge(self, regime: int, authed: int) -> Optional["CertifiedBadge"]:
+        """The proven connection badge. None outside the certified space."""
+        out = self.at(regime=int(regime), authed=int(authed))
+        if out is None:
+            return None
+        return CertifiedBadge(icon=int(out["icon"]), label=int(out["label"]),
+                              warn=int(out["warn"]))
+
+    def row(self, trust: int, name_len: int) -> Optional[CertifiedRow]:
+        """The proven layout for this peer, or None if outside the certified space.
+
+        None is honest emptiness: the caller renders normally rather than being handed a guess.
+        A table that extrapolated past its proven domain would be exactly the unproven code this
+        replaces, wearing a digest.
+        """
+        out = self.at(trust=int(trust), name_len=int(name_len))
+        if out is None:
+            return None
+        return CertifiedRow(glyph=int(out["glyph"]), name_w=int(out["name_w"]),
+                            badge_x=int(out["badge_x"]), label=int(out.get("label", LABEL_NONE)))
+
+    def covers(self, trust: int, name_len: int) -> bool:
+        return self.at(trust=int(trust), name_len=int(name_len)) is not None
+
+
+def _signable(doc: dict) -> bytes:
+    """The exact bytes the signature covers: everything EXCEPT the signature fields.
+
+    Built by EXCLUSION, mirroring the producer, so a field added to the artifact tomorrow is covered
+    by default. A signature whose scope is a hand-maintained list of keys is a signature that
+    silently stops covering the newest thing anyone added.
+    """
+    body = {k: v for k, v in doc.items() if k not in ("signature", "signer")}
+    return _SIG_DOMAIN + _canon(body)
+
+
+def signature_ok(doc: dict, *, trusted: frozenset = TRUSTED_VIEW_SIGNERS) -> tuple:
+    """(ok, reason) for the artifact's identity. Ed25519, stdlib + `cryptography` only."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    signer = str(doc.get("signer") or "")
+    sig = str(doc.get("signature") or "")
+    if not signer or not sig:
+        return False, ("the artifact is UNSIGNED — its digest proves only that nobody EDITED it, "
+                       "and a fabricated table with a freshly computed digest is self-consistent")
+    if signer not in trusted:
+        return False, (f"signed by {signer[:16]}, which is not a pinned signer — an artifact "
+                       "verified against whatever key it names is verified against its author")
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(signer)).verify(
+            bytes.fromhex(sig), _signable(doc))
+    except (InvalidSignature, ValueError):
+        return False, "SIGNATURE INVALID: this is not the artifact that was signed"
+    return True, f"signed by pinned {signer[:16]}"
+
+
+def verify(doc: dict, *, trusted: frozenset = TRUSTED_VIEW_SIGNERS) -> tuple:
+    """(ok, reason). Everything checkable without the producer.
+
+    Deliberately dependency-free: this is what the product, a reviewer, or a stranger runs, and it
+    must not need the machine that made the table.
+    """
+    if doc.get("schema") != SCHEMA:
+        return False, f"unknown schema {doc.get('schema')!r}"
+
+    rows = doc.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return False, "the artifact carries no rows"
+
+    recomputed = table_digest(rows)
+    if recomputed != doc.get("table_digest"):
+        return False, (f"DIGEST MISMATCH: rows hash to {recomputed[:16]}, artifact claims "
+                       f"{str(doc.get('table_digest'))[:16]} — the answers were edited after they "
+                       "were certified")
+
+    axes = (doc.get("space") or {}).get("axes") or []
+    if not axes:
+        return False, "the artifact declares no state space, so 'exhaustive' means nothing"
+    expected = 1
+    for _name, values in axes:
+        expected *= len(values)
+    if len(rows) != expected:
+        return False, (f"the space declares {expected} points, the table carries {len(rows)} — an "
+                       "incomplete table is a broken surface, not a smaller one")
+
+    if not doc.get("laws"):
+        return False, ("no proven laws — this would be a lookup table with a hash, which is "
+                       "precisely what the format exists not to be")
+
+    # IDENTITY LAST, and it is not optional. Everything above is self-referential: it proves the
+    # artifact is internally consistent, which a competent forger also achieves.
+    signed, why_sig = signature_ok(doc, trusted=trusted)
+    if not signed:
+        return False, why_sig
+
+    return True, (f"{len(rows)} points, exhaustive, {len(doc['laws'])} law(s) proven, "
+                  f"digest {recomputed[:16]}, {why_sig}")
+
+
+def load(path: Optional[Path] = None) -> Optional[CertifiedSurface]:
+    """Load and VERIFY the certified surface. None on any failure — never a partial surface.
+
+    Every failure is logged with its reason. A surface that vanished quietly would leave the UI
+    rendering unproven rows while the code still claimed a proven one.
+    """
+    target = Path(path) if path is not None else DEFAULT_ARTIFACT
+    try:
+        doc = json.loads(target.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        log.info("certified surface absent at %s; rendering falls back to ordinary layout", target)
+        return None
+    except (OSError, ValueError) as exc:
+        log.warning("certified surface unreadable (%s): %s", target, exc)
+        return None
+
+    ok, why = verify(doc)
+    if not ok:
+        log.warning("certified surface REFUSED (%s): %s", target, why)
+        return None
+    log.info("certified surface loaded: %s", why)
+    return CertifiedSurface(doc, source=target)
+
+
+_CACHE: dict = {}
+
+
+def view(name: str) -> Optional[CertifiedSurface]:
+    """A loaded, verified certified view by name, or None. Cached per process.
+
+    An unknown name raises rather than returning None: None means "this surface is unavailable,
+    render normally", and a typo'd view name silently taking that path would disable a proven
+    surface with no trace.
+    """
+    if name not in VIEW_NAMES:
+        raise KeyError(f"unknown certified view {name!r}; known: {VIEW_NAMES}")
+    if name not in _CACHE:
+        _CACHE[name] = load(CERTIFIED_DIR / f"{name}.json")
+    return _CACHE[name]
+
+
+def surface() -> Optional[CertifiedSurface]:
+    """The peer-row surface. Kept as the name the peers API already calls."""
+    return view("peer_row")
+
+
+def link_surface() -> Optional[CertifiedSurface]:
+    return view("link_badge")
+
+
+def origin_fence() -> Optional[CertifiedSurface]:
+    """The native shell's navigation decision, as a verified table.
+
+    The shell (`native/ol_shell`) checks its own Rust implementation against this at every point.
+    Loading it here means the Python side refuses to launch the shell when the decision the shell
+    is about to enforce does not itself verify.
+    """
+    return view("origin_fence")
+
+
+def fence_admits(next_char_code: int) -> Optional[bool]:
+    """Is a URI still inside its origin when the next character is this? None if unverified.
+
+    -1 encodes end-of-string, exactly as the certified table does.
+    """
+    s = origin_fence()
+    if s is None:
+        return None
+    out = s.at(c=int(next_char_code))
+    return None if out is None else bool(out == 1)
+
+
+def unread_badge(count: int) -> Optional[dict]:
+    """The PROVEN unread badge for a count, or None outside the certified space.
+
+    Returns `{"show", "shown", "overflow"}`. Five laws, all at scope `exact`:
+    a count of zero or less never draws a badge; the badge never shows a negative number;
+    it never shows more than fits; the overflow marker means the count really overflowed;
+    and a count that fits is shown EXACTLY -- the last one because the other four are
+    satisfied by a badge that never appears.
+    """
+    s = view("unread_badge")
+    if s is None:
+        return None
+    return s.at(count=int(count))
+
+
+def available() -> bool:
+    return surface() is not None

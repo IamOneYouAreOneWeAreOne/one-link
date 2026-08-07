@@ -1,8 +1,14 @@
-"""Tests for the standalone Chromium app-mode window launcher.
+"""Tests for the Chromium app-mode window launcher — now the FALLBACK path.
 
-Default flow: when Edge or Chrome is found on disk, the daemon opens
-the UI URL in a frameless ``--app=URL`` window instead of a regular
-browser tab. Fallback path goes through the default browser.
+As of the native shell (§10.4, `native/ol_shell`), One Link opens its own window and never
+touches a browser. This file tests what happens when it cannot: no shell binary in the bundle,
+no WebView2 runtime, a shell that refuses to render a modified interface. The app-mode window is
+then still far better than a browser tab, so the ladder is: our window -> app mode -> plain tab.
+
+EVERY TEST HERE DISABLES THE NATIVE SHELL EXPLICITLY, via the `no_native_shell` fixture. Before
+that fixture existed these tests passed for the wrong reason on machines with no Rust toolchain
+and failed on machines that had built the shell — a suite whose verdict depends on whether a
+developer happens to have run `cargo build` is measuring the developer, not the code.
 """
 
 from __future__ import annotations
@@ -13,6 +19,18 @@ import sys
 from unittest import mock
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def no_native_shell(monkeypatch):
+    """Force the app-mode path by making One Link's own window unavailable.
+
+    Autouse on purpose: this file is ABOUT the fallback, and a test here that accidentally
+    exercised the native shell would be silently testing something else.
+    """
+    from one_link import app as app_mod
+
+    monkeypatch.setattr(app_mod, "_shell_path", lambda: None)
 
 
 def test_find_chromium_browser_exe_returns_path_or_none():

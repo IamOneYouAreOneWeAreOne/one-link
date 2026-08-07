@@ -1,0 +1,40 @@
+# One Link's native window — the shell that removes the browser dependency.
+#
+# DELIBERATELY ITS OWN WORKSPACE, not a member of `../Cargo.toml`.
+#
+# A webview stack is ~260 transitive crates. The daemon's crates are the ones that touch keys,
+# ciphertext and the wire; letting a *window* drag 260 packages into the lockfile those crates
+# resolve against would expand the audited surface of the security-critical half of the product to
+# buy a title bar. The shell is a LEAF BINARY — nothing links it, it only receives a URL and paints
+# — so its dependency set is isolated here and `../Cargo.toml` never sees it.
+#
+# The cost of that choice, stated: a second lockfile to audit and update. That is the right trade
+# for keeping `cargo audit` over the daemon meaningful.
+
+[package]
+name = "ol_shell"
+version = "0.1.0"
+edition = "2021"
+description = "Native window host for the One Link UI (WebView2 / WKWebView / WebKitGTK)"
+license = "Apache-2.0"
+publish = false
+
+# Empty table => this directory is its own workspace root, so `cargo` does not try to attach it to
+# the parent workspace it physically sits inside.
+[workspace]
+
+[dependencies]
+ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+# Tauri's windowing and webview layers, WITHOUT the Tauri framework: no npm, no frontend build, no
+# CLI. One Link's UI is already served by the local daemon, so all the shell has to do is host it.
+tao = "0.36"
+wry = "0.54"
+
+[profile.release]
+opt-level = "z"      # a window host should be small; nothing here is hot
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

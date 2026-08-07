@@ -1,0 +1,178 @@
+{
+  "class_fingerprint": "31565abb35c2b85a99204ee59e929c03eca424195a48c91045e47a652f40587b",
+  "entry": "badge",
+  "frame_digest": null,
+  "laws": [
+    [
+      "never-claims-DIRECT-for-a-link-that-is-not",
+      "exact"
+    ],
+    [
+      "never-claims-SECURE-for-an-unauthenticated-link",
+      "exact"
+    ],
+    [
+      "offline-never-renders-as-connected",
+      "exact"
+    ],
+    [
+      "an-unauthenticated-live-link-always-warns",
+      "exact"
+    ],
+    [
+      "the-link-label-cannot-contradict-the-icon",
+      "exact"
+    ]
+  ],
+  "member_mid": "bfab0bdccdd8fb2be5999291e73fb9724e0dff4e3d6bddb955bfc5ce496a6e3e",
+  "notes": {
+    "points": 10
+  },
+  "rows": [
+    {
+      "in": {
+        "authed": 0,
+        "regime": 0
+      },
+      "out": {
+        "__type__": "Badge",
+        "icon": 0,
+        "label": 0,
+        "warn": 0
+      }
+    },
+    {
+      "in": {
+        "authed": 1,
+        "regime": 0
+      },
+      "out": {
+        "__type__": "Badge",
+        "icon": 0,
+        "label": 0,
+        "warn": 0
+      }
+    },
+    {
+      "in": {
+        "authed": 0,
+        "regime": 1
+      },
+      "out": {
+        "__type__": "Badge",
+        "icon": 1,
+        "label": 3,
+        "warn": 1
+      }
+    },
+    {
+      "in": {
+        "authed": 1,
+        "regime": 1
+      },
+      "out": {
+        "__type__": "Badge",
+        "icon": 1,
+        "label": 1,
+        "warn": 0
+      }
+    },
+    {
+      "in": {
+        "authed": 0,
+        "regime": 2
+      },
+      "out": {
+        "__type__": "Badge",
+        "icon": 1,
+        "label": 3,
+        "warn": 1
+      }
+    },
+    {
+      "in": {
+        "authed": 1,
+        "regime": 2
+      },
+      "out": {
+        "__type__": "Badge",
+        "icon": 1,
+        "label": 1,
+        "warn": 0
+      }
+    },
+    {
+      "in": {
+        "authed": 0,
+        "regime": 3
+      },
+      "out": {
+        "__type__": "Badge",
+        "icon": 2,
+        "label": 3,
+        "warn": 1
+      }
+    },
+    {
+      "in": {
+        "authed": 1,
+        "regime": 3
+      },
+      "out": {
+        "__type__": "Badge",
+        "icon": 2,
+        "label": 2,
+        "warn": 0
+      }
+    },
+    {
+      "in": {
+        "authed": 0,
+        "regime": 4
+      },
+      "out": {
+        "__type__": "Badge",
+        "icon": 2,
+        "label": 3,
+        "warn": 1
+      }
+    },
+    {
+      "in": {
+        "authed": 1,
+        "regime": 4
+      },
+      "out": {
+        "__type__": "Badge",
+        "icon": 2,
+        "label": 2,
+        "warn": 0
+      }
+    }
+  ],
+  "schema": "idem-certified-view/v1",
+  "signature": "51fc2b1ac264d643238934d929e5c992902f46eca1b25905c1103dc000c1413e72fac0036fdbd99659cedd2c09d63474fc366404c213d4158dc6b7bb9c794709",
+  "signer": "30f8f6f794ab0059926bb61fa8e63a19dfea84505b5ccee5c30f87df36fd39a1",
+  "space": {
+    "axes": [
+      [
+        "regime",
+        [
+          0,
+          1,
+          2,
+          3,
+          4
+        ]
+      ],
+      [
+        "authed",
+        [
+          0,
+          1
+        ]
+      ]
+    ]
+  },
+  "table_digest": "e53d4faa5d4d52e22f93cd9b3613d5f556e45154f4fb762e37591633bed77f1f"
+}
