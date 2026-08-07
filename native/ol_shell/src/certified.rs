@@ -41,10 +41,16 @@ pub struct Verdict {
 
 impl Verdict {
     fn no(reason: impl Into<String>) -> Self {
-        Self { ok: false, reason: reason.into() }
+        Self {
+            ok: false,
+            reason: reason.into(),
+        }
     }
     fn yes(reason: impl Into<String>) -> Self {
-        Self { ok: true, reason: reason.into() }
+        Self {
+            ok: true,
+            reason: reason.into(),
+        }
     }
 }
 
@@ -67,7 +73,7 @@ fn canonical(value: &serde_json::Value) -> Result<Vec<u8>, String> {
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len() / 2)
@@ -105,7 +111,10 @@ pub fn verify(doc: &serde_json::Value, trusted: &[&str]) -> Verdict {
     h.update(&canon);
     let recomputed = hex_encode(&h.finalize());
 
-    let claimed = obj.get("table_digest").and_then(|v| v.as_str()).unwrap_or("");
+    let claimed = obj
+        .get("table_digest")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if recomputed != claimed {
         return Verdict::no(format!(
             "TABLE DIGEST MISMATCH: rows hash to {}, artifact claims {} — the answers were edited \
@@ -123,10 +132,18 @@ pub fn verify(doc: &serde_json::Value, trusted: &[&str]) -> Verdict {
     let expected: usize = match axes {
         Some(a) if !a.is_empty() => a
             .iter()
-            .filter_map(|ax| ax.as_array().and_then(|p| p.get(1)).and_then(|v| v.as_array()))
+            .filter_map(|ax| {
+                ax.as_array()
+                    .and_then(|p| p.get(1))
+                    .and_then(|v| v.as_array())
+            })
             .map(|vals| vals.len())
             .product(),
-        _ => return Verdict::no("the artifact declares no state space, so 'exhaustive' means nothing"),
+        _ => {
+            return Verdict::no(
+                "the artifact declares no state space, so 'exhaustive' means nothing",
+            )
+        }
     };
     if rows.len() != expected {
         return Verdict::no(format!(
@@ -136,7 +153,12 @@ pub fn verify(doc: &serde_json::Value, trusted: &[&str]) -> Verdict {
         ));
     }
 
-    if obj.get("laws").and_then(|v| v.as_array()).map(|l| l.is_empty()).unwrap_or(true) {
+    if obj
+        .get("laws")
+        .and_then(|v| v.as_array())
+        .map(|l| l.is_empty())
+        .unwrap_or(true)
+    {
         return Verdict::no(
             "no proven laws — this would be a lookup table with a hash, which is exactly what the \
              format exists not to be",
@@ -155,7 +177,7 @@ pub fn verify(doc: &serde_json::Value, trusted: &[&str]) -> Verdict {
              fabricated table with a freshly computed digest is self-consistent",
         );
     }
-    if !trusted.iter().any(|t| *t == signer) {
+    if !trusted.contains(&signer) {
         return Verdict::no(format!(
             "signed by {}, which is not a pinned signer — an artifact verified against whatever key \
              it names is verified against its author",
@@ -187,14 +209,20 @@ pub fn verify(doc: &serde_json::Value, trusted: &[&str]) -> Verdict {
         Some(s) => s,
         None => return Verdict::no("the signature is not 64 bytes of hex"),
     };
-    if key.verify(&signed_bytes, &Signature::from_bytes(&sig_bytes)).is_err() {
+    if key
+        .verify(&signed_bytes, &Signature::from_bytes(&sig_bytes))
+        .is_err()
+    {
         return Verdict::no("SIGNATURE INVALID: this is not the artifact that was signed");
     }
 
     Verdict::yes(format!(
         "{} points, exhaustive, {} law(s), digest {}, signed by pinned {}",
         rows.len(),
-        obj.get("laws").and_then(|v| v.as_array()).map(|l| l.len()).unwrap_or(0),
+        obj.get("laws")
+            .and_then(|v| v.as_array())
+            .map(|l| l.len())
+            .unwrap_or(0),
         &recomputed[..16],
         &signer[..16]
     ))
@@ -205,6 +233,9 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+// Test names shout on purpose: a failure line reading `a_non_ascii_artifact_is_REFUSED...`
+// says what broke without opening the file. Readability beats the naming lint here.
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 

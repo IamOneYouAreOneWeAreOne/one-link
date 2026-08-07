@@ -17,8 +17,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    let ui = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../src/one_link/web/index.html");
+    let ui = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src/one_link/web/index.html");
 
     // Rebuild whenever the UI changes: a stale pin would refuse the very interface that shipped
     // beside it, which reads as "the app is broken" rather than "the pin is old".
@@ -55,9 +54,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
             .args(["-hashfile", tmp.to_str().unwrap(), "SHA256"])
             .output()
     } else if cfg!(target_os = "macos") {
-        Command::new("shasum").args(["-a", "256", tmp.to_str().unwrap()]).output()
+        Command::new("shasum")
+            .args(["-a", "256", tmp.to_str().unwrap()])
+            .output()
     } else {
-        Command::new("sha256sum").arg(tmp.to_str().unwrap()).output()
+        Command::new("sha256sum")
+            .arg(tmp.to_str().unwrap())
+            .output()
     }
     .expect("no SHA-256 tool available to pin the UI");
 
