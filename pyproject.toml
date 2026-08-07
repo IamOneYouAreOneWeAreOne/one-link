@@ -272,6 +272,7 @@ one_link = [
   # and still reports a proven surface in its own code -- the exact silent failure the
   # artifact exists to end.
   "data/certified/peer_row.json",
+  "data/certified/link_badge.json",
 ]
 
 [tool.pytest.ini_options]

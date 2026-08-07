@@ -42158,22 +42158,48 @@
         route.textContent = "no route";
         return;
       }
-      // Translate the regime code into something a normal user
-      // can read at a glance.
+      // WHO DECIDES what this connection is called.
+      //
+      // `peer.certified_link` comes from a renderer whose claims are DISCHARGED over every
+      // integer input (idem/scripts/emit_certified_views.py):
+      //
+      //   never-claims-DIRECT-for-a-link-that-is-not
+      //   never-claims-SECURE-for-an-unauthenticated-link
+      //   offline-never-renders-as-connected
+      //   an-unauthenticated-live-link-always-warns
+      //
+      // That matters here more than for the identity badge: "direct" and "secure" describe
+      // infrastructure the user cannot inspect, so this string is the only thing standing
+      // between them and believing a relayed conversation is peer-to-peer.
+      //
+      // The fallback below is the old string table. Note its last line was `return r;` --
+      // an unrecognised regime printed straight through as a raw protocol token, which is
+      // both meaningless to a user and an unbounded claim. The proven path has no such
+      // branch: an unknown regime renders as RELAYED, because the law leaves nowhere to
+      // put "and otherwise".
+      const certified = peer.certified_link;
+      const proven = certified && typeof certified.spoken === "string";
       const regimeLabel = (() => {
+        if (proven) return certified.spoken;
         const r = peer.regime;
         if (!r) return peer.online ? "connecting…" : "offline";
-        if (r === "lan-fast") return "Wi-Fi (LAN)";
-        if (r === "lan-medium") return "Wi-Fi";
-        if (r === "wan-fast") return "Internet (fast)";
-        if (r === "wan-slow") return "Internet (slow)";
         if (r === "relay") return "via relay";
-        return r;
+        if (r === "lan") return "local network";
+        if (r === "internet") return "internet";
+        if (r === "offline") return "offline";
+        // An unrecognised regime is NOT printed raw. The old code ended `return r;`, putting a
+        // protocol token on screen -- meaningless to a user, and an unbounded claim about a
+        // connection nobody has classified. "unknown route" says exactly what is known.
+        return "unknown route";
       })();
       const latency = peer.latency_ms != null
         ? ` - ${Math.round(peer.latency_ms)} ms`
         : "";
-      route.textContent = `${regimeLabel}${latency}`;
+      // A link that cannot be authenticated must SAY so, and the proof decides when.
+      const warnMark = (proven && certified.warn) ? " ⚠" : "";
+      route.textContent = `${regimeLabel}${latency}${warnMark}`;
+      route.setAttribute("data-proven", proven ? "yes" : "unavailable");
+      if (proven) route.setAttribute("data-claims-direct", String(!!certified.claims_direct));
     } catch (_) { /* silent - never block the call surface */ }
   }
 

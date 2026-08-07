@@ -47,7 +47,14 @@ SCHEMA = "idem-certified-view/v1"
 #: package-data list, PyInstaller's `--add-data`, and `validate_python_distributions.py`'s source
 #: scan (which walks exactly `data` and `web`). A new top-level directory would have been
 #: invisible to that scan and shipped in a wheel that looked valid.
-DEFAULT_ARTIFACT = Path(__file__).resolve().parent / "data" / "certified" / "peer_row.json"
+CERTIFIED_DIR = Path(__file__).resolve().parent / "data" / "certified"
+
+DEFAULT_ARTIFACT = CERTIFIED_DIR / "peer_row.json"
+
+#: Every certified surface this build ships. Named here rather than globbed: a directory listing
+#: would silently accept an artifact somebody dropped in, and "which surfaces are proven" is a
+#: claim the source should make, not the filesystem.
+VIEW_NAMES = ("peer_row", "link_badge")
 
 #: The glyph the whole security argument is about. Named here so a reader of THIS file can see what
 #: the law protects without opening the prover repo.
@@ -127,13 +134,71 @@ class CertifiedRow:
         return LABEL_TEXT.get(self.label, LABEL_TEXT[LABEL_NONE])
 
 
+#: The connection badge's vocabulary. `icon` is what is drawn, `label` what is spoken/written,
+#: `warn` whether the surface must call attention to itself.
+ICON_OFFLINE, ICON_DIRECT, ICON_RELAYED = 0, 1, 2
+LBL_OFFLINE, LBL_DIRECT, LBL_RELAYED, LBL_UNAUTH = 0, 1, 2, 3
+
+LINK_LABEL_TEXT = {
+    LBL_OFFLINE: "Offline",
+    LBL_DIRECT: "Direct connection, authenticated",
+    LBL_RELAYED: "Relayed connection, authenticated",
+    LBL_UNAUTH: "Not authenticated",
+}
+
+
+@dataclass(frozen=True)
+class CertifiedBadge:
+    """What the renderer proved it draws for one connection state.
+
+    `claims_direct` is the load-bearing one: "direct" is a claim about infrastructure the user
+    cannot inspect, and `never-claims-DIRECT-for-a-link-that-is-not` is discharged over every
+    integer input -- including regimes this build has never heard of, which render as RELAYED.
+    """
+    icon: int
+    label: int
+    warn: int
+
+    def claims_direct(self) -> bool:
+        return self.icon == ICON_DIRECT
+
+    def claims_authenticated(self) -> bool:
+        return self.label in (LBL_DIRECT, LBL_RELAYED)
+
+    def spoken(self) -> str:
+        """Conservative fallback: an unrecognised id must never announce authentication."""
+        return LINK_LABEL_TEXT.get(self.label, LINK_LABEL_TEXT[LBL_UNAUTH])
+
+
 class CertifiedSurface:
     """A loaded, verified render table. Construct via :func:`load`."""
 
     def __init__(self, doc: dict, *, source: Optional[Path] = None) -> None:
         self._doc = doc
         self._source = source
-        self._index = {(r["in"]["trust"], r["in"]["name_len"]): r["out"] for r in doc["rows"]}
+        # Keyed by the axis values IN DECLARED ORDER, so this class is generic over views. The
+        # first version hard-coded `(trust, name_len)`; a second surface would have needed a
+        # second loader, which is how one proven demo stays one proven demo.
+        self._axes = tuple(name for name, _values in (doc.get("space") or {}).get("axes", []))
+        self._index = {tuple(r["in"][a] for a in self._axes): r["out"] for r in doc["rows"]}
+
+    @property
+    def axes(self) -> tuple:
+        return self._axes
+
+    def at(self, **inputs: Any) -> Optional[dict]:
+        """The proven output for one point, or None outside the certified space.
+
+        None is honest emptiness -- the caller renders normally rather than being handed an
+        extrapolation. A table that guessed past its proven domain would be the unproven code
+        this replaces, wearing a digest.
+        """
+        try:
+            key = tuple(inputs[a] for a in self._axes)
+        except KeyError as missing:
+            raise KeyError(
+                f"{missing} is not an axis of this view; axes are {self._axes}") from missing
+        return self._index.get(key)
 
     # -- provenance a UI can show, and a reviewer can check ------------------------------------
 
@@ -163,6 +228,14 @@ class CertifiedSurface:
 
     # -- the read path ------------------------------------------------------------------------
 
+    def link_badge(self, regime: int, authed: int) -> Optional["CertifiedBadge"]:
+        """The proven connection badge. None outside the certified space."""
+        out = self.at(regime=int(regime), authed=int(authed))
+        if out is None:
+            return None
+        return CertifiedBadge(icon=int(out["icon"]), label=int(out["label"]),
+                              warn=int(out["warn"]))
+
     def row(self, trust: int, name_len: int) -> Optional[CertifiedRow]:
         """The proven layout for this peer, or None if outside the certified space.
 
@@ -170,14 +243,14 @@ class CertifiedSurface:
         A table that extrapolated past its proven domain would be exactly the unproven code this
         replaces, wearing a digest.
         """
-        out = self._index.get((int(trust), int(name_len)))
+        out = self.at(trust=int(trust), name_len=int(name_len))
         if out is None:
             return None
         return CertifiedRow(glyph=int(out["glyph"]), name_w=int(out["name_w"]),
                             badge_x=int(out["badge_x"]), label=int(out.get("label", LABEL_NONE)))
 
     def covers(self, trust: int, name_len: int) -> bool:
-        return (int(trust), int(name_len)) in self._index
+        return self.at(trust=int(trust), name_len=int(name_len)) is not None
 
 
 def _signable(doc: dict) -> bytes:
@@ -282,11 +355,27 @@ def load(path: Optional[Path] = None) -> Optional[CertifiedSurface]:
 _CACHE: dict = {}
 
 
+def view(name: str) -> Optional[CertifiedSurface]:
+    """A loaded, verified certified view by name, or None. Cached per process.
+
+    An unknown name raises rather than returning None: None means "this surface is unavailable,
+    render normally", and a typo'd view name silently taking that path would disable a proven
+    surface with no trace.
+    """
+    if name not in VIEW_NAMES:
+        raise KeyError(f"unknown certified view {name!r}; known: {VIEW_NAMES}")
+    if name not in _CACHE:
+        _CACHE[name] = load(CERTIFIED_DIR / f"{name}.json")
+    return _CACHE[name]
+
+
 def surface() -> Optional[CertifiedSurface]:
-    """Process-wide loaded surface, or None. Cached — the artifact does not change under a run."""
-    if "s" not in _CACHE:
-        _CACHE["s"] = load()
-    return _CACHE["s"]
+    """The peer-row surface. Kept as the name the peers API already calls."""
+    return view("peer_row")
+
+
+def link_surface() -> Optional[CertifiedSurface]:
+    return view("link_badge")
 
 
 def available() -> bool:

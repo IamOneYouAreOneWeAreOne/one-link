@@ -79,7 +79,7 @@ def test_stable_distribution_contract_exactly_matches_source_tree() -> None:
     assert build_identity.EXPECTED_STABLE_PACKAGE_DATA == tuple(
         sorted(set(build_identity.EXPECTED_STABLE_PACKAGE_DATA))
     )
-    assert len(build_identity.EXPECTED_STABLE_PACKAGE_DATA) == 20
+    assert len(build_identity.EXPECTED_STABLE_PACKAGE_DATA) == 21
 
     package_root = build_identity.package_root()
     discovered_data = {
@@ -126,14 +126,15 @@ def test_distribution_source_contract_hashes_every_packaged_python_file() -> Non
         if "__pycache__" not in path.parts
     }
     packaged_python = {name for name in contract.payload_hashes if name.endswith(".py")}
-    # 222 / 242: one_link/certified_surface.py added 2026-08-06 -- loads and VERIFIES
-    # the peer row's proven layout table, whose laws are discharged over every integer
-    # input by the Coherence prover at build time. The payload count rises by TWO: the
-    # module plus data/certified/peer_row.json, the materialized answers it reads.
+    # 222 / 243: data/certified/link_badge.json added 2026-08-06 -- the SECOND certified
+    # surface (is this connection direct, and authenticated?), emitted through the same
+    # pipeline as the first. No new module: `certified_surface.py` carries both.
+    # (222 / 242 before it: certified_surface.py + data/certified/peer_row.json, the
+    # peer row's proven layout table, laws discharged over every integer input.)
     # (221 / 240 before it: env_bounds.py, 2026-08-05. 220 / 239: bounded_resolver.py.)
     assert len(source_python) == 222
     assert packaged_python == source_python
-    assert len(contract.payload_hashes) == 242
+    assert len(contract.payload_hashes) == 243
 
 
 def test_developer_only_modules_are_not_stable_distribution_requirements() -> None:
@@ -481,7 +482,7 @@ def test_fresh_wheel_and_sdist_pass_two_clean_install_probes(tmp_path: Path) -> 
     assert result["stable_runtime_module_count"] == len(
         build_identity.EXPECTED_STABLE_RUNTIME_MODULES
     )
-    assert result["stable_package_data_count"] == 20
+    assert result["stable_package_data_count"] == 21
     assert result["source_payload_file_count"] == len(staged_contract.payload_hashes)
     assert result["source_python_file_count"] == sum(
         name.endswith(".py") for name in staged_contract.payload_hashes

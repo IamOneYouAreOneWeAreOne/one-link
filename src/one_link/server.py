@@ -19742,6 +19742,40 @@ class UIServer:
         return web.json_response({"ok": True})
 
     # ─── /api/peers ───────────────────────────────────────────────────
+    #: One Link's regime vocabulary -> the certified view's axis. `relay` and anything this build
+    #: does not recognise map to R_RELAY/R_UNKNOWN, never to a direct regime: the proven renderer
+    #: refuses to claim DIRECT for a link it cannot positively identify as one, and this mapping
+    #: must not undo that by guessing on the way in.
+    _REGIME_AXIS = {"offline": 0, "lan": 1, "internet": 2, "relay": 3}
+
+    @staticmethod
+    def _certified_link_for(surface: Any, p: dict) -> Optional[dict]:
+        """The proven connection badge for one peer, or None outside the certified space.
+
+        WHY THIS IS A SEPARATE SURFACE FROM THE ROW. The peer row answers "is this device who I
+        think"; this answers "is this conversation direct, and authenticated". They are different
+        claims with different failure modes, and the second is the one a product overstates
+        quietly -- "direct" and "secure" describe infrastructure the user cannot inspect.
+        """
+        regime_name = str(p.get("regime") or "offline")
+        # UNRECOGNISED REGIME -> 4 (unknown), which the renderer draws as RELAYED. A `.get(..., 2)`
+        # defaulting to `internet` would have been the natural line to write and would have made
+        # every unknown transport claim a direct connection.
+        regime = UIServer._REGIME_AXIS.get(regime_name, 4)
+        authed = 1 if p.get("is_verified") else 0
+        badge = surface.link_badge(regime, authed)
+        if badge is None:
+            return None
+        return {
+            "icon": badge.icon,
+            "label": badge.label,
+            "warn": badge.warn,
+            "spoken": badge.spoken(),
+            "claims_direct": badge.claims_direct(),
+            "regime_axis": regime,
+            "digest": surface.digest[:16],
+        }
+
     @staticmethod
     def _certified_row_for(surface: Any, p: dict) -> Optional[dict]:
         """The proven layout for one peer row, or None outside the certified space.
@@ -20000,7 +20034,7 @@ class UIServer:
 
         # THE PROVEN ROW. Stamped in ONE place, for every peer, from a table whose three
         # layout/security laws were discharged over every integer input by the Coherence prover at
-        # build time (see one_link/certified_surface.py and idem/scripts/emit_peer_row_view.py).
+        # build time (see one_link/certified_surface.py and idem/scripts/emit_certified_views.py).
         #
         # The trust mapping is deliberately STRICTER than the obvious one: the verified glyph
         # requires `is_verified` -- an in-person SAS confirmation -- not merely `trust == "pinned"`.
@@ -20011,11 +20045,16 @@ class UIServer:
             for p in kept:
                 p["certified_row"] = self._certified_row_for(_certified, p)
 
+        # THE SECOND PROVEN SURFACE. Stamped after the regime is resolved below would be wrong --
+        # `regime` is set in the loop further down, so this runs there instead. See the stamp at
+        # the end of that loop.
+
         # v0.5.6: stamp connection regime per peer. Outbound session
         # regime (most authoritative — that's the path our chat sends
         # would actually take). Falls back to inbound regime if we've
         # only received from the peer. Otherwise, classify by
         # peer.address (lan/internet) for online peers, or "offline".
+        _certified_link = certified_surface.link_surface()
         outbound = getattr(self.daemon, "_outbound_sessions", {}) or {}
         inbound = getattr(self.daemon, "_inbound_regime", {}) or {}
         from one_link.daemon import _classify_address_regime
@@ -20045,6 +20084,13 @@ class UIServer:
                 p["regime"] = _classify_address_regime(p.get("address") or "")
             else:
                 p["regime"] = "offline"
+
+            # THE PROVEN CONNECTION BADGE, stamped here because `regime` is only known now.
+            # Putting it beside `certified_row` above would have read the regime one line before
+            # it was assigned -- and every peer would have been badged "offline", which is the
+            # conservative value and therefore the kind of bug that never looks like one.
+            if _certified_link is not None:
+                p["certified_link"] = self._certified_link_for(_certified_link, p)
             # v0.7.x: surface the peer's advertised app_version (from
             # CAPS) so the UI can warn before a wire-mismatch turns into
             # an opaque InvalidTag. None until first CAPS exchange.
