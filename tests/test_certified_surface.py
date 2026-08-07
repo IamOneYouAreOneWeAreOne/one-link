@@ -426,7 +426,6 @@ def test_the_verified_glyph_constant_matches_the_server():
 import hashlib as _hashlib  # noqa: E402
 
 from one_link.certified_surface import (  # noqa: E402
-    DEVELOPMENT_SIGNER,
     TRUSTED_VIEW_SIGNERS,
     _signable,
     signature_ok,
@@ -528,34 +527,59 @@ def test_the_signable_bytes_match_the_producers_rule(doc):
 # ── the development key must not ride into a release ──────────────────
 
 
-def test_a_RELEASE_build_must_not_pin_the_development_key():
-    """THE gate that stops this being security theatre.
+def test_no_PUBLISHED_key_is_trusted():
+    """The gate that retired the development key, generalised so it cannot come back.
 
-    The pinned key is derived from a published phrase, so anyone can produce a table this
-    build accepts. That is fine for making the path real and testable now — and it must not
-    survive into a release. If this fails, generate a release key, pin its pubkey, and drop
-    `DEVELOPMENT_SIGNER`.
+    Until 2026-08-07 the tables were signed with a key derived from the published phrase
+    `one-link/certified-view/DEVELOPMENT-KEY/not-for-release/v1` — anyone could forge a table
+    this build accepts. That was deliberate and temporary: it made the whole path (sign, pin,
+    verify, fail closed) real and testable before a real key existed, and this test failed any
+    non-alpha build while it was pinned.
+
+    The real key now lives in the estate's DPAPI vault. This test outlives the specific key it
+    was written for: NO derivable key may be trusted, whatever it is called.
     """
-    from one_link import __version__
+    import hashlib
 
-    prerelease = any(tag in __version__ for tag in ("alpha", "beta", "rc", "dev"))
-    if not prerelease:
-        assert DEVELOPMENT_SIGNER not in TRUSTED_VIEW_SIGNERS, (
-            f"version {__version__} looks like a RELEASE and still trusts the development "
-            "signing key. Anyone can forge a certified surface this build will accept. "
-            "Generate a release key, pin its pubkey in TRUSTED_VIEW_SIGNERS, and remove "
-            "DEVELOPMENT_SIGNER.")
+    from one_link.certified_surface import TRUSTED_VIEW_SIGNERS
+
     assert TRUSTED_VIEW_SIGNERS, "no pinned signer at all: every artifact would be refused"
 
+    # Any signer that is the release-role pubkey of a seed derived from a phrase in our own
+    # source is, by construction, forgeable by anyone who can read the repository.
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "idem"))
+    try:
+        from idem.keys import role_pubkey
+    except Exception:                                   # idem is a sibling checkout, not a dep
+        pytest.skip("idem not available to re-derive published keys")
 
-def test_the_development_key_is_labelled_as_one_in_the_source():
-    """A published key that does not say so is the dangerous kind."""
+    for phrase in (
+        b"one-link/certified-view/DEVELOPMENT-KEY/not-for-release/v1",
+        b"one-link/certified-view/v1",
+        b"development",
+        b"test",
+    ):
+        forgeable = role_pubkey(hashlib.sha256(phrase).digest(), "release")
+        assert forgeable not in TRUSTED_VIEW_SIGNERS, (
+            f"a key derived from the published phrase {phrase!r} is trusted — anyone who can read "
+            "this repository can sign a certified surface this build will render")
+
+
+def test_the_release_signer_is_pinned_and_documented():
+    """A pinned key with no recorded custody is a key nobody can rotate."""
+    from one_link.certified_surface import RELEASE_SIGNER, TRUSTED_VIEW_SIGNERS
+
+    assert RELEASE_SIGNER in TRUSTED_VIEW_SIGNERS
+    assert len(RELEASE_SIGNER) == 64 and all(c in "0123456789abcdef" for c in RELEASE_SIGNER)
+
     src = (Path(__file__).resolve().parents[1] / "src" / "one_link" /
            "certified_surface.py").read_text(encoding="utf-8")
-    i = src.index("DEVELOPMENT_SIGNER")
-    window = src[max(0, i - 1400):i]
-    assert "DEVELOPMENT KEY" in window and "not-for-release" in window, (
-        "the development key is no longer marked as one where a reader would see it")
+    i = src.index("RELEASE_SIGNER =")
+    window = src[max(0, i - 1800):i]
+    assert "vault" in window and "To rotate" in window, (
+        "where the private half lives and how to rotate it is no longer recorded beside the key")
+
 
 
 # ── the screen reader and the pixel cannot disagree ───────────────────
@@ -965,3 +989,80 @@ def test_the_launcher_prefers_our_own_window_and_falls_back_VISIBLY():
         "opened' are different facts, and only the second is worth falling back on")
     assert 'SHELL_READY = "OL_SHELL_READY"' in app, (
         "the ready marker no longer matches what the shell prints")
+
+
+# ═══ THE UNREAD BADGE — where §11.1 model (b) reaches a pixel ════════════════════════════
+#
+# `inbox_transition` proves what an ARRIVAL may do to the counter, and deliberately ships no table:
+# its space is 8x8 because the laws quantify over every Inbox, and a product outgrows that on the
+# ninth message. This proves what the counter is ALLOWED TO SAY, which is genuinely bounded — a
+# badge counts to 99 and then shows an overflow marker, forever.
+
+
+@pytest.fixture(scope="module")
+def unread():
+    s = view("unread_badge")
+    assert s is not None, "the unread_badge view did not load or did not verify"
+    return s
+
+
+def test_the_unread_badge_carries_its_five_laws(unread):
+    names = {n for n, _ in unread.laws}
+    assert names == {
+        "a-count-of-zero-or-less-never-draws-a-badge",
+        "the-badge-never-shows-a-negative-number",
+        "the-badge-never-shows-more-than-it-can-fit",
+        "the-overflow-marker-means-the-count-really-overflowed",
+        "a-count-that-fits-is-shown-EXACTLY",
+    }, f"the shipped unread laws changed: {sorted(names)}"
+    assert all(scope == "exact" for _n, scope in unread.laws)
+
+
+def test_a_zero_or_negative_count_never_draws_a_badge(unread):
+    """The oldest bug in this feature, and it survives review because the COUNT is correct —
+    it is the rendering decision that is wrong. A negative reaches the pill after a desync."""
+    for count in (-2, -1, 0):
+        out = unread.at(count=count)
+        assert out is not None
+        assert out["show"] == 0, f"count={count} draws a badge"
+        assert out["shown"] >= 0, f"count={count} would render {out['shown']}"
+
+
+def test_a_count_that_fits_is_shown_exactly(unread):
+    """NEGATIVE CONTROL. Every other law is satisfied by a badge that never appears."""
+    for count in (1, 2, 42, 98, 99):
+        out = unread.at(count=count)
+        assert out["show"] == 1 and out["shown"] == count and out["overflow"] == 0
+
+
+def test_a_count_that_does_not_fit_becomes_the_overflow_marker(unread):
+    """The pill is fixed width. A three-digit count would push the row's layout apart."""
+    for count in (100, 101, 120):
+        out = unread.at(count=count)
+        assert out["overflow"] == 1 and out["shown"] == 99 and out["show"] == 1
+
+
+def test_the_whole_shipped_space_obeys_every_law(unread):
+    """Swept, not sampled — the product-side statement of what the prover discharged."""
+    doc = json.loads((certified_surface.CERTIFIED_DIR / "unread_badge.json").read_text("utf-8"))
+    for row in doc["rows"]:
+        c, out = row["in"]["count"], row["out"]
+        assert out["shown"] >= 0
+        assert out["shown"] <= 99
+        assert (c > 0) == (out["show"] == 1)
+        assert (out["overflow"] == 1) <= (c > 99)
+
+
+def test_the_peers_API_and_the_UI_both_use_the_proven_badge():
+    src = (Path(__file__).resolve().parents[1] / "src" / "one_link" / "server.py").read_text(
+        encoding="utf-8")
+    assert 'p["certified_unread"]' in src, "the peers API no longer stamps the proven badge"
+
+    html = _ui()
+    assert "function unreadBadgeOf(" in html
+    i = html.index("const ucount = state.unreadByPeer")
+    body = html[i:i + 700]
+    assert "unreadBadgeOf(p, ucount)" in body, (
+        "the sidebar badge decides its own text again; the old `ucount > 99 ? \"99+\"` was "
+        "correct and re-decided in JS on every render")
+    assert 'data-proven' in body, "the unproven fallback no longer marks itself"

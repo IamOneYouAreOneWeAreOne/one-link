@@ -54,7 +54,7 @@ DEFAULT_ARTIFACT = CERTIFIED_DIR / "peer_row.json"
 #: Every certified surface this build ships. Named here rather than globbed: a directory listing
 #: would silently accept an artifact somebody dropped in, and "which surfaces are proven" is a
 #: claim the source should make, not the filesystem.
-VIEW_NAMES = ("peer_row", "link_badge", "origin_fence")
+VIEW_NAMES = ("peer_row", "link_badge", "origin_fence", "unread_badge")
 
 #: The glyph the whole security argument is about. Named here so a reader of THIS file can see what
 #: the law protects without opening the prover repo.
@@ -64,19 +64,22 @@ GLYPH_VERIFIED = 7
 #:
 #: The digest binds the artifact to ITSELF: edit an answer and it stops matching. But an adversary
 #: who edits an answer AND recomputes the digest produces a perfectly self-consistent file, because
-#: a hash is not an identity. Only a signature makes FABRICATION fail rather than merely editing —
+#: a hash is not an identity. Only a signature makes FABRICATION fail rather than merely editing --
 #: and only a PINNED signer makes the signature mean anything, since verifying against whatever key
 #: the artifact names is verifying against its author.
 #:
-#: ⚠ THIS IS A DEVELOPMENT KEY. It is derived from a published phrase
-#: (`one-link/certified-view/DEVELOPMENT-KEY/not-for-release/v1`), so anyone can produce a table
-#: this build accepts. That is deliberate and temporary: it makes the whole path — sign, pin,
-#: verify, fail closed — real and testable now, instead of a TODO. `test_certified_surface.py`
-#: FAILS THE BUILD if a non-alpha version still pins it, so the key cannot quietly ride into a
-#: release. Replace with the release role pubkey and drop this entry.
-DEVELOPMENT_SIGNER = "6c73b5addfbc1dcd82adb15738c954b2fa0e0e49ae92a93451ae7c9f2ff9df51"
+#: THIS IS THE RELEASE KEY. Its private half is a random 32-byte seed held in the estate's DPAPI
+#: vault as `one_link_certified_view_seed` (CurrentUser, round-trip verified before the plaintext
+#: was shredded). It replaced a development key derived from a PUBLISHED phrase -- which anyone
+#: could have used to forge a table this build accepts. That key was deliberate and temporary: it
+#: made the whole path (sign, pin, verify, fail closed) real and testable before a real key existed.
+#:
+#: To rotate: mint a new seed, vault it, re-emit every view with
+#: `IDEM_VIEW_SIGNING_SEED=<hex> python idem/scripts/emit_certified_views.py`, and replace this
+#: constant. Nothing else changes -- the artifacts carry their own signer.
+RELEASE_SIGNER = "30f8f6f794ab0059926bb61fa8e63a19dfea84505b5ccee5c30f87df36fd39a1"
 
-TRUSTED_VIEW_SIGNERS: frozenset = frozenset({DEVELOPMENT_SIGNER})
+TRUSTED_VIEW_SIGNERS: frozenset = frozenset({RELEASE_SIGNER})
 
 #: Domain separator for the signed bytes. Must match `idem/certified_view.py::_signable` exactly —
 #: a divergence here does not fail loudly, it simply rejects every honest artifact.
@@ -398,6 +401,21 @@ def fence_admits(next_char_code: int) -> Optional[bool]:
         return None
     out = s.at(c=int(next_char_code))
     return None if out is None else bool(out == 1)
+
+
+def unread_badge(count: int) -> Optional[dict]:
+    """The PROVEN unread badge for a count, or None outside the certified space.
+
+    Returns `{"show", "shown", "overflow"}`. Five laws, all at scope `exact`:
+    a count of zero or less never draws a badge; the badge never shows a negative number;
+    it never shows more than fits; the overflow marker means the count really overflowed;
+    and a count that fits is shown EXACTLY -- the last one because the other four are
+    satisfied by a badge that never appears.
+    """
+    s = view("unread_badge")
+    if s is None:
+        return None
+    return s.at(count=int(count))
 
 
 def available() -> bool:

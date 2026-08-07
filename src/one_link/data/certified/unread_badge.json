@@ -1,0 +1,1522 @@
+{
+  "class_fingerprint": "9734b8b37908c5b9d8a14e5eff6513fd69e24c837582856618960b6a25861928",
+  "entry": "badge",
+  "frame_digest": null,
+  "laws": [
+    [
+      "a-count-of-zero-or-less-never-draws-a-badge",
+      "exact"
+    ],
+    [
+      "the-badge-never-shows-a-negative-number",
+      "exact"
+    ],
+    [
+      "the-badge-never-shows-more-than-it-can-fit",
+      "exact"
+    ],
+    [
+      "the-overflow-marker-means-the-count-really-overflowed",
+      "exact"
+    ],
+    [
+      "a-count-that-fits-is-shown-EXACTLY",
+      "exact"
+    ]
+  ],
+  "member_mid": "5dc571dc26b6c0f80d4b1401c9cf22874b41c1bef5c0f271798defba81ae5cce",
+  "notes": {
+    "points": 123
+  },
+  "rows": [
+    {
+      "in": {
+        "count": -2
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 0,
+        "shown": 0
+      }
+    },
+    {
+      "in": {
+        "count": -1
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 0,
+        "shown": 0
+      }
+    },
+    {
+      "in": {
+        "count": 0
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 0,
+        "shown": 0
+      }
+    },
+    {
+      "in": {
+        "count": 1
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 1
+      }
+    },
+    {
+      "in": {
+        "count": 2
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 2
+      }
+    },
+    {
+      "in": {
+        "count": 3
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 3
+      }
+    },
+    {
+      "in": {
+        "count": 4
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 4
+      }
+    },
+    {
+      "in": {
+        "count": 5
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 5
+      }
+    },
+    {
+      "in": {
+        "count": 6
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 6
+      }
+    },
+    {
+      "in": {
+        "count": 7
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 7
+      }
+    },
+    {
+      "in": {
+        "count": 8
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 8
+      }
+    },
+    {
+      "in": {
+        "count": 9
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 9
+      }
+    },
+    {
+      "in": {
+        "count": 10
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 10
+      }
+    },
+    {
+      "in": {
+        "count": 11
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 11
+      }
+    },
+    {
+      "in": {
+        "count": 12
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 12
+      }
+    },
+    {
+      "in": {
+        "count": 13
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 13
+      }
+    },
+    {
+      "in": {
+        "count": 14
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 14
+      }
+    },
+    {
+      "in": {
+        "count": 15
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 15
+      }
+    },
+    {
+      "in": {
+        "count": 16
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 16
+      }
+    },
+    {
+      "in": {
+        "count": 17
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 17
+      }
+    },
+    {
+      "in": {
+        "count": 18
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 18
+      }
+    },
+    {
+      "in": {
+        "count": 19
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 19
+      }
+    },
+    {
+      "in": {
+        "count": 20
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 20
+      }
+    },
+    {
+      "in": {
+        "count": 21
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 21
+      }
+    },
+    {
+      "in": {
+        "count": 22
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 22
+      }
+    },
+    {
+      "in": {
+        "count": 23
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 23
+      }
+    },
+    {
+      "in": {
+        "count": 24
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 24
+      }
+    },
+    {
+      "in": {
+        "count": 25
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 25
+      }
+    },
+    {
+      "in": {
+        "count": 26
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 26
+      }
+    },
+    {
+      "in": {
+        "count": 27
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 27
+      }
+    },
+    {
+      "in": {
+        "count": 28
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 28
+      }
+    },
+    {
+      "in": {
+        "count": 29
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 29
+      }
+    },
+    {
+      "in": {
+        "count": 30
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 30
+      }
+    },
+    {
+      "in": {
+        "count": 31
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 31
+      }
+    },
+    {
+      "in": {
+        "count": 32
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 32
+      }
+    },
+    {
+      "in": {
+        "count": 33
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 33
+      }
+    },
+    {
+      "in": {
+        "count": 34
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 34
+      }
+    },
+    {
+      "in": {
+        "count": 35
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 35
+      }
+    },
+    {
+      "in": {
+        "count": 36
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 36
+      }
+    },
+    {
+      "in": {
+        "count": 37
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 37
+      }
+    },
+    {
+      "in": {
+        "count": 38
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 38
+      }
+    },
+    {
+      "in": {
+        "count": 39
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 39
+      }
+    },
+    {
+      "in": {
+        "count": 40
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 40
+      }
+    },
+    {
+      "in": {
+        "count": 41
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 41
+      }
+    },
+    {
+      "in": {
+        "count": 42
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 42
+      }
+    },
+    {
+      "in": {
+        "count": 43
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 43
+      }
+    },
+    {
+      "in": {
+        "count": 44
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 44
+      }
+    },
+    {
+      "in": {
+        "count": 45
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 45
+      }
+    },
+    {
+      "in": {
+        "count": 46
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 46
+      }
+    },
+    {
+      "in": {
+        "count": 47
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 47
+      }
+    },
+    {
+      "in": {
+        "count": 48
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 48
+      }
+    },
+    {
+      "in": {
+        "count": 49
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 49
+      }
+    },
+    {
+      "in": {
+        "count": 50
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 50
+      }
+    },
+    {
+      "in": {
+        "count": 51
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 51
+      }
+    },
+    {
+      "in": {
+        "count": 52
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 52
+      }
+    },
+    {
+      "in": {
+        "count": 53
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 53
+      }
+    },
+    {
+      "in": {
+        "count": 54
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 54
+      }
+    },
+    {
+      "in": {
+        "count": 55
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 55
+      }
+    },
+    {
+      "in": {
+        "count": 56
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 56
+      }
+    },
+    {
+      "in": {
+        "count": 57
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 57
+      }
+    },
+    {
+      "in": {
+        "count": 58
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 58
+      }
+    },
+    {
+      "in": {
+        "count": 59
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 59
+      }
+    },
+    {
+      "in": {
+        "count": 60
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 60
+      }
+    },
+    {
+      "in": {
+        "count": 61
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 61
+      }
+    },
+    {
+      "in": {
+        "count": 62
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 62
+      }
+    },
+    {
+      "in": {
+        "count": 63
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 63
+      }
+    },
+    {
+      "in": {
+        "count": 64
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 64
+      }
+    },
+    {
+      "in": {
+        "count": 65
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 65
+      }
+    },
+    {
+      "in": {
+        "count": 66
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 66
+      }
+    },
+    {
+      "in": {
+        "count": 67
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 67
+      }
+    },
+    {
+      "in": {
+        "count": 68
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 68
+      }
+    },
+    {
+      "in": {
+        "count": 69
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 69
+      }
+    },
+    {
+      "in": {
+        "count": 70
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 70
+      }
+    },
+    {
+      "in": {
+        "count": 71
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 71
+      }
+    },
+    {
+      "in": {
+        "count": 72
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 72
+      }
+    },
+    {
+      "in": {
+        "count": 73
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 73
+      }
+    },
+    {
+      "in": {
+        "count": 74
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 74
+      }
+    },
+    {
+      "in": {
+        "count": 75
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 75
+      }
+    },
+    {
+      "in": {
+        "count": 76
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 76
+      }
+    },
+    {
+      "in": {
+        "count": 77
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 77
+      }
+    },
+    {
+      "in": {
+        "count": 78
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 78
+      }
+    },
+    {
+      "in": {
+        "count": 79
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 79
+      }
+    },
+    {
+      "in": {
+        "count": 80
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 80
+      }
+    },
+    {
+      "in": {
+        "count": 81
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 81
+      }
+    },
+    {
+      "in": {
+        "count": 82
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 82
+      }
+    },
+    {
+      "in": {
+        "count": 83
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 83
+      }
+    },
+    {
+      "in": {
+        "count": 84
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 84
+      }
+    },
+    {
+      "in": {
+        "count": 85
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 85
+      }
+    },
+    {
+      "in": {
+        "count": 86
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 86
+      }
+    },
+    {
+      "in": {
+        "count": 87
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 87
+      }
+    },
+    {
+      "in": {
+        "count": 88
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 88
+      }
+    },
+    {
+      "in": {
+        "count": 89
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 89
+      }
+    },
+    {
+      "in": {
+        "count": 90
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 90
+      }
+    },
+    {
+      "in": {
+        "count": 91
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 91
+      }
+    },
+    {
+      "in": {
+        "count": 92
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 92
+      }
+    },
+    {
+      "in": {
+        "count": 93
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 93
+      }
+    },
+    {
+      "in": {
+        "count": 94
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 94
+      }
+    },
+    {
+      "in": {
+        "count": 95
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 95
+      }
+    },
+    {
+      "in": {
+        "count": 96
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 96
+      }
+    },
+    {
+      "in": {
+        "count": 97
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 97
+      }
+    },
+    {
+      "in": {
+        "count": 98
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 98
+      }
+    },
+    {
+      "in": {
+        "count": 99
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 0,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 100
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 101
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 102
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 103
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 104
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 105
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 106
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 107
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 108
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 109
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 110
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 111
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 112
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 113
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 114
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 115
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 116
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 117
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 118
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 119
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    },
+    {
+      "in": {
+        "count": 120
+      },
+      "out": {
+        "__type__": "Badge",
+        "overflow": 1,
+        "show": 1,
+        "shown": 99
+      }
+    }
+  ],
+  "schema": "idem-certified-view/v1",
+  "signature": "3da47dd7e9a11f4ee9bf8bfa378039a9106fde9676890bc5e2d105a2e0d316d72a0ba58d2befcfb1bfbb9f980564c34039780aad2566eb053e64a755c3105c03",
+  "signer": "30f8f6f794ab0059926bb61fa8e63a19dfea84505b5ccee5c30f87df36fd39a1",
+  "space": {
+    "axes": [
+      [
+        "count",
+        [
+          -2,
+          -1,
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          71,
+          72,
+          73,
+          74,
+          75,
+          76,
+          77,
+          78,
+          79,
+          80,
+          81,
+          82,
+          83,
+          84,
+          85,
+          86,
+          87,
+          88,
+          89,
+          90,
+          91,
+          92,
+          93,
+          94,
+          95,
+          96,
+          97,
+          98,
+          99,
+          100,
+          101,
+          102,
+          103,
+          104,
+          105,
+          106,
+          107,
+          108,
+          109,
+          110,
+          111,
+          112,
+          113,
+          114,
+          115,
+          116,
+          117,
+          118,
+          119,
+          120
+        ]
+      ]
+    ]
+  },
+  "table_digest": "ce36dfe1b8846564295fa3f0bc1a0979ba78549c4349559e41401b319571f88e"
+}

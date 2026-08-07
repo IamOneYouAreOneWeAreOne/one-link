@@ -16084,11 +16084,21 @@
       // v0.21.x: per-peer unread badge. Lives on the row so the user
       // sees WHICH conversation has waiting messages without opening
       // every one. Cap display at "99+".
+      // WHAT THE COUNT IS ALLOWED TO SAY is proven; the count itself is this tab's.
+      // Five laws at scope `exact` (idem/scripts/emit_certified_views.py): a count of zero or
+      // less never draws a badge, the badge never shows a negative number, it never shows more
+      // than the pill can fit, the overflow marker means the count really overflowed, and a
+      // count that fits is shown exactly.
+      //
+      // The old code did `ucount > 99 ? "99+" : String(ucount)` -- correct, and re-decided in
+      // JS every render. `unreadBadgeOf` asks the table instead, and falls back to the same
+      // arithmetic when the surface is unavailable.
       const ucount = state.unreadByPeer[p.short_id] || 0;
-      if (ucount > 0 && p.short_id !== state.selectedPeer) {
-        const badge = el("span", "peer-unread-badge",
-          ucount > 99 ? "99+" : String(ucount));
+      const ub = unreadBadgeOf(p, ucount);
+      if (ub.show && p.short_id !== state.selectedPeer) {
+        const badge = el("span", "peer-unread-badge", ub.text);
         badge.title = `${ucount} unread`;
+        badge.setAttribute("data-proven", ub.proven ? "yes" : "unavailable");
         row.appendChild(badge);
       }
       row.appendChild(avWrap);
@@ -25810,6 +25820,21 @@
   // (`the-spoken-label-cannot-contradict-the-pixel`, discharged over every integer input)
   // says these cannot disagree -- so a screen reader and a sighted user are told the same
   // thing, and it is not maintained by anyone remembering to update an aria-label.
+  // The proven unread badge. `certified_unread` is stamped by /api/peers from a renderer whose
+  // five laws are discharged over every integer input. The fallback repeats the old arithmetic
+  // and marks itself, because a fallback nobody can see is how the unproven path returns.
+  function unreadBadgeOf(peer, count) {
+    const c = peer && peer.certified_unread;
+    if (c && typeof c.show === "number") {
+      return {
+        show: c.show === 1,
+        text: c.overflow === 1 ? `${c.shown}+` : String(c.shown),
+        proven: true,
+      };
+    }
+    return { show: count > 0, text: count > 99 ? "99+" : String(count), proven: false };
+  }
+
   function spokenByProof(peer) {
     const row = peer && peer.certified_row;
     return (row && typeof row.spoken === "string" && row.spoken) ? row.spoken : null;

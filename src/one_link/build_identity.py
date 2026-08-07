@@ -242,6 +242,7 @@ EXPECTED_STABLE_PACKAGE_DATA: tuple[str, ...] = (
     "data/certified/link_badge.json",
     "data/certified/origin_fence.json",
     "data/certified/peer_row.json",
+    "data/certified/unread_badge.json",
     "data/oui_prefixes.txt.gz",
     "web/assets/argon2id-v1.wasm",
     "web/assets/argon2id-worker.js",

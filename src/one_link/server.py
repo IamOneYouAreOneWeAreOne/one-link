@@ -20040,6 +20040,7 @@ class UIServer:
         # requires `is_verified` -- an in-person SAS confirmation -- not merely `trust == "pinned"`.
         # Being paired is not the same as having checked who is on the other end, and the law only
         # constrains the renderer; choosing what counts as VERIFIED is this line's job.
+        _certified_unread = certified_surface.view("unread_badge")
         _certified = certified_surface.surface()
         if _certified is not None:
             for p in kept:
@@ -20091,6 +20092,14 @@ class UIServer:
             # conservative value and therefore the kind of bug that never looks like one.
             if _certified_link is not None:
                 p["certified_link"] = self._certified_link_for(_certified_link, p)
+
+            # THE PROVEN UNREAD BADGE. The count itself is the UI's (it tracks what this tab has
+            # seen); what is proven is what the count is ALLOWED TO SAY -- never "0", never a
+            # negative, never wider than the pill, and exactly right when it fits.
+            if _certified_unread is not None:
+                out = _certified_unread.at(count=int(p.get("unread") or 0))
+                if out is not None:
+                    p["certified_unread"] = {**out, "digest": _certified_unread.digest[:16]}
             # v0.7.x: surface the peer's advertised app_version (from
             # CAPS) so the UI can warn before a wire-mismatch turns into
             # an opaque InvalidTag. None until first CAPS exchange.

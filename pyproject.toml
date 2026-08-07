@@ -274,6 +274,7 @@ one_link = [
   "data/certified/peer_row.json",
   "data/certified/link_badge.json",
   "data/certified/origin_fence.json",
+  "data/certified/unread_badge.json",
 ]
 
 [tool.pytest.ini_options]

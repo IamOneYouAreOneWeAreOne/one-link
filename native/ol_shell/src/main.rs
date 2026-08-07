@@ -42,7 +42,7 @@ const UI_SHA256: &str = env!("OL_UI_SHA256");
 /// `one_link/certified_surface.py::TRUSTED_VIEW_SIGNERS` — a divergence does not fail loudly, it
 /// refuses every honest artifact, so `test_certified_surface.py` pins them together.
 const TRUSTED_SIGNERS: &[&str] =
-    &["6c73b5addfbc1dcd82adb15738c954b2fa0e0e49ae92a93451ae7c9f2ff9df51"];
+    &["30f8f6f794ab0059926bb61fa8e63a19dfea84505b5ccee5c30f87df36fd39a1"];
 
 use tao::{
     dpi::LogicalSize,
