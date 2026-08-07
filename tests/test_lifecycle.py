@@ -421,6 +421,10 @@ def test_launcher_uses_hardened_loopback_url_open(monkeypatch):
         lambda url, **_kwargs: opened.append(url),
     )
     monkeypatch.setattr(app_mod, "_find_chromium_browser_exe", lambda: None)
+    # The launch ladder gained a rung above these: One Link's own window (§10.4). This test is
+    # about the LAST rung -- the plain browser open -- so every rung above it must be disabled,
+    # or the assertion below passes only on machines where the shell was never built.
+    monkeypatch.setattr(app_mod, "_shell_path", lambda: None)
 
     app_mod._open_browser_url("http://127.0.0.1:7117/?t=test")
 

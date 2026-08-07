@@ -142,6 +142,9 @@ def _good_spec() -> str:
             "ONE_LINK_PREVIEW_ML = False",
             "datas = [('src/one_link/web', 'one_link/web'), "
             "('src/one_link/data', 'one_link/data'), "
+            # One Link's native window, staged at the bundle root. Part of the contract because a
+            # bundle without it degrades to the browser path SILENTLY from the user's side.
+            "('build/native-shell', '.'), "
             "('build/release-contract/runtime-source-manifest.json', 'one_link/_build'), "
             f"('build/release-contract/{STAMP_FILENAME}', 'one_link'), "
             f"('build/native-cdc/{native_tag}/{native_name}.sha256', "

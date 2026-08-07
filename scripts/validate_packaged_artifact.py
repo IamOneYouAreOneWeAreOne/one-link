@@ -61,6 +61,12 @@ REQUIRED_DATA_FRAGMENTS = (
     # installed artifact cannot tell it is older than the published build,
     # so a stampless spec is a distribution-contract failure, not a warning.
     "one_link",
+    # One Link's NATIVE WINDOW (native/ol_shell), staged at the bundle root beside the
+    # launcher. A bundle without it still opens -- the launcher degrades to the browser
+    # app-mode path and says so -- but it degrades SILENTLY from the user's side, which is
+    # the shape of failure the certified surfaces exist to end. So it is part of the
+    # contract, not an optional extra somebody notices is missing.
+    ".",
 )
 REQUIRED_STABLE_SUBMODULE_COLLECTORS = (
     "aiohttp",
@@ -646,6 +652,9 @@ def _stable_spec_structure_failures(text: str) -> list[str]:
             # only STAMP_FILENAME, so the exact name is part of the contract.
             "one_link": "/build/release-contract/" + STAMP_FILENAME,
             native_destination: "/" + native_library_name() + ".sha256",
+            # The shell is staged as a directory (the binary plus its .sha256 sidecar), so the
+            # source is the staging directory rather than a file.
+            ".": "/build/native-shell",
         }
         def _source_matches(source: str, suffix: str) -> bool:
             return source == suffix.removeprefix("/") or source.endswith(suffix)
