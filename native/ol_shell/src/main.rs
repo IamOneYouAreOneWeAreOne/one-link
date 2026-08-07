@@ -305,7 +305,9 @@ fn open_externally(uri: &str) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     {
         // `explorer.exe <uri>` is ShellExecute without a shell interpreter in the path.
-        std::process::Command::new("explorer.exe").arg(uri).spawn()?;
+        std::process::Command::new("explorer.exe")
+            .arg(uri)
+            .spawn()?;
     }
     #[cfg(target_os = "macos")]
     {
@@ -319,6 +321,9 @@ fn open_externally(uri: &str) -> io::Result<()> {
 }
 
 #[cfg(test)]
+// Test names shout on purpose: a failure line reading `a_non_ascii_artifact_is_REFUSED...`
+// says what broke without opening the file. Readability beats the naming lint here.
+#[allow(non_snake_case)]
 mod tests {
     use super::{loopback_origin, same_origin};
 
@@ -358,8 +363,10 @@ mod tests {
         // starts with the loopback origin, because everything before the `@` is USERINFO and the
         // real host is `evil.example`. A prefix test renders that page inside the trusted window.
         let origin = loopback_origin("http://127.0.0.1:7117/").unwrap();
-        assert!("http://127.0.0.1:7117@evil.example/".starts_with(&origin),
-                "if this is false the attack changed shape and the test below proves nothing");
+        assert!(
+            "http://127.0.0.1:7117@evil.example/".starts_with(&origin),
+            "if this is false the attack changed shape and the test below proves nothing"
+        );
         assert!(!same_origin("http://127.0.0.1:7117@evil.example/", &origin));
         assert!(!same_origin("http://127.0.0.1:7117.evil.example/", &origin));
     }
@@ -378,7 +385,11 @@ mod tests {
             .expect("the certified origin fence must ship beside the shell");
         let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
         let rows = doc["rows"].as_array().expect("rows");
-        assert_eq!(rows.len(), 257, "the fence table is not the shipped 257 points");
+        assert_eq!(
+            rows.len(),
+            257,
+            "the fence table is not the shipped 257 points"
+        );
 
         let mut admitted = 0;
         for row in rows {
@@ -395,7 +406,10 @@ mod tests {
         }
         // NON-VACUITY: a table that admitted nothing would make the agreement above trivial, and
         // the window would never open its own page.
-        assert_eq!(admitted, 4, "exactly the four boundary characters should be admitted");
+        assert_eq!(
+            admitted, 4,
+            "exactly the four boundary characters should be admitted"
+        );
     }
 
     #[test]
@@ -415,7 +429,10 @@ mod tests {
             "http://127.0.0.1:7117/?t=abc",
             "http://127.0.0.1:7117/peer.html#frag",
         ] {
-            assert!(same_origin(ok, &origin), "the fence refuses our own page: {ok}");
+            assert!(
+                same_origin(ok, &origin),
+                "the fence refuses our own page: {ok}"
+            );
         }
     }
 }
