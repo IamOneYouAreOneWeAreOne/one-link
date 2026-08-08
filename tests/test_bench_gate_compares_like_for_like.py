@@ -440,3 +440,83 @@ def test_the_anchor_names_a_commit_not_a_measurement() -> None:
     assert re.fullmatch(r"[0-9a-f]{40}", lines[0]), (
         f"the anchor must be a full commit sha: {lines[0]!r}"
     )
+
+
+# ── per-metric tolerance ──────────────────────────────────────────────
+#
+# Some metrics are dominated by something other than the code under test. The two sample sets are
+# collected in BLOCKS -- five head runs, then five base runs, with a rebuild between -- so within a
+# block the thermal state and page cache are near-identical and the spread is tiny, while between
+# blocks it is not. That makes the sets easy to SEPARATE for reasons unrelated to the diff, which
+# is what the separation criterion was supposed to rule out.
+#
+# Measured 2026-08-08: `native_aead_aes_decrypt_16KiB` failed at 6.31% on master with
+# `native/ol_aead/` UNCHANGED since the drift anchor -- byte-identical source on both sides --
+# while this gate's history flapped success/failure across unrelated commits on the same day.
+
+
+def run_gate_with(results: Path, baseline: Path, *extra: str):
+    argv = [
+        sys.executable, str(GATE),
+        "--results", str(results),
+        "--baseline", str(baseline),
+        "--max-regression-percent", "5",
+        "--require-comparable-host",
+        *extra,
+    ]
+    return subprocess.run(argv, capture_output=True, text=True, check=False)
+
+
+def _pair(tmp_path: Path, drop_pct: float):
+    """A separated regression of `drop_pct` on one metric, on a matched host."""
+    host = {"platform": "Linux-6.17.0-azure-x86_64", "python": "3.12.13", "cpu_count": 4}
+    base = write(tmp_path, "base.json", payload(host, BASE_METRICS))
+    hot = dict(BASE_METRICS)
+    hot["native_aead_aes"] = BASE_METRICS["native_aead_aes"] * (1.0 - drop_pct / 100.0)
+    head = write(tmp_path, "head.json", payload(host, hot))
+    return head, base
+
+
+def test_a_per_metric_limit_tolerates_only_the_metric_it_names(tmp_path: Path) -> None:
+    head, base = _pair(tmp_path, 8.0)
+
+    # Without it: still a failure. The global limit is untouched.
+    assert run_gate_with(head, base).returncode != 0
+
+    # Named: tolerated.
+    named = run_gate_with(head, base, "--metric-limit", "native_aead_aes=12")
+    assert named.returncode == 0, named.stdout + named.stderr
+
+    # A limit on a DIFFERENT metric must not rescue this one -- an override that leaked across
+    # names would quietly disable the gate for everything.
+    other = run_gate_with(head, base, "--metric-limit", "native_cdc_scan_128MiB=12")
+    assert other.returncode != 0
+
+
+def test_a_tolerated_drop_is_still_REPORTED_never_silent(tmp_path: Path) -> None:
+    """The whole point of the gate is to be believed. A drop that passes because someone widened
+    a tolerance months ago must still appear in the log, or the override becomes a place for a
+    real regression to hide. (Adding the flag without this line created exactly that.)"""
+    head, base = _pair(tmp_path, 8.0)
+    out = run_gate_with(head, base, "--metric-limit", "native_aead_aes=12")
+    assert out.returncode == 0
+    assert "TOLERATED" in out.stdout
+    assert "native_aead_aes" in out.stdout
+    assert "8.0" in out.stdout or "8.00" in out.stdout
+
+
+def test_a_per_metric_limit_still_fails_past_ITS_OWN_line(tmp_path: Path) -> None:
+    """Widening is not disabling."""
+    head, base = _pair(tmp_path, 20.0)
+    out = run_gate_with(head, base, "--metric-limit", "native_aead_aes=12")
+    assert out.returncode != 0
+    assert "regressed" in (out.stdout + out.stderr)
+
+
+@pytest.mark.parametrize("spec", ["no-equals-sign", "name=", "=12", "name=abc"])
+def test_a_malformed_per_metric_limit_is_REFUSED_not_ignored(tmp_path: Path, spec: str) -> None:
+    """A typo must not silently restore the global limit while looking applied."""
+    head, base = _pair(tmp_path, 1.0)
+    out = run_gate_with(head, base, "--metric-limit", spec)
+    assert out.returncode != 0
+    assert "--metric-limit" in (out.stdout + out.stderr)
