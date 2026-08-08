@@ -44,6 +44,11 @@ jobs:
         os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Without this, checkout leaves the job's token in `.git/config` on the runner, where
+          # any later step -- or an uploaded artifact -- can carry it off. This job only needs to
+          # READ the tree to compile it. Matches every other workflow in this repo.
+          persist-credentials: false
       # Pin an interpreter explicitly: `python3` is not reliably on PATH under bash on the
       # Windows runners, and `python` is absent on Ubuntu. Naming it here avoids both.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
