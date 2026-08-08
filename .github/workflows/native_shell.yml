@@ -1,0 +1,95 @@
+# Does One Link's own window BUILD on every platform we ship to?
+#
+# WHY THIS EXISTS. `ol_shell` is the product's new front door -- the thing that removes the browser
+# dependency -- and until this workflow, NOTHING in CI compiled it. It was built only inside
+# `build_binary.py` during a release, where a compile failure is deliberately non-fatal: the shell
+# is `--required` on Windows alone, so on Linux and macOS a broken build quietly packages the
+# browser fallback instead. That is a silent downgrade discovered at release time, on the platform
+# where it is hardest to fix. This asks the question early, on the real OS, and fails out loud.
+#
+# WHAT A GREEN RUN CLAIMS, EXACTLY: the shell COMPILES and its UI pin resolves on that platform.
+# It does NOT claim the window opens or renders correctly there -- that needs a desktop session and
+# a real webview runtime, and is verified end to end only on Windows. A compile is the floor, not
+# the proof, and this file will not pretend otherwise.
+
+name: native shell builds
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'native/ol_shell/**'
+      - 'src/one_link/web/index.html'      # the pin's input: a change here must rebuild
+      - '.github/workflows/native_shell.yml'
+  pull_request:
+    paths:
+      - 'native/ol_shell/**'
+      - 'src/one_link/web/index.html'
+      - '.github/workflows/native_shell.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-shell-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ol_shell / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false          # one platform's break must not hide another's
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Pin an interpreter explicitly: `python3` is not reliably on PATH under bash on the
+      # Windows runners, and `python` is absent on Ubuntu. Naming it here avoids both.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup default 1.96.0
+
+      # wry's Linux backend is WebKitGTK. Without these headers the crate cannot compile at all,
+      # which is precisely the failure this workflow is here to surface rather than swallow.
+      - name: install WebKitGTK (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: native/ol_shell
+
+      - name: build the window
+        working-directory: native/ol_shell
+        run: cargo build --release --locked
+
+      # The pin is the shell's whole trust story: it refuses to render an interface whose hash is
+      # not the one compiled into it. A build that produced no pin would still link and still run,
+      # and would render anything -- so assert the environment variable actually landed.
+      - name: the UI pin is baked into the binary
+        shell: bash
+        working-directory: native/ol_shell
+        run: |
+          python - <<'PY'
+          import hashlib, pathlib, sys
+          ui = pathlib.Path("../../src/one_link/web/index.html").read_bytes()
+          want = hashlib.sha256(ui).hexdigest()
+          exe = next(p for p in pathlib.Path("target/release").iterdir()
+                     if p.name in ("ol_shell", "ol_shell.exe"))
+          blob = exe.read_bytes()
+          if want.encode() not in blob:
+              sys.exit(f"the shell does not carry the UI pin {want[:16]}... -- "
+                       "a shell with no pin renders anything")
+          print(f"UI pin {want[:16]}... is compiled into {exe.name} ({len(blob):,} bytes)")
+          PY

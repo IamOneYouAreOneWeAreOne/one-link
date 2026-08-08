@@ -5735,7 +5735,15 @@ class UIServer:
         img.save(buf)
         svg_body = buf.getvalue().decode("utf-8")
         resp = web.Response(text=svg_body, content_type="image/svg+xml")
-        # Don't cache: the URL contains the token, which can rotate.
+        # No-store because a pairing URL is a credential-shaped thing and must not sit in a cache.
+        #
+        # NOTE FOR ANYONE AUDITING THIS: the previous comment here said "the URL contains the
+        # token", and that is no longer true in ANY reachable state. `requires_short_lived_invite`
+        # is *defined* as `lan_bound` above, so the two guards are complementary and total --
+        # loopback refuses with `loopback_only`, LAN refuses with `short_lived_invite_required`,
+        # and this renderer is unreachable in every shipping configuration. Both refusals are
+        # covered by tests. The owner bearer reaches neither a LAN URL nor a QR; a comment
+        # claiming otherwise invents a residual that does not exist.
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
