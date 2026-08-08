@@ -98,3 +98,29 @@ jobs:
                        "a shell with no pin renders anything")
           print(f"UI pin {want[:16]}... is compiled into {exe.name} ({len(blob):,} bytes)")
           PY
+
+      # A COMPILE IS THE FLOOR. Everything above proves the shell builds and carries its pin; none
+      # of it proves a window ever appears. That was verified by hand on Windows only, which is
+      # exactly why the shell is `--required` there and degrades to the browser everywhere else.
+      # A headless runner can still answer the question -- Linux needs a virtual display, macOS and
+      # Windows runners already have a desktop session.
+      - name: a virtual display for the window (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends xvfb
+
+      - name: the window OPENS and LOADS the real interface
+        # Not `--required` anywhere yet: this is the first run of this check on Linux and macOS, and
+        # a brand-new GUI smoke that fails for its own reasons would block unrelated work. It fails
+        # the job loudly so the result is READ; promoting it to a release gate comes after it has a
+        # track record. `continue-on-error` is a stated decision here, not an accident.
+        continue-on-error: true
+        shell: bash
+        run: |
+          # THE LOAD SIGNAL IS A SERVER LOG, not the shell's own word: a window can open onto a
+          # blank surface and still report ready. The smoke also self-calibrates -- it can be run
+          # against a tampered interface, where the ONLY correct outcome is a refusal.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a python scripts/smoke_native_shell.py --timeout 120
+          else
+            python scripts/smoke_native_shell.py --timeout 120
+          fi
