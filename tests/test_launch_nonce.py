@@ -146,9 +146,23 @@ def test_ui_launch_info_mints_a_nonce_for_every_caller():
 
     src = Path(__file__).resolve().parents[1] / "src" / "one_link" / "daemon.py"
     text = src.read_text(encoding="utf-8")
-    assert '"launch_nonce": (' in text and "mint_launch_nonce()" in text, (
+
+    # Scoped to the handler, not the whole file. The previous version matched the literal
+    # `"launch_nonce": (` -- the opening paren of a `hasattr(...)` ternary that has since been
+    # replaced by a direct call. That spelling was incidental: collapsing the conditional made
+    # the property MORE clearly true, and the test failed anyway. A source assertion has to name
+    # the behaviour and the place, or it just pins today's formatting.
+    start = text.index('elif cmd == "ui_launch_info":')
+    block = text[start:text.index("elif cmd ==", start + 10)]
+
+    assert "mint_launch_nonce()" in block, (
         "ui_launch_info no longer mints a launch nonce, so the launcher has nothing "
         "safe to put in the URL")
+    # CALLED here, per request -- not read from something stored earlier. A cached nonce would
+    # be a long-lived credential wearing a single-use name, which is the whole defect this
+    # mechanism exists to prevent.
+    assert "self._cached_launch_nonce" not in block and "launch_nonce =" not in block, (
+        "the launch nonce looks cached rather than minted per call")
 
 
 # ── end to end: a real UIServer over real HTTP ────────────────────────
