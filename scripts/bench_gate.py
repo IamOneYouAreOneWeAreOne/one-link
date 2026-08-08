@@ -164,6 +164,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Maximum allowed regression vs baseline, in percent (default 5).",
     )
     p.add_argument(
+        "--metric-limit",
+        action="append",
+        default=[],
+        metavar="NAME=PERCENT",
+        help=(
+            "Per-metric tolerance override, repeatable. For metrics whose measured spread is "
+            "dominated by something other than the code under test -- see the block-collection "
+            "note in the comparison loop -- a global limit either fails constantly or has to be "
+            "loosened for everything. This keeps the strict limit where it means something."
+        ),
+    )
+    p.add_argument(
         "--require-comparable-host",
         action="store_true",
         help=(
@@ -224,6 +236,19 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     threshold = args.max_regression_percent / 100.0
+
+    # Per-metric overrides. Parsed strictly: a typo here would silently restore the global limit
+    # and the override would look applied while doing nothing.
+    metric_limits: dict[str, float] = {}
+    for spec in args.metric_limit:
+        name, _, pct = str(spec).partition("=")
+        if not name or not pct:
+            raise SystemExit(f"--metric-limit expects NAME=PERCENT, got {spec!r}")
+        try:
+            metric_limits[name] = float(pct) / 100.0
+        except ValueError:
+            raise SystemExit(f"--metric-limit percent is not a number: {spec!r}") from None
+
     failures: list[str] = []
 
     for name, base_bps in baseline.items():
@@ -255,21 +280,51 @@ def main(argv: list[str] | None = None) -> int:
         # present in every repetition, so it separates; noise does not.
         worst_base = min(baseline_samples.get(name, [base_bps]))
         separated = fresh_bps < worst_base
-        if ratio < (1.0 - threshold) and separated:
+        # WHY SEPARATION IS NOT ENOUGH FOR EVERY METRIC, and why some carry their own limit.
+        #
+        # The two sample sets are collected in BLOCKS: five head runs, then five base runs, with a
+        # rebuild between. Inside a block the thermal state, page cache and CPU frequency are
+        # near-identical, so within-block spread is tiny; between blocks it is not. That makes the
+        # sets easy to separate for reasons that have nothing to do with the diff -- the criterion
+        # was meant to ask "did the effect survive the machine's variance", but a blocked design
+        # hides most of that variance inside each arm.
+        #
+        # Measured, 2026-08-08: `native_aead_aes_decrypt_16KiB` failed at 6.31% on master with
+        # `native/ol_aead/` UNCHANGED since the drift anchor -- byte-identical source on both
+        # sides -- while the gate's history flapped success/failure across unrelated commits on the
+        # same day. Small fixed-size AEAD blocks are dominated by code layout, which unrelated
+        # changes elsewhere in the binary move around.
+        #
+        # So: keep 5% where it means something, and give the layout-sensitive metrics their own
+        # limit rather than loosening the gate globally or deleting it.
+        limit = metric_limits.get(name, threshold)
+        if ratio < (1.0 - limit) and separated:
             regress_pct = (1.0 - ratio) * 100.0
             failures.append(
-                f"  - {name}: regressed {regress_pct:.2f}% (limit {args.max_regression_percent}%) "
+                f"  - {name}: regressed {regress_pct:.2f}% (limit {limit * 100.0:g}%) "
                 f"({base_bps / 1e6:.2f} MB/s -> {fresh_bps / 1e6:.2f} MB/s); "
                 f"every base run was faster (worst base "
                 f"{worst_base / 1e6:.2f} MB/s)"
             )
-        elif ratio < (1.0 - threshold):
+        elif ratio < (1.0 - limit):
             # Over the line but inside the machine's own spread. Say so --
             # silently passing a measured drop is how a real one hides.
             print(
                 f"  noisy {name}: {(1.0 - ratio) * 100.0:.2f}% below best base, "
                 f"but base itself ranged down to {worst_base / 1e6:.2f} MB/s "
                 f"({len(baseline_samples.get(name, []))} runs); not separable"
+            )
+        elif ratio < (1.0 - threshold):
+            # Past the GLOBAL limit but inside this metric's own, wider one. Report it loudly.
+            # Adding the override without this line created exactly the failure the branch above
+            # exists to prevent: a measured 6.3% drop passing in silence, which is how a real
+            # regression hides behind a tolerance someone widened months ago.
+            print(
+                f"  TOLERATED {name}: {(1.0 - ratio) * 100.0:.2f}% below best base, over the "
+                f"global {args.max_regression_percent:g}% limit but inside this metric's "
+                f"documented {limit * 100.0:g}% tolerance"
+                + (" -- AND the sample sets separated, so this is not noise; if it persists "
+                   "across runners it is worth a look" if separated else "")
             )
         else:
             delta_pct = (ratio - 1.0) * 100.0
