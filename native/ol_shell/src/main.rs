@@ -156,6 +156,18 @@ fn main() {
     let _ = io::stdin().lock().read_line(&mut root);
     let root = root.trim().to_string();
 
+    // LINE 3: `w h x y`, computed by the launcher. NOT decided here, because `app.py` already
+    // computes it for the browser path -- 80% of the primary screen, clamped to 1400x900 so the
+    // window does not dominate a large monitor, centred. Two launch paths answering the same
+    // question differently is how a user's window changes size depending on which one ran.
+    let mut geom = String::new();
+    let _ = io::stdin().lock().read_line(&mut geom);
+    let geometry: Vec<f64> = geom
+        .trim()
+        .split_whitespace()
+        .filter_map(|n| n.parse::<f64>().ok())
+        .collect();
+
     let origin = match loopback_origin(&url) {
         Some(o) => o,
         // Refusing a non-loopback URL is not defensive programming for its own sake: this process
@@ -181,12 +193,19 @@ fn main() {
     }
 
     let event_loop = EventLoop::new();
-    let window = match WindowBuilder::new()
+    let mut builder_w = WindowBuilder::new()
         .with_title("One Link")
-        .with_inner_size(LogicalSize::new(1100.0, 760.0))
-        .with_min_inner_size(LogicalSize::new(420.0, 480.0))
-        .build(&event_loop)
-    {
+        .with_min_inner_size(LogicalSize::new(420.0, 480.0));
+    if let [w, h, x, y] = geometry[..] {
+        builder_w = builder_w
+            .with_inner_size(LogicalSize::new(w, h))
+            .with_position(tao::dpi::LogicalPosition::new(x, y));
+    } else {
+        // No geometry from the launcher (an embedder, or an older caller): a sensible window
+        // rather than a refusal, because failing to open over a missing size would be absurd.
+        builder_w = builder_w.with_inner_size(LogicalSize::new(1100.0, 760.0));
+    }
+    let window = match builder_w.build(&event_loop) {
         Ok(w) => w,
         Err(e) => fail(&format!("could not create a window: {e}")),
     };

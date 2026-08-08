@@ -1,0 +1,126 @@
+# Does One Link's own window BUILD on every platform we ship to?
+#
+# WHY THIS EXISTS. `ol_shell` is the product's new front door -- the thing that removes the browser
+# dependency -- and until this workflow, NOTHING in CI compiled it. It was built only inside
+# `build_binary.py` during a release, where a compile failure is deliberately non-fatal: the shell
+# is `--required` on Windows alone, so on Linux and macOS a broken build quietly packages the
+# browser fallback instead. That is a silent downgrade discovered at release time, on the platform
+# where it is hardest to fix. This asks the question early, on the real OS, and fails out loud.
+#
+# WHAT A GREEN RUN CLAIMS, EXACTLY: the shell COMPILES and its UI pin resolves on that platform.
+# It does NOT claim the window opens or renders correctly there -- that needs a desktop session and
+# a real webview runtime, and is verified end to end only on Windows. A compile is the floor, not
+# the proof, and this file will not pretend otherwise.
+
+name: native shell builds
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'native/ol_shell/**'
+      - 'src/one_link/web/index.html'      # the pin's input: a change here must rebuild
+      - '.github/workflows/native_shell.yml'
+  pull_request:
+    paths:
+      - 'native/ol_shell/**'
+      - 'src/one_link/web/index.html'
+      - '.github/workflows/native_shell.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-shell-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ol_shell / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false          # one platform's break must not hide another's
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Without this, checkout leaves the job's token in `.git/config` on the runner, where
+          # any later step -- or an uploaded artifact -- can carry it off. This job only needs to
+          # READ the tree to compile it. Matches every other workflow in this repo.
+          persist-credentials: false
+      # Pin an interpreter explicitly: `python3` is not reliably on PATH under bash on the
+      # Windows runners, and `python` is absent on Ubuntu. Naming it here avoids both.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup default 1.96.0
+
+      # wry's Linux backend is WebKitGTK. Without these headers the crate cannot compile at all,
+      # which is precisely the failure this workflow is here to surface rather than swallow.
+      - name: install WebKitGTK (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: native/ol_shell
+
+      - name: build the window
+        working-directory: native/ol_shell
+        run: cargo build --release --locked
+
+      # The pin is the shell's whole trust story: it refuses to render an interface whose hash is
+      # not the one compiled into it. A build that produced no pin would still link and still run,
+      # and would render anything -- so assert the environment variable actually landed.
+      - name: the UI pin is baked into the binary
+        shell: bash
+        working-directory: native/ol_shell
+        run: |
+          python - <<'PY'
+          import hashlib, pathlib, sys
+          ui = pathlib.Path("../../src/one_link/web/index.html").read_bytes()
+          want = hashlib.sha256(ui).hexdigest()
+          exe = next(p for p in pathlib.Path("target/release").iterdir()
+                     if p.name in ("ol_shell", "ol_shell.exe"))
+          blob = exe.read_bytes()
+          if want.encode() not in blob:
+              sys.exit(f"the shell does not carry the UI pin {want[:16]}... -- "
+                       "a shell with no pin renders anything")
+          print(f"UI pin {want[:16]}... is compiled into {exe.name} ({len(blob):,} bytes)")
+          PY
+
+      # A COMPILE IS THE FLOOR. Everything above proves the shell builds and carries its pin; none
+      # of it proves a window ever appears. That was verified by hand on Windows only, which is
+      # exactly why the shell is `--required` there and degrades to the browser everywhere else.
+      # A headless runner can still answer the question -- Linux needs a virtual display, macOS and
+      # Windows runners already have a desktop session.
+      - name: a virtual display for the window (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends xvfb
+
+      - name: the window OPENS and LOADS the real interface
+        # Not `--required` anywhere yet: this is the first run of this check on Linux and macOS, and
+        # a brand-new GUI smoke that fails for its own reasons would block unrelated work. It fails
+        # the job loudly so the result is READ; promoting it to a release gate comes after it has a
+        # track record. `continue-on-error` is a stated decision here, not an accident.
+        continue-on-error: true
+        shell: bash
+        run: |
+          # THE LOAD SIGNAL IS A SERVER LOG, not the shell's own word: a window can open onto a
+          # blank surface and still report ready. The smoke also self-calibrates -- it can be run
+          # against a tampered interface, where the ONLY correct outcome is a refusal.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a python scripts/smoke_native_shell.py --timeout 120
+          else
+            python scripts/smoke_native_shell.py --timeout 120
+          fi

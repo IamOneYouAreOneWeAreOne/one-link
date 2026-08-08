@@ -35727,7 +35727,12 @@ class Daemon:
                 ui_server = self.ui_server
                 ui_port = getattr(ui_server, "port", None) if ui_server is not None else None
                 ui_token = getattr(ui_server, "token", None) if ui_server is not None else None
-                if not isinstance(ui_port, int) or ui_port <= 0 or not isinstance(ui_token, str):
+                if (
+                    ui_server is None
+                    or not isinstance(ui_port, int)
+                    or ui_port <= 0
+                    or not isinstance(ui_token, str)
+                ):
                     await self._reply(
                         writer,
                         {"ok": False, "error": "UI server is not ready"},
@@ -35744,11 +35749,7 @@ class Daemon:
                             # therefore on a command line. Single-use and TTL-bounded --
                             # `token` above is a Bearer for this authenticated control
                             # channel and must never reach argv (UIServer.mint_launch_nonce).
-                            "launch_nonce": (
-                                ui_server.mint_launch_nonce()
-                                if hasattr(ui_server, "mint_launch_nonce")
-                                else None
-                            ),
+                            "launch_nonce": ui_server.mint_launch_nonce(),
                             "daemon_instance_id": self._control_instance_id,
                             "pid": os.getpid(),
                             "source_fingerprint": runtime_build_identity()["source_fingerprint"],

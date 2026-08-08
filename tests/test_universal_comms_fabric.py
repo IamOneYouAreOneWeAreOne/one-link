@@ -409,9 +409,97 @@ def test_fabric_plan_stays_fast_with_many_remembered_routes():
     assert plan.best_score is not None
     assert plan.timing_ms is not None
     assert plan.timing_ms["adapter_count"] == 513.0
-    assert elapsed_ms < 250.0
-    assert plan.timing_ms["total_ms"] < 250.0
-    assert plan.timing_ms["health"] in {"fast", "warm"}
+
+    # WHY THIS IS A SCALING ASSERTION AND NOT A STOPWATCH.
+    #
+    # This previously required `elapsed_ms < 250.0`. That is a claim about the MACHINE, not the
+    # planner: it passes on a developer laptop and fails on a shared CI runner at ~680 ms, and it
+    # had been failing on every pull request's Linux suite for exactly that reason -- red on work
+    # that could not possibly have caused it, which is how a gate stops being read at all.
+    #
+    # The property the name promises is that planning stays fast AS REMEMBERED ROUTES GROW. That
+    # is about growth, and growth is measurable on any machine: compare the same planner against
+    # 4x the routes, in this process, under this load. Linear is ~4x, quadratic ~16x. A ceiling of
+    # 8x still refuses the regression this test exists to catch -- an accidental O(n^2) scan over
+    # candidates -- while surviving a runner three times slower than a laptop.
+    small_ms = _best_plan_ms(_fabric_with_routes(inv, 128))
+    large_ms = _best_plan_ms(_fabric_with_routes(inv, 512))
+    growth = large_ms / max(small_ms, 0.05)
+    assert growth < 8.0, (
+        f"planning grew {growth:.1f}x for 4x the remembered routes "
+        f"({small_ms:.1f}ms -> {large_ms:.1f}ms); that is superlinear, and a route brain that "
+        "degrades with the size of the mesh gets slower exactly as a user's network gets richer")
+
+    # A catastrophic floor, deliberately loose: this fires on a planner that has genuinely fallen
+    # over, on any hardware, and stays quiet about how fast the runner happens to be.
+    assert elapsed_ms < 5000.0, f"planning 513 routes took {elapsed_ms:.0f}ms"
+    assert plan.timing_ms["health"] in {"fast", "warm", "slow"}
+
+
+def _fabric_with_routes(inv, count: int):
+    """The same fabric shape at a different number of remembered routes."""
+    return UniversalCommsFabric.from_inventory_and_candidates(
+        inv,
+        tuple(
+            {
+                "peer_fp": f"{i:064x}",
+                "route": "lan" if i % 3 else "ethernet",
+                "transport": "tcp",
+                "host": f"10.0.{i // 255}.{i % 255}",
+                "port": 17117,
+                "source": "session_open",
+                "verified": True,
+                "attempts": 4,
+                "successes": 4,
+                "failures": 0,
+                "latency_ms": float(1 + (i % 20)),
+                "bandwidth_bps": float(100_000_000 + i),
+            }
+            for i in range(count)
+        ),
+    )
+
+
+def _best_plan_ms(fabric, repeats: int = 3) -> float:
+    """BEST of k, not the mean. A shared runner's scheduler adds time; it never subtracts it,
+    so the minimum is the closest thing to the planner's own cost that a noisy box can report."""
+    best = float("inf")
+    for _ in range(repeats):
+        started = time.perf_counter()
+        fabric.plan(size_bytes=256 * 1024 * 1024, supports_cdc=True, supports_swarm=True)
+        best = min(best, (time.perf_counter() - started) * 1000.0)
+    return best
+
+
+def test_timing_health_labels_are_computed_not_measured():
+    """The health label's LOGIC, tested deterministically.
+
+    The assertion this replaces (`health in {"fast", "warm"}` after a real plan) could only pass
+    on a machine fast enough to land inside the budget -- so it tested the runner and left the
+    threshold arithmetic itself unchecked. Feeding `_timing_health` known numbers checks the part
+    that can actually be wrong, and does it identically on every machine.
+    """
+    from one_link.transport_fabric import _timing_health
+
+    # budget = 8 + min(92, count * 0.18); warm is up to 2.5x that; beyond is slow.
+    assert _timing_health(1.0, 0) == "fast"
+    assert _timing_health(8.0, 0) == "fast"          # boundary is inclusive
+    assert _timing_health(8.1, 0) == "warm"
+    assert _timing_health(20.0, 0) == "warm"         # 2.5x of 8.0
+    assert _timing_health(20.1, 0) == "slow"
+
+    # The budget grows with adapter count, and CLAMPS at 92ms of allowance.
+    assert _timing_health(99.0, 513) == "fast"       # budget 100.0
+    assert _timing_health(100.0, 513) == "fast"
+    assert _timing_health(101.0, 513) == "warm"
+    assert _timing_health(250.0, 513) == "warm"      # 2.5x of 100.0
+    assert _timing_health(251.0, 513) == "slow"
+    assert _timing_health(100.0, 10_000) == "fast", (
+        "the allowance no longer clamps; an unbounded budget would call any slowness healthy "
+        "as long as the mesh was large enough")
+
+    # A negative count must not produce a budget below the floor.
+    assert _timing_health(8.0, -5) == "fast"
 
 
 def test_fabric_keeps_unverified_remembered_route_out_of_bulk_path():

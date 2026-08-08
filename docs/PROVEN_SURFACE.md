@@ -247,6 +247,36 @@ Four properties the app-mode path could not have:
 
 The daemon outlives the window, verified end to end.
 
+**And the app RUNS in it — 2026-08-07.** The earlier evidence was that the window consumed its
+single-use launch nonce (with a fresh-nonce control). That proves a *fetch*, which a blank page also
+produces. It does not prove the interface came alive.
+
+A recording proxy placed between window and daemon now shows, after load: **38 authenticated
+`/api/*` calls and a live WebSocket upgrade** — peers, messages, folders, transfers, fabric, health.
+That is the JavaScript executing, authenticating, and opening its event stream. The application, in
+our window, doing its work.
+
+*The experiment needed a control to be worth anything.* The daemon answers **421 Misdirected
+Request** when `Host` names a port it is not listening on — its anti-DNS-rebinding defense, working
+exactly as designed. A transparent byte proxy therefore records nothing but rejections, and a silent
+request log would have read as *"the page's script never ran"*: a false negative blaming the product
+for a broken instrument. A plain client fetching through the proxy first caught it immediately.
+
+Two smaller things settled with it. Window geometry now comes from the launcher's existing
+`_default_window_geometry()` rather than the shell guessing its own size, so the window a user gets
+no longer depends on which launch path ran — measured live: position honoured exactly, frame
+overhead 15×38px, 81% of screen width. And the taskbar icon is embedded in the PE resource table,
+which is what Windows reads before any of our code runs; confirmed by finding the `.ico`'s own bytes
+inside `ol_shell.exe` rather than trusting a build that printed no error.
+
+**The scope of the claim, stated plainly.** *Running* is verified on Windows only. CI
+(`native_shell.yml`) now compiles the shell on windows/ubuntu/macos and asserts the UI pin actually
+landed in the binary — nothing in CI built it at all before, so a broken Linux or macOS build would
+have quietly packaged the browser fallback and we would have found out at release time. But a
+compile is the floor, not the proof: whether the window *opens and renders* on those platforms needs
+a desktop session and a real webview runtime, and is not claimed here. That is why the shell remains
+`--required` only on Windows.
+
 ### §10.7 — retracted: living-glyph is not load-bearing
 
 This document called it *"the 0-ULP twin — the linchpin of every frame receipt"* and required
