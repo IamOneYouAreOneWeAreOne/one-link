@@ -109,7 +109,7 @@ dev = [
   # (rotation probe, launcher probe, WebRTC hello -- each passing
   # everywhere else). A deterministic failure still fails every rerun;
   # the hermetic gates do not pass --reruns and are unaffected.
-  "pytest-rerunfailures>=15,<16",
+  "pytest-rerunfailures>=16.4,<17",
   # Parse every workflow with duplicate-key rejection in the supply-chain
   # regression suite before GitHub ever attempts to schedule it.
   "PyYAML>=6.0.3,<7",
