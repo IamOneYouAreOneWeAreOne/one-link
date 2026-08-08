@@ -7,10 +7,15 @@
 # browser fallback instead. That is a silent downgrade discovered at release time, on the platform
 # where it is hardest to fix. This asks the question early, on the real OS, and fails out loud.
 #
-# WHAT A GREEN RUN CLAIMS, EXACTLY: the shell COMPILES and its UI pin resolves on that platform.
-# It does NOT claim the window opens or renders correctly there -- that needs a desktop session and
-# a real webview runtime, and is verified end to end only on Windows. A compile is the floor, not
-# the proof, and this file will not pretend otherwise.
+# WHAT A GREEN RUN CLAIMS, EXACTLY (updated 2026-08-08): the shell COMPILES, its UI pin resolves,
+# AND a real window opens and fetches the interface -- on all three platforms. Linux gets a display
+# from xvfb; the macOS and Windows runners already have a desktop session. The load signal is a
+# server log the shell does not control, because a window can open onto a blank surface and still
+# report itself ready.
+#
+# It still does NOT claim the page RENDERED CORRECTLY, that pixels were right, or that the app is
+# usable. Proving the UI *runs* needs a live daemon and authenticated API traffic; that heavier
+# experiment has been done on Windows only. A green run here is the sentence above and nothing more.
 
 name: native shell builds
 
@@ -109,11 +114,15 @@ jobs:
         run: sudo apt-get install -y --no-install-recommends xvfb
 
       - name: the window OPENS and LOADS the real interface
-        # Not `--required` anywhere yet: this is the first run of this check on Linux and macOS, and
-        # a brand-new GUI smoke that fails for its own reasons would block unrelated work. It fails
-        # the job loudly so the result is READ; promoting it to a release gate comes after it has a
-        # track record. `continue-on-error` is a stated decision here, not an accident.
-        continue-on-error: true
+        # PROMOTED TO A HARD GATE 2026-08-08. It shipped as `continue-on-error` because a brand-new
+        # GUI check on two untested platforms should not block unrelated work before it has earned
+        # trust. It has: 4 runs x 3 platforms = 12 consecutive passes, and that was verified at the
+        # STEP level (grepping each log for the PASS line), not from the job's own green -- with
+        # continue-on-error set, a green job proves nothing about the step inside it.
+        #
+        # It also demonstrably CATCHES things: it is what caught the window opening with no title
+        # bar and no controls, when an initialization script threw on `document.documentElement`
+        # being null at document-start.
         shell: bash
         run: |
           # THE LOAD SIGNAL IS A SERVER LOG, not the shell's own word: a window can open onto a
