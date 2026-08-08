@@ -72,6 +72,19 @@ REQUIRED_DATA_FRAGMENTS = (
 #: quietly lost it must fail this gate: that is the silent-claim failure the certified surfaces
 #: exist to end.
 REQUIRED_SHELL_FRAGMENTS = (".",) if sys.platform == "win32" else ()
+
+#: ...but PERMITTED everywhere, because "not required" is not the same as "forbidden".
+#:
+#: `build_binary.py` stages the window whenever the cargo build SUCCEEDED, on any platform -- the
+#: `--required` flag governs whether a FAILED build is fatal, not whether a successful one ships.
+#: This gate read the two as the same thing and rejected a Linux or macOS bundle that legitimately
+#: contained the window, reporting it as `unexpected=['.']`.
+#:
+#: That was already breaking every PR's Linux suite. It was about to break something worse: Linux
+#: release runners now install WebKitGTK, so `wry` builds there and the release genuinely produces
+#: a window -- which this gate would have refused, turning a working feature into a failed release.
+#: A validator must not forbid what the builder is designed to produce.
+OPTIONAL_SHELL_FRAGMENTS = () if sys.platform == "win32" else (".",)
 REQUIRED_STABLE_SUBMODULE_COLLECTORS = (
     "aiohttp",
     "cryptography",
@@ -646,6 +659,9 @@ def _stable_spec_structure_failures(text: str) -> list[str]:
         native_destination = f"one_link/native/{native_platform_tag()}"
         expected_destinations = {*REQUIRED_DATA_FRAGMENTS, *REQUIRED_SHELL_FRAGMENTS,
                                  native_destination}
+        # Required-vs-allowed are DIFFERENT sets. Everything in `expected` must be present; the
+        # window is additionally allowed off-Windows, where the build ships it when it succeeded.
+        allowed_destinations = {*expected_destinations, *OPTIONAL_SHELL_FRAGMENTS}
         destinations = [destination for _source, destination in data_rows]
         from one_link.build_info import STAMP_FILENAME
 
@@ -666,7 +682,7 @@ def _stable_spec_structure_failures(text: str) -> list[str]:
 
         malformed_rows = len(data_rows) != len(data_values[0])
         missing_destinations = sorted(expected_destinations - set(destinations))
-        unexpected_destinations = sorted(set(destinations) - expected_destinations)
+        unexpected_destinations = sorted(set(destinations) - allowed_destinations)
         duplicate_destinations = sorted(
             destination for destination in set(destinations) if destinations.count(destination) > 1
         )
@@ -678,7 +694,11 @@ def _stable_spec_structure_failures(text: str) -> list[str]:
         )
         if (
             malformed_rows
-            or len(data_rows) != len(expected_destinations)
+            # One row per destination. This was `!= len(expected_destinations)`, an exact count
+            # that silently forbade the optional window even after it became allowed above.
+            # Membership is already policed by missing/unexpected; what this adds is "no row is
+            # carried twice", which `duplicate_destinations` then names precisely.
+            or len(data_rows) != len(set(destinations))
             or missing_destinations
             or unexpected_destinations
             or duplicate_destinations
