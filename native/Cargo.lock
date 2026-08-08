@@ -1267,7 +1267,7 @@ dependencies = [
  "rayon",
  "ring",
  "subtle",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "tracing",
  "zeroize",
 ]
@@ -1277,7 +1277,7 @@ name = "ol_align"
 version = "0.22.0-alpha.0"
 dependencies = [
  "proptest",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1296,7 +1296,7 @@ dependencies = [
  "criterion",
  "proptest",
  "rand 0.9.5",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1308,7 +1308,7 @@ dependencies = [
  "proptest",
  "rand 0.9.5",
  "rayon",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "xxhash-rust",
 ]
 
@@ -1318,7 +1318,7 @@ version = "0.22.0-alpha.0"
 dependencies = [
  "criterion",
  "proptest",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1330,7 +1330,7 @@ dependencies = [
  "proptest",
  "rand 0.9.5",
  "subtle",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "zeroize",
 ]
 
@@ -1345,7 +1345,7 @@ dependencies = [
  "memchr",
  "proptest",
  "rayon",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1363,7 +1363,7 @@ dependencies = [
  "proptest",
  "rand 0.9.5",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "tracing",
 ]
 
@@ -1373,7 +1373,7 @@ version = "0.22.0-alpha.0"
 dependencies = [
  "criterion",
  "proptest",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1383,7 +1383,7 @@ dependencies = [
  "criterion",
  "proptest",
  "rayon",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1392,7 +1392,7 @@ version = "0.22.0-alpha.0"
 dependencies = [
  "lz4_flex",
  "proptest",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "zstd",
 ]
 
@@ -1414,7 +1414,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "subtle",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "windows",
  "zeroize",
 ]
@@ -1427,14 +1427,14 @@ dependencies = [
  "criterion",
  "proptest",
  "rand 0.9.5",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "ol_decide"
 version = "0.22.0-alpha.0"
 dependencies = [
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1456,7 +1456,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "subtle",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "zeroize",
 ]
 
@@ -1472,7 +1472,7 @@ dependencies = [
  "rand 0.8.7",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "tokio",
 ]
 
@@ -1484,7 +1484,7 @@ dependencies = [
  "criterion",
  "proptest",
  "subtle",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "zeroize",
 ]
 
@@ -1506,7 +1506,7 @@ dependencies = [
  "ol_fec",
  "proptest",
  "rand 0.9.5",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1517,7 +1517,7 @@ dependencies = [
  "hex",
  "proptest",
  "rand 0.9.5",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1529,7 +1529,7 @@ dependencies = [
  "hex",
  "proptest",
  "rand 0.9.5",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1538,7 +1538,7 @@ version = "0.22.0-alpha.0"
 dependencies = [
  "ol_fuse",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1550,7 +1550,7 @@ dependencies = [
  "fuser",
  "libc",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1559,7 +1559,7 @@ version = "0.22.0-alpha.0"
 dependencies = [
  "criterion",
  "proptest",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1568,7 +1568,7 @@ version = "0.22.0-alpha.0"
 dependencies = [
  "criterion",
  "proptest",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1580,7 +1580,7 @@ dependencies = [
  "proptest",
  "rand 0.9.5",
  "subtle",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "zeroize",
 ]
 
@@ -1590,7 +1590,7 @@ version = "0.22.0-alpha.0"
 dependencies = [
  "blake3",
  "proptest",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1611,7 +1611,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "subtle",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "x25519-dalek",
  "zeroize",
 ]
@@ -1629,7 +1629,7 @@ dependencies = [
  "rand 0.8.7",
  "rand_core 0.6.4",
  "subtle",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "x25519-dalek",
  "zeroize",
 ]
@@ -1646,7 +1646,7 @@ dependencies = [
  "proptest",
  "rand 0.8.7",
  "rand_core 0.6.4",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "x25519-dalek",
  "zeroize",
 ]
@@ -1665,7 +1665,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "subtle",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "zeroize",
 ]
 
@@ -1675,7 +1675,7 @@ version = "0.22.0-alpha.0"
 dependencies = [
  "criterion",
  "proptest",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1685,7 +1685,7 @@ dependencies = [
  "blake3",
  "criterion",
  "proptest",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1705,7 +1705,7 @@ dependencies = [
  "ring",
  "rustls",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1717,7 +1717,7 @@ name = "ol_radio_batcher"
 version = "0.22.0-alpha.0"
 dependencies = [
  "proptest",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1730,7 +1730,7 @@ dependencies = [
  "ol_aead",
  "proptest",
  "rand 0.9.5",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "zeroize",
 ]
 
@@ -1740,7 +1740,7 @@ version = "0.22.0-alpha.0"
 dependencies = [
  "criterion",
  "proptest",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1749,7 +1749,7 @@ version = "0.22.0-alpha.0"
 dependencies = [
  "ol_decide",
  "proptest",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1761,7 +1761,7 @@ dependencies = [
  "proptest",
  "rand_core 0.6.4",
  "subtle",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "zeroize",
 ]
 
@@ -1783,7 +1783,7 @@ dependencies = [
  "quinn",
  "rand 0.9.5",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1800,7 +1800,7 @@ dependencies = [
  "proptest",
  "rand 0.9.5",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "tracing",
 ]
 
@@ -1810,7 +1810,7 @@ version = "0.22.0-alpha.0"
 dependencies = [
  "ol_fuse",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1863,7 +1863,7 @@ dependencies = [
  "pyo3",
  "quinn",
  "rand_core 0.6.4",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "tokio",
  "tracing",
  "tracing-subscriber",
