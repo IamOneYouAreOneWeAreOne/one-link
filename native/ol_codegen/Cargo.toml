@@ -1,6 +1,6 @@
 [package]
 name = "ol_codegen"
-version = "0.22.0"
+version = "0.22.1"
 edition = "2021"
 description = "One Link file engine: Coherence Language → Rust codegen scaffolding (Phase D, ADR-0032)."
 license = "AGPL-3.0-or-later"

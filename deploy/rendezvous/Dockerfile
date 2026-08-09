@@ -37,7 +37,7 @@ RUN uv venv \
 
 FROM python:3.12.13-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b AS runtime
 
-ARG ONE_LINK_VERSION=0.22.0
+ARG ONE_LINK_VERSION=0.22.1
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="One Link rendezvous" \
       org.opencontainers.image.description="Self-hosted One Link presence rendezvous" \

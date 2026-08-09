@@ -1161,6 +1161,10 @@ def main(
     # libraries (torch/lib/*.dll, cupy/cuda/*, nvidia/*) via transitive
     # deps even when --exclude-module names the parent. We post-filter
     # the Analysis result via a generated .spec file.
+    from one_link.build_identity import (
+        DELIBERATELY_UNPACKAGED as _DELIBERATELY_UNPACKAGED,
+    )
+
     forbidden_paths = [
         # Developer diagnostics must not ship in a release bundle. /dr_test is
         # a Double Ratchet self-test harness served UNGUARDED by the daemon's
@@ -1168,8 +1172,10 @@ def main(
         # surface a user never asked for and cannot benefit from. Excluding it
         # here means the route's own 404 ("dr_test.html not bundled") becomes
         # the shipped behaviour, which is what that branch was written for.
-        "one_link/web/dr_test.html",
-        "one_link\\web\\dr_test.html",
+        # From build_identity.DELIBERATELY_UNPACKAGED -- the same tuple the release-time payload
+        # verifier reads, so the two can never disagree about what is meant to be absent again.
+        *[f"one_link/{p}" for p in _DELIBERATELY_UNPACKAGED],
+        *[f"one_link\\{p.replace('/', chr(92))}" for p in _DELIBERATELY_UNPACKAGED],
         "torch/lib/",
         "torch\\lib\\",
         "torchvision/",

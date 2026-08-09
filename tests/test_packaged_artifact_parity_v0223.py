@@ -86,6 +86,22 @@ def _valid_install_inventory_payload(bundle: Path, exe: Path) -> dict[str, objec
     }
 
 
+def _drop_deliberately_unpackaged(package: Path) -> None:
+    """A CORRECT bundle does not contain the files the builder withholds.
+
+    `build_binary.py` filters `web/dr_test.html` -- a Double Ratchet self-test harness the daemon
+    serves unguarded -- out of every frozen bundle. These fixtures copy the whole source tree, so
+    without this they stage a bundle that must never exist, and the release gate rightly refuses
+    it. Copying the tree wholesale is what made the fixture disagree with the product.
+    """
+    from one_link.build_identity import DELIBERATELY_UNPACKAGED
+
+    for relative in DELIBERATELY_UNPACKAGED:
+        withheld = package / relative
+        if withheld.exists():
+            withheld.unlink()
+
+
 def _complete_inventory_bundle(bundle: Path) -> Path:
     repo = SCRIPT.parent.parent
     bundle.mkdir(parents=True)
@@ -94,6 +110,7 @@ def _complete_inventory_bundle(bundle: Path) -> Path:
     package = bundle / "_internal" / "one_link"
     for subtree in ("web", "data"):
         shutil.copytree(repo / "src" / "one_link" / subtree, package / subtree)
+    _drop_deliberately_unpackaged(package)
     manifest = package / "_build" / "runtime-source-manifest.json"
     manifest.parent.mkdir(parents=True)
     validator = _load_module()
@@ -120,6 +137,7 @@ def _complete_macos_inventory_bundle(app: Path) -> Path:
     package = resources / "one_link"
     for subtree in ("web", "data"):
         shutil.copytree(repo / "src" / "one_link" / subtree, package / subtree)
+    _drop_deliberately_unpackaged(package)
     validator = _load_module()
     manifest = package / "_build" / "runtime-source-manifest.json"
     manifest.parent.mkdir(parents=True)

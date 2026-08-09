@@ -1918,7 +1918,7 @@ wheels = [
 
 [[package]]
 name = "one-link"
-version = "0.22.0"
+version = "0.22.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -2076,7 +2076,7 @@ wheel-tools = [{ name = "maturin", specifier = ">=1.14.1,<2" }]
 
 [[package]]
 name = "one-link-native"
-version = "0.22.0"
+version = "0.22.1"
 source = { directory = "native" }
 
 [[package]]

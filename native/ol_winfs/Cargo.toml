@@ -1,6 +1,6 @@
 [package]
 name = "ol_winfs"
-version = "0.22.0"
+version = "0.22.1"
 edition = "2021"
 description = "One Link file engine: Windows filesystem surface scaffold (Dokan / WinFsp, Phase B layer 9)."
 license = "AGPL-3.0-or-later"

@@ -1,6 +1,6 @@
 [package]
 name = "ol_coherence_field"
-version = "0.22.0"
+version = "0.22.1"
 edition = "2021"
 description = "One Link file engine: coherence-field substrate (Phase E). Reaction-diffusion + Helmholtz reduction + Green-function nonlocal kernel + BE-RAR interpolation + apparent-horizon anchor. Shared with OneField Mesh + BioMesh — cross-domain calibration."
 license = "AGPL-3.0-or-later"
