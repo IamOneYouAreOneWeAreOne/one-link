@@ -721,16 +721,19 @@ jobs:
         shell: bash
         env:
           SOURCE_DATE_EPOCH: ${{ needs.build.outputs.source_date_epoch }}
-        # `--gui` IS THE END-USER BUILD, and its absence here shipped the developer one.
+        # `--gui` is EXPLICIT here, and it is a no-op -- stated because I got this wrong.
         #
-        # Without it `build_binary.py` picks `--console`, whose own help says "debugging only; end
-        # users want --gui". On Windows that makes the launcher a CONSOLE-SUBSYSTEM binary, so
-        # double-clicking One Link pops a black terminal beside the app that no other desktop
-        # program shows. On macOS it also skips `BUNDLE()`, shipping `dist/one-link/` -- a
-        # UNIX-executable folder Finder will not double-click -- instead of `one-link.app`.
+        # I claimed omitting it shipped a console build to users. That was FALSE. `build_binary.py`
+        # declares `--gui` with `default=True`; `--console` is the opt-in inversion. The published
+        # v0.21.0 Windows binary has PE Subsystem 2 (GUI, no console), checked in the artifact
+        # itself, and the macOS job has always produced a real `one-link.app` -- which is why the
+        # matrix's `bundle_path: dist/one-link.app` worked before this line existed.
         #
-        # The ROLLING channel (`auto_build.yml`) has always passed `--gui`. Only the STABLE
-        # release omitted it, so the artifact users are pointed at was the worse of the two.
+        # The console window that prompted the change was real but came from a DESKTOP SHORTCUT
+        # pointing at `python.exe` instead of `pythonw.exe`, which is a per-machine problem and
+        # not this workflow's. Right symptom, wrong cause.
+        #
+        # Kept because naming the intent beats relying on a default I demonstrably misread.
         run: uv run --no-sync python scripts/build_binary.py --gui
 
       - name: validate stable packaged-artifact contract
