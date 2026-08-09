@@ -237,6 +237,21 @@ STABLE_FROZEN_MAX_ZIP_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
 # standalone installation. Native libraries are deliberately absent: the core
 # wheel is universal, the optional Rust package has its own wheel contract,
 # and PyInstaller builds stage a freshly compiled CDC library separately.
+#: Package data that ships in the WHEEL but is deliberately withheld from frozen bundles.
+#:
+#: `web/dr_test.html` is a Double Ratchet self-test harness the daemon serves UNGUARDED on the
+#: loopback UI. It exposes no secrets and is CSP-locked, but it is surface a user never asked for,
+#: so `build_binary.py` filters it out and the route's own 404 becomes the shipped behaviour.
+#:
+#: THIS TUPLE EXISTS BECAUSE THE BUILDER AND THE VERIFIER DISAGREED. The exclusion landed
+#: 2026-08-05; the release-time payload check walks every source asset and demands it in the
+#: bundle. Both were right on their own terms and the release could not build. The verifier only
+#: runs under a tag, so nothing noticed for four days -- until the next release was cut.
+#:
+#: Read by `build_binary.py` (what to filter) and `validate_packaged_artifact.py` (what not to
+#: expect). Adding a path here must be a deliberate act, and it changes both sides at once.
+DELIBERATELY_UNPACKAGED: tuple[str, ...] = ("web/dr_test.html",)
+
 EXPECTED_STABLE_PACKAGE_DATA: tuple[str, ...] = (
     "data/bip39-english.txt",
     "data/certified/link_badge.json",

@@ -1,6 +1,6 @@
 [package]
 name = "ol_duress"
-version = "0.22.0"
+version = "0.22.1"
 edition = "2021"
 description = "One Link duress passphrase-classification and keyed-signal primitives; filesystem deniability is not included."
 license = "AGPL-3.0-or-later"

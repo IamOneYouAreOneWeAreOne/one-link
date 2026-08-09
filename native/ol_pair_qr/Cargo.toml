@@ -1,6 +1,6 @@
 [package]
 name = "ol_pair_qr"
-version = "0.22.0"
+version = "0.22.1"
 edition = "2021"
 description = "One Link Coherence Mesh: pair-by-QR Factor-1 trust (Phase F2, COHERENCE_MESH_PLAN.md)."
 license = "AGPL-3.0-or-later"

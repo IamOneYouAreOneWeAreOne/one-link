@@ -1,6 +1,6 @@
 [package]
 name = "ol_prefetch"
-version = "0.22.0"
+version = "0.22.1"
 edition = "2021"
 description = "One Link file engine: active inference prefetch over peer access traces (Phase D, ADR-0029)."
 license = "AGPL-3.0-or-later"

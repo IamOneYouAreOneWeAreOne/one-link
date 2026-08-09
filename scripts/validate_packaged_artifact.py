@@ -1459,7 +1459,10 @@ def _expected_package_data_hashes(
     bundle_package_root: str = "bundle/_internal/one_link",
 ) -> dict[str, str]:
     """Bind every source web/data asset into the frozen-bundle release gate."""
-    from one_link.build_identity import EXPECTED_STABLE_PACKAGE_DATA
+    from one_link.build_identity import (
+        DELIBERATELY_UNPACKAGED,
+        EXPECTED_STABLE_PACKAGE_DATA,
+    )
 
     package = repo.resolve() / "src" / "one_link"
     expected: dict[str, str] = {}
@@ -1480,7 +1483,13 @@ def _expected_package_data_hashes(
             if not stat.S_ISREG(metadata.st_mode):
                 raise GateFailure(f"source package data is not regular: {path}")
             relative = path.relative_to(package).as_posix()
+            # `discovered` is the SOURCE tree and still holds everything -- the contract check
+            # below must keep seeing the file, because it does ship in the wheel.
             discovered.add(relative)
+            if relative in DELIBERATELY_UNPACKAGED:
+                # Withheld from frozen bundles on purpose. Demanding it here is what made the
+                # builder and this verifier contradict each other and blocked a release.
+                continue
             expected[f"{bundle_package_root}/{relative}"] = _stable_file_sha256(path)
     contract = set(EXPECTED_STABLE_PACKAGE_DATA)
     if discovered != contract:
