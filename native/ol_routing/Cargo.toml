@@ -1,6 +1,6 @@
 [package]
 name = "ol_routing"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 edition = "2021"
 description = "One Link file engine: tau_c-weighted routing primitives (Phase D, ADR-0028). Harvested from OneField mesh/routing.cl."
 license = "AGPL-3.0-or-later"

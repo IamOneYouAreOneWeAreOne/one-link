@@ -1,6 +1,6 @@
 [package]
 name = "ol_compress"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 edition = "2021"
 description = "One Link: payload-aware compression dispatcher (lz4 / zstd / none) per integration-map D14"
 license = "AGPL-3.0-or-later"

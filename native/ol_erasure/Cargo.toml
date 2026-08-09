@@ -1,6 +1,6 @@
 [package]
 name = "ol_erasure"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 edition = "2021"
 description = "One Link file engine: chunk-level erasure coding (RS over CDC chunks) per ADR-0018"
 license = "AGPL-3.0-or-later"

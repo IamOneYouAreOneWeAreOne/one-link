@@ -10,7 +10,7 @@ services:
       context: ../..
       dockerfile: deploy/rendezvous/Dockerfile
       args:
-        ONE_LINK_VERSION: "0.22.0-alpha"
+        ONE_LINK_VERSION: "0.22.0"
         # Set this to `git rev-parse HEAD` when retaining/publishing an image.
         VCS_REF: "${ONE_LINK_VCS_REF:-unrecorded-local-build}"
     # Intentionally omit `image:`: this quickstart always builds the reviewed

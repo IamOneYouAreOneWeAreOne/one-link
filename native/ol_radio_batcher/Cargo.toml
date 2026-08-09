@@ -1,6 +1,6 @@
 [package]
 name = "ol_radio_batcher"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 edition = "2021"
 description = "One Link: deterministic radio-aware batch scheduler — coalesces background traffic across the radio's DRX cycle to recover idle energy"
 license = "AGPL-3.0-or-later"
