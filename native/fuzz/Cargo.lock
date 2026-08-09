@@ -634,9 +634,9 @@ dependencies = [
 
 [[package]]
 name = "ml-dsa"
-version = "0.1.0-rc.11"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "163f15320f3fba11760c373af52d7f69d638482c2c350d877fb06513b1c3137c"
+checksum = "add6b9d92e496f16f4526d68ff29da1483aba4b119baeab8bed3b9e3544a6f3d"
 dependencies = [
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
@@ -644,7 +644,7 @@ dependencies = [
  "hybrid-array 0.4.13",
  "module-lattice",
  "pkcs8 0.11.0",
- "sha3 0.11.0",
+ "shake",
  "signature 3.0.0",
 ]
 
@@ -657,7 +657,7 @@ dependencies = [
  "hybrid-array 0.2.3",
  "kem",
  "rand_core 0.6.4",
- "sha3 0.10.9",
+ "sha3",
 ]
 
 [[package]]
@@ -682,7 +682,7 @@ dependencies = [
 
 [[package]]
 name = "ol_capability"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "subtle",
@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "ol_chunk"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "fastcdc",
@@ -704,14 +704,14 @@ dependencies = [
 
 [[package]]
 name = "ol_codegen"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "ol_confidential"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -729,7 +729,7 @@ dependencies = [
 
 [[package]]
 name = "ol_crdt"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "thiserror",
@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "ol_device_mesh"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "argon2",
  "blake3",
@@ -755,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "ol_discovery"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "ol_duress"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "subtle",
@@ -806,21 +806,21 @@ dependencies = [
 
 [[package]]
 name = "ol_grammar"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "ol_homology"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "ol_hwkey"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "subtle",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "ol_onion"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "aead",
  "blake3",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "ol_pair_qr"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "ol_pqsig"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -874,14 +874,14 @@ dependencies = [
 
 [[package]]
 name = "ol_prefetch"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "ol_proximity_pair"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "thiserror",
@@ -889,14 +889,14 @@ dependencies = [
 
 [[package]]
 name = "ol_routing"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "ol_threshold_recovery"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "rand_core 0.6.4",
@@ -907,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "ol_wal"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 dependencies = [
  "crc32c",
  "fs2",
@@ -1185,13 +1185,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "sha3"
-version = "0.11.0"
+name = "shake"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be176f1a57ce4e3d31c1a166222d9768de5954f811601fb7ca06fc8203905ce1"
+checksum = "09057cb2149ad4cbd2da1e26b351f9a4c354219421229c69c3063e6f61947c4a"
 dependencies = [
  "digest 0.11.3",
  "keccak 0.2.0",
+ "sponge-cursor",
 ]
 
 [[package]]
@@ -1257,6 +1258,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sponge-cursor"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a0219bd7d979d58245a4f41f695e1ac9f8befdffadd7f61f1bae9e39abc6620"
+
+[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1286,22 +1293,22 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.69"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "1.0.69"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]

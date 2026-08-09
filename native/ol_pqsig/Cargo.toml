@@ -1,6 +1,6 @@
 [package]
 name = "ol_pqsig"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 edition = "2021"
 description = "One Link Coherence Mesh: PQ-hybrid digital signatures (Ed25519 + ML-DSA-65 per ADR + row 1 of COHERENCE_MESH_PLAN)."
 license = "AGPL-3.0-or-later"

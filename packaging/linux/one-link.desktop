@@ -10,4 +10,4 @@ Terminal=false
 StartupNotify=true
 StartupWMClass=One Link
 Keywords=p2p;peer;chat;files;sync;encrypted;
-X-AppImage-Version=0.22.0-alpha
+X-AppImage-Version=0.22.0

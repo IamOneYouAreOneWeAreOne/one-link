@@ -1,6 +1,6 @@
 [package]
 name = "ol_canon"
-version = "0.22.0-alpha.0"
+version = "0.22.0"
 edition = "2021"
 description = "One Link file engine: canonical-bytes encoder (Phase 0 substrate, ported from std.codec.canon)."
 license = "AGPL-3.0-or-later"

@@ -28,6 +28,26 @@ from types import SimpleNamespace
 import pytest
 
 
+def _next_version() -> str:
+    """The version of a release that is genuinely NEWER than the one we ship.
+
+    Hardcoding this is how these fixtures died: they said 0.22.0 when 0.22.0 was the future, and
+    the day it became the present the updater short-circuited on "not_newer" before reaching the
+    behaviour under test. A test that passes while testing nothing is worse than one that fails.
+    """
+    from packaging.version import Version
+
+    from one_link import __version__
+
+    v = Version(__version__)
+    return f"{v.major}.{v.minor + 1}.0"
+
+
+_NEXT_VERSION = _next_version()
+_NEWER_TAG = f"v{_NEXT_VERSION}"
+
+
+
 # ─── host detection ────────────────────────────────────────────────────
 
 def test_host_wheel_tag_returns_string():
@@ -52,9 +72,9 @@ def _asset(name, size=1024, url=None):
 def test_select_wheel_picks_windows_amd64():
     from one_link.updater import select_wheel_for_host
     assets = [
-        _asset("one_link_native-0.22.0a0-cp311-abi3-linux_x86_64.whl"),
-        _asset("one_link_native-0.22.0a0-cp311-abi3-macosx_11_0_arm64.whl"),
-        _asset("one_link_native-0.22.0a0-cp311-abi3-win_amd64.whl"),
+        _asset(f"one_link_native-{_NEXT_VERSION}-cp311-abi3-linux_x86_64.whl"),
+        _asset(f"one_link_native-{_NEXT_VERSION}-cp311-abi3-macosx_11_0_arm64.whl"),
+        _asset(f"one_link_native-{_NEXT_VERSION}-cp311-abi3-win_amd64.whl"),
     ]
     pick = select_wheel_for_host(assets, host_tag="cp311-abi3-win_amd64")
     assert pick is not None
@@ -66,7 +86,7 @@ def test_select_wheel_picks_macos_universal2_as_fallback():
     from one_link.updater import select_wheel_for_host
     # No per-arch wheel, only universal2 — should still match.
     assets = [
-        _asset("one_link_native-0.22.0a0-cp311-abi3-macosx_11_0_universal2.whl"),
+        _asset(f"one_link_native-{_NEXT_VERSION}-cp311-abi3-macosx_11_0_universal2.whl"),
     ]
     pick = select_wheel_for_host(assets, host_tag="cp311-abi3-macosx_11_0_arm64")
     assert pick is not None
@@ -79,7 +99,7 @@ def test_select_wheel_matches_manylinux_arch():
     match."""
     from one_link.updater import select_wheel_for_host
     assets = [
-        _asset("one_link_native-0.22.0a0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"),
+        _asset(f"one_link_native-{_NEXT_VERSION}-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"),
     ]
     pick = select_wheel_for_host(assets, host_tag="cp311-abi3-linux_x86_64")
     assert pick is not None
@@ -89,7 +109,7 @@ def test_select_wheel_matches_manylinux_arch():
 def test_select_wheel_returns_none_when_no_match():
     from one_link.updater import select_wheel_for_host
     assets = [
-        _asset("one_link_native-0.22.0a0-cp311-abi3-linux_x86_64.whl"),
+        _asset(f"one_link_native-{_NEXT_VERSION}-cp311-abi3-linux_x86_64.whl"),
     ]
     pick = select_wheel_for_host(assets, host_tag="cp311-abi3-win_amd64")
     assert pick is None
@@ -99,7 +119,7 @@ def test_select_wheel_rejects_musllinux_for_glibc_host():
     from one_link.updater import select_wheel_for_host
 
     assets = [
-        _asset("one_link_native-0.22.0-cp311-abi3-musllinux_1_2_x86_64.whl"),
+        _asset(f"one_link_native-{_NEXT_VERSION}-cp311-abi3-musllinux_1_2_x86_64.whl"),
     ]
     assert (
         select_wheel_for_host(assets, host_tag="cp311-abi3-linux_x86_64")
@@ -113,7 +133,7 @@ def test_select_wheel_rejects_wrong_python_floor(python_tag):
 
     assets = [
         _asset(
-            f"one_link_native-0.22.0-{python_tag}-abi3-win_amd64.whl",
+            f"one_link_native-{_NEXT_VERSION}-{python_tag}-abi3-win_amd64.whl",
         ),
     ]
     assert (
@@ -128,9 +148,9 @@ def test_select_wheel_ignores_non_one_link_native_files():
     from one_link.updater import select_wheel_for_host
     assets = [
         _asset("SHA256SUMS"),
-        _asset("one_link-0.22.0a0-py3-none-any.whl"),  # pure-Python
-        _asset("one_link_native-0.22.0a0-cp311-abi3-win_amd64.whl"),
-        _asset("one_link_native-0.22.0a0-cp311-abi3-win_amd64.whl.sigstore"),
+        _asset(f"one_link-{_NEXT_VERSION}-py3-none-any.whl"),  # pure-Python
+        _asset(f"one_link_native-{_NEXT_VERSION}-cp311-abi3-win_amd64.whl"),
+        _asset(f"one_link_native-{_NEXT_VERSION}-cp311-abi3-win_amd64.whl.sigstore"),
     ]
     pick = select_wheel_for_host(assets, host_tag="cp311-abi3-win_amd64")
     assert pick is not None
@@ -227,7 +247,7 @@ def test_download_to_temp_preserves_verified_wheel_basename():
     from one_link.updater import download_to_temp, remove_staged_file
 
     body = b"wheel bytes"
-    wheel_name = "one_link_native-0.22.0-cp311-abi3-win_amd64.whl"
+    wheel_name = f"one_link_native-{_NEXT_VERSION}-cp311-abi3-win_amd64.whl"
     path = download_to_temp(
         "https://example.test/wheel.whl",
         expected_size=len(body),
@@ -294,10 +314,10 @@ def test_build_install_plan_happy_path(monkeypatch):
 
     def fake_fetch_json(url, timeout):
         return {
-            "tag_name": "v0.22.0",
+            "tag_name": _NEWER_TAG,
             "assets": [
                 {
-                    "name": "one_link_native-0.22.0-cp311-abi3-win_amd64.whl",
+                    "name": f"one_link_native-{_NEXT_VERSION}-cp311-abi3-win_amd64.whl",
                     "size": 2_400_000,
                     "browser_download_url": "https://example.test/wheel.whl",
                 },
@@ -313,7 +333,7 @@ def test_build_install_plan_happy_path(monkeypatch):
                 },
                 {
                     "name": (
-                        "one_link_native-0.22.0-cp311-abi3-win_amd64.whl"
+                        f"one_link_native-{_NEXT_VERSION}-cp311-abi3-win_amd64.whl"
                         ".sigstore"
                     ),
                     "size": 300,
@@ -324,7 +344,7 @@ def test_build_install_plan_happy_path(monkeypatch):
     expected_hash = "a" * 64
     sha_body = (
         f"{expected_hash}  "
-        "one_link_native-0.22.0-cp311-abi3-win_amd64.whl\n"
+        f"one_link_native-{_NEXT_VERSION}-cp311-abi3-win_amd64.whl\n"
     ).encode()
 
     def fake_fetch_bytes(url, timeout):
@@ -342,7 +362,7 @@ def test_build_install_plan_happy_path(monkeypatch):
         fetch_bytes=fake_fetch_bytes,
     )
     assert plan.status == "ready"
-    assert plan.tag == "v0.22.0"
+    assert plan.tag == _NEWER_TAG
     assert plan.wheel is not None
     assert "win_amd64" in plan.wheel.filename
     assert plan.wheel.expected_sha256 == expected_hash
@@ -376,11 +396,11 @@ def test_build_install_plan_no_match_when_wheel_missing(monkeypatch):
 
     def fake_fetch_json(url, timeout):
         return {
-            "tag_name": "v0.22.0",
+            "tag_name": _NEWER_TAG,
             "assets": [
                 {
                     "name": (
-                        "one_link_native-0.22.0a0-cp311-abi3-"
+                        f"one_link_native-{_NEXT_VERSION}-cp311-abi3-"
                         f"{foreign_platform}.whl"
                     ),
                     "size": 2_400_000,
@@ -391,7 +411,7 @@ def test_build_install_plan_no_match_when_wheel_missing(monkeypatch):
 
     plan = u_mod.build_install_plan(fetch_json=fake_fetch_json)
     assert plan.status == "no_match"
-    assert plan.tag == "v0.22.0"
+    assert plan.tag == _NEWER_TAG
     assert plan.wheel is None
 
 
@@ -409,10 +429,10 @@ def test_build_install_plan_unverified_when_no_sha256sums(monkeypatch):
 
     def fake_fetch_json(url, timeout):
         return {
-            "tag_name": "v0.22.0",
+            "tag_name": _NEWER_TAG,
             "assets": [
                 {
-                    "name": f"one_link_native-0.22.0a0-{host_tag}.whl",
+                    "name": f"one_link_native-{_NEXT_VERSION}-{host_tag}.whl",
                     "size": 2_400_000,
                     "browser_download_url": "https://example.test/w.whl",
                 },
@@ -428,12 +448,12 @@ def test_build_install_plan_unverified_when_no_sha256sums(monkeypatch):
 def test_build_install_plan_rejects_duplicate_asset_names(monkeypatch):
     from one_link import updater as u_mod
 
-    wheel_name = "one_link_native-0.22.0a0-cp311-abi3-win_amd64.whl"
+    wheel_name = f"one_link_native-{_NEXT_VERSION}-cp311-abi3-win_amd64.whl"
     duplicate = _asset(wheel_name)
     monkeypatch.setattr(u_mod, "host_wheel_tag", lambda: "cp311-abi3-win_amd64")
     plan = u_mod.build_install_plan(
         fetch_json=lambda url, timeout: {
-            "tag_name": "v0.22.0",
+            "tag_name": _NEWER_TAG,
             "assets": [duplicate, dict(duplicate)],
         },
     )
@@ -441,13 +461,30 @@ def test_build_install_plan_rejects_duplicate_asset_names(monkeypatch):
     assert "duplicate" in (plan.error or "").lower()
 
 
+def _newer_tag() -> str:
+    """A tag that is genuinely NEWER than what we ship.
+
+    This was the literal _NEWER_TAG, chosen when that was a future version. The moment the project
+    reached 0.22.0 the updater short-circuited on "not_newer" and never reached the draft /
+    prerelease check these cases exist for -- so they would have kept passing while testing
+    nothing, which is the quietest way for a gate to die. Deriving it keeps the premise true
+    across every future bump.
+    """
+    from packaging.version import Version
+
+    from one_link import __version__
+
+    v = Version(__version__)
+    return f"v{v.major}.{v.minor + 1}.0"
+
+
 @pytest.mark.parametrize(
     ("tag", "draft", "prerelease"),
     [
         ("../../main", False, False),
         ("v01.2.3", False, False),
-        ("v0.22.0", True, False),
-        ("v0.22.0", False, True),
+        (_newer_tag(), True, False),
+        (_newer_tag(), False, True),
     ],
 )
 def test_build_install_plan_rejects_noncanonical_release(
@@ -495,12 +532,12 @@ def test_verify_signed_update_authenticates_manifest_then_artifact(
         manifest=manifest,
         manifest_bundle=manifest_bundle,
         artifact_filename=artifact.name,
-        tag="v0.22.0",
+        tag=_NEWER_TAG,
     )
     assert authenticated == digest
     assert calls == [
-        ("SHA256SUMS", "SHA256SUMS.sigstore", "v0.22.0"),
-        ("engine.whl", "engine.whl.sigstore", "v0.22.0"),
+        ("SHA256SUMS", "SHA256SUMS.sigstore", _NEWER_TAG),
+        ("engine.whl", "engine.whl.sigstore", _NEWER_TAG),
     ]
 
 
@@ -532,7 +569,7 @@ def test_verify_signed_update_rejects_duplicate_manifest_entry(
             manifest=manifest,
             manifest_bundle=bundle,
             artifact_filename=artifact.name,
-            tag="v0.22.0",
+            tag=_NEWER_TAG,
         )
 
 
@@ -554,19 +591,19 @@ def test_sigstore_verifier_pins_exact_workflow_tag(monkeypatch, tmp_path):
     u_mod._run_sigstore_identity_verify(
         artifact=artifact,
         bundle=bundle,
-        tag="v0.22.0",
+        tag=_NEWER_TAG,
     )
     command = captured["command"]
     identity_index = command.index("--cert-identity") + 1
     assert command[identity_index] == (
         "https://github.com/coherence-energy-labs/one-link/"
-        ".github/workflows/release.yml@refs/tags/v0.22.0"
+        f".github/workflows/release.yml@refs/tags/v{_NEXT_VERSION}"
     )
     assert captured["kwargs"]["shell"] is False
     assert captured["kwargs"]["timeout"] == u_mod.SIGSTORE_VERIFY_TIMEOUT_S
 
 
-def _write_test_native_wheel(path: Path, *, root="one_link_native-0.22.0.dist-info"):
+def _write_test_native_wheel(path: Path, *, root=f"one_link_native-{_NEXT_VERSION}.dist-info"):
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("one_link_native/__init__.py", "VALUE = 1\n")
         archive.writestr(f"{root}/METADATA", "Name: one-link-native\n")
@@ -577,7 +614,7 @@ def _write_test_native_wheel(path: Path, *, root="one_link_native-0.22.0.dist-in
 def test_validate_native_wheel_accepts_complete_archive(tmp_path):
     from one_link.updater import validate_native_wheel
 
-    filename = "one_link_native-0.22.0-cp311-abi3-win_amd64.whl"
+    filename = f"one_link_native-{_NEXT_VERSION}-cp311-abi3-win_amd64.whl"
     wheel = tmp_path / filename
     _write_test_native_wheel(wheel)
     validate_native_wheel(wheel, filename)
@@ -586,7 +623,7 @@ def test_validate_native_wheel_accepts_complete_archive(tmp_path):
 def test_validate_native_wheel_rejects_wrong_distribution(tmp_path):
     from one_link.updater import validate_native_wheel
 
-    filename = "one_link_native-0.22.0-cp311-abi3-win_amd64.whl"
+    filename = f"one_link_native-{_NEXT_VERSION}-cp311-abi3-win_amd64.whl"
     wheel = tmp_path / filename
     _write_test_native_wheel(wheel, root="other_package-1.0.dist-info")
     with pytest.raises(ValueError, match="not one_link_native"):
@@ -596,7 +633,7 @@ def test_validate_native_wheel_rejects_wrong_distribution(tmp_path):
 def test_validate_native_wheel_rejects_traversal_member(tmp_path):
     from one_link.updater import validate_native_wheel
 
-    filename = "one_link_native-0.22.0-cp311-abi3-win_amd64.whl"
+    filename = f"one_link_native-{_NEXT_VERSION}-cp311-abi3-win_amd64.whl"
     wheel = tmp_path / filename
     _write_test_native_wheel(wheel)
     with zipfile.ZipFile(wheel, "a") as archive:
@@ -707,7 +744,7 @@ async def test_api_update_plan_returns_standalone_plan_shape(monkeypatch, tmp_pa
     server._update_check_policy_enabled = lambda: True
     fake_plan = StandaloneInstallPlan(
         status="ready_for_authentication",
-        tag="v0.22.0",
+        tag=_NEWER_TAG,
         release_id=77,
         platform=capability.platform,
         artifact=ReleaseAsset(
@@ -727,7 +764,7 @@ async def test_api_update_plan_returns_standalone_plan_shape(monkeypatch, tmp_pa
 
     assert response.status == 200
     assert body["status"] == "ready_for_authentication"
-    assert body["tag"] == "v0.22.0"
+    assert body["tag"] == _NEWER_TAG
     assert body["release_id"] == 77
     assert body["artifact"]["filename"].endswith(".zip")
     assert body["install_available"] is True
@@ -754,7 +791,7 @@ async def test_api_update_install_unverified_release_never_spawns(
         "build_standalone_install_plan",
         lambda **_kwargs: StandaloneInstallPlan(
             status="unverified",
-            tag="v0.22.0",
+            tag=_NEWER_TAG,
             error="missing exact-tag evidence",
         ),
     )
@@ -838,7 +875,7 @@ async def test_api_update_install_defers_while_transfer_active(
         "build_standalone_install_plan",
         lambda **_kwargs: StandaloneInstallPlan(
             status="ready_for_authentication",
-            tag="v0.22.0",
+            tag=_NEWER_TAG,
             release_id=77,
             platform=capability.platform,
         ),
@@ -893,7 +930,7 @@ async def test_api_update_install_launches_authenticated_helper_and_shutdown(
     daemon.request_shutdown = request_shutdown
     plan = StandaloneInstallPlan(
         status="ready_for_authentication",
-        tag="v0.22.0",
+        tag=_NEWER_TAG,
         release_id=77,
         platform=capability.platform,
     )
@@ -938,7 +975,7 @@ async def test_api_update_install_launches_authenticated_helper_and_shutdown(
     assert body["status"] == "handoff_started"
     assert body["helper_pid"] == 4444
     assert observed["spawn"] is launch
-    assert observed["prepare"]["expected_tag"] == "v0.22.0"
+    assert observed["prepare"]["expected_tag"] == _NEWER_TAG
     assert observed["prepare"]["expected_release_id"] == 77
     assert observed["prepare"]["parent_pid"] > 0
     assert observed["shutdown_delay"] == 0.75
