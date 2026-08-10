@@ -125,7 +125,7 @@ dev = [
   # 'I forgot to test the empty input / unicode edge / a value
   # that happens to be 256 bytes long' that example-based tests
   # systematically miss because the author didn't think of it.
-  "hypothesis>=6.164.0",
+  "hypothesis>=6.165.0",
   # Static quality gates are part of the committed universal lock so CI
   # never downloads an unreviewed "latest" linter at execution time.
   "ruff>=0.16.1,<0.17",
@@ -182,7 +182,7 @@ security = [
   "bandit>=1.7",
   "cyclonedx-bom>=4.4",
   "uv>=0.12.1,<0.13",
-  "zizmor>=1.27,<2",
+  "zizmor>=1.29.0,<2",
 ]
 
 [dependency-groups]
