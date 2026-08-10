@@ -837,7 +837,7 @@ dependencies = [
  "chacha20",
  "chacha20poly1305",
  "curve25519-dalek",
- "hybrid-array 0.2.3",
+ "hybrid-array 0.4.13",
  "ml-kem",
  "rand_core 0.6.4",
  "subtle",
