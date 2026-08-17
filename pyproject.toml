@@ -29,7 +29,7 @@ dependencies = [
   "zeroconf>=0.149.12",
   "click>=8.1",
   "blake3>=0.4",
-  "platformdirs>=4",
+  "platformdirs>=4.11.1",
   # Daemon PID ownership, listener recovery, resource budgets, and production
   # health gates use psutil on every supported desktop platform.
   "psutil>=7.2.2,<8",
@@ -74,7 +74,7 @@ dependencies = [
   # frozen standalone bundle; unattended/background installation stays disabled.
   "sigstore>=4.5.0,<5",
   # Standards-correct release ordering (not lexical rc2/rc10 comparison).
-  "packaging>=26.2,<27",
+  "packaging>=26.3,<27",
 ]
 
 [project.optional-dependencies]
@@ -125,10 +125,10 @@ dev = [
   # 'I forgot to test the empty input / unicode edge / a value
   # that happens to be 256 bytes long' that example-based tests
   # systematically miss because the author didn't think of it.
-  "hypothesis>=6.164.0",
+  "hypothesis>=6.165.2",
   # Static quality gates are part of the committed universal lock so CI
   # never downloads an unreviewed "latest" linter at execution time.
-  "ruff>=0.16.1,<0.17",
+  "ruff>=0.16.2,<0.17",
   "mypy>=2.3,<2.4",
 ]
 # v0.21.x browser-driven E2E harness. Catches UI bugs that no
@@ -166,7 +166,7 @@ preview-ml = [
 release = [
   "build>=1.5,<2",
   "maturin>=1.14.1,<2",
-  "pyinstaller>=6.21,<7",
+  "pyinstaller>=6.22.0,<7",
   "setuptools>=83,<84",
   "sigstore>=4.5.0,<5",
   "wheel>=0.47,<0.48",
@@ -181,8 +181,8 @@ security = [
   "pip-audit>=2.7",
   "bandit>=1.7",
   "cyclonedx-bom>=4.4",
-  "uv>=0.12.1,<0.13",
-  "zizmor>=1.27,<2",
+  "uv>=0.12.3,<0.13",
+  "zizmor>=1.29.0,<2",
 ]
 
 [dependency-groups]
@@ -206,7 +206,7 @@ release-tools = [
   "maturin>=1.14.1,<2",
   # Parse wheel/sdist filenames and normalize the PEP 440 project version in
   # the independent distribution contract gate.
-  "packaging>=26.2,<27",
+  "packaging>=26.3,<27",
   "setuptools>=83,<84",
   "sigstore>=4.5.0,<5",
   "wheel>=0.47,<0.48",
