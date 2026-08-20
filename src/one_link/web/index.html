@@ -216,8 +216,18 @@
   .me .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); box-shadow: 0 0 8px var(--good); }
   .me code { font-family: var(--mono); color: var(--text); }
 
-  .main { display: grid; grid-template-columns: 280px 1fr 0fr; min-height: 0; }
-  .main.with-files { grid-template-columns: 280px 1fr 320px; }
+  /* minmax(0, 1fr), NOT 1fr. A bare `1fr` track is `minmax(auto, 1fr)`, so its
+     MINIMUM is the column's min-content width. One chat message containing a
+     fenced code block (a <pre> never wraps) therefore set a min-content wider
+     than the window, the track refused to shrink, and the whole app overflowed
+     horizontally -- shoving the 280px sidebar off-screen and leaving the page
+     scrolled sideways. It looked like the app broke; it was one pasted log.
+     Reported on two devices at the same moment because the same message
+     arrived on both. min-height:0 was already here for the vertical axis; this
+     is the horizontal twin, and the idiom this file already uses in 22 other
+     grids. */
+  .main { display: grid; grid-template-columns: 280px minmax(0, 1fr) 0fr; min-height: 0; }
+  .main.with-files { grid-template-columns: 280px minmax(0, 1fr) 320px; }
   .mobile-scrim { display: none; }
 
   /* ── Sidebar (peers + rooms) ───────────────────────────────────────── */
@@ -694,7 +704,13 @@
   .side-foot { display: none; }
 
   /* ── Conversation pane ────────────────────────────────────────────── */
-  .convo { display: flex; flex-direction: column; min-height: 0; background: var(--bg-0); }
+  /* min-WIDTH:0 as well as min-height:0. .convo is the grid item in .main's
+     flexible column, and a grid item defaults to min-width:auto -- it refuses
+     to shrink below its content's min-content width. Fixing the TRACK with
+     minmax(0, 1fr) is not enough on its own: the item can still overflow the
+     track it sits in. One chat message holding an unwrappable <pre> otherwise
+     stretches this pane past the window and shoves the sidebar off-screen. */
+  .convo { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--bg-0); }
   .convo-h {
     display: flex; align-items: center; justify-content: space-between;
     padding: 12px 18px;
@@ -834,6 +850,12 @@
   }
   .msg {
     max-width: 70%;
+    /* A flex item defaults to min-width:auto, i.e. it refuses to shrink below
+       its content's min-content width. An unwrappable child (a fenced code
+       block) then stretches the bubble past the pane instead of scrolling
+       inside it, which is what .md-chat pre's overflow-x:auto was there to do.
+       min-width:0 lets the bubble shrink so that scroll container can work. */
+    min-width: 0;
     padding: var(--msg-pad-y) var(--msg-pad-x);
     border-radius: var(--radius);
     line-height: 1.4;
