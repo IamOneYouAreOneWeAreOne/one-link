@@ -47,7 +47,20 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python: ["3.12"]
-    timeout-minutes: 45
+    # 70, not 45. MEASURED, not guessed: on 701e423 the Windows leg ran the
+    # whole suite green -- 9,419 passed, 181 skipped in 39m12s -- and was then
+    # killed at the 45-minute cap during POST-JOB CACHE CLEANUP. The tests had
+    # already finished; the budget simply did not cover the job's real envelope
+    # (checkout, dependency install, Rust toolchain, native build, tests,
+    # cache upload).
+    # A cap leaving under six minutes for all of that is not a hang detector,
+    # it is a coin flip, and it reports "cancelled" -- which reads like a
+    # failure and blocks a merge on a suite that passed.
+    #
+    # Windows duration varies widely run to run (28m on 9b5499e, 39m here), so
+    # the headroom is deliberate. This does NOT weaken the hang guard: a suite
+    # that genuinely wedges still dies, just at a bound that reflects the work.
+    timeout-minutes: 70
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
