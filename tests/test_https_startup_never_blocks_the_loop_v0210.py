@@ -16,7 +16,6 @@ import re
 import time
 from pathlib import Path
 
-import pytest
 
 
 def test_a_wedged_resolver_costs_a_san_entry_not_the_daemon(monkeypatch):

@@ -22,7 +22,6 @@ a user who never heard of the switch, and it is the one that must never regress.
 
 from __future__ import annotations
 
-import os
 
 import pytest
 
