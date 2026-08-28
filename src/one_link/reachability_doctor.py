@@ -383,7 +383,12 @@ def _mdns_facts(
     try:
         import time
 
-        from zeroconf import ServiceBrowser, Zeroconf, ZeroconfServiceTypes
+        from zeroconf import (
+            ServiceBrowser,
+            ServiceListener,
+            Zeroconf,
+            ZeroconfServiceTypes,
+        )
     except ImportError:
         return {}
 
@@ -391,7 +396,7 @@ def _mdns_facts(
     other_hosts: set[str] = set()
     self_port: dict[str, int] = {}
 
-    class _Listener:
+    class _Listener(ServiceListener):
         def add_service(self, zc: Any, type_: str, name: str) -> None:
             try:
                 info = zc.get_service_info(type_, name, timeout=1500)
@@ -436,7 +441,8 @@ def _mdns_facts(
             except Exception:
                 pass
 
-    self_visible = bool(self_short_id) and any(self_short_id in n for n in seen_onelink)
+    sid = self_short_id or ""
+    self_visible = bool(sid) and any(sid in n for n in seen_onelink)
     peers = len(seen_onelink) - (1 if self_visible else 0)
     out: dict[str, Any] = {
         "mdns_self_visible": self_visible,
@@ -490,14 +496,35 @@ def _listener_executable(port: int | None) -> str | None:
 
 
 def _lan_addresses() -> tuple[str, ...]:
+    """This device's LAN address, resolved WITHOUT any name lookup.
+
+    The obvious implementation -- getaddrinfo(gethostname()) -- is banned in
+    this package for a reason documented at length in
+    tests/test_no_unbounded_resolution_v0210.py: the C resolver takes no
+    timeout, a host's own name is often answered over mDNS, and on a degraded
+    network the call blocks for a minute or more. One Link shipped that defect
+    twice already, and putting it HERE would be the worst copy yet -- a network
+    doctor that hangs for a minute precisely when the network is broken is the
+    one moment it has to answer.
+
+    A UDP socket needs no packets and no DNS: connecting a datagram socket only
+    selects a route, and getsockname() then reports the address the kernel
+    would send from. TEST-NET-1 (RFC 5737) is used as the target because it is
+    guaranteed never to be routed anywhere real. It also yields a better answer
+    than enumerating adapters did -- the address actually used for LAN traffic,
+    rather than a list including WSL and VM bridges the peer will never be on.
+    """
+
     import socket
 
     out: set[str] = set()
     try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if not ip.startswith(("127.", "169.254.")):
-                out.add(ip)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.settimeout(0.5)
+            probe.connect(("192.0.2.1", 9))  # RFC 5737 TEST-NET-1; no traffic
+            ip = probe.getsockname()[0]
+        if isinstance(ip, str) and not ip.startswith(("127.", "169.254.")):
+            out.add(ip)
     except OSError:
         pass
     return tuple(sorted(out))
