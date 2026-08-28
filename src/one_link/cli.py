@@ -2732,13 +2732,81 @@ def peers():
     click.echo(f"me: {me['short_id']}  {me['hostname']}")
     plist = res["peers"]
     if not plist:
-        click.echo("(no peers discovered yet — give it a few seconds)")
+        # "give it a few seconds" was printed for every cause, and most of them
+        # never resolve by waiting: an orphaned firewall rule, a guest network,
+        # or the other machine simply being off. Point at the command that can
+        # tell them apart rather than asking the user to wait out a fault.
+        click.echo("(no peers discovered yet)")
+        click.echo("Run  one-link doctor  to find out why — it names the cause.")
         return
     click.echo("")
     click.echo(f"{'short_id':10} {'hostname':24} {'address':18} port")
     click.echo("-" * 60)
     for p in plist:
         click.echo(f"{p['short_id']:10} {p['hostname']:24} {p['address']:18} {p['port']}")
+
+
+@cli.command()
+@click.option("--seconds", default=6.0, show_default=True,
+              help="How long to listen for other devices before deciding.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable verdict.")
+def doctor(seconds, as_json):
+    """Diagnose why this device cannot reach the other one.
+
+    Checks the things that actually stop peer traffic and names ONE cause:
+    whether the daemon is listening, whether a firewall rule matches the
+    program it is really running as, whether multicast is reaching us at all,
+    whether we are announcing, and whether any peer is out there.
+    """
+
+    from one_link import reachability_doctor as rd
+
+    daemon_running = True
+    self_short_id: str | None = None
+    try:
+        res = _request("peers")
+        daemon_running = bool(res.get("ok"))
+        self_short_id = (res.get("me") or {}).get("short_id")
+    except Exception:
+        # The daemon being unreachable IS a finding, not an error to abort on:
+        # it is the first cause the diagnosis checks for.
+        daemon_running = False
+
+    # The peer port is NOT asked for here. The control API's `me` record does
+    # not carry one, and reading a field that does not exist produced a
+    # confident "daemon not listening" for a daemon that was listening. The
+    # device's own mDNS announcement is authoritative: it is literally the port
+    # a peer would dial.
+    facts = rd.collect_facts(
+        daemon_running=daemon_running,
+        peer_port=None,
+        peer_port_listening=False,
+        self_short_id=self_short_id,
+        mdns_seconds=float(seconds),
+    )
+    verdict = rd.diagnose(facts)
+
+    if as_json:
+        import json as _json
+
+        click.echo(_json.dumps({
+            "cause": verdict.cause,
+            "severity": verdict.severity,
+            "headline": verdict.headline,
+            "remedy": list(verdict.remedy),
+            "also": list(verdict.also),
+            "facts": dict(verdict.facts),
+        }, indent=2, sort_keys=True))
+    else:
+        click.echo(verdict.render())
+        click.echo("")
+        click.echo("What was observed:")
+        click.echo(rd.summarize(facts))
+
+    # Exit non-zero on a blocking cause so a script or a support flow can branch
+    # on it without parsing prose.
+    if verdict.severity == rd.SEVERITY_BLOCKED:
+        raise click.exceptions.Exit(2)
 
 
 @cli.command()

@@ -24,7 +24,6 @@ rather than a fix.
 
 from __future__ import annotations
 
-import logging
 import time
 
 import pytest
