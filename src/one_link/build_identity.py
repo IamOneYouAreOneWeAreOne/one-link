@@ -470,6 +470,7 @@ EXPECTED_STABLE_RUNTIME_MODULES: tuple[str, ...] = (
     "one_link.radio_batcher_native",
     "one_link.ratchet_native",
     "one_link.rdz_blind",
+    "one_link.reachability_doctor",
     "one_link.recording_consent",
     "one_link.recovery_api",
     "one_link.relay_client",

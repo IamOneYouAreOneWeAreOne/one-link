@@ -78,7 +78,10 @@ def test_stable_distribution_contract_exactly_matches_source_tree() -> None:
     # to zero. It is imported at module scope by both, so a frozen build
     # missing it would fail before logging exists.
     # (204 before it: bounded_resolver, 2026-07-30.)
-    assert len(build_identity.EXPECTED_STABLE_RUNTIME_MODULES) == 207
+    # 208: one_link.reachability_doctor added 2026-08-27. Being in this tuple
+    # is also what bundles it as a PyInstaller hidden import, so the diagnosis
+    # ships with the app rather than only existing in a source checkout.
+    assert len(build_identity.EXPECTED_STABLE_RUNTIME_MODULES) == 208
     assert build_identity.EXPECTED_STABLE_RUNTIME_MODULES == tuple(
         sorted(set(build_identity.EXPECTED_STABLE_RUNTIME_MODULES))
     )
@@ -151,9 +154,9 @@ def test_distribution_source_contract_hashes_every_packaged_python_file() -> Non
     # (222 / 242 before it: certified_surface.py + data/certified/peer_row.json, the
     # peer row's proven layout table, laws discharged over every integer input.)
     # (221 / 240 before it: env_bounds.py, 2026-08-05. 220 / 239: bounded_resolver.py.)
-    assert len(source_python) == 223
+    assert len(source_python) == 224
     assert packaged_python == source_python
-    assert len(contract.payload_hashes) == 246
+    assert len(contract.payload_hashes) == 247
 
 
 def test_developer_only_modules_are_not_stable_distribution_requirements() -> None:
